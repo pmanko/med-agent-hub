@@ -2,10 +2,11 @@
   import { onMount } from 'svelte';
 
   let mode: 'agents' | 'direct' = 'agents';
-  let orchestratorMode: 'simple' | 'react' = 'simple';
+  let orchestratorMode: 'simple' | 'react' = 'react';
   let selectedModel: 'orchestrator' | 'medical' | 'clinical' = 'orchestrator';
   let prompt = '';
   let isSending = false;
+
   // Base URL for backend API. In dev, proxy handles it; in preview/build, set VITE_API_BASE_URL
   const SERVER_URL: string = (import.meta as any).env?.VITE_API_BASE_URL || '';
   console.log('SERVER_URL configured as:', SERVER_URL);
@@ -13,13 +14,14 @@
   import { marked } from 'marked';
   type ChatMsg = { sender: 'user' | 'model' | 'system'; text: string; html?: string; agent?: string; };
   let messages: ChatMsg[] = [
-    { sender: 'system', text: '👋 Welcome! A2A is the default. Ask a question to get started.' }
+    { sender: 'system', text: '👋 Welcome to the Med Agent Hub! Please start your conversation below...' }
   ];
 
   // System prompts for Direct mode
   type SysPromptKey = 'default' | 'helpful' | 'concise' | 'medical' | 'researcher' | 'custom';
   let selectedPrompt: SysPromptKey = 'default';
   let customPrompt = '';
+
   const prompts: Record<SysPromptKey, { name: string; text: string }> = {
     default:   { name: '💬 Default',   text: '' },
     helpful:   { name: '🤝 Helpful',   text: 'You are a helpful, harmless, and honest assistant.' },
@@ -103,15 +105,15 @@
   <header>
     <nav>
       <ul>
-        <li><h1>🤖 Multi-Model Chat</h1></li>
+        <li><h1>🤖 Med Agent Hub</h1></li>
       </ul>
       <ul>
         <li>
           <details class="dropdown">
-            <summary><span>{mode === 'agents' ? '🕸️ Agents (A2A)' : '🧠 Direct'}</span></summary>
+            <summary><span>{mode === 'agents' ? '🕸️ Team of Agents (A2A)' : '🧠 Direct Queries'}</span></summary>
             <ul>
-              <li><button class="link-like" on:click|preventDefault={setModeDirect}>🧠 Direct (per-model)</button></li>
-              <li><button class="link-like" on:click|preventDefault={setModeAgents}>🕸️ Agents (A2A)</button></li>
+              <li><button class="link-like" on:click|preventDefault={setModeDirect}>🧠 Direct Queries</button></li>
+              <li><button class="link-like" on:click|preventDefault={setModeAgents}>🕸️ Team of Agents (A2A)</button></li>
             </ul>
           </details>
         </li>
