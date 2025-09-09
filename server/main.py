@@ -63,7 +63,7 @@ def read_root():
         "direct_models": {
             "orchestrator": llm_config.orchestrator_model, 
             "medical": llm_config.med_model,
-            "clinical": llm_config.clinical_research_model
+            "generalist": llm_config.clinical_research_model
         },
     }
 
@@ -75,8 +75,8 @@ def get_manifest():
     # enhanced to query each agent and aggregate the results.
     return {
         "router_agent": a2a_endpoints.router_url,
-        "medgemma_agent": a2a_endpoints.medgemma_url,
-        "clinical_agent": a2a_endpoints.clinical_url
+        "medical_agent": a2a_endpoints.medgemma_url,
+        "generalist_agent": a2a_endpoints.clinical_url
     }
 
 

@@ -23,6 +23,8 @@ import logging
 import os
 import json
 
+from .router_executor import load_agent_config
+
 logger = logging.getLogger(__name__)
 
 
@@ -30,11 +32,16 @@ class ClinicalExecutor(AgentExecutor):
     """Clinical research agent executor"""
     
     def __init__(self):
+        config = load_agent_config('clinical')
+        
         self.llm_base_url = os.getenv("LLM_BASE_URL", "http://localhost:1234")
         self.llm_api_key = os.getenv("LLM_API_KEY", "")
-        self.general_model = os.getenv("CLINICAL_RESEARCH_MODEL", 'gemma-3-1b-it')
+        self.general_model = os.getenv("CLINICAL_RESEARCH_MODEL", config.get('model'))
         self.temperature = float(os.getenv("LLM_TEMPERATURE", "0.3"))
         self.http_client = httpx.AsyncClient(timeout=180.0)
+        
+        self.skill_routing_prompt_template = config.get('skill_routing_prompt_template', '')
+        self.skills = {skill['id']: skill for skill in config.get('card', {}).get('skills', [])}
         
         # Clinical data sources (optional)
         self.fhir_base_url = os.getenv("OPENMRS_FHIR_BASE_URL")
@@ -61,16 +68,11 @@ class ClinicalExecutor(AgentExecutor):
         
         try:
             # First, determine which skill to use based on the query.
-            # This is a mini-routing step within the agent itself.
-            skill_choice_prompt = f"""You are a multi-skilled agent. Determine which of your skills is most appropriate for the user's query.
-            Available skills:
-            - general_knowledge: For answering general, non-medical, non-clinical questions.
-            - clinical_research: For answering questions related to clinical trials, research, and data analysis.
-            
-            User query: "{query}"
-            
-            Respond with JSON: {{"skill": "skill_name"}}
-            """
+            skills_info = "\n".join([f"- {name}: {skill['description']}" for name, skill in self.skills.items()])
+            skill_choice_prompt = self.skill_routing_prompt_template.format(
+                skills_info=skills_info,
+                query=query
+            )
             
             skill_messages = [{"role": "system", "content": "You are a helpful assistant that chooses the best skill for a query."}, {"role": "user", "content": skill_choice_prompt}]
             skill_response_raw = await self._call_llm(skill_messages, max_tokens=50) # Short response needed
@@ -81,10 +83,10 @@ class ClinicalExecutor(AgentExecutor):
 
             logger.info(f"[Task {task.id}] Determined skill for query '{query[:30]}...': {skill_choice}")
 
-            if skill_choice == "clinical_research":
-                system_prompt = self._get_clinical_research_prompt()
-                artifact_name = "clinical_analysis"
-                status_message = "Analyzing clinical research question..."
+            if skill_choice in self.skills:
+                system_prompt = self.skills[skill_choice].get('system_prompt', self._get_general_knowledge_prompt())
+                artifact_name = self.skills[skill_choice].get('id', 'general_knowledge_response')
+                status_message = f"Executing skill: {skill_choice}..."
             else: # Default to general knowledge
                 system_prompt = self._get_general_knowledge_prompt()
                 artifact_name = "general_knowledge_response"
@@ -156,25 +158,11 @@ class ClinicalExecutor(AgentExecutor):
 
     def _get_general_knowledge_prompt(self) -> str:
         """Returns the system prompt for general queries."""
-        return "You are a helpful general-purpose assistant. Provide clear and concise answers to user questions."
+        return self.skills.get('general_knowledge', {}).get('system_prompt', "You are a helpful general-purpose assistant.")
 
     def _get_clinical_research_prompt(self) -> str:
         """Returns the system prompt for the clinical research persona."""
-        prompt = """You are a Clinical Research Assistant specializing in evidence-based medicine and clinical data analysis.
-            
-            Your expertise includes:
-            1. Clinical trial design and methodology
-            2. Epidemiological research
-            3. Patient data analysis and statistics
-            4. Medical literature review
-            5. Clinical guidelines and protocols
-            
-            Important guidelines:
-            1. Cite relevant studies when possible
-            2. Explain statistical concepts clearly
-            3. Discuss limitations of research findings
-            4. Maintain patient privacy and HIPAA compliance
-            5. Provide evidence-based recommendations"""
+        prompt = self.skills.get('clinical_research', {}).get('system_prompt', "")
         
         if self.fhir_base_url:
             prompt += "\n\nNote: You have access to clinical data from a FHIR server, though direct queries are not implemented in this demo."

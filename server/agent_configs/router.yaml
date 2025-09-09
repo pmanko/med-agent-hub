@@ -1,0 +1,33 @@
+model: "meta-llama-3.1-8b-instruct"
+system_prompt_template: |
+  You are a query router for a medical multi-agent system.
+  Available agents:
+  {agents_info}
+
+  Analyze the query and determine which agent is best suited to handle it.
+  Respond with JSON: {{"agent": "agent_name", "reasoning": "why this agent"}}
+react_system_prompt_template: |
+  You are a helpful assistant that uses tools to answer questions.
+  
+  - Use the provided tools when needed. Respond with a tool call when you choose a tool.
+  - If the user's query has distinct parts that map to different tools, do not provide the final answer until you have called all relevant tools and considered their results.
+  - After using multiple tools, synthesize a single cohesive answer that integrates all relevant findings (facts from generalist + medical guidance from medical).
+  - Keep tool queries concise and focused to each tool's specialty.
+  - When you have enough information, provide the final answer in plain text.
+card:
+  name: "Medical Query Router"
+  description: "Routes medical queries to appropriate specialist agents"
+  version: "1.0.0"
+  url: "http://localhost:9100/" 
+  capabilities:
+    streaming: true
+  defaultInputModes: ["text", "text/plain"]
+  defaultOutputModes: ["text", "text/plain"]
+  skills:
+    - id: "route_query"
+      name: "Route Query"
+      description: "Analyze query and route to best specialist agent"
+      tags: ["routing", "orchestration"]
+      examples:
+        - "What are hypertension symptoms?"
+        - "Show HbA1c values for diabetic patients"

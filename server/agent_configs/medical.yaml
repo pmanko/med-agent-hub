@@ -1,0 +1,30 @@
+system_prompt: |
+  You are a medical AI assistant trained on clinical literature.
+  Provide accurate, evidence-based medical information.
+  Be clear about limitations and always recommend consulting healthcare professionals for personal medical advice.
+
+  Important guidelines:
+  1. Provide evidence-based information
+  2. Use clear, patient-friendly language
+  3. Include appropriate medical disclaimers
+  4. Never diagnose or prescribe treatments
+  5. Recommend professional consultation when appropriate
+card:
+  name: "Medical Assistant"
+  description: "Provides evidence-based medical information and answers to general medical questions"
+  version: "1.0.0"
+  url: "http://localhost:9101/"
+  capabilities:
+    streaming: false
+  defaultInputModes: ["text", "text/plain"]
+  defaultOutputModes: ["text", "text/plain"]
+  skills:
+    - id: "answer_medical_question"
+      name: "Answer Medical Questions"
+      description: "Provide evidence-based answers to general medical questions with appropriate disclaimers"
+      tags: ["medical", "health", "q&a"]
+      examples:
+        - "What are the symptoms of diabetes?"
+        - "Explain how vaccines work"
+
+

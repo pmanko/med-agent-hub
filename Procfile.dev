@@ -1,4 +1,4 @@
 web: UVICORN_ENV_FILE=env.recommended poetry run uvicorn server.main:app --host 0.0.0.0 --port 8080 --reload --env-file env.recommended >> logs/web.log 2>&1
 router: UVICORN_ENV_FILE=env.recommended poetry run uvicorn server.sdk_agents.router_server:app --host 0.0.0.0 --port 9100 --reload --env-file env.recommended >> logs/router.log 2>&1
-medgemma: UVICORN_ENV_FILE=env.recommended poetry run uvicorn server.sdk_agents.medgemma_server:app --host 0.0.0.0 --port 9101 --reload --env-file env.recommended >> logs/medgemma.log 2>&1
-clinical: UVICORN_ENV_FILE=env.recommended poetry run uvicorn server.sdk_agents.clinical_server:app --host 0.0.0.0 --port 9102 --reload --env-file env.recommended >> logs/clinical.log 2>&1 
+medical: UVICORN_ENV_FILE=env.recommended poetry run uvicorn server.sdk_agents.medical_server:app --host 0.0.0.0 --port 9101 --reload --env-file env.recommended >> logs/medical.log 2>&1
+generalist: UVICORN_ENV_FILE=env.recommended poetry run uvicorn server.sdk_agents.clinical_server:app --host 0.0.0.0 --port 9102 --reload --env-file env.recommended >> logs/clinical.log 2>&1 

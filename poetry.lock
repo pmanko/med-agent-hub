@@ -1089,7 +1089,7 @@ version = "6.0.2"
 description = "YAML parser and emitter for Python"
 optional = false
 python-versions = ">=3.8"
-groups = ["main"]
+groups = ["main", "dev"]
 files = [
     {file = "PyYAML-6.0.2-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:0a9a2848a5b7feac301353437eb7d5957887edbf81d56e903999a75a3d743086"},
     {file = "PyYAML-6.0.2-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:29717114e51c84ddfba879543fb232a6ed60086602313ca38cce623c1d62cfbf"},
@@ -1658,4 +1658,4 @@ spark = ["PyHive", "pure-sasl", "thrift", "thrift_sasl"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.10,<3.14"
-content-hash = "213034cb3c5fc3084621b6639579358285bc10aa498658cc5fbf634d60350608"
+content-hash = "9f0d477670b951b28f0290c1a7c9e245c5d93f9b855961e0c14637d03932a939"

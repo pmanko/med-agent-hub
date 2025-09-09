@@ -9,8 +9,10 @@ import logging
 import json
 import httpx
 from uuid import uuid4
+from pathlib import Path
+import yaml
 from a2a.client import ClientFactory, ClientConfig
-from a2a.types import AgentCard, Message, Role, Part, TextPart, TransportProtocol
+from a2a.types import AgentCard, Message, Role, Part, TextPart, TransportProtocol, AgentSkill
 
 
 async def fetch_agent_card(base_url: str, httpx_client: httpx.AsyncClient) -> AgentCard:
@@ -28,39 +30,57 @@ async def fetch_agent_card(base_url: str, httpx_client: httpx.AsyncClient) -> Ag
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+def load_agent_config(agent_name: str):
+    """Loads agent configuration from a YAML file."""
+    config_path = Path(__file__).resolve().parent.parent / 'server' / 'agent_configs' / f'{agent_name}.yaml'
+    with config_path.open('r', encoding='utf-8') as f:
+        return yaml.safe_load(f)
+
 async def test_agent_discovery():
-    """Test agent discovery via A2A protocol"""
+    """Test agent discovery and validate agent cards against YAML configs."""
     logger.info("=" * 60)
-    logger.info("Testing Agent Discovery")
+    logger.info("Testing Agent Discovery and Configuration")
     logger.info("=" * 60)
     
     agents = {
-        "Router": "http://localhost:9100",
-        "MedGemma": "http://localhost:9101",
-        "Clinical": "http://localhost:9102"
+        "router": "http://localhost:9100",
+        "medgemma": "http://localhost:9101",
+        "clinical": "http://localhost:9102"
     }
     
+    all_tests_passed = True
     for name, url in agents.items():
         try:
             async with httpx.AsyncClient() as httpx_client:
                 card = await fetch_agent_card(url, httpx_client)
             
-            logger.info(f"\n{name} Agent:")
-            logger.info(f"  Name: {card.name}")
-            logger.info(f"  Description: {card.description}")
-            logger.info(f"  Version: {getattr(card, 'version', 'N/A')}")
-            logger.info(f"  Skills:")
+            logger.info(f"\nVerifying Agent: {name.capitalize()}")
+            config = load_agent_config(name)
+            config_card = config.get('card', {})
+
+            # Validate card properties
+            assert card.name == config_card.get('name'), f"Name mismatch for {name}"
+            assert card.description == config_card.get('description'), f"Description mismatch for {name}"
             
-            for skill in card.skills:
-                logger.info(f"    - {skill.name}: {skill.description}")
-                if hasattr(skill, 'input_schema'):
-                    props = skill.input_schema.get('properties', {})
-                    logger.info(f"      Inputs: {', '.join(props.keys())}")
-                    
-            # no client needed for discovery via resolver
+            # Validate skills
+            config_skills = {s['id']: s for s in config_card.get('skills', [])}
+            card_skills = {s.id: s for s in card.skills}
             
+            assert len(card.skills) == len(config_skills), f"Skill count mismatch for {name}"
+            for skill_id, config_skill in config_skills.items():
+                assert skill_id in card_skills, f"Skill '{skill_id}' not found in card for {name}"
+                card_skill = card_skills[skill_id]
+                assert card_skill.name == config_skill.get('name'), f"Skill name mismatch for {skill_id} in {name}"
+                assert card_skill.description == config_skill.get('description'), f"Skill description mismatch for {skill_id} in {name}"
+
+            logger.info(f"  -> SUCCESS: Agent card for '{name}' matches its configuration.")
+
         except Exception as e:
-            logger.error(f"Failed to discover {name} agent: {e}")
+            logger.error(f"  -> FAILED: Verification for '{name}' agent failed: {e}", exc_info=True)
+            all_tests_passed = False
+            
+    assert all_tests_passed, "One or more agent card verifications failed."
+
 
 async def test_medgemma_agent():
     """Test MedGemma medical Q&A"""
@@ -287,8 +307,10 @@ async def test_simple_router_query():
     logger.info("=" * 60)
 
     httpx_client = httpx.AsyncClient()
-    resolver = A2ACardResolver(httpx_client, "http://localhost:9100")
-    card = await resolver.get_agent_card()
+    # The A2ACardResolver is no longer needed as we fetch directly.
+    # This test might need to be updated or removed if the intent is to test the router's skill directly.
+    # For now, we'll just fetch the card and create a client.
+    card = await fetch_agent_card("http://localhost:9100", httpx_client)
     client = ClientFactory(ClientConfig(httpx_client=httpx_client)).create(card)
 
     try:
@@ -332,9 +354,10 @@ if __name__ == "__main__":
     
     # Check for --env-file parameter
     env_file = ".env"
-    for i, arg in enumerate(sys.argv[1:]):
-        if arg == "--env-file" and i + 1 < len(sys.argv[1:]):
-            env_file = sys.argv[i + 2]
+    args = sys.argv[1:]
+    for i, arg in enumerate(args):
+        if arg == "--env-file" and i + 1 < len(args):
+            env_file = args[i + 1]
             break
     
     # Load environment from specified file

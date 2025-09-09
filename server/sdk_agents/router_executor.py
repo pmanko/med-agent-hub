@@ -9,6 +9,8 @@ import os
 import uuid
 from typing import Dict, Any, Optional
 import json
+import yaml
+from pathlib import Path
 
 from a2a.server.agent_execution import AgentExecutor, RequestContext
 from a2a.server.events import EventQueue
@@ -33,15 +35,26 @@ from a2a.types import TransportProtocol
 logger = logging.getLogger(__name__)
 
 
+def load_agent_config(agent_name: str) -> Dict[str, Any]:
+    """Loads agent configuration from a YAML file."""
+    config_path = Path(__file__).resolve().parent.parent / 'agent_configs' / f'{agent_name}.yaml'
+    with config_path.open('r', encoding='utf-8') as f:
+        return yaml.safe_load(f)
+
+
 class RouterAgentExecutor(AgentExecutor):
     """Router Agent Executor - orchestrates other agents."""
     
     def __init__(self):
+        config = load_agent_config('router')
+        
         self.llm_base_url = os.getenv("LLM_BASE_URL", "http://localhost:1234")
         self.llm_api_key = os.getenv("LLM_API_KEY", "")
-        self.orchestrator_model = os.getenv("ORCHESTRATOR_MODEL", "llama-3-8b-instruct")
+        self.orchestrator_model = os.getenv("ORCHESTRATOR_MODEL", config.get('model'))
         self.temperature = float(os.getenv("LLM_TEMPERATURE", "0.3"))
         self.http_client = httpx.AsyncClient(timeout=180.0)
+        
+        self.system_prompt_template = config.get('system_prompt_template', '')
         
         # Agent registry - dynamically discover agents and their skills
         self.agents = self._discover_agents()
@@ -54,8 +67,8 @@ class RouterAgentExecutor(AgentExecutor):
         import requests # Use synchronous requests for startup discovery
         
         agent_base_urls = {
-            "medgemma": os.getenv("A2A_MEDGEMMA_URL", "http://localhost:9101"),
-            "clinical": os.getenv("A2A_CLINICAL_URL", "http://localhost:9102"),
+            "medical": os.getenv("A2A_MEDICAL_URL", os.getenv("A2A_MEDGEMMA_URL", "http://localhost:9101")),
+            "generalist": os.getenv("A2A_CLINICAL_URL", "http://localhost:9102"),
         }
         
         discovered_agents = {}
@@ -107,12 +120,7 @@ class RouterAgentExecutor(AgentExecutor):
             for name, info in self.agents.items()
         ])
         
-        system_prompt = f"""You are a query router for a medical multi-agent system.
-Available agents:
-{agents_info}
-
-Analyze the query and determine which agent is best suited to handle it.
-Respond with JSON: {{"agent": "agent_name", "reasoning": "why this agent"}}"""
+        system_prompt = self.system_prompt_template.format(agents_info=agents_info)
         
         messages = [
             {"role": "system", "content": system_prompt},
@@ -126,12 +134,12 @@ Respond with JSON: {{"agent": "agent_name", "reasoning": "why this agent"}}"""
         try:
             # Parse LLM response
             result = json.loads(response)
-            agent_name = result.get("agent", "medgemma")
+            agent_name = result.get("agent", "medical")
             reasoning = result.get("reasoning", "")
             
             if agent_name not in self.agents:
                 logger.warning(f"Router: LLM returned an unknown agent '{agent_name}'. Falling back to default.")
-                agent_name = "medgemma"  # Default fallback
+                agent_name = "medical"  # Default fallback
                 
             return {
                 "agent": agent_name,
@@ -142,9 +150,9 @@ Respond with JSON: {{"agent": "agent_name", "reasoning": "why this agent"}}"""
             logger.error(f"Router: Failed to parse JSON from orchestrator response. Falling back to keyword routing. Response: {response}")
             # Default to medical agent on parse error
             return {
-                "agent": "medgemma",
+                "agent": "medical",
                 "reasoning": "Default routing to medical agent due to orchestrator failure",
-                "url": self.agents["medgemma"]["url"]
+                "url": self.agents["medical"]["url"]
             }
     
     async def execute(

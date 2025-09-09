@@ -1,0 +1,37 @@
+model: "gemma-3-1b-it"
+skill_routing_prompt_template: |
+  You are a multi-skilled agent. Determine which of your skills is most appropriate for the user's query.
+  Available skills:
+  {skills_info}
+  
+  User query: "{query}"
+  
+  Respond with JSON: {{"skill": "skill_name"}}
+card:
+  name: "Research Agent"
+  description: "Answers general knowledge questions and provides information on a wide variety of topics."
+  version: "1.0.0"
+  url: "http://localhost:9102/"
+  capabilities:
+    streaming: true
+  defaultInputModes: ["text", "text/plain"]
+  defaultOutputModes: ["text", "text/plain"]
+  skills:
+    - id: "general_knowledge"
+      name: "general_knowledge"
+      description: "Answers general knowledge questions and provides information on a wide variety of topics."
+      tags: ["general", "q&a"]
+      system_prompt: "You are a helpful general-purpose assistant. Provide clear and concise answers to user questions."
+      input_schema:
+        type: "object"
+        properties:
+          query:
+            type: "string"
+            description: "The general knowledge question to be answered."
+        required: ["query"]
+      output_schema:
+        type: "object"
+        properties:
+          response:
+            type: "string"
+            description: "The answer to the question."

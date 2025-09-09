@@ -1,6 +1,6 @@
 """
-MedGemma Agent Executor using A2A SDK
-Handles medical Q&A requests using the MedGemma model
+Medical Agent Executor using A2A SDK
+Handles medical Q&A requests
 """
 
 from a2a.server.agent_execution import AgentExecutor, RequestContext
@@ -14,19 +14,25 @@ import logging
 import os
 import json
 
+from .router_executor import load_agent_config
+
 logger = logging.getLogger(__name__)
 
 
-class MedGemmaExecutor(AgentExecutor):
-    """Medical Q&A agent executor using MedGemma model"""
+class MedicalExecutor(AgentExecutor):
+    """Medical Q&A agent executor"""
     
     def __init__(self):
+        config = load_agent_config('medical')
+        
         self.llm_base_url = os.getenv("LLM_BASE_URL", "http://localhost:1234")
         self.llm_api_key = os.getenv("LLM_API_KEY", "")
-        self.med_model = os.getenv("MED_MODEL", "medgemma-2")
+        self.med_model = os.getenv("MED_MODEL", config.get('model'))
         self.temperature = float(os.getenv("LLM_TEMPERATURE", "0.1"))
         self.http_client = httpx.AsyncClient(timeout=180.0)
-        logger.info(f"MedGemma executor initialized with model: {self.med_model}")
+        self.system_prompt = config.get('system_prompt', '')
+        
+        logger.info(f"Medical executor initialized with model: {self.med_model}")
     
     async def execute(
         self,
@@ -53,16 +59,7 @@ class MedGemmaExecutor(AgentExecutor):
             )
             
             # Prepare system prompt
-            system_prompt = """You are MedGemma, a medical AI assistant trained on clinical literature. 
-            Provide accurate, evidence-based medical information. 
-            Be clear about limitations and always recommend consulting healthcare professionals for personal medical advice.
-            
-            Important guidelines:
-            1. Provide evidence-based information
-            2. Use clear, patient-friendly language
-            3. Include appropriate medical disclaimers
-            4. Never diagnose or prescribe treatments
-            5. Recommend professional consultation when appropriate"""
+            system_prompt = self.system_prompt
             
             # Call LLM
             headers = {"Content-Type": "application/json"}
@@ -127,10 +124,12 @@ class MedGemmaExecutor(AgentExecutor):
     ) -> Task | None:
         """Cancel is not supported for this agent"""
         raise ServerError(error=UnsupportedOperationError(
-            message="Cancel operation is not supported for MedGemma agent"
+            message="Cancel operation is not supported for Medical agent"
         ))
     
     async def cleanup(self):
         """Clean up resources"""
         await self.http_client.aclose()
-        logger.info("MedGemma executor cleanup completed")
+        logger.info("Medical executor cleanup completed")
+
+

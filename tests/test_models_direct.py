@@ -173,9 +173,8 @@ if __name__ == "__main__":
         try:
             index = sys.argv.index("--env-file") + 1
             env_file = sys.argv[index]
-        except IndexError:
-            logger.error("Error: --env-file flag requires a value.")
-            sys.exit(1)
+        except (ValueError, IndexError):
+            pass
     
     if env_file:
         from dotenv import load_dotenv

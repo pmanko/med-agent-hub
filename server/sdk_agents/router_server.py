@@ -10,9 +10,10 @@ from pathlib import Path
 from a2a.server.apps import A2AStarletteApplication
 from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.tasks import InMemoryTaskStore
-from a2a.types import AgentCapabilities, TransportProtocol, AgentCard
+from a2a.types import AgentCapabilities, TransportProtocol, AgentCard, AgentSkill
 from .dispatch_executor import DispatchingExecutor
 from ..config import a2a_endpoints
+from .router_executor import load_agent_config
 
 logger = logging.getLogger(__name__)
 
@@ -27,10 +28,14 @@ def create_router_server():
         task_store=InMemoryTaskStore()
     )
     
-    # Load agent card from JSON for transparency
-    card_path = Path(__file__).resolve().parents[1] / 'agent_cards' / 'router.json'
-    with card_path.open('r', encoding='utf-8') as f:
-        card_data = json.load(f)
+    # Load agent card from YAML config
+    config = load_agent_config('router')
+    card_data = config.get('card', {})
+    
+    # Convert skills data to AgentSkill objects
+    skills_data = card_data.get('skills', [])
+    card_data['skills'] = [AgentSkill(**skill) for skill in skills_data]
+    
     agent_card = AgentCard(**card_data)
     # Ensure runtime URL is sourced from config
     agent_card.url = a2a_endpoints.router_url
