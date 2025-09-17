@@ -49,3 +49,4 @@ test_models_direct.py # System validation
 - Check logs in `logs/` directory
 - Ensure LM Studio is running with models loaded
 - Verify `AGENT_HOST_IP` matches your network setup
+

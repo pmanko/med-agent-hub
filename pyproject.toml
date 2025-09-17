@@ -1,5 +1,5 @@
 [tool.poetry]
-name = "multiagent-chat"
+name = "med-agent-hub"
 version = "0.1.0"
 description = "Multi-agent medical chat application with A2A protocol support and FHIR integration"
 authors = ["OMRS AI Team <team@example.com>"]

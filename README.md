@@ -29,11 +29,13 @@ poetry run python test_models_direct.py
 
 ## Documentation
 
-See [docs/README.md](docs/README.md) for complete documentation:
-- Configuration guide
-- Architecture overview
-- Creating new agents
-- LM Studio setup
+See project docs:
+- [Docs index](docs/docs.md)
+- [Configuration](docs/getting-started/configuration.md)
+- [LM Studio Setup](docs/getting-started/lm-studio.md)
+- [System Overview](docs/architecture/overview.md)
+- [Agent Reference](docs/architecture/agents.md)
+- [Creating Agents](docs/development/creating-agents.md)
 
 ## Project Structure
 
