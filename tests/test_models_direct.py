@@ -142,7 +142,7 @@ async def main():
     
     # Load agent URLs from config
     router_url = os.getenv("A2A_ROUTER_URL", "http://localhost:9100")
-    medgemma_url = os.getenv("A2A_MEDGEMMA_URL", "http://localhost:9101")
+    medgemma_url = os.getenv("A2A_MEDICAL_URL", os.getenv("A2A_MEDGEMMA_URL", "http://localhost:9101"))
     clinical_url = os.getenv("A2A_CLINICAL_URL", "http://localhost:9102")
 
     tests = [

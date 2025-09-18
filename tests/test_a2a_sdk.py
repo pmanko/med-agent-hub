@@ -11,6 +11,7 @@ import httpx
 from uuid import uuid4
 from pathlib import Path
 import yaml
+import os
 from a2a.client import ClientFactory, ClientConfig
 from a2a.types import AgentCard, Message, Role, Part, TextPart, TransportProtocol, AgentSkill
 
@@ -32,7 +33,11 @@ logger = logging.getLogger(__name__)
 
 def load_agent_config(agent_name: str):
     """Loads agent configuration from a YAML file."""
-    config_path = Path(__file__).resolve().parent.parent / 'server' / 'agent_configs' / f'{agent_name}.yaml'
+    # Normalize model-specific names to role names (e.g., medgemma -> medical)
+    role_name = {
+        'medgemma': 'medical',
+    }.get(agent_name, agent_name)
+    config_path = Path(__file__).resolve().parent.parent / 'server' / 'agent_configs' / f'{role_name}.yaml'
     with config_path.open('r', encoding='utf-8') as f:
         return yaml.safe_load(f)
 
@@ -43,9 +48,10 @@ async def test_agent_discovery():
     logger.info("=" * 60)
     
     agents = {
-        "router": "http://localhost:9100",
-        "medgemma": "http://localhost:9101",
-        "clinical": "http://localhost:9102"
+        "router": os.getenv("A2A_ROUTER_URL", "http://localhost:9100"),
+        # Keep the test name 'medgemma' for backwards-compat, but URL is env-based
+        "medgemma": os.getenv("A2A_MEDGEMMA_URL", os.getenv("A2A_MEDICAL_URL", "http://localhost:9101")),
+        "clinical": os.getenv("A2A_CLINICAL_URL", "http://localhost:9102"),
     }
     
     all_tests_passed = True
@@ -89,7 +95,8 @@ async def test_medgemma_agent():
     logger.info("=" * 60)
     
     httpx_client = httpx.AsyncClient(timeout=180)
-    card = await fetch_agent_card("http://localhost:9101", httpx_client)
+    med_url = os.getenv("A2A_MEDGEMMA_URL", os.getenv("A2A_MEDICAL_URL", "http://localhost:9101"))
+    card = await fetch_agent_card(med_url, httpx_client)
     client = ClientFactory(ClientConfig(
         httpx_client=httpx_client,
         supported_transports=[TransportProtocol.jsonrpc],
@@ -129,7 +136,8 @@ async def test_clinical_agent():
     logger.info("=" * 60)
     
     httpx_client = httpx.AsyncClient(timeout=180)
-    card = await fetch_agent_card("http://localhost:9102", httpx_client)
+    clinical_url = os.getenv("A2A_CLINICAL_URL", "http://localhost:9102")
+    card = await fetch_agent_card(clinical_url, httpx_client)
     try:
         client = ClientFactory(ClientConfig(
             httpx_client=httpx_client,
@@ -174,7 +182,8 @@ async def test_router_agent():
     logger.info("=" * 60)
     
     httpx_client = httpx.AsyncClient(timeout=180)
-    card = await fetch_agent_card("http://localhost:9100", httpx_client)
+    router_url = os.getenv("A2A_ROUTER_URL", "http://localhost:9100")
+    card = await fetch_agent_card(router_url, httpx_client)
     client = ClientFactory(ClientConfig(
         httpx_client=httpx_client,
         supported_transports=[TransportProtocol.jsonrpc],
@@ -182,7 +191,7 @@ async def test_router_agent():
     )).create(card)
     
     test_cases = [
-        {"query": "What are common symptoms of hypertension?", "expected_agent": "medgemma"},
+        {"query": "What are common symptoms of hypertension?", "expected_agent": "medical"},
     ]
     
     for test in test_cases:
@@ -232,7 +241,8 @@ async def test_end_to_end():
     
     # Build Router client via resolver + factory
     httpx_client = httpx.AsyncClient(timeout=180)
-    card = await fetch_agent_card("http://localhost:9100", httpx_client)
+    router_url = os.getenv("A2A_ROUTER_URL", "http://localhost:9100")
+    card = await fetch_agent_card(router_url, httpx_client)
     router_client = ClientFactory(ClientConfig(
         httpx_client=httpx_client,
         supported_transports=[TransportProtocol.jsonrpc],
@@ -268,7 +278,8 @@ async def test_clinical_patient_overview():
     logger.info("=" * 60)
 
     httpx_client = httpx.AsyncClient(timeout=180)
-    card = await fetch_agent_card("http://localhost:9102", httpx_client)
+    clinical_url = os.getenv("A2A_CLINICAL_URL", "http://localhost:9102")
+    card = await fetch_agent_card(clinical_url, httpx_client)
     try:
         client = ClientFactory(ClientConfig(
             httpx_client=httpx_client,
@@ -310,7 +321,10 @@ async def test_simple_router_query():
     # The A2ACardResolver is no longer needed as we fetch directly.
     # This test might need to be updated or removed if the intent is to test the router's skill directly.
     # For now, we'll just fetch the card and create a client.
-    card = await fetch_agent_card("http://localhost:9100", httpx_client)
+    router_url = os.getenv("A2A_ROUTER_URL", "http://localhost:9100")
+    card = await fetch_agent_card(router_url, httpx_client)
+    router_url = os.getenv("A2A_ROUTER_URL", "http://localhost:9100")
+    card = await fetch_agent_card(router_url, httpx_client)
     client = ClientFactory(ClientConfig(httpx_client=httpx_client)).create(card)
 
     try:

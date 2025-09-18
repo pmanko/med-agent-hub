@@ -76,10 +76,10 @@ def test_current_config(env_file=".env"):
     else:
         success.append(f"✅ Using local LLM for orchestration")
     
-    # Test optional data sources
+    # Test optional data sources presence
     fhir_url = os.getenv("OPENMRS_FHIR_BASE_URL")
     if fhir_url:
-        success.append(f"✅ FHIR server: {fhir_url}")
+        success.append(f"✅ FHIR server configured: {fhir_url}")
     
     parquet_dir = os.getenv("FHIR_PARQUET_DIR")
     if parquet_dir:
@@ -88,7 +88,51 @@ def test_current_config(env_file=".env"):
         else:
             warnings.append(f"⚠️  FHIR_PARQUET_DIR set but path doesn't exist")
     
-    # Test ports availability
+    # Test Spark Thrift connectivity (TCP; optional PyHive validation)
+    spark_host = os.getenv("SPARK_THRIFT_HOST")
+    spark_port = int(os.getenv("SPARK_THRIFT_PORT", "10001"))
+    if spark_host:
+        import socket
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(3)
+        tcp_ok = sock.connect_ex((spark_host, spark_port)) == 0
+        sock.close()
+        if tcp_ok:
+            # Try PyHive if available
+            try:
+                from pyhive import hive  # type: ignore
+                conn = hive.Connection(host=spark_host, port=spark_port, username="test", auth="NONE")
+                cur = conn.cursor()
+                cur.execute("SHOW DATABASES")
+                cur.fetchall()
+                conn.close()
+                success.append(f"✅ Spark Thrift reachable via PyHive at {spark_host}:{spark_port}")
+            except Exception:
+                success.append(f"✅ Spark Thrift TCP open at {spark_host}:{spark_port} (PyHive check skipped/failed)")
+        else:
+            errors.append(f"❌ Spark Thrift not reachable at {spark_host}:{spark_port}")
+    else:
+        warnings.append("⚠️  SPARK_THRIFT_HOST not set; skipping Spark connectivity check")
+
+    # Test FHIR HTTP reachability
+    if fhir_url:
+        try:
+            import requests  # type: ignore
+            # Try base URL; if fails, try metadata
+            resp = requests.get(fhir_url, timeout=5)
+            if not (200 <= resp.status_code < 400):
+                meta_url = fhir_url.rstrip('/') + '/metadata'
+                resp2 = requests.get(meta_url, timeout=5)
+                if 200 <= resp2.status_code < 400:
+                    success.append(f"✅ FHIR reachable at {meta_url} (status {resp2.status_code})")
+                else:
+                    errors.append(f"❌ FHIR endpoint not reachable (status {resp.status_code}, metadata {resp2.status_code})")
+            else:
+                success.append(f"✅ FHIR reachable at {fhir_url} (status {resp.status_code})")
+        except Exception as e:
+            errors.append(f"❌ FHIR connectivity check failed: {e}")
+
+    # Test agent ports availability (optional when using honcho)
     ports_to_check = [
         ("Router", 9100),
         ("MedGemma", 9101),
@@ -124,7 +168,7 @@ def test_current_config(env_file=".env"):
             print(f"  {msg}")
         return False
     
-    # Test LLM connectivity
+    # Test LLM connectivity (informational)
     if llm_base_url:
         print("\n🔗 Testing LLM connectivity...")
         try:

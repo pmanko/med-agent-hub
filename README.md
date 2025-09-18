@@ -9,23 +9,13 @@ A pure A2A (Agent-to-Agent) protocol implementation for collaborative medical AI
 - **A2A Protocol**: Full compliance using A2A SDK v0.3.2+
 - **Configurable**: Environment-based configuration
 
-## Quick Start
+## Run Options
 
-```bash
-# 1. Setup
-cd projects/med-agent-hub
-cp env.recommended .env
-# Edit .env: Set AGENT_HOST_IP and LLM_BASE_URL
-
-# 2. Install dependencies
-poetry install
-
-# 3. Start all agents
-honcho -f Procfile.dev start
-
-# 4. Test
-poetry run python test_models_direct.py
-```
+- Development setup and workflow (Python-only, Poetry-managed): see the Development Guide
+  - docs/development/dev-setup.md
+- Run with Docker Compose: docs/development/run-with-docker.md
+- Run as an Instant OpenHIE v2 package: docs/development/run-as-package.md
+- LM Studio setup for local models: docs/getting-started/lm-studio.md
 
 ## Documentation
 
@@ -53,8 +43,8 @@ test_models_direct.py # System tests
 ## Requirements
 
 - Python 3.10+
-- LM Studio with models loaded
 - Poetry for dependency management
+- See the Development Guide for optional services used during development
 
 ## License
 

@@ -8,6 +8,7 @@ Router-only A2A tests:
 import asyncio
 import logging
 import httpx
+import os
 from uuid import uuid4
 from a2a.client import ClientFactory, ClientConfig
 from a2a.types import AgentCard, Message, Role, Part, TextPart, TransportProtocol
@@ -34,7 +35,8 @@ async def test_router_med_question():
     logger.info("=" * 60)
 
     httpx_client = httpx.AsyncClient(timeout=180)
-    card = await fetch_agent_card("http://localhost:9100", httpx_client)
+    router_url = os.getenv("A2A_ROUTER_URL", "http://localhost:9100")
+    card = await fetch_agent_card(router_url, httpx_client)
     client = ClientFactory(ClientConfig(
         httpx_client=httpx_client,
         supported_transports=[TransportProtocol.jsonrpc],
@@ -57,7 +59,8 @@ async def test_router_conversation():
     logger.info("=" * 60)
 
     httpx_client = httpx.AsyncClient(timeout=180)
-    card = await fetch_agent_card("http://localhost:9100", httpx_client)
+    router_url = os.getenv("A2A_ROUTER_URL", "http://localhost:9100")
+    card = await fetch_agent_card(router_url, httpx_client)
     client = ClientFactory(ClientConfig(
         httpx_client=httpx_client,
         supported_transports=[TransportProtocol.jsonrpc],

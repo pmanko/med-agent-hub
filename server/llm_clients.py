@@ -30,6 +30,11 @@ class LLMClient:
         }
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens
+        # Helpful log so we can see effective URL and model used
+        try:
+            print(f"LLM call: base={self.base_url} model={model} temp={payload['temperature']} max_tokens={payload.get('max_tokens','-')} stream={stream}")
+        except Exception:
+            pass
         resp = self._session.post(url, json=payload, headers=headers, timeout=120)
         resp.raise_for_status()
         data = resp.json()

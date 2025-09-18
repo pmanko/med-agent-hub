@@ -9,8 +9,8 @@ A pure A2A (Agent-to-Agent) protocol implementation using the A2A SDK v0.3.2+ fo
 cd projects/med-agent-hub
 cp env.recommended .env  # Edit with your LM Studio IP
 
-# 2. Start all agents
-honcho -f Procfile.dev start
+# 2. Start API and agents (Poetry + honcho)
+poetry run honcho -f Procfile.dev start
 
 # 3. Test the system
 poetry run python test_models_direct.py
@@ -29,6 +29,9 @@ Expected: Router (9100), MedGemma (9101), Clinical (9102) agents running.
 - **[Agent Reference](architecture/agents.md)** - Available agents and skills
 
 ### Development
+- **[Development Setup](development/dev-setup.md)** - Poetry workflow, ports, validation
+- **[Run with Docker Compose](development/run-with-docker.md)** - Containerized
+- **[Run as Instant OpenHIE Package](development/run-as-package.md)** - Package mode
 - **[Creating Agents](development/creating-agents.md)** - Extend the system
 
 ## Key Files

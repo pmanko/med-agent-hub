@@ -181,3 +181,4 @@ from a2a.client import ClientFactory
 1. Add environment variables to `env.recommended`
 2. Test with `test_models_direct.py`
 3. Update documentation if adding new patterns
+4. See Development Setup (docs/development/dev-setup.md) for environment and ports

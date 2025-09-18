@@ -75,7 +75,7 @@ def get_manifest():
     # enhanced to query each agent and aggregate the results.
     return {
         "router_agent": a2a_endpoints.router_url,
-        "medical_agent": a2a_endpoints.medgemma_url,
+        "medical_agent": getattr(a2a_endpoints, 'medical_url', a2a_endpoints.medgemma_url),
         "generalist_agent": a2a_endpoints.clinical_url
     }
 

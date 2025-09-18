@@ -74,6 +74,8 @@ A2A_CLINICAL_PORT = os.getenv("A2A_CLINICAL_PORT", "9102")
 
 A2A_ROUTER_URL = f"http://{AGENT_HOST_IP}:{A2A_ROUTER_PORT}"
 A2A_MEDGEMMA_URL = f"http://{AGENT_HOST_IP}:{A2A_MEDGEMMA_PORT}"
+# Backwards-compat: prefer role-based 'medical' URL while retaining legacy 'medgemma'
+A2A_MEDICAL_URL = os.getenv("A2A_MEDICAL_URL", A2A_MEDGEMMA_URL)
 A2A_CLINICAL_URL = f"http://{AGENT_HOST_IP}:{A2A_CLINICAL_PORT}"
 
 # A2A is always enabled in SDK version
@@ -155,6 +157,9 @@ class AgentConfig:
 
 class A2AEndpoints:
     router_url = A2A_ROUTER_URL
+    # Prefer role-based alias
+    medical_url = A2A_MEDICAL_URL
+    # Legacy alias for compatibility
     medgemma_url = A2A_MEDGEMMA_URL
     clinical_url = A2A_CLINICAL_URL
 

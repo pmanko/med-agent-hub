@@ -186,7 +186,7 @@ class ClinicalExecutor(AgentExecutor):
         return AgentCard(
             name="Clinical Research Agent",
             description="Provides clinical research analysis and general clinical answers",
-            url="http://localhost:9102/",
+            url=os.getenv("A2A_CLINICAL_URL", "http://localhost:9102/"),
             version="1.0.0",
             default_input_modes=["text", "text/plain"],
             default_output_modes=["text", "text/plain"],
