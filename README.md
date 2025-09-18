@@ -4,10 +4,17 @@ A pure A2A (Agent-to-Agent) protocol implementation for collaborative medical AI
 
 ## Features
 
-- **Three Specialized Agents**: Router (orchestration), MedGemma (medical Q&A), Clinical (research)
+- **Four Specialized Agents**: Router (orchestration), MedGemma (medical Q&A), Clinical (research + MCP tools), Administrative (appointments)
+- **MCP Tool Integration**: Model Context Protocol for structured data access
+- **Advanced Clinical Capabilities**:
+  - Population health analytics via Spark SQL
+  - Patient longitudinal records (IPS-like comprehensive history)
+  - FHIR resource search and retrieval
+  - Medical literature search (extensible)
+  - Appointment management via OpenMRS REST
 - **Local-First**: Runs entirely on your hardware with LM Studio
 - **A2A Protocol**: Full compliance using A2A SDK v0.3.2+
-- **Configurable**: Environment-based configuration
+- **Graceful Degradation**: Works with mock data when external services unavailable
 
 ## Run Options
 
