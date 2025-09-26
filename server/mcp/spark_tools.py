@@ -3,7 +3,7 @@ MCP Tools for Spark-based analytics on Parquet-on-FHIR data.
 """
 
 from typing import Dict, Any, Optional, List
-from .base import MCPTool
+from .base import MCPTool, SparkProfile
 import logging
 import os
 
@@ -33,8 +33,16 @@ class SparkPopulationAnalyticsTool(MCPTool):
             'port': int(os.getenv('SPARK_THRIFT_PORT', '10001')),
             'database': os.getenv('SPARK_THRIFT_DATABASE', 'default')
         }
+        self.use_test_data = os.getenv('MCP_USE_TEST_DATA', '').lower() in ('1', 'true', 'yes')
         
         self.connection = None
+        # Load Spark logical-to-physical mapping profile
+        self.profile = SparkProfile()
+        try:
+            self.profile.load()
+        except Exception as e:
+            logger.error(f"Failed to load Spark profile: {e}")
+            raise
         if PYHIVE_AVAILABLE and self.config.get('host'):
             try:
                 self.connection = hive.Connection(
@@ -103,6 +111,10 @@ class SparkPopulationAnalyticsTool(MCPTool):
         """Execute population analytics query."""
         self.validate_input(params)
         
+        # Test-data shortcut
+        if self.use_test_data:
+            return self._get_mock_results(params)
+
         # Build SQL query based on analysis type
         sql = self._build_query(params)
         
@@ -121,13 +133,9 @@ class SparkPopulationAnalyticsTool(MCPTool):
                 }
             except Exception as e:
                 logger.error(f"Query execution failed: {e}")
-                return {
-                    "error": str(e),
-                    "query_attempted": sql
-                }
+                raise
         else:
-            # Return mock data for testing
-            return self._get_mock_results(params)
+            raise RuntimeError("Spark is not configured/connected. Set MCP_USE_TEST_DATA=1 to use built-in test data.")
     
     def _build_query(self, params: Dict[str, Any]) -> str:
         """Build SQL query based on analysis type."""
@@ -139,7 +147,7 @@ class SparkPopulationAnalyticsTool(MCPTool):
         # Base query components
         condition_filter = ""
         if params.get("condition"):
-            condition_filter = f"WHERE code LIKE '%{params['condition']}%'"
+            condition_filter = f"WHERE {self._col('observation','code')} LIKE '%{params['condition']}%'"
         
         # Time filter
         time_filter = self._build_time_filter(params.get("timeframe", "all_time"))
@@ -148,12 +156,12 @@ class SparkPopulationAnalyticsTool(MCPTool):
         if analysis_type == "prevalence":
             return f"""
                 SELECT 
-                    code,
-                    COUNT(DISTINCT patient_id) as patient_count,
+                    {self._col('observation','code')} as code,
+                    COUNT(DISTINCT {self._col('observation','patient_id')}) as patient_count,
                     COUNT(*) as condition_instances
-                FROM condition
+                FROM {self._tbl('observation')}
                 {condition_filter}
-                GROUP BY code
+                GROUP BY {self._col('observation','code')}
                 ORDER BY patient_count DESC
                 LIMIT 20
             """
@@ -161,10 +169,10 @@ class SparkPopulationAnalyticsTool(MCPTool):
         elif analysis_type == "trends":
             return f"""
                 SELECT 
-                    DATE_TRUNC('month', onsetDateTime) as month,
-                    COUNT(DISTINCT patient_id) as patient_count,
+                    DATE_TRUNC('month', {self._col('observation','effective_datetime')}) as month,
+                    COUNT(DISTINCT {self._col('observation','patient_id')}) as patient_count,
                     COUNT(*) as total_cases
-                FROM condition
+                FROM {self._tbl('observation')}
                 {condition_filter}
                 {time_filter}
                 GROUP BY month
@@ -175,11 +183,11 @@ class SparkPopulationAnalyticsTool(MCPTool):
         elif analysis_type == "demographics":
             return f"""
                 SELECT 
-                    p.gender,
-                    FLOOR(DATEDIFF(CURRENT_DATE, p.birthDate) / 365) as age,
-                    COUNT(DISTINCT c.patient_id) as patient_count
-                FROM condition c
-                JOIN patient p ON c.patient_id = p.id
+                    p.{self._col('patient','gender')} as gender,
+                    FLOOR(DATEDIFF(CURRENT_DATE, p.{self._col('patient','birth_date')}) / 365) as age,
+                    COUNT(DISTINCT c.{self._col('observation','patient_id')}) as patient_count
+                FROM {self._tbl('observation')} c
+                JOIN {self._tbl('patient')} p ON c.{self._col('observation','patient_id')} = p.{self._col('patient','id')}
                 {condition_filter}
                 GROUP BY p.gender, age
                 ORDER BY patient_count DESC
@@ -189,17 +197,17 @@ class SparkPopulationAnalyticsTool(MCPTool):
             condition = params.get("condition", "diabetes")
             return f"""
                 WITH target_patients AS (
-                    SELECT DISTINCT patient_id
-                    FROM condition
-                    WHERE code LIKE '%{condition}%'
+                    SELECT DISTINCT {self._col('observation','patient_id')} as patient_id
+                    FROM {self._tbl('observation')}
+                    WHERE {self._col('observation','code')} LIKE '%{condition}%'
                 )
                 SELECT 
-                    c.code,
-                    COUNT(DISTINCT c.patient_id) as patient_count
-                FROM condition c
-                WHERE c.patient_id IN (SELECT patient_id FROM target_patients)
-                  AND c.code NOT LIKE '%{condition}%'
-                GROUP BY c.code
+                    c.{self._col('observation','code')} as code,
+                    COUNT(DISTINCT c.{self._col('observation','patient_id')}) as patient_count
+                FROM {self._tbl('observation')} c
+                WHERE c.{self._col('observation','patient_id')} IN (SELECT patient_id FROM target_patients)
+                  AND c.{self._col('observation','code')} NOT LIKE '%{condition}%'
+                GROUP BY c.{self._col('observation','code')}
                 ORDER BY patient_count DESC
                 LIMIT 10
             """
@@ -209,12 +217,24 @@ class SparkPopulationAnalyticsTool(MCPTool):
     def _build_time_filter(self, timeframe: str) -> str:
         """Build SQL time filter clause."""
         if timeframe == "last_year":
-            return "WHERE onsetDateTime >= DATE_SUB(CURRENT_DATE, INTERVAL 1 YEAR)"
+            return f"WHERE {self._col('observation','effective_datetime')} >= DATE_SUB(CURRENT_DATE, INTERVAL 1 YEAR)"
         elif timeframe == "last_month":
-            return "WHERE onsetDateTime >= DATE_SUB(CURRENT_DATE, INTERVAL 1 MONTH)"
+            return f"WHERE {self._col('observation','effective_datetime')} >= DATE_SUB(CURRENT_DATE, INTERVAL 1 MONTH)"
         elif timeframe == "last_week":
-            return "WHERE onsetDateTime >= DATE_SUB(CURRENT_DATE, INTERVAL 1 WEEK)"
+            return f"WHERE {self._col('observation','effective_datetime')} >= DATE_SUB(CURRENT_DATE, INTERVAL 1 WEEK)"
         return ""
+
+    def _tbl(self, logical_view: str) -> str:
+        table = self.profile.get_table(logical_view)
+        if not table:
+            raise ValueError(f"No table mapping for '{logical_view}' in profile '{self.profile.profile_name}'")
+        return table
+
+    def _col(self, logical_view: str, logical_column: str) -> str:
+        column = self.profile.get_column(logical_view, logical_column)
+        if not column:
+            raise ValueError(f"No column mapping for '{logical_view}.{logical_column}' in profile '{self.profile.profile_name}'")
+        return column
     
     def _generate_summary(self, params: Dict[str, Any], results: List) -> str:
         """Generate human-readable summary of results."""
@@ -255,9 +275,9 @@ class SparkPopulationAnalyticsTool(MCPTool):
         
         return {
             "results": mock_data,
-            "summary": "Mock data - Spark not connected",
+            "summary": "Test data mode - Spark not used",
             "row_count": len(mock_data),
-            "query_executed": "MOCK QUERY"
+            "query_executed": "TEST-DATA"
         }
 
 
@@ -271,8 +291,16 @@ class SparkPatientLongitudinalTool(MCPTool):
             'port': int(os.getenv('SPARK_THRIFT_PORT', '10001')),
             'database': os.getenv('SPARK_THRIFT_DATABASE', 'default')
         }
+        self.use_test_data = os.getenv('MCP_USE_TEST_DATA', '').lower() in ('1', 'true', 'yes')
         
         self.connection = None
+        # Load Spark logical-to-physical mapping profile
+        self.profile = SparkProfile()
+        try:
+            self.profile.load()
+        except Exception as e:
+            logger.error(f"Failed to load Spark profile: {e}")
+            raise
         if PYHIVE_AVAILABLE and self.config.get('host'):
             try:
                 self.connection = hive.Connection(
@@ -280,6 +308,11 @@ class SparkPatientLongitudinalTool(MCPTool):
                     port=self.config['port'],
                     database=self.config['database']
                 )
+                # Compute capabilities once connected
+                try:
+                    self.profile.compute_capabilities_via_introspection(self.connection)
+                except Exception as cap_e:
+                    logger.warning(f"Spark capability introspection failed: {cap_e}")
             except Exception as e:
                 logger.error(f"Failed to connect to Spark: {e}")
     
@@ -333,23 +366,24 @@ class SparkPatientLongitudinalTool(MCPTool):
         format_type = params.get("format", "summary")
         sections = params.get("sections", ["demographics", "conditions", "medications", "observations", "encounters"])
         
-        # Execute queries for each section
-        record = {}
-        
-        for section in sections:
-            sql = self._build_section_query(section, patient_id, params.get("date_range"))
-            
-            if self.connection:
+        # Test-data shortcut
+        if self.use_test_data:
+            record = {section: self._get_mock_section_data(section) for section in sections}
+        else:
+            if not self.connection:
+                raise RuntimeError("Spark is not configured/connected. Set MCP_USE_TEST_DATA=1 to use built-in test data.")
+            # Execute queries for each section
+            record = {}
+            for section in sections:
+                sql = self._build_section_query(section, patient_id, params.get("date_range"))
                 try:
                     cursor = self.connection.cursor()
                     cursor.execute(sql)
                     record[section] = cursor.fetchall()
                 except Exception as e:
-                    logger.error(f"Failed to fetch {section}: {e}")
+                    # If a specific section's table/view is missing, continue with others
+                    logger.warning(f"Section '{section}' unavailable ({e}); returning empty results for this section")
                     record[section] = []
-            else:
-                # Mock data
-                record[section] = self._get_mock_section_data(section)
         
         # Format the record based on requested format
         formatted = self._format_record(record, format_type)
@@ -367,56 +401,87 @@ class SparkPatientLongitudinalTool(MCPTool):
         date_filter = ""
         if date_range:
             if date_range.get("start"):
-                date_filter += f" AND effectiveDateTime >= '{date_range['start']}'"
+                date_filter += f" AND {self._col('observation','effective_datetime')} >= '{date_range['start']}'"
             if date_range.get("end"):
-                date_filter += f" AND effectiveDateTime <= '{date_range['end']}'"
+                date_filter += f" AND {self._col('observation','effective_datetime')} <= '{date_range['end']}'"
         
         queries = {
             "demographics": f"""
-                SELECT id, gender, birthDate, deceased, address_city, address_state
-                FROM patient
-                WHERE id = '{patient_id}'
+                SELECT {self._col('patient','id')} as id,
+                       {self._col('patient','gender')} as gender,
+                       {self._col('patient','birth_date')} as birthDate,
+                       {self._col('patient','deceased')} as deceased,
+                       {self._col('patient','address_city')} as address_city,
+                       {self._col('patient','address_state')} as address_state
+                FROM {self._tbl('patient')}
+                WHERE {self._col('patient','id')} = '{patient_id}'
             """,
             
             "conditions": f"""
-                SELECT code, clinicalStatus, onsetDateTime, abatementDateTime
-                FROM condition
-                WHERE patient_id = '{patient_id}'
-                ORDER BY onsetDateTime DESC
+                SELECT {self._col('observation','code')} as code,
+                       {self._col('observation','clinical_status')} as clinicalStatus,
+                       {self._col('observation','effective_datetime')} as onsetDateTime,
+                       NULL as abatementDateTime
+                FROM {self._tbl('observation')}
+                WHERE {self._col('observation','patient_id')} = '{patient_id}'
+                ORDER BY {self._col('observation','effective_datetime')} DESC
             """,
             
             "medications": f"""
-                SELECT medication, dosage, status, authoredOn
-                FROM medication_request
-                WHERE patient_id = '{patient_id}'
-                ORDER BY authoredOn DESC
+                SELECT {self._col('medication_request','medication')} as medication,
+                       {self._col('medication_request','dosage')} as dosage,
+                       {self._col('medication_request','status')} as status,
+                       {self._col('medication_request','authored_on')} as authoredOn
+                FROM {self._tbl('medication_request')}
+                WHERE {self._col('medication_request','patient_id')} = '{patient_id}'
+                ORDER BY {self._col('medication_request','authored_on')} DESC
             """,
             
             "observations": f"""
-                SELECT code, value, unit, effectiveDateTime
-                FROM observation
-                WHERE patient_id = '{patient_id}' {date_filter}
-                ORDER BY effectiveDateTime DESC
+                SELECT {self._col('observation','code')} as code,
+                       {self._col('observation','value')} as value,
+                       {self._col('observation','unit')} as unit,
+                       {self._col('observation','effective_datetime')} as effectiveDateTime
+                FROM {self._tbl('observation')}
+                WHERE {self._col('observation','patient_id')} = '{patient_id}' {date_filter}
+                ORDER BY {self._col('observation','effective_datetime')} DESC
                 LIMIT 100
             """,
             
             "encounters": f"""
-                SELECT type, period_start, period_end, reasonCode
-                FROM encounter
-                WHERE patient_id = '{patient_id}'
-                ORDER BY period_start DESC
+                SELECT {self._col('encounter','type')} as type,
+                       {self._col('encounter','period_start')} as period_start,
+                       {self._col('encounter','period_end')} as period_end,
+                       {self._col('encounter','reason_code')} as reasonCode
+                FROM {self._tbl('encounter')}
+                WHERE {self._col('encounter','patient_id')} = '{patient_id}'
+                ORDER BY {self._col('encounter','period_start')} DESC
                 LIMIT 50
             """,
             
             "procedures": f"""
-                SELECT code, performedDateTime, outcome
-                FROM procedure
-                WHERE patient_id = '{patient_id}'
-                ORDER BY performedDateTime DESC
+                SELECT {self._col('procedure','code')} as code,
+                       {self._col('procedure','performed_datetime')} as performedDateTime,
+                       {self._col('procedure','outcome')} as outcome
+                FROM {self._tbl('procedure')}
+                WHERE {self._col('procedure','patient_id')} = '{patient_id}'
+                ORDER BY {self._col('procedure','performed_datetime')} DESC
             """
         }
         
         return queries.get(section, f"SELECT 1")
+
+    def _tbl(self, logical_view: str) -> str:
+        table = self.profile.get_table(logical_view)
+        if not table:
+            raise ValueError(f"No table mapping for '{logical_view}' in profile '{self.profile.profile_name}'")
+        return table
+
+    def _col(self, logical_view: str, logical_column: str) -> str:
+        column = self.profile.get_column(logical_view, logical_column)
+        if not column:
+            raise ValueError(f"No column mapping for '{logical_view}.{logical_column}' in profile '{self.profile.profile_name}'")
+        return column
     
     def _format_record(self, record: Dict, format_type: str) -> Any:
         """Format the patient record based on requested format."""
@@ -494,3 +559,70 @@ class SparkPatientLongitudinalTool(MCPTool):
             ]
         }
         return mock_data.get(section, [])
+
+
+class SparkCapabilitiesTool(MCPTool):
+    """MCP tool exposing Spark profile mappings and runtime capabilities."""
+
+    def __init__(self, config: Optional[Dict[str, Any]] = None):
+        self.config = config or {
+            'host': os.getenv('SPARK_THRIFT_HOST', 'localhost'),
+            'port': int(os.getenv('SPARK_THRIFT_PORT', '10001')),
+            'database': os.getenv('SPARK_THRIFT_DATABASE', 'default')
+        }
+        self.profile = SparkProfile()
+        self.connection = None
+        try:
+            self.profile.load()
+        except Exception as e:
+            logger.error(f"Failed to load Spark profile: {e}")
+            raise
+        if PYHIVE_AVAILABLE and self.config.get('host'):
+            try:
+                self.connection = hive.Connection(
+                    host=self.config['host'],
+                    port=self.config['port'],
+                    database=self.config['database']
+                )
+                try:
+                    self.profile.compute_capabilities_via_introspection(self.connection)
+                except Exception as cap_e:
+                    logger.warning(f"Spark capability introspection failed: {cap_e}")
+            except Exception as e:
+                logger.error(f"Failed to connect to Spark: {e}")
+
+    @property
+    def name(self) -> str:
+        return "spark_capabilities"
+
+    @property
+    def schema(self) -> Dict[str, Any]:
+        return {
+            "name": self.name,
+            "description": "Expose Spark profile mappings and supported features",
+            "input_schema": {
+                "type": "object",
+                "properties": {}
+            },
+            "output_schema": {
+                "type": "object",
+                "properties": {
+                    "profile": {"type": "string"},
+                    "views": {"type": "object"},
+                    "features": {"type": "object"}
+                }
+            }
+        }
+
+    async def invoke(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        # Recompute capabilities if a connection exists
+        if self.connection:
+            try:
+                self.profile.compute_capabilities_via_introspection(self.connection)
+            except Exception:
+                pass
+        return {
+            "profile": self.profile.profile_name,
+            "views": self.profile.mapping.get("views", {}),
+            "features": self.profile.capabilities,
+        }

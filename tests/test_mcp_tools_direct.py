@@ -15,6 +15,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from server.mcp.base import MCPToolRegistry
 from server.mcp.spark_tools import SparkPopulationAnalyticsTool, SparkPatientLongitudinalTool
+from server.mcp.spark_tools import SparkCapabilitiesTool
 from server.mcp.fhir_tool import FHIRSearchTool
 from server.mcp.medical_search_tool import MedicalSearchTool
 from server.mcp.appointment_tool import AppointmentTool
@@ -22,6 +23,31 @@ from server.mcp.appointment_tool import AppointmentTool
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+
+async def test_spark_capabilities_tool():
+    """Test Spark capabilities tool."""
+    logger.info("\n" + "="*60)
+    logger.info("Testing Spark Capabilities Tool")
+    logger.info("="*60)
+
+    tool = SparkCapabilitiesTool()
+    result = await tool.safe_invoke({})
+
+    if result["success"]:
+        data = result["result"]
+        logger.info("✅ Success!")
+        logger.info(f"  - Profile: {data.get('profile')}")
+        views = data.get("views", {})
+        feats = data.get("features", {})
+        logger.info(f"  - Views defined: {list(views.keys())}")
+        logger.info(f"  - Features: {feats}")
+        # Basic assertions: profile exists; features dict present
+        ok = isinstance(data.get("profile"), str) and isinstance(feats, dict)
+        return ok
+    else:
+        logger.error(f"❌ Failed: {result['error']}")
+        return False
 
 
 async def test_spark_population_tool():
@@ -237,6 +263,7 @@ async def test_tool_registry():
     registry = MCPToolRegistry()
     
     # Register all tools
+    registry.register(SparkCapabilitiesTool())
     registry.register(SparkPopulationAnalyticsTool())
     registry.register(SparkPatientLongitudinalTool())
     registry.register(FHIRSearchTool())
@@ -256,7 +283,7 @@ async def test_tool_registry():
     else:
         logger.error(f"❌ Failed to retrieve spark_population_analytics tool")
     
-    return len(tools) == 5
+    return len(tools) == 6
 
 
 async def main():
@@ -272,6 +299,7 @@ async def main():
     # Run each test
     tests = [
         ("Tool Registry", test_tool_registry),
+        ("Spark Capabilities", test_spark_capabilities_tool),
         ("Spark Population Analytics", test_spark_population_tool),
         ("Spark Patient Longitudinal", test_spark_longitudinal_tool),
         ("FHIR Search", test_fhir_search_tool),
@@ -318,6 +346,12 @@ if __name__ == "__main__":
         from dotenv import load_dotenv
         load_dotenv(env_file)
         logger.info(f"Loaded environment from {env_file}")
+    # Default to test-data mode unless explicitly disabled
+    if os.getenv("MCP_USE_TEST_DATA") is None:
+        os.environ["MCP_USE_TEST_DATA"] = "1"
+        logger.info("MCP_USE_TEST_DATA not set; enabling test-data mode for deterministic runs")
+    # Log active Spark profile for visibility
+    logger.info(f"Active SPARK_PROFILE: {os.getenv('SPARK_PROFILE', 'parquet_on_fhir_flat')}")
     
     # Run tests
     exit_code = asyncio.run(main())

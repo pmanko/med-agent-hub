@@ -1,0 +1,64 @@
+profile: parquet_on_fhir_flat
+schema_version: v1
+views:
+  patient:
+    table: patient
+    columns:
+      id: id
+      gender: gender
+      birth_date: birthDate
+      deceased: deceased
+      address_city: address_city
+      address_state: address_state
+  observation:
+    table: observation
+    columns:
+      code: code
+      value: value
+      unit: unit
+      effective_datetime: effectiveDateTime
+      patient_id: patient_id
+      clinical_status: clinicalStatus
+  encounter:
+    table: encounter
+    columns:
+      patient_id: patient_id
+      type: type
+      period_start: period_start
+      period_end: period_end
+      reason_code: reasonCode
+  medication_request:
+    table: medication_request
+    columns:
+      patient_id: patient_id
+      medication: medication
+      dosage: dosage
+      status: status
+      authored_on: authoredOn
+  procedure:
+    table: procedure
+    columns:
+      patient_id: patient_id
+      code: code
+      performed_datetime: performedDateTime
+      outcome: outcome
+features:
+  prevalence:
+    requires:
+      - observation.code
+      - observation.patient_id
+  trends:
+    requires:
+      - observation.effective_datetime
+      - observation.patient_id
+  demographics:
+    requires:
+      - observation.patient_id
+      - patient.id
+      - patient.gender
+      - patient.birth_date
+  comorbidities:
+    requires:
+      - observation.code
+      - observation.patient_id
+

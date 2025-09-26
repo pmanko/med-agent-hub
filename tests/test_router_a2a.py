@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 """
-Router-only A2A tests:
-- Send MedGemma-suitable question through Router
-- Small end-to-end conversation routed via Router
+Router-only A2A tests
+
+What this file tests and expectations:
+- Fetch Router Agent Card and ensure the server is reachable.
+- Send a medical question via Router and validate the orchestration path completes.
+  Expectation: Router returns a text artifact (actual content can be fallback text).
+- Send a short two-turn conversation via Router and ensure both turns complete successfully.
+  Expectation: No exceptions; router forwards downstream artifacts or fallback text per turn.
 """
 
 import asyncio
@@ -15,7 +20,7 @@ from a2a.types import AgentCard, Message, Role, Part, TextPart, TransportProtoco
 
 
 async def fetch_agent_card(base_url: str, httpx_client: httpx.AsyncClient) -> AgentCard:
-    for path in ("/.well-known/agent.json", "/.well-known/agent-card.json"):
+    for path in ("/.well-known/agent-card.json", "/.well-known/agent.json"):
         try:
             resp = await httpx_client.get(f"{base_url}{path}")
             if resp.status_code == 200:

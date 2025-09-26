@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """
-Direct agent tests for boot-up, card retrieval, and simple queries.
-- MedGemma agent (medical Q&A)
-- Clinical Research agent (general clinical question)
-- Router agent (simple routing task)
+Direct agent tests for boot-up, card retrieval, and simple queries
+
+What this file tests and expectations:
+- LLM connectivity: confirm LLM_BASE_URL + router.yaml model are usable
+- Medical agent: reachability and ability to return text artifacts to simple Q&A
+- Clinical agent: reachability and ability to return streamed events for generic prompt
+- Router agent: sanity routing path returns a text artifact (or fallback text)
 
 Usage:
   poetry run python test_models_direct.py --env-file env.recommended
@@ -94,11 +97,20 @@ async def test_llm_direct_connection() -> bool:
     logger.info("=" * 60)
     
     base_url = os.getenv("LLM_BASE_URL")
-    model = os.getenv("ORCHESTRATOR_MODEL")
+    # Load orchestrator model from YAML (single source of truth)
+    try:
+        import yaml
+        from pathlib import Path
+        router_cfg_path = Path(__file__).resolve().parent.parent / 'server' / 'agent_configs' / 'router.yaml'
+        with router_cfg_path.open('r', encoding='utf-8') as f:
+            router_cfg = yaml.safe_load(f)
+        model = router_cfg.get('model')
+    except Exception:
+        model = None
     api_key = os.getenv("LLM_API_KEY", "")
 
     if not base_url or not model:
-        logger.error("  -> FAILED: LLM_BASE_URL or ORCHESTRATOR_MODEL not configured.")
+        logger.error("  -> FAILED: LLM_BASE_URL or router.yaml model not configured.")
         return False
         
     logger.info(f"Attempting to connect to {base_url} with model {model}...")

@@ -22,6 +22,7 @@ import httpx
 import logging
 import os
 import json
+import re
 from typing import Dict, Any, Optional
 
 # Import MCP tools
@@ -46,7 +47,7 @@ class ClinicalExecutorV2(AgentExecutor):
         # LLM configuration
         self.llm_base_url = os.getenv("LLM_BASE_URL", "http://localhost:1234")
         self.llm_api_key = os.getenv("LLM_API_KEY", "")
-        self.general_model = os.getenv("CLINICAL_RESEARCH_MODEL", config.get('model'))
+        self.general_model = config.get('model')
         self.sql_model = os.getenv("SQL_MODEL", self.general_model)  # Can use specialized model for SQL
         self.temperature = float(os.getenv("LLM_TEMPERATURE", "0.3"))
         self.http_client = httpx.AsyncClient(timeout=180.0)
@@ -57,9 +58,14 @@ class ClinicalExecutorV2(AgentExecutor):
         
         # Load skill configurations
         self.skill_routing_prompt_template = config.get('skill_routing_prompt_template', '')
+        self.skill_prompts = config.get('skill_prompts', {})
         self.skills = self._load_enhanced_skills()
         
-        logger.info(f"Clinical executor V2 initialized with {len(self.tool_registry.tools)} MCP tools")
+        logger.info(
+            f"ClinicalExecutorV2 init: llm_base_url={self.llm_base_url}, "
+            f"general_model={self.general_model}, sql_model={self.sql_model}, "
+            f"temperature={self.temperature}, tools={len(self.tool_registry.tools)}"
+        )
     
     def _register_tools(self):
         """Register all available MCP tools"""
@@ -97,58 +103,25 @@ class ClinicalExecutorV2(AgentExecutor):
             "population_analytics": {
                 "description": "Analyze population-level health statistics",
                 "tool": "spark_population_analytics",
-                "prompt_template": """You are a clinical data analyst. Convert this query into population analytics parameters.
-                
-Query: {query}
-
-Determine the appropriate analysis type and parameters.
-Examples:
-- "Is flu common now?" → {{"analysis_type": "trends", "condition": "influenza", "timeframe": "last_month"}}
-- "Diabetes prevalence" → {{"analysis_type": "prevalence", "condition": "diabetes"}}
-- "Comorbidities with hypertension" → {{"analysis_type": "comorbidities", "condition": "hypertension"}}
-
-Respond with JSON only."""
+                "prompt_template": self.skill_prompts.get("population_analytics", "")
             },
             
             "patient_longitudinal": {
                 "description": "Retrieve complete patient health record",
                 "tool": "spark_patient_longitudinal",
-                "prompt_template": """Extract patient ID and format requirements from this query.
-
-Query: {query}
-
-Determine:
-1. Patient ID (if mentioned)
-2. Desired format (ips, timeline, summary, full)
-3. Specific sections needed
-
-Respond with JSON: {{"patient_id": "...", "format": "...", "sections": [...]}}"""
+                "prompt_template": self.skill_prompts.get("patient_longitudinal", "")
             },
             
             "fhir_patient_search": {
                 "description": "Search specific FHIR resources",
                 "tool": "fhir_search",
-                "prompt_template": """Convert this query into FHIR search parameters.
-
-Query: {query}
-
-Determine:
-1. Resource type (Patient, Observation, Condition, etc.)
-2. Patient ID (if mentioned)
-3. Search parameters (code, date, status, etc.)
-
-Respond with JSON: {{"resource_type": "...", "patient_id": "...", "search_params": {{}}}}"""
+                "prompt_template": self.skill_prompts.get("fhir_patient_search", "")
             },
             
             "medical_search": {
                 "description": "Search medical literature and resources",
                 "tool": "medical_search",
-                "prompt_template": """Convert this medical literature query into search parameters.
-
-Query: {query}
-
-Determine search type and filters.
-Respond with JSON: {{"query": "...", "search_type": "...", "filters": {{}}}}"""
+                "prompt_template": self.skill_prompts.get("medical_search", "")
             }
         }
     
@@ -206,26 +179,27 @@ Respond with JSON: {{"query": "...", "search_type": "...", "filters": {{}}}}"""
             for name, skill in self.skills.items()
         ])
         
-        routing_prompt = f"""Determine the best skill for this query.
+        if self.skill_routing_prompt_template:
+            routing_prompt = self.skill_routing_prompt_template.format(skills_info=skills_info, query=query)
+        else:
+            routing_prompt = f"""You are a multi-skilled clinical agent. Choose the best skill.
 
 Available skills:
 {skills_info}
 
-Query: {query}
+User query: "{query}"
 
-Respond with JSON: {{"skill": "skill_name"}}"""
+Respond with JSON only: {{"skill": "skill_name"}}"""
         
         messages = [
-            {"role": "system", "content": "You route queries to appropriate data retrieval skills."},
+            {"role": "system", "content": "Return JSON only. Route queries to appropriate clinical skills."},
             {"role": "user", "content": routing_prompt}
         ]
         
         response = await self._call_llm(messages, max_tokens=50)
         
         try:
-            # Parse response
-            cleaned = response.strip().removeprefix("```json").removesuffix("```").strip()
-            result = json.loads(cleaned)
+            result = self._extract_first_json(response)
             return result.get("skill", "general")
         except:
             # Default to general if parsing fails
@@ -234,7 +208,18 @@ Respond with JSON: {{"skill": "skill_name"}}"""
     async def _execute_skill(self, skill_name: str, query: str) -> str:
         """Execute a specific skill using its MCP tool"""
         
-        skill = self.skills[skill_name]
+        skill_key = (skill_name or "").strip().lower()
+        if skill_key not in self.skills:
+            # best-effort fuzzy mapping
+            if "population" in skill_key:
+                skill_key = "population_analytics"
+            elif "longitudinal" in skill_key or "patient" in skill_key:
+                skill_key = "patient_longitudinal"
+            elif "fhir" in skill_key:
+                skill_key = "fhir_patient_search"
+            elif "medical" in skill_key or "literature" in skill_key:
+                skill_key = "medical_search"
+        skill = self.skills.get(skill_key, {})
         tool_name = skill.get("tool")
         
         if not tool_name or not self.tool_registry.has_tool(tool_name):
@@ -250,12 +235,40 @@ Respond with JSON: {{"skill": "skill_name"}}"""
         param_response = await self._call_llm(messages, max_tokens=200)
         
         try:
-            # Parse parameters
-            cleaned = param_response.strip().removeprefix("```json").removesuffix("```").strip()
-            tool_params = json.loads(cleaned)
+        tool_params = self._extract_first_json(param_response)
         except Exception as e:
             logger.error(f"Failed to parse tool parameters: {e}")
-            return f"Failed to parse parameters for {skill_name}"
+            # Fallback to normalization from raw query
+            tool_params = {}
+
+        # Normalize/fallback parameters per skill to avoid validation errors
+        tool_params = self._normalize_tool_params(skill_key, tool_params, query)
+
+        # Final guard: ensure required fields for tool exist with safe defaults
+        try:
+            tool_obj = self.tool_registry.get_tool(tool_name)
+            required = (tool_obj.schema or {}).get("input_schema", {}).get("required", []) if tool_obj else []
+            if skill_key == "population_analytics":
+                if "analysis_type" in required and not tool_params.get("analysis_type"):
+                    tool_params["analysis_type"] = "prevalence"
+                if not tool_params.get("timeframe"):
+                    tool_params["timeframe"] = "all_time"
+            if skill_key == "patient_longitudinal":
+                if "patient_id" in required and not tool_params.get("patient_id"):
+                    m = re.search(r"patient\s*([A-Za-z0-9_-]+)", query, re.IGNORECASE)
+                    if m:
+                        tool_params["patient_id"] = m.group(1)
+                if not tool_params.get("format"):
+                    tool_params["format"] = "summary"
+            if skill_key == "fhir_patient_search":
+                if not tool_params.get("resource_type"):
+                    ql = query.lower()
+                    tool_params["resource_type"] = "Observation" if any(k in ql for k in ["lab","result","observation","hba1c"]) else "Patient"
+                sp = tool_params.get("search_params") or {}
+                sp.setdefault("_count", 5)
+                tool_params["search_params"] = sp
+        except Exception:
+            pass
         
         # Step 2: Invoke MCP tool
         tool = self.tool_registry.get_tool(tool_name)
@@ -281,6 +294,152 @@ Include key findings, patterns, and any clinical significance."""
         final_response = await self._call_llm(synthesis_messages, max_tokens=1000)
         
         return final_response
+
+    def _extract_first_json(self, content: str) -> Dict[str, Any]:
+        """Extract and parse the first JSON object from LLM content robustly."""
+        if not content:
+            return {}
+        text = content.strip()
+        # Remove fenced code if present
+        if text.startswith("```"):
+            # Strip first fence line
+            parts = text.split("```", 2)
+            if len(parts) >= 3:
+                text = parts[1] if not parts[1].strip() else parts[1].split("\n", 1)[1] if parts[1].startswith("json") else parts[1]
+                text = text.strip()
+        # Try direct JSON load
+        try:
+            return json.loads(text)
+        except Exception:
+            pass
+        # Regex search for first {...} block
+        match = re.search(r"\{[\s\S]*\}", text)
+        if match:
+            candidate = match.group(0)
+            # Remove inline comments (// ... ) defensively
+            candidate = re.sub(r"//.*", "", candidate)
+            try:
+                return json.loads(candidate)
+            except Exception:
+                pass
+        return {}
+
+    def _normalize_tool_params(self, skill_name: str, params: Dict[str, Any], query: str) -> Dict[str, Any]:
+        """Normalize tool parameters with sensible defaults and mappings."""
+        normalized: Dict[str, Any] = dict(params or {})
+
+        if skill_name == "patient_longitudinal":
+            # Extract patient id if missing
+            if not normalized.get("patient_id"):
+                import re
+                m = re.search(r"patient\s*([A-Za-z0-9_-]+)", query, re.IGNORECASE)
+                if m:
+                    normalized["patient_id"] = m.group(1)
+            # Default format
+            if normalized.get("format") not in {"ips", "timeline", "summary", "full"}:
+                normalized["format"] = "summary"
+            # Sections normalization
+            allowed = {"demographics", "conditions", "medications", "observations", "encounters", "procedures"}
+            sections = normalized.get("sections")
+            if isinstance(sections, list):
+                mapped = []
+                for s in sections:
+                    s_lower = str(s).strip().lower()
+                    if "complete" in s_lower or "history" in s_lower:
+                        mapped = []  # empty → include all
+                        break
+                    if s_lower in allowed:
+                        mapped.append(s_lower)
+                if mapped:
+                    normalized["sections"] = mapped
+                else:
+                    normalized.pop("sections", None)
+            elif sections is not None:
+                normalized.pop("sections", None)
+
+        elif skill_name == "fhir_patient_search":
+            # Resource type default and normalization
+            rt_allowed = {"Patient", "Observation", "Condition", "MedicationRequest", "Encounter", "Procedure", "DiagnosticReport", "AllergyIntolerance"}
+            rt = str(normalized.get("resource_type", "")).strip()
+            if not rt:
+                ql = query.lower()
+                if any(k in ql for k in ["lab", "result", "observation", "hba1c"]):
+                    rt = "Observation"
+                else:
+                    rt = "Patient"
+            for cand in rt_allowed:
+                if cand.lower() == rt.lower():
+                    rt = cand
+                    break
+            if rt not in rt_allowed:
+                rt = "Observation"
+            normalized["resource_type"] = rt
+
+            # Patient id inference
+            if not normalized.get("patient_id"):
+                import re
+                m = re.search(r"patient\s*([A-Za-z0-9_-]+)", query, re.IGNORECASE)
+                if m:
+                    normalized["patient_id"] = m.group(1)
+
+            # Search params default
+            sp = normalized.get("search_params") or {}
+            sp.setdefault("_count", 5)
+            normalized["search_params"] = sp
+
+        elif skill_name == "medical_search":
+            normalized.setdefault("query", query)
+            mapping = {
+                "literature review": "literature",
+                "literature review/research articles": "literature",
+                "research articles": "literature",
+                "research": "literature",
+                "guideline": "guidelines",
+                "protocol": "protocols",
+                "drug": "drug_info",
+            }
+            st = str(normalized.get("search_type", "general")).strip().lower()
+            st = mapping.get(st, st)
+            if st not in {"literature", "guidelines", "protocols", "drug_info", "general"}:
+                st = "general"
+            normalized["search_type"] = st
+
+        elif skill_name == "population_analytics":
+            ql = query.lower()
+            # analysis_type
+            at_allowed = {"prevalence", "trends", "demographics", "comorbidities", "custom"}
+            at = str(normalized.get("analysis_type", "")).strip().lower()
+            if not at:
+                at = "trends" if any(k in ql for k in ["trend", "recent", "increasing", "common now"]) else "prevalence"
+            if at not in at_allowed:
+                at = "prevalence"
+            normalized["analysis_type"] = at
+
+            # condition
+            if not normalized.get("condition"):
+                import re
+                m = re.search(r"\b(diabetes|hypertension|flu|influenza)\b", query, re.IGNORECASE)
+                if m:
+                    normalized["condition"] = m.group(1).lower()
+
+            # timeframe
+            tf_allowed = {"all_time", "last_year", "last_month", "last_week", "custom"}
+            tf = str(normalized.get("timeframe", "")).strip().lower()
+            if not tf:
+                if any(k in ql for k in ["overall", "historical", "all time", "ever"]):
+                    tf = "all_time"
+                elif any(k in ql for k in ["month", "recent", "now", "current"]):
+                    tf = "last_month"
+                else:
+                    tf = "all_time"
+            # normalize common synonyms
+            if tf in {"overall patient population", "overall", "historical"}:
+                tf = "all_time"
+            if tf not in tf_allowed:
+                tf = "all_time"
+            normalized["timeframe"] = tf
+
+        return normalized
     
     async def _handle_general_query(self, query: str) -> str:
         """Handle queries that don't map to specific skills"""
@@ -305,11 +464,12 @@ Include key findings, patterns, and any clinical significance."""
             "max_tokens": max_tokens,
         }
         
-        response = await self.http_client.post(
-            f"{self.llm_base_url}/v1/chat/completions",
-            headers=headers,
-            json=request_data
+        url = f"{self.llm_base_url}/v1/chat/completions"
+        logger.info(
+            f"ClinicalExecutorV2 LLM call: url={url}, model={self.general_model}, max_tokens={max_tokens}"
         )
+        response = await self.http_client.post(url, headers=headers, json=request_data)
+        logger.info(f"ClinicalExecutorV2 LLM response: status={response.status_code}")
         response.raise_for_status()
         
         result = response.json()
@@ -339,7 +499,7 @@ Include key findings, patterns, and any clinical significance."""
             version="2.0.0",
             default_input_modes=["text", "text/plain"],
             default_output_modes=["text", "text/plain"],
-            capabilities=AgentCapabilities(streaming=True),
+            capabilities=AgentCapabilities(streaming=False),
             skills=[
                 AgentSkill(
                     id="population_analytics",

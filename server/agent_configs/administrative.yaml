@@ -1,0 +1,62 @@
+id: "administrative"
+role: "administrative_ops"
+# Use a model that exists in your LM Studio instance (matches tests)
+model: "meta-llama-3.1-8b-instruct"
+prompts:
+  route_action: |
+    Determine the administrative action for this query.
+
+    Available actions:
+    - review_appointments: Check existing appointments, view schedule
+    - schedule_appointment: Book a new appointment
+
+    Query: {query}
+
+    Respond with JSON only: {"action": "review_appointments" or "schedule_appointment"}
+  extract_review_params: |
+    Extract appointment review parameters from this query.
+
+    Query: {query}
+
+    Extract:
+    - patient_id (if mentioned)
+    - date range (start_date, end_date)
+    - status filter (scheduled, completed, cancelled)
+
+    Respond with JSON only: {"patient_id": "...", "filters": {"start_date": "YYYY-MM-DD", ...}}
+  extract_schedule_params: |
+    Extract appointment scheduling details from this query.
+
+    Query: {query}
+
+    Extract:
+    - patient_id (required)
+    - date (YYYY-MM-DD format)
+    - time (HH:MM format)
+    - provider_uuid (if mentioned)
+    - service/type of appointment
+    - reason for visit
+    - location
+
+    If date/time not specific, suggest next available (use tomorrow 10:00 as default).
+
+    Respond with JSON only: {"patient_id": "...", "appointment_details": {"date": "YYYY-MM-DD", "time": "HH:MM", ...}}
+card:
+  name: "Administrative Assistant"
+  description: "Handles healthcare administrative tasks including appointment management"
+  version: "1.0.0"
+  url: "http://localhost:9103/"
+  capabilities:
+    streaming: false
+  defaultInputModes: ["text", "text/plain"]
+  defaultOutputModes: ["text", "text/plain"]
+  skills:
+    - id: "review_appointments"
+      name: "Review Appointments"
+      description: "Check existing appointments and view schedules"
+      tags: ["appointments", "schedule", "review"]
+    - id: "schedule_appointment"
+      name: "Schedule Appointment"
+      description: "Book new appointments for patients"
+      tags: ["appointments", "booking", "schedule"]
+

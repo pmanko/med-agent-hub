@@ -27,12 +27,14 @@ class MedicalExecutor(AgentExecutor):
         
         self.llm_base_url = os.getenv("LLM_BASE_URL", "http://localhost:1234")
         self.llm_api_key = os.getenv("LLM_API_KEY", "")
-        self.med_model = os.getenv("MED_MODEL", config.get('model'))
+        self.med_model = config.get('model')
         self.temperature = float(os.getenv("LLM_TEMPERATURE", "0.1"))
         self.http_client = httpx.AsyncClient(timeout=180.0)
         self.system_prompt = config.get('system_prompt', '')
         
-        logger.info(f"Medical executor initialized with model: {self.med_model}")
+        logger.info(
+            f"MedicalExecutor init: llm_base_url={self.llm_base_url}, model={self.med_model}, temperature={self.temperature}"
+        )
     
     async def execute(
         self,
@@ -76,11 +78,10 @@ class MedicalExecutor(AgentExecutor):
                 "max_tokens": 1000
             }
             
-            response = await self.http_client.post(
-                f"{self.llm_base_url}/v1/chat/completions",
-                headers=headers,
-                json=request_data
-            )
+            url = f"{self.llm_base_url}/v1/chat/completions"
+            logger.info(f"MedicalExecutor LLM call: url={url}, model={self.med_model}")
+            response = await self.http_client.post(url, headers=headers, json=request_data)
+            logger.info(f"MedicalExecutor LLM response: status={response.status_code}")
             response.raise_for_status()
             
             result = response.json()

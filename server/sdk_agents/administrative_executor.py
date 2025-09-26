@@ -35,10 +35,13 @@ class AdministrativeExecutor(AgentExecutor):
     """Administrative tasks executor for healthcare operations"""
     
     def __init__(self):
-        # LLM configuration
+        # LLM configuration (prefer YAML config)
+        from .router_executor import load_agent_config
+        admin_cfg = load_agent_config('administrative')
         self.llm_base_url = os.getenv("LLM_BASE_URL", "http://localhost:1234")
         self.llm_api_key = os.getenv("LLM_API_KEY", "")
-        self.model = os.getenv("ADMIN_MODEL", os.getenv("GENERAL_MODEL", "llama-3-8b-instruct"))
+        # Model from YAML, env only as emergency override
+        self.model = os.getenv("ADMIN_MODEL", admin_cfg.get('model', 'llama-3-8b-instruct'))
         self.temperature = float(os.getenv("LLM_TEMPERATURE", "0.3"))
         self.http_client = httpx.AsyncClient(timeout=180.0)
         
@@ -46,7 +49,11 @@ class AdministrativeExecutor(AgentExecutor):
         self.tool_registry = MCPToolRegistry()
         self._register_tools()
         
-        logger.info(f"Administrative executor initialized with model: {self.model}")
+        self.prompts = (admin_cfg or {}).get('prompts', {})
+
+        logger.info(
+            f"AdministrativeExecutor init: llm_base_url={self.llm_base_url}, model={self.model}, temperature={self.temperature}"
+        )
     
     def _register_tools(self):
         """Register administrative MCP tools"""
@@ -112,7 +119,7 @@ class AdministrativeExecutor(AgentExecutor):
     async def _determine_skill(self, query: str) -> str:
         """Determine which administrative skill to use"""
         
-        routing_prompt = f"""Determine the administrative action for this query.
+        routing_prompt = self.prompts.get('route_action', '').format(query=query) if self.prompts.get('route_action') else f"""Determine the administrative action for this query.
 
 Available actions:
 - review_appointments: Check existing appointments, view schedule
@@ -120,7 +127,7 @@ Available actions:
 
 Query: {query}
 
-Respond with JSON: {{"action": "review_appointments" or "schedule_appointment"}}"""
+Respond with JSON only: {{"action": "review_appointments" or "schedule_appointment"}}"""
         
         messages = [
             {"role": "system", "content": "You classify administrative healthcare requests."},
@@ -143,7 +150,7 @@ Respond with JSON: {{"action": "review_appointments" or "schedule_appointment"}}
         """Handle appointment review requests"""
         
         # Extract parameters from query
-        param_prompt = f"""Extract appointment review parameters from this query.
+        param_prompt = self.prompts.get('extract_review_params', '').format(query=query) if self.prompts.get('extract_review_params') else f"""Extract appointment review parameters from this query.
 
 Query: {query}
 
@@ -152,7 +159,7 @@ Extract:
 - date range (start_date, end_date)
 - status filter (scheduled, completed, cancelled)
 
-Respond with JSON: {{"patient_id": "...", "filters": {{"start_date": "YYYY-MM-DD", ...}}}}"""
+Respond with JSON only: {{"patient_id": "...", "filters": {{"start_date": "YYYY-MM-DD", ...}}}}"""
         
         messages = [
             {"role": "system", "content": "You extract appointment search parameters."},
@@ -201,7 +208,7 @@ Respond with JSON: {{"patient_id": "...", "filters": {{"start_date": "YYYY-MM-DD
         """Handle appointment scheduling requests"""
         
         # Extract scheduling parameters
-        param_prompt = f"""Extract appointment scheduling details from this query.
+        param_prompt = self.prompts.get('extract_schedule_params', '').format(query=query) if self.prompts.get('extract_schedule_params') else f"""Extract appointment scheduling details from this query.
 
 Query: {query}
 
@@ -216,7 +223,7 @@ Extract:
 
 If date/time not specific, suggest next available (use tomorrow 10:00 as default).
 
-Respond with JSON: {{"patient_id": "...", "appointment_details": {{"date": "YYYY-MM-DD", "time": "HH:MM", ...}}}}"""
+Respond with JSON only: {{"patient_id": "...", "appointment_details": {{"date": "YYYY-MM-DD", "time": "HH:MM", ...}}}}"""
         
         messages = [
             {"role": "system", "content": "You extract appointment scheduling parameters."},
@@ -274,11 +281,10 @@ Respond with JSON: {{"patient_id": "...", "appointment_details": {{"date": "YYYY
             "max_tokens": max_tokens,
         }
         
-        response = await self.http_client.post(
-            f"{self.llm_base_url}/v1/chat/completions",
-            headers=headers,
-            json=request_data
-        )
+        url = f"{self.llm_base_url}/v1/chat/completions"
+        logger.info(f"AdministrativeExecutor LLM call: url={url}, model={self.model}")
+        response = await self.http_client.post(url, headers=headers, json=request_data)
+        logger.info(f"AdministrativeExecutor LLM response: status={response.status_code}")
         response.raise_for_status()
         
         result = response.json()

@@ -37,7 +37,7 @@ class ReactRouterExecutor(AgentExecutor):
         config = load_agent_config('router')
         self.llm_base_url = os.getenv("LLM_BASE_URL", "http://localhost:1234")
         self.llm_api_key = os.getenv("LLM_API_KEY", "")
-        self.orchestrator_model = os.getenv("ORCHESTRATOR_MODEL", config.get('model'))
+        self.orchestrator_model = config.get('model')
         self.temperature = float(os.getenv("LLM_TEMPERATURE", "0.2"))
         self.http_client = httpx.AsyncClient(timeout=180.0)
 
