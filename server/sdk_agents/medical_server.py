@@ -39,7 +39,8 @@ def create_medical_server():
 
     # Ensure URL reflects runtime host/port from config
     agent_card = AgentCard(**card_data)
-    agent_card.url = a2a_endpoints.medgemma_url
+    # Prefer role-based alias if present
+    agent_card.url = getattr(a2a_endpoints, 'medical_url', a2a_endpoints.medgemma_url)
     # Ensure compatible transport preference
     agent_card.preferred_transport = TransportProtocol.jsonrpc
 

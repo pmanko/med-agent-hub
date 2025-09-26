@@ -41,7 +41,7 @@ def create_router_server():
     agent_card.url = a2a_endpoints.router_url
     # Ensure compatible transport preference
     agent_card.preferred_transport = TransportProtocol.jsonrpc
-    agent_card.capabilities = AgentCapabilities(streaming=True)
+    agent_card.capabilities = AgentCapabilities(streaming=False)
     
     # Create the server application (Starlette to expose .well-known)
     server_app = A2AStarletteApplication(

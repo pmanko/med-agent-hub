@@ -11,7 +11,7 @@ from a2a.server.apps import A2AStarletteApplication
 from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.tasks import InMemoryTaskStore
 from a2a.types import AgentCapabilities, TransportProtocol, AgentCard, AgentSkill
-from .clinical_executor import ClinicalExecutor
+from .clinical_executor_v2 import ClinicalExecutorV2
 from ..config import a2a_endpoints
 from .router_executor import load_agent_config
 
@@ -22,26 +22,19 @@ def create_clinical_server():
     """
     Creates and returns the FastAPI application for the Clinical Research agent.
     """
-    agent_executor = ClinicalExecutor()
+    agent_executor = ClinicalExecutorV2()
     request_handler = DefaultRequestHandler(
         agent_executor=agent_executor,
         task_store=InMemoryTaskStore()
     )
     
-    # Load agent card from YAML config
-    config = load_agent_config('clinical')
-    card_data = config.get('card', {})
+    # Get agent card from executor (includes MCP skills)
+    agent_card = agent_executor.get_agent_card()
     
-    # Convert skills data to AgentSkill objects
-    skills_data = card_data.get('skills', [])
-    card_data['skills'] = [AgentSkill(**skill) for skill in skills_data]
-    
-    agent_card = AgentCard(**card_data)
     # Ensure runtime URL is sourced from config
     agent_card.url = a2a_endpoints.clinical_url
     # Ensure compatible transport preference
     agent_card.preferred_transport = TransportProtocol.jsonrpc
-    agent_card.capabilities = AgentCapabilities(streaming=True)
     
     # Create the server application (Starlette to expose .well-known)
     server_app = A2AStarletteApplication(

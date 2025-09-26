@@ -5,7 +5,7 @@
 ```bash
 cd projects/med-agent-hub
 cp env.recommended .env
-# Edit .env with your LM Studio IP address
+# Edit .env with your LM Studio URL and local services
 ```
 
 ## Essential Settings
@@ -19,7 +19,7 @@ AGENT_HOST_IP=127.0.0.1  # Local development
 
 ### LM Studio
 ```env
-LLM_BASE_URL=http://10.0.0.41:1234  # Your LM Studio endpoint
+LLM_BASE_URL=http://localhost:1234  # LM Studio local API
 ```
 
 ### Model Assignments
@@ -36,6 +36,12 @@ A2A_MEDGEMMA_PORT=9101
 A2A_CLINICAL_PORT=9102
 ```
 
+### API Port
+```env
+# FastAPI development server
+# Procfile.dev uses 8080 by default
+```
+
 ## Optional Features
 
 ### Google Gemini Orchestration
@@ -45,18 +51,25 @@ GEMINI_API_KEY=your-api-key
 ORCHESTRATOR_MODEL=gemini-1.5-flash
 ```
 
-### FHIR Integration
+### FHIR Integration (OpenMRS Gateway)
 ```env
-OPENMRS_FHIR_BASE_URL=http://localhost:8080/openmrs/ws/fhir2/R4/
+OPENMRS_FHIR_BASE_URL=http://localhost:8090/openmrs/ws/fhir2/R4/
 OPENMRS_USERNAME=admin
 OPENMRS_PASSWORD=Admin123
+```
+
+### Spark Thrift (Parquet-on-FHIR)
+```env
+SPARK_THRIFT_HOST=localhost
+SPARK_THRIFT_PORT=10001
+SPARK_THRIFT_DATABASE=default
 ```
 
 ## Running the System
 
 ### All Services (Recommended)
 ```bash
-honcho -f Procfile.dev start
+poetry run honcho -f Procfile.dev start
 ```
 
 ### Individual Services
@@ -68,6 +81,9 @@ export UVICORN_ENV_FILE=env.recommended
 poetry run uvicorn server.sdk_agents.router_server:app --port 9100
 poetry run uvicorn server.sdk_agents.medgemma_server:app --port 9101
 poetry run uvicorn server.sdk_agents.clinical_server:app --port 9102
+
+# Start API (separate terminal)
+poetry run uvicorn server.main:app --host 0.0.0.0 --port 8080 --reload
 ```
 
 ### Testing
@@ -87,6 +103,10 @@ curl http://localhost:9102/.well-known/agent-card.json
 
 # Test LM Studio
 curl http://localhost:1234/v1/models
+
+# Test API health/manifest
+curl http://localhost:8080/health
+curl http://localhost:8080/manifest
 ```
 
 ### View Logs
@@ -119,3 +139,17 @@ The `server/config.py` file:
 - Loads environment from `UVICORN_ENV_FILE` or `.env`
 - Constructs agent URLs from `AGENT_HOST_IP` and ports
 - Provides configuration objects to executors
+
+## Port Map (defaults)
+
+| Service | Port |
+|--------|------|
+| API (FastAPI) | 8080 |
+| Router Agent | 9100 |
+| Med Agent | 9101 |
+| Clinical Agent | 9102 |
+| LM Studio | 1234 |
+| OpenMRS Gateway (FHIR) | 8090 |
+| Spark Thrift | 10001 |
+| Spark UI | 4041 |
+| Web Dev (Vite) | 5173 |

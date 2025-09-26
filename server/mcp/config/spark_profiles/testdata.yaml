@@ -1,0 +1,13 @@
+profile: testdata
+schema_version: v1
+views: {}
+features:
+  prevalence:
+    requires: []
+  trends:
+    requires: []
+  demographics:
+    requires: []
+  comorbidities:
+    requires: []
+

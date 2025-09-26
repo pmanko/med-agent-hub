@@ -1,3 +1,6 @@
+id: "medical"
+role: "medical_qna"
+model: "medgemma-4b-it"
 system_prompt: |
   You are a medical AI assistant trained on clinical literature.
   Provide accurate, evidence-based medical information.

@@ -1,15 +1,64 @@
-model: "gemma-3-1b-it"
+id: "clinical"
+role: "clinical_research"
+model: "gemma-3-4b-it"
+skill_prompts:
+  population_analytics: |
+    You are a clinical data analyst. Convert this query into JSON parameters for the Spark population analytics tool.
+
+    Rules:
+    - Respond with JSON only (no prose, no markdown fences).
+    - analysis_type must be one of: ["prevalence", "trends", "demographics", "comorbidities", "custom"].
+    - timeframe must be one of: ["all_time", "last_year", "last_month", "last_week", "custom"]. If the query implies overall or historical scope, use "all_time". If it implies recent period, prefer "last_month".
+    - Include condition when medically relevant (e.g., diabetes, hypertension, influenza).
+
+    Query: {query}
+
+    Examples:
+    - "Is flu common now?" → {"analysis_type": "trends", "condition": "influenza", "timeframe": "last_month"}
+    - "Diabetes prevalence" → {"analysis_type": "prevalence", "condition": "diabetes", "timeframe": "all_time"}
+    - "Comorbidities with hypertension" → {"analysis_type": "comorbidities", "condition": "hypertension", "timeframe": "all_time"}
+  patient_longitudinal: |
+    Extract parameters for the Spark longitudinal tool.
+
+    Rules:
+    - Respond with JSON only (no prose, no markdown fences).
+    - format must be one of ["ips","timeline","summary","full"]. If not specified, use "summary".
+    - sections should be an array of any of ["demographics","conditions","medications","observations","encounters","procedures"]. If the query asks for the complete history, omit sections.
+
+    Query: {query}
+
+    Respond with JSON: {"patient_id": "...", "format": "...", "sections": [...]} 
+  fhir_patient_search: |
+    Convert this query into FHIR search parameters.
+
+    Rules:
+    - Respond with JSON only (no prose, no markdown fences).
+    - resource_type must be one of ["Patient","Observation","Condition","MedicationRequest","Encounter","Procedure","DiagnosticReport","AllergyIntolerance"].
+
+    Query: {query}
+
+    Respond with JSON: {"resource_type": "...", "patient_id": "...", "search_params": {...}}
+  medical_search: |
+    Convert this medical literature query into search parameters.
+
+    Rules:
+    - Respond with JSON only (no prose, no markdown fences).
+    - search_type must be one of ["literature","guidelines","protocols","drug_info","general"].
+
+    Query: {query}
+
+    Respond with JSON: {"query": "...", "search_type": "...", "filters": {...}}
 skill_routing_prompt_template: |
-  You are a multi-skilled agent. Determine which of your skills is most appropriate for the user's query.
+  Return JSON only. You are a multi-skilled clinical agent. Choose the best skill.
   Available skills:
   {skills_info}
   
   User query: "{query}"
   
-  Respond with JSON: {{"skill": "skill_name"}}
+  Respond with JSON only: {{"skill": "skill_name"}}
 card:
-  name: "Research Agent"
-  description: "Answers general knowledge questions and provides information on a wide variety of topics."
+  name: "Clinical Research Agent V2"
+  description: "Advanced clinical data retrieval and analytics with MCP tools"
   version: "1.0.0"
   url: "http://localhost:9102/"
   capabilities:
@@ -17,21 +66,19 @@ card:
   defaultInputModes: ["text", "text/plain"]
   defaultOutputModes: ["text", "text/plain"]
   skills:
-    - id: "general_knowledge"
-      name: "general_knowledge"
-      description: "Answers general knowledge questions and provides information on a wide variety of topics."
-      tags: ["general", "q&a"]
-      system_prompt: "You are a helpful general-purpose assistant. Provide clear and concise answers to user questions."
-      input_schema:
-        type: "object"
-        properties:
-          query:
-            type: "string"
-            description: "The general knowledge question to be answered."
-        required: ["query"]
-      output_schema:
-        type: "object"
-        properties:
-          response:
-            type: "string"
-            description: "The answer to the question."
+    - id: "population_analytics"
+      name: "Population Analytics"
+      description: "Analyze population-level health trends and statistics"
+      tags: ["analytics", "population", "spark"]
+    - id: "patient_longitudinal"
+      name: "Patient Longitudinal Record"
+      description: "Retrieve complete patient health history"
+      tags: ["patient", "ehr", "longitudinal"]
+    - id: "fhir_patient_search"
+      name: "FHIR Patient Search"
+      description: "Search specific FHIR resources"
+      tags: ["fhir", "search", "clinical"]
+    - id: "medical_search"
+      name: "Medical Literature Search"
+      description: "Search medical literature and guidelines"
+      tags: ["literature", "research", "guidelines"]

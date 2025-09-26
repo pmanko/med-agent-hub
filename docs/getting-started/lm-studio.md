@@ -25,14 +25,17 @@ Download from [lmstudio.ai](https://lmstudio.ai) for your platform:
 
 ### 2. Configure the Local API Server
 
-#### Option A: GUI Mode
+#### Option A: Developer Screen (Recommended)
 1. Open LM Studio
-2. Navigate to the "Local Server" tab
-3. Select your model (e.g., `llama-3-8b-instruct`)
-4. Click "Start Server"
-5. Note the server URL (typically `http://localhost:1234`)
+2. Go to the Developer screen (Local Server)
+3. Download the following models:
+   - Router/General: `meta-llama-3.1-8b-instruct`
+   - Medical: `medgemma-4b-it-mlx`
+   - Clinical: `gemma-3-1b-it`
+4. Start the local server (keep default `http://localhost:1234`)
+5. Load models as needed while developing (LM Studio can live-load on demand)
 
-#### Option B: Headless Mode (Recommended for Development)
+#### Option B: Headless Mode (Alternative)
 ```bash
 # Start LM Studio server in headless mode
 lms server start --port 1234
@@ -50,9 +53,10 @@ Create your `.env` file with LM Studio as the LLM provider:
 # Essential Configuration
 LLM_BASE_URL=http://localhost:1234  # Your LM Studio server
 
-# Model Selection (adjust to match your loaded models)
-GENERAL_MODEL=llama-3-8b-instruct    # For router and clinical agents
-MED_MODEL=medgemma-2                 # For medical Q&A
+# Model selection (match LM Studio)
+ORCHESTRATOR_MODEL=meta-llama-3.1-8b-instruct
+MED_MODEL=medgemma-4b-it-mlx
+CLINICAL_RESEARCH_MODEL=gemma-3-1b-it
 
 # Optional: Use Gemini for orchestration instead of local LLM
 # ORCHESTRATOR_PROVIDER=gemini

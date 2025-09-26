@@ -1,0 +1,64 @@
+profile: parquet_on_fhir_nested
+schema_version: v1
+views:
+  patient:
+    table: patient
+    columns:
+      id: id
+      gender: gender
+      birth_date: birthDate
+      deceased: deceased.boolean
+      address_city: element_at(address, 1).city
+      address_state: element_at(address, 1).state
+  observation:
+    table: observation
+    columns:
+      code: coalesce(code.text, element_at(code.coding, 1).display, element_at(code.coding, 1).code)
+      value: coalesce(value.string, cast(value.integer as string), cast(value.quantity.value as string))
+      unit: coalesce(value.quantity.unit, '')
+      effective_datetime: coalesce(effective.dateTime, effective.period.start)
+      patient_id: subject.patientId
+      clinical_status: status
+  encounter:
+    table: encounter
+    columns:
+      patient_id: subject.patientId
+      type: class.code
+      period_start: period.start
+      period_end: period.end
+      reason_code: element_at(reasonCode, 1).text
+  medication_request:
+    table: medication_request
+    columns:
+      patient_id: subject.patientId
+      medication: coalesce(medicationCodeableConcept.text, element_at(medicationCodeableConcept.coding, 1).display)
+      dosage: element_at(dosageInstruction, 1).text
+      status: status
+      authored_on: authoredOn
+  procedure:
+    table: procedure
+    columns:
+      patient_id: subject.patientId
+      code: coalesce(code.text, element_at(code.coding, 1).display, element_at(code.coding, 1).code)
+      performed_datetime: performed.dateTime
+      outcome: outcome.text
+features:
+  prevalence:
+    requires:
+      - observation.code
+      - observation.patient_id
+  trends:
+    requires:
+      - observation.effective_datetime
+      - observation.patient_id
+  demographics:
+    requires:
+      - observation.patient_id
+      - patient.id
+      - patient.gender
+      - patient.birth_date
+  comorbidities:
+    requires:
+      - observation.code
+      - observation.patient_id
+

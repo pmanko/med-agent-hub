@@ -4,36 +4,35 @@ A pure A2A (Agent-to-Agent) protocol implementation for collaborative medical AI
 
 ## Features
 
-- **Three Specialized Agents**: Router (orchestration), MedGemma (medical Q&A), Clinical (research)
+- **Four Specialized Agents**: Router (orchestration), MedGemma (medical Q&A), Clinical (research + MCP tools), Administrative (appointments)
+- **MCP Tool Integration**: Model Context Protocol for structured data access
+- **Advanced Clinical Capabilities**:
+  - Population health analytics via Spark SQL
+  - Patient longitudinal records (IPS-like comprehensive history)
+  - FHIR resource search and retrieval
+  - Medical literature search (extensible)
+  - Appointment management via OpenMRS REST
 - **Local-First**: Runs entirely on your hardware with LM Studio
 - **A2A Protocol**: Full compliance using A2A SDK v0.3.2+
-- **Configurable**: Environment-based configuration
+- **Graceful Degradation**: Works with mock data when external services unavailable
 
-## Quick Start
+## Run Options
 
-```bash
-# 1. Setup
-cd projects/med-agent-hub
-cp env.recommended .env
-# Edit .env: Set AGENT_HOST_IP and LLM_BASE_URL
-
-# 2. Install dependencies
-poetry install
-
-# 3. Start all agents
-honcho -f Procfile.dev start
-
-# 4. Test
-poetry run python test_models_direct.py
-```
+- Development setup and workflow (Python-only, Poetry-managed): see the Development Guide
+  - docs/development/dev-setup.md
+- Run with Docker Compose: docs/development/run-with-docker.md
+- Run as an Instant OpenHIE v2 package: docs/development/run-as-package.md
+- LM Studio setup for local models: docs/getting-started/lm-studio.md
 
 ## Documentation
 
-See [docs/README.md](docs/README.md) for complete documentation:
-- Configuration guide
-- Architecture overview
-- Creating new agents
-- LM Studio setup
+See project docs:
+- [Docs index](docs/docs.md)
+- [Configuration](docs/getting-started/configuration.md)
+- [LM Studio Setup](docs/getting-started/lm-studio.md)
+- [System Overview](docs/architecture/overview.md)
+- [Agent Reference](docs/architecture/agents.md)
+- [Creating Agents](docs/development/creating-agents.md)
 
 ## Project Structure
 
@@ -51,8 +50,8 @@ test_models_direct.py # System tests
 ## Requirements
 
 - Python 3.10+
-- LM Studio with models loaded
 - Poetry for dependency management
+- See the Development Guide for optional services used during development
 
 ## License
 

@@ -1,3 +1,5 @@
+id: "router"
+role: "orchestrator"
 model: "meta-llama-3.1-8b-instruct"
 system_prompt_template: |
   You are a query router for a medical multi-agent system.
@@ -20,7 +22,7 @@ card:
   version: "1.0.0"
   url: "http://localhost:9100/" 
   capabilities:
-    streaming: true
+    streaming: false
   defaultInputModes: ["text", "text/plain"]
   defaultOutputModes: ["text", "text/plain"]
   skills:

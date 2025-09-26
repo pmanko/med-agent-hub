@@ -50,7 +50,7 @@ class RouterAgentExecutor(AgentExecutor):
         
         self.llm_base_url = os.getenv("LLM_BASE_URL", "http://localhost:1234")
         self.llm_api_key = os.getenv("LLM_API_KEY", "")
-        self.orchestrator_model = os.getenv("ORCHESTRATOR_MODEL", config.get('model'))
+        self.orchestrator_model = config.get('model')
         self.temperature = float(os.getenv("LLM_TEMPERATURE", "0.3"))
         self.http_client = httpx.AsyncClient(timeout=180.0)
         
@@ -59,17 +59,27 @@ class RouterAgentExecutor(AgentExecutor):
         # Agent registry - dynamically discover agents and their skills
         self.agents = self._discover_agents()
         
-        logger.info(f"Router agent executor initialized with model: {self.orchestrator_model}")
+        logger.info(
+            f"RouterAgentExecutor init: llm_base_url={self.llm_base_url}, model={self.orchestrator_model}, temperature={self.temperature}"
+        )
         logger.info(f"Discovered agents: {json.dumps(self.agents, indent=2)}")
     
     def _discover_agents(self) -> Dict[str, Any]:
         """Synchronously discover agents and their skills from their cards."""
         import requests # Use synchronous requests for startup discovery
         
-        agent_base_urls = {
+        # Determine active agents from env (default: router, medical, clinical, administrative)
+        active_agents_env = os.getenv("ACTIVE_AGENTS", "router,medical,clinical,administrative")
+        active = {a.strip() for a in active_agents_env.split(',') if a.strip()}
+
+        # Map agent names to URLs (infra env still used for endpoints)
+        name_to_url = {
             "medical": os.getenv("A2A_MEDICAL_URL", os.getenv("A2A_MEDGEMMA_URL", "http://localhost:9101")),
-            "generalist": os.getenv("A2A_CLINICAL_URL", "http://localhost:9102"),
+            "clinical": os.getenv("A2A_CLINICAL_URL", "http://localhost:9102"),
+            "administrative": os.getenv("A2A_ADMIN_URL", "http://localhost:9103"),
         }
+
+        agent_base_urls = {k: v for k, v in name_to_url.items() if k in active and v}
         
         discovered_agents = {}
         for name, url in agent_base_urls.items():
@@ -94,8 +104,10 @@ class RouterAgentExecutor(AgentExecutor):
     async def _call_llm(self, messages: list[Dict[str, Any]]) -> str:
         """Call the LLM for routing decisions."""
         try:
+            url = f"{self.llm_base_url}/v1/chat/completions"
+            logger.info(f"Router LLM call: url={url}, model={self.orchestrator_model}")
             response = await self.http_client.post(
-                f"{self.llm_base_url}/v1/chat/completions",
+                url,
                 json={
                     "model": self.orchestrator_model,
                     "messages": messages,
@@ -104,6 +116,7 @@ class RouterAgentExecutor(AgentExecutor):
                 },
                 headers={"Authorization": f"Bearer {self.llm_api_key}"} if self.llm_api_key else {}
             )
+            logger.info(f"Router LLM response: status={response.status_code}")
             response.raise_for_status()
             return response.json()["choices"][0]["message"]["content"]
         except Exception as e:
@@ -213,14 +226,46 @@ class RouterAgentExecutor(AgentExecutor):
                 logger.info(f"[Task {task.id}] Received event from {agent_name}: {type(final_task).__name__}")
 
             # After the stream is done, process the final task state
-            if final_task and getattr(final_task, 'artifacts', None):
-                logger.info(f"[Task {task.id}] Final task received with {len(final_task.artifacts)} artifacts. Forwarding to parent.")
-                # Forward the last artifact from the downstream agent
-                last_artifact = final_task.artifacts[-1]
-                await task_updater.add_artifact(last_artifact.parts, name=last_artifact.name)
+            if final_task:
+                # Determine downstream state early
+                downstream_state = None
+                try:
+                    downstream_state = getattr(getattr(final_task, 'status', None), 'state', None)
+                except Exception:
+                    downstream_state = None
+
+                # Forward artifact or provide a fallback artifact
+                if getattr(final_task, 'artifacts', None):
+                    logger.info(f"[Task {task.id}] Final task received with {len(final_task.artifacts)} artifacts. Forwarding to parent.")
+                    last_artifact = final_task.artifacts[-1]
+                    await task_updater.add_artifact(last_artifact.parts, name=last_artifact.name)
+                else:
+                    logger.warning(f"[Task {task.id}] Final task received from {agent_name} had no artifacts. Attempting message fallback.")
+                    try:
+                        status_msg = getattr(getattr(final_task, 'status', None), 'message', None)
+                        if status_msg and getattr(status_msg, 'parts', None):
+                            await task_updater.add_artifact(status_msg.parts, name=f"{agent_name}_message")
+                        else:
+                            summary_text = f"Task completed by {agent_name}, but no response artifact was found."
+                            await task_updater.add_artifact([Part(root=TextPart(text=summary_text))])
+                    except Exception:
+                        summary_text = f"Task completed by {agent_name}, but no response artifact was found."
+                        await task_updater.add_artifact([Part(root=TextPart(text=summary_text))])
+
+                # If downstream reported a non-completed state, set failed and return (avoid double terminal updates)
+                if downstream_state and str(downstream_state).lower() != str(TaskState.completed).lower():
+                    await task_updater.update_status(
+                        TaskState.failed,
+                        new_agent_text_message(
+                            f"Downstream agent '{agent_name}' reported state: {downstream_state}",
+                            task.context_id,
+                            task.id,
+                        ),
+                    )
+                    return
             else:
-                logger.warning(f"[Task {task.id}] Final task received from {agent_name} had no artifacts.")
-                summary_text = f"Task completed by {agent_name}, but no response artifact was found."
+                logger.warning(f"[Task {task.id}] No final task object received from {agent_name}.")
+                summary_text = f"No final task received from {agent_name}."
                 await task_updater.add_artifact([Part(root=TextPart(text=summary_text))])
             
             logger.info(f"[Task {task.id}] Completing router task.")

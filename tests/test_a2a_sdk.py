@@ -1,7 +1,24 @@
 #!/usr/bin/env python3
 """
 Test script for A2A SDK agents
-Demonstrates using the official A2A SDK to communicate with agents
+
+What this file tests and expectations:
+- Agent discovery against live agent servers:
+  - For each agent (router, medical, clinical, administrative), fetch the Agent Card and verify
+    that name/description/skills match the YAML configuration in server/agent_configs/*.yaml.
+  - Expectation: The card matches YAML; mismatches indicate misconfigured executors/servers.
+
+- Direct agent invocation (medical, clinical):
+  - Send single-turn queries to medical and clinical endpoints and ensure the A2A protocol returns streamed events.
+  - Expectation: Agents respond and produce either artifacts or at minimum streamed events; any exception is a test failure.
+
+- Router orchestration:
+  - Send a medical question via router and verify the router successfully delegates and returns a text artifact.
+  - Expectation: Router returns a user-visible text artifact (fallback behavior acceptable).
+
+- End-to-end short conversation via router:
+  - Send two turns through the router and ensure events complete without error; router forwards downstream results.
+  - Expectation: No exceptions; router forwards last downstream artifact (or fallback text) per turn.
 """
 
 import asyncio
@@ -11,6 +28,7 @@ import httpx
 from uuid import uuid4
 from pathlib import Path
 import yaml
+import os
 from a2a.client import ClientFactory, ClientConfig
 from a2a.types import AgentCard, Message, Role, Part, TextPart, TransportProtocol, AgentSkill
 
@@ -32,7 +50,11 @@ logger = logging.getLogger(__name__)
 
 def load_agent_config(agent_name: str):
     """Loads agent configuration from a YAML file."""
-    config_path = Path(__file__).resolve().parent.parent / 'server' / 'agent_configs' / f'{agent_name}.yaml'
+    # Normalize model-specific names to role names (e.g., medgemma -> medical)
+    role_name = {
+        'medgemma': 'medical',
+    }.get(agent_name, agent_name)
+    config_path = Path(__file__).resolve().parent.parent / 'server' / 'agent_configs' / f'{role_name}.yaml'
     with config_path.open('r', encoding='utf-8') as f:
         return yaml.safe_load(f)
 
@@ -43,9 +65,10 @@ async def test_agent_discovery():
     logger.info("=" * 60)
     
     agents = {
-        "router": "http://localhost:9100",
-        "medgemma": "http://localhost:9101",
-        "clinical": "http://localhost:9102"
+        "router": os.getenv("A2A_ROUTER_URL", "http://localhost:9100"),
+        "medical": os.getenv("A2A_MEDICAL_URL", os.getenv("A2A_MEDGEMMA_URL", "http://localhost:9101")),
+        "clinical": os.getenv("A2A_CLINICAL_URL", "http://localhost:9102"),
+        "administrative": os.getenv("A2A_ADMIN_URL", "http://localhost:9103"),
     }
     
     all_tests_passed = True
@@ -89,7 +112,8 @@ async def test_medgemma_agent():
     logger.info("=" * 60)
     
     httpx_client = httpx.AsyncClient(timeout=180)
-    card = await fetch_agent_card("http://localhost:9101", httpx_client)
+    med_url = os.getenv("A2A_MEDGEMMA_URL", os.getenv("A2A_MEDICAL_URL", "http://localhost:9101"))
+    card = await fetch_agent_card(med_url, httpx_client)
     client = ClientFactory(ClientConfig(
         httpx_client=httpx_client,
         supported_transports=[TransportProtocol.jsonrpc],
@@ -129,7 +153,8 @@ async def test_clinical_agent():
     logger.info("=" * 60)
     
     httpx_client = httpx.AsyncClient(timeout=180)
-    card = await fetch_agent_card("http://localhost:9102", httpx_client)
+    clinical_url = os.getenv("A2A_CLINICAL_URL", "http://localhost:9102")
+    card = await fetch_agent_card(clinical_url, httpx_client)
     try:
         client = ClientFactory(ClientConfig(
             httpx_client=httpx_client,
@@ -174,7 +199,8 @@ async def test_router_agent():
     logger.info("=" * 60)
     
     httpx_client = httpx.AsyncClient(timeout=180)
-    card = await fetch_agent_card("http://localhost:9100", httpx_client)
+    router_url = os.getenv("A2A_ROUTER_URL", "http://localhost:9100")
+    card = await fetch_agent_card(router_url, httpx_client)
     client = ClientFactory(ClientConfig(
         httpx_client=httpx_client,
         supported_transports=[TransportProtocol.jsonrpc],
@@ -182,7 +208,7 @@ async def test_router_agent():
     )).create(card)
     
     test_cases = [
-        {"query": "What are common symptoms of hypertension?", "expected_agent": "medgemma"},
+        {"query": "What are common symptoms of hypertension?", "expected_agent": "medical"},
     ]
     
     for test in test_cases:
@@ -232,7 +258,8 @@ async def test_end_to_end():
     
     # Build Router client via resolver + factory
     httpx_client = httpx.AsyncClient(timeout=180)
-    card = await fetch_agent_card("http://localhost:9100", httpx_client)
+    router_url = os.getenv("A2A_ROUTER_URL", "http://localhost:9100")
+    card = await fetch_agent_card(router_url, httpx_client)
     router_client = ClientFactory(ClientConfig(
         httpx_client=httpx_client,
         supported_transports=[TransportProtocol.jsonrpc],
@@ -268,7 +295,8 @@ async def test_clinical_patient_overview():
     logger.info("=" * 60)
 
     httpx_client = httpx.AsyncClient(timeout=180)
-    card = await fetch_agent_card("http://localhost:9102", httpx_client)
+    clinical_url = os.getenv("A2A_CLINICAL_URL", "http://localhost:9102")
+    card = await fetch_agent_card(clinical_url, httpx_client)
     try:
         client = ClientFactory(ClientConfig(
             httpx_client=httpx_client,
@@ -310,7 +338,10 @@ async def test_simple_router_query():
     # The A2ACardResolver is no longer needed as we fetch directly.
     # This test might need to be updated or removed if the intent is to test the router's skill directly.
     # For now, we'll just fetch the card and create a client.
-    card = await fetch_agent_card("http://localhost:9100", httpx_client)
+    router_url = os.getenv("A2A_ROUTER_URL", "http://localhost:9100")
+    card = await fetch_agent_card(router_url, httpx_client)
+    router_url = os.getenv("A2A_ROUTER_URL", "http://localhost:9100")
+    card = await fetch_agent_card(router_url, httpx_client)
     client = ClientFactory(ClientConfig(httpx_client=httpx_client)).create(card)
 
     try:
@@ -331,6 +362,7 @@ async def main():
     await asyncio.sleep(5)
     
     # Run tests in sequence; never abort whole run on a single failure
+    overall_ok = True
     for test in [
         ("discovery", test_agent_discovery),
         ("medgemma", test_medgemma_agent),
@@ -344,10 +376,14 @@ async def main():
             await fn()
         except Exception as e:
             logger.error(f"Test '{name}' failed: {e}", exc_info=True)
+            overall_ok = False
 
     logger.info("\n" + "=" * 60)
     logger.info("All tests completed!")
     logger.info("=" * 60)
+    if not overall_ok:
+        import sys
+        sys.exit(1)
 
 if __name__ == "__main__":
     import sys
