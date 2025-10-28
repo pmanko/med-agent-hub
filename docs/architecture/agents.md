@@ -89,6 +89,38 @@ Analyze query and respond with:
 {"agent": "name", "reasoning": "why"}
 ```
 
+## Prompt Management
+
+All agent prompts are managed through a **dual-source system**:
+
+### Primary: Agenta Web UI
+- **Location**: `http://localhost:8002/prompts` (when Agenta package deployed)
+- **Features**: Version control, playground testing, collaboration, A/B testing
+- **Update flow**: Edit in UI → Test in playground → Auto-deploy to agents
+
+### Fallback: YAML Files
+- **Location**: `server/agent_configs/*.yaml`
+- **Purpose**: Source of truth, fallback when Agenta unavailable
+- **Update flow**: Edit YAML → Migrate to Agenta → Commit to git
+
+### Prompt Types by Agent
+
+**Router Agent:**
+- `system_prompt_template` - Simple routing logic
+- `react_system_prompt_template` - Multi-step ReAct orchestration
+
+**Medical Agent:**
+- `system_prompt` - Medical Q&A guidelines and disclaimers
+
+**Clinical Agent:**
+- `skill_routing_prompt_template` - Skill selection logic
+- `skill_prompts.*` - Individual skill-specific prompts (4 skills)
+
+**Administrative Agent:**
+- `prompts.*` - Action routing and parameter extraction prompts
+
+See [Prompt Management Guide](../prompt-management.md) for detailed workflow.
+
 ## Adding New Agents
 
 New agents require three components:
@@ -98,5 +130,9 @@ New agents require three components:
 3. **Server** (`server/sdk_agents/new_server.py`)
 
 Then update the router's agent registry and add to `Procfile.dev`.
+
+**Prompts**: Add to both:
+- `server/agent_configs/new_agent.yaml` (for fallback)
+- Agenta UI (via migration script or manual creation)
 
 See [Creating Agents](../development/creating-agents.md) for implementation details.

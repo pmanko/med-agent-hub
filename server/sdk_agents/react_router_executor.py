@@ -23,6 +23,14 @@ from a2a.types import TransportProtocol
 # Import the config loader from the simple router
 from .router_executor import load_agent_config
 
+# Import prompt loader
+try:
+    from ..prompt_management.loader import PromptLoader
+    _prompt_loader = PromptLoader()
+except Exception as e:
+    logging.warning(f"Failed to initialize PromptLoader, will use YAML only: {e}")
+    _prompt_loader = None
+
 logger = logging.getLogger(__name__)
 
 MAX_ITERATIONS = 5  # Prevent infinite loops
@@ -41,7 +49,15 @@ class ReactRouterExecutor(AgentExecutor):
         self.temperature = float(os.getenv("LLM_TEMPERATURE", "0.2"))
         self.http_client = httpx.AsyncClient(timeout=180.0)
 
-        self.system_prompt_template = config.get('react_system_prompt_template')
+        # Load ReAct system prompt with Agenta/YAML fallback
+        if _prompt_loader:
+            self.system_prompt_template = _prompt_loader.load_prompt('router', 'react_system_prompt_template')
+        else:
+            self.system_prompt_template = ""
+        
+        # Fallback to YAML if not loaded
+        if not self.system_prompt_template:
+            self.system_prompt_template = config.get('react_system_prompt_template', '')
         self.agents, self.tools = self._discover_agents_and_build_tools()
         logger.info("ReAct Router executor initialized.")
         logger.info(f"Discovered agents: {json.dumps(self.agents, indent=2)}")

@@ -16,6 +16,14 @@ import json
 
 from .router_executor import load_agent_config
 
+# Import prompt loader
+try:
+    from ..prompt_management.loader import PromptLoader
+    _prompt_loader = PromptLoader()
+except Exception as e:
+    logging.warning(f"Failed to initialize PromptLoader, will use YAML only: {e}")
+    _prompt_loader = None
+
 logger = logging.getLogger(__name__)
 
 
@@ -30,7 +38,16 @@ class MedicalExecutor(AgentExecutor):
         self.med_model = config.get('model')
         self.temperature = float(os.getenv("LLM_TEMPERATURE", "0.1"))
         self.http_client = httpx.AsyncClient(timeout=180.0)
-        self.system_prompt = config.get('system_prompt', '')
+        
+        # Load system prompt with Agenta/YAML fallback
+        if _prompt_loader:
+            self.system_prompt = _prompt_loader.load_prompt('medical', 'system_prompt')
+        else:
+            self.system_prompt = ""
+        
+        # Fallback to YAML if not loaded
+        if not self.system_prompt:
+            self.system_prompt = config.get('system_prompt', '')
         
         logger.info(
             f"MedicalExecutor init: llm_base_url={self.llm_base_url}, model={self.med_model}, temperature={self.temperature}"

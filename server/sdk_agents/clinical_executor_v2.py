@@ -35,6 +35,14 @@ from mcp.medical_search_tool import MedicalSearchTool
 
 from .router_executor import load_agent_config
 
+# Import prompt loader
+try:
+    from ..prompt_management.loader import PromptLoader
+    _prompt_loader = PromptLoader()
+except Exception as e:
+    logging.warning(f"Failed to initialize PromptLoader, will use YAML only: {e}")
+    _prompt_loader = None
+
 logger = logging.getLogger(__name__)
 
 
@@ -56,9 +64,29 @@ class ClinicalExecutorV2(AgentExecutor):
         self.tool_registry = MCPToolRegistry()
         self._register_tools()
         
-        # Load skill configurations
-        self.skill_routing_prompt_template = config.get('skill_routing_prompt_template', '')
-        self.skill_prompts = config.get('skill_prompts', {})
+        # Load skill configurations with Agenta/YAML fallback
+        if _prompt_loader:
+            self.skill_routing_prompt_template = _prompt_loader.load_prompt('clinical', 'skill_routing_prompt_template')
+        else:
+            self.skill_routing_prompt_template = ""
+        
+        if not self.skill_routing_prompt_template:
+            self.skill_routing_prompt_template = config.get('skill_routing_prompt_template', '')
+        
+        # Load individual skill prompts with fallback
+        self.skill_prompts = {}
+        skill_names = ['population_analytics', 'patient_longitudinal', 'fhir_patient_search', 'medical_search']
+        for skill in skill_names:
+            if _prompt_loader:
+                prompt = _prompt_loader.load_prompt('clinical', f'skill_{skill}')
+            else:
+                prompt = ""
+            
+            if not prompt:
+                prompt = config.get('skill_prompts', {}).get(skill, '')
+            
+            self.skill_prompts[skill] = prompt
+        
         self.skills = self._load_enhanced_skills()
         
         logger.info(

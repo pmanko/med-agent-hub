@@ -28,6 +28,14 @@ sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from mcp.base import MCPToolRegistry
 from mcp.appointment_tool import AppointmentTool
 
+# Import prompt loader
+try:
+    from ..prompt_management.loader import PromptLoader
+    _prompt_loader = PromptLoader()
+except Exception as e:
+    logging.warning(f"Failed to initialize PromptLoader, will use YAML only: {e}")
+    _prompt_loader = None
+
 logger = logging.getLogger(__name__)
 
 
@@ -49,7 +57,14 @@ class AdministrativeExecutor(AgentExecutor):
         self.tool_registry = MCPToolRegistry()
         self._register_tools()
         
-        self.prompts = (admin_cfg or {}).get('prompts', {})
+        # Load prompts dict with Agenta/YAML fallback
+        if _prompt_loader:
+            self.prompts = _prompt_loader.load_prompt_dict('administrative', 'prompts')
+        else:
+            self.prompts = {}
+        
+        if not self.prompts:
+            self.prompts = (admin_cfg or {}).get('prompts', {})
 
         logger.info(
             f"AdministrativeExecutor init: llm_base_url={self.llm_base_url}, model={self.model}, temperature={self.temperature}"

@@ -39,7 +39,7 @@ SPARK_THRIFT_DATABASE=default
 ## Install Dependencies
 
 ```bash
-poetry install --with dev --extras "spark duckdb"
+poetry install --with dev
 ```
 
 ## Validate Configuration
@@ -77,14 +77,21 @@ curl http://localhost:9101/.well-known/agent-card.json
 curl http://localhost:9102/.well-known/agent-card.json
 ```
 
-## Optional Web App (Svelte/Vite)
+## Optional Web App (Svelte 5 + Vite)
 
-The UI under `web/` is a separate Node environment.
+The UI under `web/` is a separate Node environment using **Svelte 5** and Vite.
 
 ```bash
 cd projects/med-agent-hub/web
-npm ci
+npm install
 npm run dev  # http://localhost:5173 (proxies API to :8080)
+```
+
+**Note:** If you encounter compilation errors after updating dependencies:
+```bash
+# Clear cache and restart
+rm -rf node_modules/.vite .vite dist
+npm run dev
 ```
 
 ## Port Map (defaults)
@@ -103,9 +110,17 @@ npm run dev  # http://localhost:5173 (proxies API to :8080)
 
 ## Troubleshooting
 
+**Backend:**
 - Ensure LM Studio is running and `LLM_BASE_URL` matches.
 - Check that OpenMRS Gateway and Spark Thrift ports are listening.
 - Increase `CHAT_TIMEOUT_SECONDS` for long LLM calls.
-- See also: docs/getting-started/configuration.md
+
+**Web UI:**
+- **Don't use `npm audit fix --force`** - it can upgrade dependencies to incompatible versions
+- If you see "Unrecognized option 'hmr'" errors, clear the cache (see Web App section above)
+- Ensure your Node.js version is 18+ (Vite 5 requirement)
+- **Svelte 5 Migration Note:** This project uses the new `mount()` API instead of `new Component()`
+
+See also: docs/getting-started/configuration.md
 
 

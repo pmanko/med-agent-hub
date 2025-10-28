@@ -32,6 +32,14 @@ from a2a.client import ClientConfig, ClientFactory
 from a2a.client.card_resolver import A2ACardResolver
 from a2a.types import TransportProtocol
 
+# Import prompt loader
+try:
+    from ..prompt_management.loader import PromptLoader
+    _prompt_loader = PromptLoader()
+except Exception as e:
+    logging.warning(f"Failed to initialize PromptLoader, will use YAML only: {e}")
+    _prompt_loader = None
+
 logger = logging.getLogger(__name__)
 
 
@@ -54,7 +62,15 @@ class RouterAgentExecutor(AgentExecutor):
         self.temperature = float(os.getenv("LLM_TEMPERATURE", "0.3"))
         self.http_client = httpx.AsyncClient(timeout=180.0)
         
-        self.system_prompt_template = config.get('system_prompt_template', '')
+        # Load system prompt with Agenta/YAML fallback
+        if _prompt_loader:
+            self.system_prompt_template = _prompt_loader.load_prompt('router', 'system_prompt_template')
+        else:
+            self.system_prompt_template = ""
+        
+        # Fallback to YAML if not loaded from Agenta
+        if not self.system_prompt_template:
+            self.system_prompt_template = config.get('system_prompt_template', '')
         
         # Agent registry - dynamically discover agents and their skills
         self.agents = self._discover_agents()

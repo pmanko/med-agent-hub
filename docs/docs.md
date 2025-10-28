@@ -33,18 +33,20 @@ Expected: Router (9100), MedGemma (9101), Clinical (9102) agents running.
 - **[Run with Docker Compose](development/run-with-docker.md)** - Containerized
 - **[Run as Instant OpenHIE Package](development/run-as-package.md)** - Package mode
 - **[Creating Agents](development/creating-agents.md)** - Extend the system
+- **[Prompt Management](prompt-management.md)** - Agenta integration for rapid prompt iteration
 
 ## Key Files
 
 ```
 server/
-├── sdk_agents/         # Agent implementations  
-├── agent_cards/        # Agent capabilities (JSON)
-└── config.py          # Central configuration
+├── sdk_agents/           # Agent implementations  
+├── agent_configs/        # Agent prompts (YAML - fallback)
+├── prompt_management/    # Agenta client and loader
+└── config.py            # Central configuration
 
-env.recommended        # Default configuration
-Procfile.dev          # Process management
-test_models_direct.py # System validation
+env.recommended          # Default configuration
+Procfile.dev            # Process management
+test_models_direct.py   # System validation
 ```
 
 ## Support
