@@ -34,7 +34,6 @@ WEB_PORT="${WEB_PORT:-8080}"
 ROUTER_PORT="${A2A_ROUTER_PORT:-9100}"
 MEDICAL_PORT="${A2A_MEDICAL_PORT:-${A2A_MEDGEMMA_PORT:-9101}}"
 CLINICAL_PORT="${A2A_CLINICAL_PORT:-9102}"
-ADMIN_PORT="${A2A_ADMIN_PORT:-9103}"
 
 # Flag to signal we could not terminate some processes
 UNKILLED_WARN=0
@@ -126,7 +125,7 @@ kill_by_pattern "honcho" "honcho -f Procfile.dev"
 
 # 2) Stop uvicorn servers bound to our known ports (use sudo as needed)
 UVICORN_PIDS=""
-for P in "$WEB_PORT" "$ROUTER_PORT" "$MEDICAL_PORT" "$CLINICAL_PORT" "$ADMIN_PORT"; do
+for P in "$WEB_PORT" "$ROUTER_PORT" "$MEDICAL_PORT" "$CLINICAL_PORT"; do
   if command -v lsof >/dev/null 2>&1; then
     candidates=$(lsof -i :"$P" -sTCP:LISTEN -t 2>/dev/null || true)
     if [ -n "$candidates" ]; then
@@ -168,7 +167,7 @@ else
 fi
 
 # 3) Ensure ports are free (best-effort)
-PORTS=("$WEB_PORT" "$ROUTER_PORT" "$MEDICAL_PORT" "$CLINICAL_PORT" "$ADMIN_PORT")
+PORTS=("$WEB_PORT" "$ROUTER_PORT" "$MEDICAL_PORT" "$CLINICAL_PORT")
 for PORT in "${PORTS[@]}"; do
   if command -v lsof >/dev/null 2>&1; then
     before=$(lsof -i :"${PORT}" -sTCP:LISTEN -t 2>/dev/null || true)

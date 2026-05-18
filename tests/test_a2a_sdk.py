@@ -4,7 +4,7 @@ Test script for A2A SDK agents
 
 What this file tests and expectations:
 - Agent discovery against live agent servers:
-  - For each agent (router, medical, clinical, administrative), fetch the Agent Card and verify
+  - For each agent (router, medical, clinical), fetch the Agent Card and verify
     that name/description/skills match the YAML configuration in server/agent_configs/*.yaml.
   - Expectation: The card matches YAML; mismatches indicate misconfigured executors/servers.
 
@@ -68,7 +68,6 @@ async def test_agent_discovery():
         "router": os.getenv("A2A_ROUTER_URL", "http://localhost:9100"),
         "medical": os.getenv("A2A_MEDICAL_URL", os.getenv("A2A_MEDGEMMA_URL", "http://localhost:9101")),
         "clinical": os.getenv("A2A_CLINICAL_URL", "http://localhost:9102"),
-        "administrative": os.getenv("A2A_ADMIN_URL", "http://localhost:9103"),
     }
     
     all_tests_passed = True

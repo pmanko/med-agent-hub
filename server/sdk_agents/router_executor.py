@@ -68,15 +68,16 @@ class RouterAgentExecutor(AgentExecutor):
         """Synchronously discover agents and their skills from their cards."""
         import requests # Use synchronous requests for startup discovery
         
-        # Determine active agents from env (default: router, medical, clinical, administrative)
-        active_agents_env = os.getenv("ACTIVE_AGENTS", "router,medical,clinical,administrative")
+        # Default active agents: the POC trio (router + medical + clinical).
+        # The administrative agent was removed in feature 005 — it needed
+        # OpenMRS REST tokens and wasn't load-bearing for chart QA.
+        active_agents_env = os.getenv("ACTIVE_AGENTS", "router,medical,clinical")
         active = {a.strip() for a in active_agents_env.split(',') if a.strip()}
 
         # Map agent names to URLs (infra env still used for endpoints)
         name_to_url = {
             "medical": os.getenv("A2A_MEDICAL_URL", os.getenv("A2A_MEDGEMMA_URL", "http://localhost:9101")),
             "clinical": os.getenv("A2A_CLINICAL_URL", "http://localhost:9102"),
-            "administrative": os.getenv("A2A_ADMIN_URL", "http://localhost:9103"),
         }
 
         agent_base_urls = {k: v for k, v in name_to_url.items() if k in active and v}
