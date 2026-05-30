@@ -119,7 +119,13 @@ async def _chat(
     logger.info("team _chat: model=%s tools=%s response_format=%s",
                 model, bool(tools), bool(response_format))
     resp = await client.post(url, json=payload, headers=headers, timeout=180.0)
-    resp.raise_for_status()
+    if resp.status_code >= 400:
+        # Surface LM Studio's reason (context overflow, bad schema, etc.) — bare
+        # status codes are not actionable.
+        logger.error("LM Studio %s for model=%s tools=%s response_format=%s: %s",
+                     resp.status_code, model, bool(tools), bool(response_format),
+                     resp.text[:800])
+        resp.raise_for_status()
     return resp.json()["choices"][0]["message"]
 
 
