@@ -43,10 +43,11 @@ class ChatCompletionRequest(BaseModel):
 
 
 def _advertised_models() -> List[str]:
-    """The team plus the raw backends, de-duplicated and order-preserving."""
-    ids = [TEAM_MODEL_ID, llm_config.orchestrator_model, llm_config.med_model]
-    seen: set = set()
-    return [m for m in ids if m and not (m in seen or seen.add(m))]
+    """Advertise a single picker choice: the team. It runs its configured
+    orchestrator + expert models internally. Raw backends stay callable via
+    passthrough (for the 006 A/B) but aren't listed here yet — multiple models /
+    team flavors come later."""
+    return [TEAM_MODEL_ID]
 
 
 @router.get("/v1/models")
