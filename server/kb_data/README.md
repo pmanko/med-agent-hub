@@ -5,17 +5,23 @@ Team may consult via the `kb_search` tool (`server/kb.py`). It is **demo-grade**
 enough well-established facts to prove the retrieve-and-ground path, not a
 comprehensive corpus.
 
-## Domains (18 snippets)
+## Domains (24 snippets)
 
-- **HIV / ART** (8) — preferred first-line (dolutegravir / TLD), the stavudine
-  (d4T) phase-out, treat-all, WHO clinical staging, CD4 interpretation, adherence,
-  TB co-infection, co-trimoxazole prophylaxis. Matches the HIV demo cohort.
-- **General clinical / global health** (6) — WHO IMCI danger signs + fast-breathing
-  thresholds, ORS+zinc, metformin/EML, amoxicillin pneumonia, hypertension threshold.
-- **Terminology — CIEL / OCL** (2) — what the CIEL concept dictionary is and how
-  Open Concept Lab distributes it.
-- **OpenMRS data model** (2) — obs / encounter / visit information model and the
-  concept dictionary, so the agent can interpret the chart structure it reasons over.
+The clinical coverage is curated to the **demo-data profile** (see
+`specs/artifacts/canvases/demo-data-profile.canvas.tsx` + `specs/artifacts/planning/kb-scope.md`):
+the demo cohort is a global-health HIV/TB/pediatric dataset, so the seed covers HIV/ART, TB,
+malaria, the EPI series, and OIs alongside the general WHO staples.
+
+- **HIV / ART** (10) — preferred first-line (dolutegravir / TLD), the stavudine (d4T) phase-out,
+  treat-all, WHO clinical staging, CD4 interpretation, adherence, TB co-infection, co-trimoxazole,
+  **cryptococcal disease**, **second-line ART**.
+- **TB & malaria** (3) — drug-susceptible TB regimen (2HRZE/4HR), uncomplicated + severe malaria (ACT /
+  parenteral artesunate). *(Malaria is the demo's 2nd-most-common condition.)*
+- **Pediatric / global health** (7) — WHO IMCI danger signs + fast-breathing thresholds, ORS+zinc,
+  amoxicillin pneumonia, the **EPI infant immunization schedule**, metformin/EML, hypertension threshold.
+- **Terminology — CIEL / OCL** (2) — what the CIEL concept dictionary is and how Open Concept Lab distributes it.
+- **OpenMRS data model** (2) — obs / encounter / visit information model and the concept dictionary,
+  so the agent can interpret the chart structure it reasons over.
 
 ## Provenance
 
