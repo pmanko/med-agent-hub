@@ -97,6 +97,38 @@ def test_orchestrator_consults_the_medical_expert_on_a_tool_call():
     assert team.llm_config.med_model in calls
 
 
+def test_orchestrator_can_search_the_knowledge_base():
+    # The orchestrator emits a kb_search tool call; the REAL KB runs (only _chat
+    # is seamed) and its labelled reference snippet flows into the synthesis turn.
+    captured = {}
+
+    async def fake_chat(client, model, messages, *, tools=None, response_format=None,
+                        temperature=None, max_tokens=None):
+        if response_format is not None:
+            captured["synth"] = messages
+            return {"content": ENVELOPE}
+        already_searched = any(m.get("role") == "tool" for m in messages)
+        if tools is not None and not already_searched:
+            return {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {"id": "k1", "function": {"name": "kb_search",
+                                              "arguments": json.dumps({"query": "metformin first-line diabetes"})}}
+                ],
+            }
+        return {"content": "ok", "tool_calls": None}
+
+    with patch.object(team, "_chat", side_effect=fake_chat):
+        out = run(team.run_team(MESSAGES, response_format=RESP_FORMAT))
+
+    json.loads(out)  # still a valid envelope
+    blob = json.dumps(captured["synth"]).lower()
+    # The real corpus snippet reached synthesis, labelled as reference (not chart) data.
+    assert "metformin" in blob
+    assert "knowledge-base reference snippets" in blob
+
+
 def test_run_team_falls_back_to_a_valid_envelope_when_synthesis_fails():
     async def fake_chat(client, model, messages, *, tools=None, response_format=None,
                         temperature=None, max_tokens=None):

@@ -25,6 +25,7 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
+from . import kb
 from .config import llm_config
 
 logger = logging.getLogger(__name__)
@@ -43,16 +44,18 @@ MEDICAL_EXPERT_SYSTEM = (
 # [system, user(chart)] prefix byte-identical for cache reuse). The path it
 # suggests is a hypothesis to be measured, not a hard pipeline.
 SYNTHESIS_INSTRUCTION = (
-    "Using the patient chart above and any expert notes gathered, answer the "
-    "question as the chart-answer JSON object. Cite chart records by their integer "
-    "index in `citations` and `[N]` markers; cite ONLY claims the chart supports. "
-    "Emit a table block when the answer is naturally tabular; otherwise leave "
-    "`blocks` empty."
+    "Using the patient chart above and any expert notes or knowledge-base snippets "
+    "gathered, answer the question as the chart-answer JSON object. Cite chart "
+    "records by their integer index in `citations` and `[N]` markers; cite ONLY "
+    "claims the chart supports. Knowledge-base reference facts are NOT chart records "
+    "— attribute them inline in prose (e.g. 'per WHO IMCI') and never put them in "
+    "`citations`. Emit a table block when the answer is naturally tabular; otherwise "
+    "leave `blocks` empty."
 )
 
 
 def _tool_definitions() -> List[Dict[str, Any]]:
-    """OpenAI tool definitions the orchestrator may call. One tool for v1."""
+    """OpenAI tool definitions the orchestrator may call."""
     return [
         {
             "type": "function",
@@ -74,7 +77,30 @@ def _tool_definitions() -> List[Dict[str, Any]]:
                     "required": ["query"],
                 },
             },
-        }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "kb_search",
+                "description": (
+                    "Search the clinical knowledge base of openly-licensed reference "
+                    "guidance (WHO IMCI danger signs, essential medicines, standard "
+                    "dosing and thresholds) for facts NOT in the patient's chart. "
+                    "Returns reference snippets with provenance — never patient data. "
+                    "Use to ground guideline/dosing claims; cite the source inline."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Clinical topic or term to look up.",
+                        }
+                    },
+                    "required": ["query"],
+                },
+            },
+        },
     ]
 
 
@@ -143,6 +169,26 @@ async def _run_medical_expert(client: httpx.AsyncClient, query: str, chart_conte
         return "(medical expert unavailable for this turn)"
 
 
+def _run_kb_search(query: str) -> str:
+    """Typed knowledge-base tool: BM25 over the openly-licensed clinical seed.
+    Formats hits as labelled reference snippets; abstains (empty) on no match."""
+    try:
+        hits = kb.search(query)
+    except Exception as e:  # tool failure must not abort the turn
+        logger.warning("kb_search tool failed: %s", e)
+        return "(knowledge base unavailable for this turn)"
+    if not hits:
+        return "(no relevant knowledge-base entries — do not invent guidance)"
+    lines = [
+        "Knowledge-base reference snippets (NOT chart data; cite the source inline "
+        "as prose, never as an integer citation):"
+    ]
+    for h in hits:
+        src = ", ".join(p for p in (h.get("source"), h.get("version")) if p)
+        lines.append(f"- {h['text']} [{src}]")
+    return "\n".join(lines)
+
+
 def _fallback_envelope(answer: str) -> str:
     """A minimal, always-schema-valid chart_answer envelope."""
     return json.dumps({"answer": answer, "citations": [], "blocks": []})
@@ -189,6 +235,8 @@ async def run_team(
                     if name == "medical_expert":
                         observation = await _run_medical_expert(
                             client, args.get("query", ""), chart)
+                    elif name == "kb_search":
+                        observation = _run_kb_search(args.get("query", ""))
                     else:
                         observation = f"(unknown tool: {name})"
                     working.append({
