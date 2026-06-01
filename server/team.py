@@ -10,8 +10,8 @@ stop. A final synthesis call — bound to chartsearchai's response_format — co
 the strict {answer, citations, blocks} envelope from the gathered evidence.
 
 Design notes (see specs/artifacts/planning/react-team-orchestration-design.md):
-- The tool loop runs on its own message list under ORCHESTRATOR_SYSTEM, NOT under
-  chartsearchai's envelope system prompt (which biases a small model). The
+- The tool loop runs on its own message list under the orchestrator prompt, NOT
+  under chartsearchai's envelope system prompt (which biases a small model). The
   original `messages` is kept untouched for the synthesis prefix so LM Studio's
   [system, user(chart)] prompt cache stays warm.
 - KB results are threaded into the medical_expert call IN CODE (the prompt no
@@ -32,104 +32,18 @@ import httpx
 
 from . import kb
 from .config import llm_config
+from .prompt_loader import load_prompt
 
 logger = logging.getLogger(__name__)
 
 # Small-model tool-calling degrades over long chains; keep the loop short.
 MAX_TOOL_ITERATIONS = 3
 
-# Loop-phase system prompt for the orchestrator. Tool-focused, envelope-free, and
-# strongly suggests the kb_search -> medical_expert -> stop flow without hardcoding
-# it (the code still works if the model skips a tool).
-ORCHESTRATOR_SYSTEM = (
-    "You are the coordinator of a small clinical team answering a clinician's "
-    "question about ONE patient's chart. You do not write the final answer yourself "
-    "— you decide which teammates to consult, then stop.\n\n"
-    "You have two tools:\n"
-    "- kb_search: look up EXTERNAL reference guidance (WHO / essential-medicines "
-    "guidelines, dosing, thresholds, danger signs, normal ranges) that is NOT in the "
-    "patient's chart.\n"
-    "- medical_expert: have a clinical expert interpret THIS patient's chart against "
-    "the question. The expert automatically receives whatever kb_search returned this "
-    "turn — you do NOT need to copy any facts into your question to it.\n\n"
-    "How to work:\n"
-    "- Before each tool call, state in ONE sentence what you still need and why.\n"
-    "- DEFAULT pattern: if the question involves a guideline, a drug/dose, a threshold, "
-    "a danger sign, an immunization schedule, a normal/reference range, or whether "
-    "something is current/recommended, FIRST call kb_search to pull the relevant "
-    "reference facts, THEN call medical_expert to interpret the chart against them, "
-    "THEN stop.\n"
-    "- SKIP the tools only when the chart plainly and fully answers the question with "
-    "no outside guidance needed (e.g. \"what medications is she on?\", \"how many did "
-    "you list?\"). Then just say you are done.\n"
-    "- Call at most one tool per step. Once you have what you need, stop — do not keep "
-    "calling tools.\n\n"
-    "Worked example (a question like the demo's):\n"
-    "Question: \"Is this patient's antiretroviral regimen still recommended?\"\n"
-    "Step 1 — Thought: I need the current WHO guidance on this regimen, which is not in "
-    "the chart.\n"
-    "         Action: kb_search({\"query\": \"WHO recommended first-line ART; stavudine "
-    "d4T phase-out\"})\n"
-    "         Observation: reference snippets on preferred dolutegravir-based regimens "
-    "and the stavudine phase-out are returned.\n"
-    "Step 2 — Thought: now interpret the chart's regimen against that guidance.\n"
-    "         Action: medical_expert({\"query\": \"Given the chart's ART regimen, is it "
-    "still WHO-recommended, and if not what is the concern?\"})\n"
-    "         Observation: the expert reasons over the chart plus the retrieved "
-    "guidance.\n"
-    "Step 3 — Thought: I have enough. Done.\n\n"
-    "Do not invent guideline facts, doses, or chart values. If kb_search returns "
-    "nothing relevant, say so rather than guessing."
-)
-
-# Clinical-agent (medical_expert) system prompt. The expert now reasons GIVEN any
-# KB reference snippets the code threads into its user message (KB block first).
-MEDICAL_EXPERT_SYSTEM = (
-    "You are a clinical reasoning assistant. You are given a patient chart excerpt, "
-    "optionally some knowledge-base reference snippets (external guideline/dosing/"
-    "threshold facts, NOT chart data), and a focused question. Reason using the chart "
-    "together with any provided reference snippets, and give concise, clinically-"
-    "grounded reasoning.\n\n"
-    "State only what the chart supports plus accepted medical knowledge and the "
-    "provided reference snippets. For any guideline, dose, threshold, danger sign, "
-    "schedule, or \"is this current / recommended\" claim, rely on the provided "
-    "reference snippets; if neither the chart nor the snippets support an answer, say "
-    "so explicitly. Do not invent values, doses, or thresholds. When you use a "
-    "reference snippet, name its source in prose (e.g. \"per WHO IMCI\"). Plain text, "
-    "no preamble."
-)
-
-# Final synthesis instruction. Carves the KB/expert facts out of the integer
-# citation channel (chart records only) while allowing them as inline prose.
-SYNTHESIS_INSTRUCTION = (
-    "You are now writing the final answer as the chart-answer JSON object "
-    "{answer, citations, blocks}. Use the patient chart above AND the gathered "
-    "evidence block below (knowledge-base reference snippets and the clinical "
-    "expert's notes).\n\n"
-    "CITATIONS — read carefully:\n"
-    "- The integer indices in `citations` and the `[N]` markers are RECORD INDICES "
-    "from the numbered patient chart ONLY. A claim gets an integer ONLY if you can "
-    "point to the numbered chart record that states it.\n"
-    "- The chart-only rule (\"use only the records; never add information not in the "
-    "records\") still governs PATIENT facts. Labeled knowledge-base reference snippets "
-    "are an ALLOWED EXCEPTION: you MAY state them as general medical guidance, but "
-    "attribute them inline in prose (e.g. \"per WHO IMCI\", \"per WHO HIV guidelines\") "
-    "and NEVER give them a bracket number or put them in `citations`.\n"
-    "- Knowledge-base facts, the medical expert's notes, and your own medical "
-    "knowledge are ALL NOT chart records — attribute them inline in prose and NEVER "
-    "place them in `citations`. Only a claim verifiable against a numbered chart "
-    "record gets an integer.\n"
-    "- Never invent a source name, URL, guideline title, dose, threshold, or "
-    "chart-record index. If no chart record and no reference snippet supports the "
-    "answer, say the information is not available rather than guessing.\n\n"
-    "Worked example (mixed): \"She is on a stavudine (d4T)-based regimen [4]. Per WHO "
-    "HIV guidelines, stavudine is no longer recommended because of frequent, often "
-    "irreversible toxicity, and tenofovir or zidovudine are the preferred nucleoside "
-    "backbones.\" -> citations: [4]  (the chart record for the regimen is cited; the "
-    "WHO guidance is attributed inline with NO integer).\n\n"
-    "Emit a `table` block when the answer lists/enumerates multiple items; otherwise "
-    "leave `blocks` empty. Keep the answer concise."
-)
+# The orchestrator, medical_expert, and synthesis system prompts are now read
+# from files per request (server/prompt_loader.load_prompt), selected by
+# PROMPT_VARIANT, so a prompt edit changes behaviour with no rebuild and an A/B
+# can run two variants side by side. The byte-identical baked fallbacks live in
+# prompt_loader so a missing file never fails the turn.
 
 # Prefix that marks a real (non-abstain) kb_search observation.
 _KB_BLOCK_HEADER = "Knowledge-base reference snippets"
@@ -253,6 +167,7 @@ async def _run_medical_expert(
     client: httpx.AsyncClient,
     query: str,
     chart_context: str,
+    expert_system: str,
     kb_context: str = "",
 ) -> str:
     """Typed clinical-expert tool: a single MedGemma call, free text (no schema).
@@ -269,7 +184,7 @@ async def _run_medical_expert(
     else:
         user = f"Patient chart:\n{chart_context}\n\nQuestion: {query}"
     messages = [
-        {"role": "system", "content": MEDICAL_EXPERT_SYSTEM},
+        {"role": "system", "content": expert_system},
         {"role": "user", "content": user},
     ]
     try:
@@ -339,11 +254,18 @@ async def run_team(
     model = orchestrator_model or llm_config.orchestrator_model
     chart = _chart_context(messages)
 
+    # Read the active prompt variant ONCE per request (PROMPT_VARIANT is static
+    # per instance); thread the expert text into the per-iteration expert call so
+    # the tool loop does not re-read it from disk each turn.
+    orchestrator_system = load_prompt("orchestrator")
+    expert_system = load_prompt("medical_expert")
+    synthesis_instruction = load_prompt("synthesis")
+
     # The tool loop runs under the orchestrator's OWN system prompt — not
     # chartsearchai's envelope prompt, which biases a small model toward answering
     # immediately. The original `messages` is left untouched for the synthesis prefix.
     loop_messages: List[Dict[str, Any]] = [
-        {"role": "system", "content": ORCHESTRATOR_SYSTEM}
+        {"role": "system", "content": orchestrator_system}
     ] + [m for m in messages if m.get("role") != "system"]
 
     kb_context = ""          # accumulated KB snippets, threaded into the expert + synthesis
@@ -375,7 +297,8 @@ async def run_team(
                         seen.add(dedup_key)
                         if name == "medical_expert":
                             observation = await _run_medical_expert(
-                                client, args.get("query", ""), chart, kb_context=kb_context)
+                                client, args.get("query", ""), chart, expert_system,
+                                kb_context=kb_context)
                             expert_notes.append(observation)
                         elif name == "kb_search":
                             observation = _run_kb_search(args.get("query", ""))
@@ -398,7 +321,7 @@ async def run_team(
         # append the gathered evidence + instruction as the last user turn, so the
         # decisive evidence sits at the end of the array (lost-in-the-middle).
         gathered = _gathered_evidence(kb_context, expert_notes)
-        synth_user = SYNTHESIS_INSTRUCTION + "\n\n" + gathered if gathered else SYNTHESIS_INSTRUCTION
+        synth_user = synthesis_instruction + "\n\n" + gathered if gathered else synthesis_instruction
         synth_messages = list(messages) + [{"role": "user", "content": synth_user}]
         try:
             msg = await _chat(
