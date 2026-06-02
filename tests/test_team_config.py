@@ -18,6 +18,8 @@ def test_team_config_for_maps_preset_ids():
     big = team.team_config_for("med-agent-team-a4b-27b")
     assert big.get("synthesizer_model") == "google/gemma-4-26b-a4b"
     assert big.get("expert_model") == "medgemma-27b-text-it-mlx"
+    # mid rung: a4b synth, default (small) expert
+    assert team.team_config_for("med-agent-team-a4b") == {"synthesizer_model": "google/gemma-4-26b-a4b"}
     # an unadvertised id never crashes -> empty overrides (defaults)
     assert team.team_config_for("med-agent-team-bogus") == {}
 

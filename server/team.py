@@ -57,6 +57,9 @@ TEAM_PRESETS: Dict[str, Dict[str, str]] = {
     # all-small: e4b orchestrator + e4b synthesizer + medgemma-1.5-4b expert
     # (the llm_config defaults) — fits anywhere.
     "med-agent-team": {},
+    # mid ("low power"): a4b synthesizer (quality) + the small medgemma-1.5 expert
+    # + e4b orchestrator — the big synth without the heavy 27b expert.
+    "med-agent-team-a4b": {"synthesizer_model": "google/gemma-4-26b-a4b"},
     # big: gemma-4-26b-a4b synthesizer (MoE, ~4B-active, so it co-fits the 27b
     # where the 31b dense did not) + medgemma-27b expert; e4b stays the fast
     # orchestrator for the tool loop.
