@@ -70,3 +70,23 @@ def test_synthesis_applies_anti_degeneration_params(monkeypatch):
     assert synth and synth[0]["frequency_penalty"] == team._SYNTH_FREQUENCY_PENALTY, seen
     assert synth[0]["temperature"] >= team._SYNTH_MIN_TEMPERATURE, seen
     assert loop and all(c["frequency_penalty"] is None for c in loop), seen
+
+
+def test_synthesis_reads_reasoning_content_when_content_empty(monkeypatch):
+    """A reasoning synthesizer (Qwen 3.x via LM Studio MLX) returns the structured
+    envelope in `reasoning_content` and leaves `content` empty. The synth must read it
+    instead of falling back. Red without the fix: empty content -> run_team returns the
+    'I could not produce a complete answer' fallback, so out['answer'] != the real answer."""
+    async def fake_chat(client, model, messages, *, tools=None, response_format=None,
+                        temperature=None, max_tokens=None, frequency_penalty=None):
+        if response_format is not None:  # synthesis turn: answer hidden in reasoning_content
+            return {"content": "",
+                    "reasoning_content": json.dumps({"answer": "qwen-ok", "citations": [], "blocks": []})}
+        return {"content": "", "tool_calls": None}  # loop turn: no tools -> straight to synthesis
+
+    monkeypatch.setattr(team, "_chat", fake_chat)
+    out = asyncio.run(team.run_team(
+        _MESSAGES, response_format=_RF,
+        orchestrator_model="ORCH-MODEL", synthesizer_model="SYNTH-MODEL",
+    ))
+    assert json.loads(out)["answer"] == "qwen-ok", out

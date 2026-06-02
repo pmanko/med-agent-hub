@@ -67,6 +67,16 @@ TEAM_PRESETS: Dict[str, Dict[str, str]] = {
         "synthesizer_model": "google/gemma-4-26b-a4b",
         "expert_model": "medgemma-27b-text-it-mlx",
     },
+    # CLEAN (non-gemma-4) Qwen synthesizers — the fix for the gemma-4 repetition
+    # collapse (#622): Qwen has no collapse + strong JSON. e4b stays orchestrator
+    # (short tool-calls, below the collapse threshold), medgemma the clinical expert.
+    "med-agent-team-qwen": {  # standard: Qwen3.6-35B-A3B synth + medgemma-27b expert
+        "synthesizer_model": "qwen3.6-35b-a3b-mlx",
+        "expert_model": "medgemma-27b-text-it-mlx",
+    },
+    "med-agent-team-qwen-low": {  # low-resource: Qwen3-14B synth + medgemma-1.5 expert (default)
+        "synthesizer_model": "qwen3-14b-mlx",
+    },
 }
 
 
@@ -193,6 +203,15 @@ async def _chat(
     return resp.json()["choices"][0]["message"]
 
 
+def _message_text(msg: Dict[str, Any]) -> str:
+    """Assistant text. Reasoning models served via LM Studio MLX (Qwen 3.x) emit the
+    answer / structured envelope in `reasoning_content` and leave `content` empty —
+    fall back to it so a real answer is not lost as an empty-content fallback. Verified:
+    qwen3.6-35b-a3b under a JSON response_format returns the envelope in reasoning_content;
+    enable_thinking=false / /no_think are not honored by LM Studio MLX."""
+    return (msg.get("content") or "").strip() or (msg.get("reasoning_content") or "").strip()
+
+
 async def _run_medical_expert(
     client: httpx.AsyncClient,
     query: str,
@@ -220,7 +239,7 @@ async def _run_medical_expert(
     ]
     try:
         msg = await _chat(client, model or llm_config.med_model, messages, temperature=0.1, max_tokens=800)
-        return (msg.get("content") or "").strip() or "(no expert response)"
+        return _message_text(msg) or "(no expert response)"
     except Exception as e:  # tool failure must not abort the turn
         logger.warning("medical_expert tool failed: %s", e)
         return "(medical expert unavailable for this turn)"
@@ -271,8 +290,8 @@ def _fallback_envelope(answer: str) -> str:
 # evidence prompt under greedy decoding. A modest temperature floor + frequency
 # penalty on the synthesis call breaks the loop; the orchestrator's tool loop keeps
 # the request temperature so its tool-calling stays deterministic.
-_SYNTH_MIN_TEMPERATURE = 0.3
-_SYNTH_FREQUENCY_PENALTY = 0.4
+_SYNTH_MIN_TEMPERATURE = 0.5
+_SYNTH_FREQUENCY_PENALTY = 0.8
 
 
 async def run_team(
@@ -374,7 +393,7 @@ async def run_team(
                 response_format=response_format, temperature=synth_temperature,
                 max_tokens=max_tokens, frequency_penalty=_SYNTH_FREQUENCY_PENALTY,
             )
-            content = (msg.get("content") or "").strip()
+            content = _message_text(msg)
             if content:
                 return content
             logger.warning("synthesis returned empty content; using fallback envelope")
