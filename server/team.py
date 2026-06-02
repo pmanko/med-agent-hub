@@ -49,6 +49,27 @@ MAX_TOOL_ITERATIONS = 3
 _KB_BLOCK_HEADER = "Knowledge-base reference snippets"
 
 
+# Per-request team-model presets: the OpenAI `model` id selects which model runs
+# each role, so ONE med-agent-hub serves any of these configs per request (no
+# reboot). Advertised via /v1/models so chartsearchai's exact-match served-model
+# validation accepts the id. An empty dict means run_team's llm_config defaults.
+TEAM_PRESETS: Dict[str, Dict[str, str]] = {
+    "med-agent-team": {},
+    "med-agent-team-31b": {"synthesizer_model": "google/gemma-4-31b"},  # big synth, small expert
+    "med-agent-team-27b": {"expert_model": "medgemma-27b-text-it-mlx"},  # big expert, small synth
+    "med-agent-team-31b-27b": {  # both big — needs gemma-4-31b AND medgemma-27b resident at once
+        "synthesizer_model": "google/gemma-4-31b",
+        "expert_model": "medgemma-27b-text-it-mlx",
+    },
+}
+
+
+def team_config_for(model_id: str) -> Dict[str, str]:
+    """Map an advertised team model id to run_team model overrides. Unknown ids
+    (which chartsearchai validation would have rejected) -> defaults (empty)."""
+    return dict(TEAM_PRESETS.get(model_id, {}))
+
+
 def _tool_definitions() -> List[Dict[str, Any]]:
     """OpenAI tool definitions the orchestrator may call. Descriptions carry the
     trigger keywords + ordering so a small model sequences kb_search then expert."""
@@ -169,6 +190,7 @@ async def _run_medical_expert(
     chart_context: str,
     expert_system: str,
     kb_context: str = "",
+    model: Optional[str] = None,
 ) -> str:
     """Typed clinical-expert tool: a single MedGemma call, free text (no schema).
     The KB block (when any was retrieved) is placed FIRST in the user message so the
@@ -188,7 +210,7 @@ async def _run_medical_expert(
         {"role": "user", "content": user},
     ]
     try:
-        msg = await _chat(client, llm_config.med_model, messages, temperature=0.1, max_tokens=800)
+        msg = await _chat(client, model or llm_config.med_model, messages, temperature=0.1, max_tokens=800)
         return (msg.get("content") or "").strip() or "(no expert response)"
     except Exception as e:  # tool failure must not abort the turn
         logger.warning("medical_expert tool failed: %s", e)
@@ -243,6 +265,7 @@ async def run_team(
     max_tokens: Optional[int] = None,
     orchestrator_model: Optional[str] = None,
     synthesizer_model: Optional[str] = None,
+    expert_model: Optional[str] = None,
 ) -> str:
     """
     Run the team for one chartsearchai turn.
@@ -254,6 +277,7 @@ async def run_team(
     """
     model = orchestrator_model or llm_config.orchestrator_model
     synth_model = synthesizer_model or llm_config.synthesizer_model
+    expert_model = expert_model or llm_config.med_model
     chart = _chart_context(messages)
 
     # Read the active prompt variant ONCE per request (PROMPT_VARIANT is static
@@ -300,7 +324,7 @@ async def run_team(
                         if name == "medical_expert":
                             observation = await _run_medical_expert(
                                 client, args.get("query", ""), chart, expert_system,
-                                kb_context=kb_context)
+                                kb_context=kb_context, model=expert_model)
                             expert_notes.append(observation)
                         elif name == "kb_search":
                             observation = _run_kb_search(args.get("query", ""))

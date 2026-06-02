@@ -23,7 +23,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from .config import llm_config
-from .team import run_team
+from .team import run_team, TEAM_PRESETS, team_config_for
 
 logger = logging.getLogger(__name__)
 
@@ -43,11 +43,11 @@ class ChatCompletionRequest(BaseModel):
 
 
 def _advertised_models() -> List[str]:
-    """Advertise a single picker choice: the team. It runs its configured
-    orchestrator + expert models internally. Raw backends stay callable via
-    passthrough (for the 006 A/B) but aren't listed here yet — multiple models /
-    team flavors come later."""
-    return [TEAM_MODEL_ID]
+    """Advertise the team presets so the UI picker and chartsearchai's exact-match
+    served-model validation both accept them. Each id selects which model runs each
+    role (orchestrator/synthesizer/expert) per request — one instance serves any
+    config, no reboot. Raw backends stay callable via passthrough but aren't listed."""
+    return list(TEAM_PRESETS)
 
 
 @router.get("/v1/models")
@@ -85,12 +85,13 @@ async def _passthrough_content(req: ChatCompletionRequest) -> str:
 
 async def _content_for(req: ChatCompletionRequest) -> str:
     """Team for the team id; raw passthrough for an advertised backend id."""
-    if req.model == TEAM_MODEL_ID:
+    if req.model in TEAM_PRESETS:
         return await run_team(
             req.messages,
             response_format=req.response_format,
             temperature=req.temperature,
             max_tokens=req.max_tokens,
+            **team_config_for(req.model),
         )
     return await _passthrough_content(req)
 
