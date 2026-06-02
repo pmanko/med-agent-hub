@@ -26,6 +26,7 @@ Design notes (see specs/artifacts/planning/react-team-orchestration-design.md):
 
 import json
 import logging
+import re
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -285,6 +286,29 @@ def _fallback_envelope(answer: str) -> str:
     return json.dumps({"answer": answer, "citations": [], "blocks": []})
 
 
+def _normalize_envelope(raw: str) -> str:
+    """Post-process the synthesizer envelope JSON: (1) normalize a literal backslash-n in
+    `answer` to a real newline — small models (e.g. qwen3-14b) copy the prompt's JSON \\n
+    escaping verbatim and garble — and (2) reconcile inline [N] chart-record markers into
+    `citations` so the count is not lost when the model cites in prose but leaves the array
+    empty. Returns `raw` unchanged if it is not parseable JSON."""
+    try:
+        env = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return raw
+    if not isinstance(env, dict):
+        return raw
+    ans = env.get("answer")
+    if isinstance(ans, str):
+        if "\\n" in ans:
+            env["answer"] = ans = ans.replace("\\n", "\n")
+        inline = sorted({int(m) for m in re.findall(r"\[(\d+)\]", ans)})
+        if inline:
+            existing = [c for c in (env.get("citations") or []) if isinstance(c, int)]
+            env["citations"] = sorted(set(existing) | set(inline))
+    return json.dumps(env)
+
+
 # Synthesis anti-degeneration: a small synthesizer (e.g. the gemma-4 26b-a4b MoE)
 # can fall into token-level repetition loops ("AIDS AIDS AIDS...") on a long
 # evidence prompt under greedy decoding. A modest temperature floor + frequency
@@ -393,7 +417,7 @@ async def run_team(
                 response_format=response_format, temperature=synth_temperature,
                 max_tokens=max_tokens, frequency_penalty=_SYNTH_FREQUENCY_PENALTY,
             )
-            content = _message_text(msg)
+            content = _normalize_envelope(_message_text(msg))
             if content:
                 return content
             logger.warning("synthesis returned empty content; using fallback envelope")

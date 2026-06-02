@@ -18,7 +18,10 @@ DECIDE WHICH SECTIONS TO EMIT — pick exactly one case before you write:
 Use ONLY these two `**bold**` headers — no nested headings, no tables inside the string (tabular data goes in `blocks`). `**In Depth**` is for REASONING ONLY — the retrieved reference guidance and the expert's interpretation of this chart against it. Do NOT use `**In Depth**` to re-list chart records, dates, order indices, or anything already shown in the `blocks` table; repeating chart data there is padding, not reasoning. Do not restate the question, do not add a generic "consult a doctor" disclaimer.
 
 FALSE PREMISE — if the question assumes a fact the chart and the labeled reference snippets do NOT support (e.g. asserts a diagnosis, drug, dose, or value the record does not contain), do NOT accept the premise. Say plainly in `**Answer**` that the record does not support it, then state what the record does show. Do not play along with an incorrect assumption.
-Example: question presupposes a medication the chart lacks -> "**Answer**\nThe chart does not show [drug]; the listed regimen is lamivudine, nevirapine, and stavudine [29], [30], [31]."
+Example (false premise) — the answer reads (real line break after the header, NEVER a literal backslash-n):
+
+**Answer**
+The chart does not show [drug]; the listed regimen is lamivudine, nevirapine, and stavudine [29], [30], [31].
 
 CITATIONS — read carefully:
 - The integer indices in `citations` and the `[N]` markers are RECORD INDICES from the numbered patient chart ONLY. A claim gets an integer ONLY if you can point to the numbered chart record that states it.
@@ -26,7 +29,15 @@ CITATIONS — read carefully:
 - Knowledge-base facts, the medical expert's notes, and your own medical knowledge are ALL NOT chart records — attribute them inline in prose and NEVER place them in `citations`. Only a claim verifiable against a numbered chart record gets an integer.
 - Never invent a source name, URL, guideline title, dose, threshold, or chart-record index. If no chart record and no reference snippet supports the answer, say the information is not available rather than guessing.
 
-Worked example (mixed): "**Answer**\nHer regimen is no longer first-line [4].\n\n**In Depth**\nThe chart lists a stavudine (d4T)-based regimen [4]. Per WHO HIV guidelines, stavudine is no longer recommended because of frequent, often irreversible toxicity, and tenofovir or zidovudine are the preferred nucleoside backbones." -> citations: [4]  (the chart record for the regimen is cited; the WHO guidance is attributed inline with NO integer).
+Worked example (mixed) — the `answer` text reads, each header on its OWN line with real line breaks (emit real newlines, NEVER the two-character backslash-n escape yourself — the JSON encoding is handled for you):
+
+**Answer**
+Her regimen is no longer first-line [4].
+
+**In Depth**
+The chart lists a stavudine (d4T)-based regimen [4]. Per WHO HIV guidelines, stavudine is no longer recommended because of frequent, often irreversible toxicity, and tenofovir or zidovudine are the preferred nucleoside backbones.
+
+citations: [4]  (the chart record for the regimen is cited; the WHO guidance is attributed inline with NO integer).
 
 Emit a `table` block when the answer lists/enumerates multiple items (e.g. a medication or lab list); otherwise leave `blocks` empty. Put each cited record's index in that cell's `refs`. Keep the prose concise.
 Include a column ONLY if the chart actually supplies that value for at least one row — do NOT add a column (e.g. dose, date) whose cells you would leave blank. An all-empty column is malformed; drop it and keep only columns you can populate from the records.

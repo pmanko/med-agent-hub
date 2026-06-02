@@ -90,3 +90,24 @@ def test_synthesis_reads_reasoning_content_when_content_empty(monkeypatch):
         orchestrator_model="ORCH-MODEL", synthesizer_model="SYNTH-MODEL",
     ))
     assert json.loads(out)["answer"] == "qwen-ok", out
+
+
+def test_synthesis_normalizes_literal_newline_and_reconciles_citations(monkeypatch):
+    """Post-process the synth envelope: a literal backslash-n in `answer` becomes a real
+    newline (small models, e.g. qwen3-14b, copy the prompt's JSON \\n escaping verbatim
+    and garble), and inline [N] chart-record markers are reconciled into `citations` so
+    the count is not lost. Red without _normalize_envelope: the literal \\n survives and
+    citations stays []."""
+    literal = "**Answer**" + "\\n" + "Regimen is outdated [29], [30]."  # literal backslash-n
+
+    async def fake_chat(client, model, messages, *, tools=None, response_format=None,
+                        temperature=None, max_tokens=None, frequency_penalty=None):
+        if response_format is not None:
+            return {"content": json.dumps({"answer": literal, "citations": [], "blocks": []})}
+        return {"content": "", "tool_calls": None}
+
+    monkeypatch.setattr(team, "_chat", fake_chat)
+    env = json.loads(asyncio.run(team.run_team(_MESSAGES, response_format=_RF, synthesizer_model="S")))
+    assert "\\n" not in env["answer"], env["answer"]      # literal backslash-n normalized away
+    assert "\n" in env["answer"], env["answer"]            # to a real newline
+    assert env["citations"] == [29, 30], env               # inline [N] reconciled into citations
