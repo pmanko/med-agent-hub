@@ -242,6 +242,7 @@ async def run_team(
     temperature: Optional[float] = None,
     max_tokens: Optional[int] = None,
     orchestrator_model: Optional[str] = None,
+    synthesizer_model: Optional[str] = None,
 ) -> str:
     """
     Run the team for one chartsearchai turn.
@@ -252,6 +253,7 @@ async def run_team(
     choices[0].message.content). Always returns a schema-valid envelope.
     """
     model = orchestrator_model or llm_config.orchestrator_model
+    synth_model = synthesizer_model or llm_config.synthesizer_model
     chart = _chart_context(messages)
 
     # Read the active prompt variant ONCE per request (PROMPT_VARIANT is static
@@ -325,7 +327,7 @@ async def run_team(
         synth_messages = list(messages) + [{"role": "user", "content": synth_user}]
         try:
             msg = await _chat(
-                client, model, synth_messages,
+                client, synth_model, synth_messages,
                 response_format=response_format, temperature=temperature, max_tokens=max_tokens,
             )
             content = (msg.get("content") or "").strip()

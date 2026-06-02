@@ -47,6 +47,7 @@ def read_root():
         "uptime_seconds": round(time.time() - server_start_time, 2),
         "team_models": {
             "orchestrator": llm_config.orchestrator_model,
+            "synthesizer": llm_config.synthesizer_model,
             "medical": llm_config.med_model,
         },
     }

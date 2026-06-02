@@ -12,9 +12,8 @@ FORMAT each header on its OWN line with a blank line after it, exactly like this
 <the reasoning>
 ```
 DECIDE WHICH SECTIONS TO EMIT — pick exactly one case before you write:
-- (A) The chart answers the fact, but it is NOT documented at all (e.g. a value the record never stores, like blood type) -> emit ONLY `**Answer**` saying it is not documented. NO `**In Depth**`. Stop.
-- (B) Reference guidance WAS gathered (a "Knowledge-base reference snippets" block appears in the gathered evidence below) -> emit both sections; `**In Depth**` carries that guidance + the expert's interpretation.
-- (C) The chart answers it and NO reference guidance was gathered (e.g. a plain "what is she on?" the chart lists by itself) -> emit `**Answer**`, then an `**In Depth**` of ONE short sentence stating no external guidance was needed. Do NOT re-list the drugs, doses, dates, or order indices — the `blocks` table already shows them; restating them is padding, not reasoning, and is wrong here.
+- (A) The fact is genuinely NOT documented in the chart at all (e.g. a value the record never stores, like blood type) -> emit ONLY `**Answer**` saying it is not documented. NO `**In Depth**`. Stop.
+- (B) OTHERWISE — for EVERY answerable question (the default) -> emit BOTH sections. `**In Depth**` carries the gathered clinical context: the knowledge-base reference guidance (attributed inline in prose) AND the clinical expert's interpretation of THIS chart against it — what the findings mean, the relevant guidance, the clinical implication. There is ALWAYS context worth surfacing, so NEVER write that "no external guidance was needed" or that the chart answers it by itself. Do NOT re-list the drugs, doses, dates, or order indices — the `blocks` table already shows them; the In-Depth is reasoning and context, not a restatement of chart data.
 
 Use ONLY these two `**bold**` headers — no nested headings, no tables inside the string (tabular data goes in `blocks`). `**In Depth**` is for REASONING ONLY — the retrieved reference guidance and the expert's interpretation of this chart against it. Do NOT use `**In Depth**` to re-list chart records, dates, order indices, or anything already shown in the `blocks` table; repeating chart data there is padding, not reasoning. Do not restate the question, do not add a generic "consult a doctor" disclaimer.
 

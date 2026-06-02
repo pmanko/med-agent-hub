@@ -25,6 +25,11 @@ LLM_API_KEY = os.getenv("LLM_API_KEY", "")  # Empty for local LM Studio
 # e2b) ship a broken jinja tool template that 400s on tool-calling.
 ORCHESTRATOR_MODEL = os.getenv("ORCHESTRATOR_MODEL", "google/gemma-4-e4b")
 MED_MODEL = os.getenv("MED_MODEL", "medgemma-1.5-4b-it")
+# Synthesizer composes the final {answer,citations,blocks} envelope. Defaults to the
+# orchestrator model (prior behaviour); set SYNTHESIZER_MODEL to a larger model so the
+# single synthesis call gets more capability while a small/fast orchestrator runs the
+# multi-call tool loop.
+SYNTHESIZER_MODEL = os.getenv("SYNTHESIZER_MODEL", ORCHESTRATOR_MODEL)
 CLINICAL_RESEARCH_MODEL = os.getenv("CLINICAL_RESEARCH_MODEL", "gemma-3-1b-it")
 
 # Legacy alias for backward compatibility
@@ -39,6 +44,7 @@ class LLMConfig:
     base_url = LLM_BASE_URL
     api_key = LLM_API_KEY
     orchestrator_model = ORCHESTRATOR_MODEL
+    synthesizer_model = SYNTHESIZER_MODEL
     med_model = MED_MODEL
     clinical_research_model = CLINICAL_RESEARCH_MODEL
     general_model = GENERAL_MODEL  # backward compat
