@@ -154,6 +154,7 @@ async def _chat(
     response_format: Optional[Dict[str, Any]] = None,
     temperature: Optional[float] = None,
     max_tokens: Optional[int] = None,
+    frequency_penalty: Optional[float] = None,
 ) -> Dict[str, Any]:
     """One LM Studio (OpenAI-compat) chat call. Returns the first choice's message."""
     payload: Dict[str, Any] = {
@@ -168,6 +169,8 @@ async def _chat(
         payload["tool_choice"] = "auto"
     if response_format is not None:
         payload["response_format"] = response_format
+    if frequency_penalty is not None:
+        payload["frequency_penalty"] = frequency_penalty
 
     headers = {"Content-Type": "application/json"}
     if llm_config.api_key:
@@ -258,6 +261,15 @@ def _gathered_evidence(kb_context: str, expert_notes: List[str]) -> str:
 def _fallback_envelope(answer: str) -> str:
     """A minimal, always-schema-valid chart_answer envelope."""
     return json.dumps({"answer": answer, "citations": [], "blocks": []})
+
+
+# Synthesis anti-degeneration: a small synthesizer (e.g. the gemma-4 26b-a4b MoE)
+# can fall into token-level repetition loops ("AIDS AIDS AIDS...") on a long
+# evidence prompt under greedy decoding. A modest temperature floor + frequency
+# penalty on the synthesis call breaks the loop; the orchestrator's tool loop keeps
+# the request temperature so its tool-calling stays deterministic.
+_SYNTH_MIN_TEMPERATURE = 0.3
+_SYNTH_FREQUENCY_PENALTY = 0.4
 
 
 async def run_team(
@@ -353,9 +365,11 @@ async def run_team(
         synth_user = synthesis_instruction + "\n\n" + gathered if gathered else synthesis_instruction
         synth_messages = list(messages) + [{"role": "user", "content": synth_user}]
         try:
+            synth_temperature = max(temperature or 0.0, _SYNTH_MIN_TEMPERATURE)
             msg = await _chat(
                 client, synth_model, synth_messages,
-                response_format=response_format, temperature=temperature, max_tokens=max_tokens,
+                response_format=response_format, temperature=synth_temperature,
+                max_tokens=max_tokens, frequency_penalty=_SYNTH_FREQUENCY_PENALTY,
             )
             content = (msg.get("content") or "").strip()
             if content:

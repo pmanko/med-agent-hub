@@ -28,7 +28,7 @@ def _stateful_fake(calls):
     state = {"n": 0}
 
     async def fake_chat(client, model, messages, *, tools=None, response_format=None,
-                        temperature=None, max_tokens=None):
+                        temperature=None, max_tokens=None, frequency_penalty=None):
         calls.append((model, bool(tools), response_format is not None))
         state["n"] += 1
         if response_format is not None:                      # synthesis turn

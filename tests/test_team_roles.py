@@ -13,7 +13,7 @@ from server import team
 
 def _fake_chat_factory(calls):
     async def fake_chat(client, model, messages, *, tools=None, response_format=None,
-                        temperature=None, max_tokens=None):
+                        temperature=None, max_tokens=None, frequency_penalty=None):
         calls.append((model, response_format is not None))
         if response_format is not None:  # synthesis turn (schema-bound)
             return {"content": json.dumps({"answer": "ok", "citations": [], "blocks": []})}
@@ -43,3 +43,30 @@ def test_synthesis_uses_synthesizer_model_loop_uses_orchestrator(monkeypatch):
     assert loop_models and all(m == "ORCH-MODEL" for m in loop_models), calls
     assert synth_models == ["SYNTH-MODEL"], calls
     assert json.loads(out)["answer"] == "ok"
+
+
+def test_synthesis_applies_anti_degeneration_params(monkeypatch):
+    """The synthesis call gets a frequency penalty + a temperature floor (breaks
+    the small synth's repetition loop); the orchestrator loop gets neither, so its
+    tool-calling stays at the request temperature. Red without the fix: synth's
+    frequency_penalty would be None and its temperature would be the request's 0.0."""
+    seen = []
+
+    async def fake_chat(client, model, messages, *, tools=None, response_format=None,
+                        temperature=None, max_tokens=None, frequency_penalty=None):
+        seen.append({"synth": response_format is not None,
+                     "temperature": temperature, "frequency_penalty": frequency_penalty})
+        if response_format is not None:
+            return {"content": json.dumps({"answer": "ok", "citations": [], "blocks": []})}
+        return {"content": "", "tool_calls": None}
+
+    monkeypatch.setattr(team, "_chat", fake_chat)
+    asyncio.run(team.run_team(
+        _MESSAGES, response_format=_RF, temperature=0.0,
+        orchestrator_model="ORCH-MODEL", synthesizer_model="SYNTH-MODEL",
+    ))
+    synth = [c for c in seen if c["synth"]]
+    loop = [c for c in seen if not c["synth"]]
+    assert synth and synth[0]["frequency_penalty"] == team._SYNTH_FREQUENCY_PENALTY, seen
+    assert synth[0]["temperature"] >= team._SYNTH_MIN_TEMPERATURE, seen
+    assert loop and all(c["frequency_penalty"] is None for c in loop), seen
