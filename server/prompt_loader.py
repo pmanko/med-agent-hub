@@ -141,4 +141,6 @@ def load_prompt(name: str) -> str:
             return path.read_text(encoding="utf-8").rstrip("\n")
         except OSError:
             continue
-    return _FALLBACK[name]
+    # A role-variant name (e.g. "synthesis-low") with no file falls back to its base
+    # role's baked constant ("synthesis"), so a missing optimized prompt never 500s.
+    return _FALLBACK.get(name) or _FALLBACK[name.split("-", 1)[0]]

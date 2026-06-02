@@ -12,19 +12,22 @@ from server import team
 
 
 def test_team_config_for_maps_preset_ids():
-    # bare id -> no overrides (run_team falls back to llm_config defaults)
-    assert team.team_config_for("med-agent-team") == {}
-    # the big rung: a4b synthesizer + 27b expert (e4b orchestrator stays default)
-    big = team.team_config_for("med-agent-team-a4b-27b")
-    assert big.get("synthesizer_model") == "google/gemma-4-26b-a4b"
-    assert big.get("expert_model") == "medgemma-27b-text-it-mlx"
-    # mid rung: a4b synth, default (small) expert
-    assert team.team_config_for("med-agent-team-a4b") == {"synthesizer_model": "google/gemma-4-26b-a4b"}
-    # the clean Qwen synth flavors (the gemma-4-collapse fix): non-gemma-4 synthesizer
-    qwen = team.team_config_for("med-agent-team-qwen")
-    assert qwen.get("synthesizer_model") == "qwen3.6-35b-a3b-mlx"
-    assert qwen.get("expert_model") == "medgemma-27b-text-it-mlx"
-    assert team.team_config_for("med-agent-team-qwen-low") == {"synthesizer_model": "qwen3-14b-mlx"}
+    from server import config as cfg
+    # med-agent-hub publishes EXACTLY three levels: low / med / high.
+    assert set(team.TEAM_PRESETS) == {"med-agent-team-low", "med-agent-team-med", "med-agent-team-high"}
+    # high: biggest synth + big expert (orchestrator stays the default e4b).
+    high = team.team_config_for("med-agent-team-high")
+    assert high["synthesizer_model"] == cfg.SYNTH_MODEL_HIGH
+    assert high["expert_model"] == cfg.EXPERT_MODEL_HIGH
+    # med: distinct mid-size synth + big expert.
+    med = team.team_config_for("med-agent-team-med")
+    assert med["synthesizer_model"] == cfg.SYNTH_MODEL_MED
+    assert med["expert_model"] == cfg.EXPERT_MODEL_MED
+    # low: small synth + small expert + an optimized synthesis prompt for that model class.
+    low = team.team_config_for("med-agent-team-low")
+    assert low["synthesizer_model"] == cfg.SYNTH_MODEL_LOW
+    assert low["expert_model"] == cfg.EXPERT_MODEL_LOW
+    assert low["synthesizer_prompt"] == "synthesis-low"
     # an unadvertised id never crashes -> empty overrides (defaults)
     assert team.team_config_for("med-agent-team-bogus") == {}
 

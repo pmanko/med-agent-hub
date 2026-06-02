@@ -32,7 +32,10 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from . import kb
-from .config import llm_config
+from .config import (
+    llm_config, SYNTH_MODEL_HIGH, SYNTH_MODEL_MED, SYNTH_MODEL_LOW,
+    EXPERT_MODEL_HIGH, EXPERT_MODEL_MED, EXPERT_MODEL_LOW,
+)
 from .prompt_loader import load_prompt
 
 logger = logging.getLogger(__name__)
@@ -50,33 +53,26 @@ MAX_TOOL_ITERATIONS = 3
 _KB_BLOCK_HEADER = "Knowledge-base reference snippets"
 
 
-# Per-request team-model presets: the OpenAI `model` id selects which model runs
-# each role, so ONE med-agent-hub serves any of these configs per request (no
-# reboot). Advertised via /v1/models so chartsearchai's exact-match served-model
-# validation accepts the id. An empty dict means run_team's llm_config defaults.
+# The ONLY models med-agent-hub publishes: three team LEVELS. The OpenAI `model` id
+# selects the level; med-agent-hub applies that level's persistent per-role models +
+# prompts (never sent per request). The orchestrator (e4b) is shared; the synthesizer
+# + clinical-expert models step up low -> med -> high; the `low` level swaps to a
+# synthesis prompt optimized for the smaller synthesizer's model class. Model ids are
+# config-driven (config.py, env-overridable). All three synthesizers are non-gemma-4
+# (Qwen), so none hit the gemma-4 repetition collapse (#622).
 TEAM_PRESETS: Dict[str, Dict[str, str]] = {
-    # all-small: e4b orchestrator + e4b synthesizer + medgemma-1.5-4b expert
-    # (the llm_config defaults) — fits anywhere.
-    "med-agent-team": {},
-    # mid ("low power"): a4b synthesizer (quality) + the small medgemma-1.5 expert
-    # + e4b orchestrator — the big synth without the heavy 27b expert.
-    "med-agent-team-a4b": {"synthesizer_model": "google/gemma-4-26b-a4b"},
-    # big: gemma-4-26b-a4b synthesizer (MoE, ~4B-active, so it co-fits the 27b
-    # where the 31b dense did not) + medgemma-27b expert; e4b stays the fast
-    # orchestrator for the tool loop.
-    "med-agent-team-a4b-27b": {
-        "synthesizer_model": "google/gemma-4-26b-a4b",
-        "expert_model": "medgemma-27b-text-it-mlx",
+    "med-agent-team-low": {
+        "synthesizer_model": SYNTH_MODEL_LOW,
+        "expert_model": EXPERT_MODEL_LOW,
+        "synthesizer_prompt": "synthesis-low",
     },
-    # CLEAN (non-gemma-4) Qwen synthesizers — the fix for the gemma-4 repetition
-    # collapse (#622): Qwen has no collapse + strong JSON. e4b stays orchestrator
-    # (short tool-calls, below the collapse threshold), medgemma the clinical expert.
-    "med-agent-team-qwen": {  # standard: Qwen3.6-35B-A3B synth + medgemma-27b expert
-        "synthesizer_model": "qwen3.6-35b-a3b-mlx",
-        "expert_model": "medgemma-27b-text-it-mlx",
+    "med-agent-team-med": {
+        "synthesizer_model": SYNTH_MODEL_MED,
+        "expert_model": EXPERT_MODEL_MED,
     },
-    "med-agent-team-qwen-low": {  # low-resource: Qwen3-14B synth + medgemma-1.5 expert (default)
-        "synthesizer_model": "qwen3-14b-mlx",
+    "med-agent-team-high": {
+        "synthesizer_model": SYNTH_MODEL_HIGH,
+        "expert_model": EXPERT_MODEL_HIGH,
     },
 }
 
@@ -327,6 +323,9 @@ async def run_team(
     orchestrator_model: Optional[str] = None,
     synthesizer_model: Optional[str] = None,
     expert_model: Optional[str] = None,
+    orchestrator_prompt: Optional[str] = None,
+    synthesizer_prompt: Optional[str] = None,
+    expert_prompt: Optional[str] = None,
 ) -> str:
     """
     Run the team for one chartsearchai turn.
@@ -344,9 +343,9 @@ async def run_team(
     # Read the active prompt variant ONCE per request (PROMPT_VARIANT is static
     # per instance); thread the expert text into the per-iteration expert call so
     # the tool loop does not re-read it from disk each turn.
-    orchestrator_system = load_prompt("orchestrator")
-    expert_system = load_prompt("medical_expert")
-    synthesis_instruction = load_prompt("synthesis")
+    orchestrator_system = load_prompt(orchestrator_prompt or "orchestrator")
+    expert_system = load_prompt(expert_prompt or "medical_expert")
+    synthesis_instruction = load_prompt(synthesizer_prompt or "synthesis")
 
     # The tool loop runs under the orchestrator's OWN system prompt — not
     # chartsearchai's envelope prompt, which biases a small model toward answering
