@@ -54,11 +54,14 @@ _KB_BLOCK_HEADER = "Knowledge-base reference snippets"
 # reboot). Advertised via /v1/models so chartsearchai's exact-match served-model
 # validation accepts the id. An empty dict means run_team's llm_config defaults.
 TEAM_PRESETS: Dict[str, Dict[str, str]] = {
+    # all-small: e4b orchestrator + e4b synthesizer + medgemma-1.5-4b expert
+    # (the llm_config defaults) — fits anywhere.
     "med-agent-team": {},
-    "med-agent-team-31b": {"synthesizer_model": "google/gemma-4-31b"},  # big synth, small expert
-    "med-agent-team-27b": {"expert_model": "medgemma-27b-text-it-mlx"},  # big expert, small synth
-    "med-agent-team-31b-27b": {  # both big — needs gemma-4-31b AND medgemma-27b resident at once
-        "synthesizer_model": "google/gemma-4-31b",
+    # big: gemma-4-26b-a4b synthesizer (MoE, ~4B-active, so it co-fits the 27b
+    # where the 31b dense did not) + medgemma-27b expert; e4b stays the fast
+    # orchestrator for the tool loop.
+    "med-agent-team-a4b-27b": {
+        "synthesizer_model": "google/gemma-4-26b-a4b",
         "expert_model": "medgemma-27b-text-it-mlx",
     },
 }

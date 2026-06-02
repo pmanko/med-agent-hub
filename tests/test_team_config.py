@@ -14,12 +14,10 @@ from server import team
 def test_team_config_for_maps_preset_ids():
     # bare id -> no overrides (run_team falls back to llm_config defaults)
     assert team.team_config_for("med-agent-team") == {}
-    # the full role-split rung
-    big = team.team_config_for("med-agent-team-31b-27b")
-    assert big.get("synthesizer_model") == "google/gemma-4-31b"
+    # the big rung: a4b synthesizer + 27b expert (e4b orchestrator stays default)
+    big = team.team_config_for("med-agent-team-a4b-27b")
+    assert big.get("synthesizer_model") == "google/gemma-4-26b-a4b"
     assert big.get("expert_model") == "medgemma-27b-text-it-mlx"
-    # big-expert-only rung (small synth) — fits when the 31b synth isn't also resident
-    assert team.team_config_for("med-agent-team-27b") == {"expert_model": "medgemma-27b-text-it-mlx"}
     # an unadvertised id never crashes -> empty overrides (defaults)
     assert team.team_config_for("med-agent-team-bogus") == {}
 
