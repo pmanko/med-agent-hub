@@ -35,6 +35,7 @@ from . import kb
 from .config import (
     llm_config, SYNTH_MODEL_HIGH, SYNTH_MODEL_MED, SYNTH_MODEL_LOW,
     EXPERT_MODEL_HIGH, EXPERT_MODEL_MED, EXPERT_MODEL_LOW,
+    ORCHESTRATOR_MODEL_HIGH, SYNTH_REPEAT_PENALTY,
 )
 from .prompt_loader import load_prompt
 
@@ -55,7 +56,7 @@ _KB_BLOCK_HEADER = "Knowledge-base reference snippets"
 
 # The ONLY models med-agent-hub publishes: three team LEVELS. The OpenAI `model` id
 # selects the level; med-agent-hub applies that level's persistent per-role models +
-# prompts (never sent per request). The orchestrator (e4b) is shared; the synthesizer
+# prompts (never sent per request). The orchestrator is e4b for low/med, gemma-4-26b-a4b for high; the synthesizer
 # + clinical-expert models step up low -> med -> high; the `low` level swaps to a
 # synthesis prompt optimized for the smaller synthesizer's model class. Model ids are
 # config-driven (config.py, env-overridable). All three synthesizers are non-gemma-4
@@ -73,6 +74,7 @@ TEAM_PRESETS: Dict[str, Dict[str, str]] = {
     "med-agent-team-high": {
         "synthesizer_model": SYNTH_MODEL_HIGH,
         "expert_model": EXPERT_MODEL_HIGH,
+        "orchestrator_model": ORCHESTRATOR_MODEL_HIGH,
     },
 }
 
@@ -164,7 +166,7 @@ async def _chat(
     response_format: Optional[Dict[str, Any]] = None,
     temperature: Optional[float] = None,
     max_tokens: Optional[int] = None,
-    frequency_penalty: Optional[float] = None,
+    repeat_penalty: Optional[float] = None,
 ) -> Dict[str, Any]:
     """One LM Studio (OpenAI-compat) chat call. Returns the first choice's message."""
     payload: Dict[str, Any] = {
@@ -179,8 +181,8 @@ async def _chat(
         payload["tool_choice"] = "auto"
     if response_format is not None:
         payload["response_format"] = response_format
-    if frequency_penalty is not None:
-        payload["frequency_penalty"] = frequency_penalty
+    if repeat_penalty is not None:
+        payload["repeat_penalty"] = repeat_penalty
 
     headers = {"Content-Type": "application/json"}
     if llm_config.api_key:
@@ -310,13 +312,14 @@ def _normalize_envelope(raw: str) -> str:
     return json.dumps(env)
 
 
-# Synthesis anti-degeneration: a small synthesizer (e.g. the gemma-4 26b-a4b MoE)
-# can fall into token-level repetition loops ("AIDS AIDS AIDS...") on a long
-# evidence prompt under greedy decoding. A modest temperature floor + frequency
-# penalty on the synthesis call breaks the loop; the orchestrator's tool loop keeps
-# the request temperature so its tool-calling stays deterministic.
+# Synthesis anti-degeneration: a small synthesizer can fall into token-level
+# repetition loops ("AIDS AIDS AIDS...") on a long evidence prompt. A modest
+# temperature floor + repeat_penalty on the synthesis call breaks the loop; the
+# orchestrator's tool loop keeps the request temperature so tool-calling stays
+# deterministic. NOTE: LM Studio's MLX OpenAI engine SILENTLY DROPS frequency_penalty
+# (and DRY) — only `repeat_penalty` (config.SYNTH_REPEAT_PENALTY) is honored, so that
+# is the lever we send. (frequency_penalty here was previously a confirmed no-op.)
 _SYNTH_MIN_TEMPERATURE = 0.5
-_SYNTH_FREQUENCY_PENALTY = 0.8
 
 
 async def run_team(
@@ -419,7 +422,7 @@ async def run_team(
             msg = await _chat(
                 client, synth_model, synth_messages,
                 response_format=response_format, temperature=synth_temperature,
-                max_tokens=max_tokens, frequency_penalty=_SYNTH_FREQUENCY_PENALTY,
+                max_tokens=max_tokens, repeat_penalty=SYNTH_REPEAT_PENALTY,
             )
             content = _normalize_envelope(_message_text(msg))
             if content:

@@ -42,6 +42,10 @@ SYNTH_MODEL_LOW = os.getenv("SYNTH_MODEL_LOW", "qwen2.5-14b-instruct-mlx")     #
 EXPERT_MODEL_HIGH = os.getenv("EXPERT_MODEL_HIGH", "medgemma-27b-text-it-mlx")  # 16GB; high-only
 EXPERT_MODEL_MED = os.getenv("EXPERT_MODEL_MED", MED_MODEL)   # medgemma-1.5-4b-it — shared with low so low+med simu-load fits 64GB
 EXPERT_MODEL_LOW = os.getenv("EXPERT_MODEL_LOW", MED_MODEL)   # medgemma-1.5-4b-it
+# HIGH uses a stronger orchestrator (gemma-4-26b-a4b) than the shared e4b: the orchestrator emits only
+# short tool-loop decisions (below the gemma-4 long-JSON collapse threshold), so the bigger MoE removes
+# the e4b reasoning bottleneck without collapse risk. low/med keep the e4b orchestrator (ORCHESTRATOR_MODEL).
+ORCHESTRATOR_MODEL_HIGH = os.getenv("ORCHESTRATOR_MODEL_HIGH", "google/gemma-4-26b-a4b")
 
 # Legacy alias for backward compatibility
 GENERAL_MODEL = ORCHESTRATOR_MODEL
@@ -49,6 +53,12 @@ GENERAL_MODEL = ORCHESTRATOR_MODEL
 # LLM parameters (smart defaults, not exposed in env.example)
 LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.2"))
 LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "2000"))  # Increased default for longer responses
+
+# Synthesis anti-repetition lever. LM Studio's OpenAI API silently DROPS
+# frequency_penalty and the DRY sampler on its MLX engine — only `repeat_penalty`
+# is honored — so the synthesis call sends this. ~1.15; keep <=1.3 (higher distorts
+# output / drives language drift on small models).
+SYNTH_REPEAT_PENALTY = float(os.getenv("SYNTH_REPEAT_PENALTY", "1.15"))
 
 # Create a config object for cleaner imports
 class LLMConfig:
