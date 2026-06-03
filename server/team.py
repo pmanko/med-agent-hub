@@ -283,9 +283,9 @@ def _fallback_envelope(answer: str) -> str:
 
 
 def _normalize_envelope(raw: str) -> str:
-    """Post-process the synthesizer envelope JSON: (1) normalize a literal backslash-n in
-    `answer` to a real newline — small models (e.g. qwen3-14b) copy the prompt's JSON \\n
-    escaping verbatim and garble — and (2) reconcile inline [N] chart-record markers into
+    """Post-process the synthesizer envelope JSON: (1) repair the section line breaks small
+    models mangle — a literal backslash-n OR runs of backslashes ("**Answer**\\\\\\:") — into
+    real newlines, and (2) reconcile inline [N] chart-record markers into
     `citations` so the count is not lost when the model cites in prose but leaves the array
     empty. Returns `raw` unchanged if it is not parseable JSON."""
     try:
@@ -296,8 +296,13 @@ def _normalize_envelope(raw: str) -> str:
         return raw
     ans = env.get("answer")
     if isinstance(ans, str):
-        if "\\n" in ans:
-            env["answer"] = ans = ans.replace("\\n", "\n")
+        # Small synths mis-escape the section line breaks as RUNS of backslashes
+        # ("**Answer**\\\\\\: text" / "**Answer**\\\\<newline>This"); collapse a run (+ an
+        # optional trailing colon) to one newline, then the single literal \n, then tidy.
+        ans = re.sub(r"\\{2,}\s*:?\s*", "\n", ans)
+        ans = ans.replace("\\n", "\n")
+        ans = re.sub(r"\n{3,}", "\n\n", ans).strip()
+        env["answer"] = ans
         inline = sorted({int(m) for m in re.findall(r"\[(\d+)\]", ans)})
         if inline:
             existing = [c for c in (env.get("citations") or []) if isinstance(c, int)]

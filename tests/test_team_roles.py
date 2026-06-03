@@ -111,3 +111,25 @@ def test_synthesis_normalizes_literal_newline_and_reconciles_citations(monkeypat
     assert "\\n" not in env["answer"], env["answer"]      # literal backslash-n normalized away
     assert "\n" in env["answer"], env["answer"]            # to a real newline
     assert env["citations"] == [29, 30], env               # inline [N] reconciled into citations
+
+
+def test_normalize_envelope_strips_backslash_run_artifacts():
+    """qwen2.5-14b mis-escapes the section line breaks as RUNS of backslashes
+    (e.g. "**Answer**\\\\\\: text", "**Answer**\\\\\\\\<newline>This"), which render as
+    literal backslashes. _normalize_envelope must collapse those runs to a clean line
+    break. Red without the run-collapse: the backslashes survive (only a single \\n was
+    handled before)."""
+    raw = json.dumps(
+        {
+            "answer": "**Answer**" + "\\" * 6 + ": The patient is on lamivudine [3]."
+            + "\\" * 4 + "\n**In Depth**" + "\\" * 3 + "Per WHO guidance, the regimen is outdated.",
+            "citations": [],
+            "blocks": [],
+        }
+    )
+    out = json.loads(team._normalize_envelope(raw))
+    assert "\\" not in out["answer"], repr(out["answer"])   # no backslash artifacts remain
+    assert "**Answer**" in out["answer"]                    # header preserved
+    assert "**In Depth**" in out["answer"]
+    assert "The patient is on lamivudine" in out["answer"]  # content preserved
+    assert out["citations"] == [3]                          # inline [N] reconcile still works
