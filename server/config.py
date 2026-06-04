@@ -60,6 +60,16 @@ LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "2000"))  # Increased default f
 # output / drives language drift on small models).
 SYNTH_REPEAT_PENALTY = float(os.getenv("SYNTH_REPEAT_PENALTY", "1.15"))
 
+# Per-role DRY (n-gram anti-repetition) multiplier, sent on each role's chat call. Honored by
+# a real llama.cpp server (the router); LM Studio MLX silently drops it (no-op), so it's safe
+# to always send. ORCHESTRATOR runs at 0 (DRY OFF): it emits tool-call JSON in a loop, and DRY's
+# sequence penalty can distort the repeated call structure. EXPERT (free text) + SYNTH (the
+# loop-prone JSON envelope) keep DRY on. Per-ROLE, so the orchestrator's gemma differs from the
+# same gemma serving the single-LLM parity arm (which keeps DRY).
+ORCHESTRATOR_DRY_MULTIPLIER = float(os.getenv("ORCHESTRATOR_DRY_MULTIPLIER", "0.0"))
+EXPERT_DRY_MULTIPLIER = float(os.getenv("EXPERT_DRY_MULTIPLIER", "0.8"))
+SYNTH_DRY_MULTIPLIER = float(os.getenv("SYNTH_DRY_MULTIPLIER", "0.8"))
+
 # Create a config object for cleaner imports
 class LLMConfig:
     base_url = LLM_BASE_URL

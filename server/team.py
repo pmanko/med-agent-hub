@@ -36,6 +36,7 @@ from .config import (
     llm_config, SYNTH_MODEL_HIGH, SYNTH_MODEL_MED, SYNTH_MODEL_LOW,
     EXPERT_MODEL_HIGH, EXPERT_MODEL_MED, EXPERT_MODEL_LOW,
     ORCHESTRATOR_MODEL_HIGH, SYNTH_REPEAT_PENALTY,
+    ORCHESTRATOR_DRY_MULTIPLIER, EXPERT_DRY_MULTIPLIER, SYNTH_DRY_MULTIPLIER,
 )
 from .prompt_loader import load_prompt
 
@@ -167,6 +168,7 @@ async def _chat(
     temperature: Optional[float] = None,
     max_tokens: Optional[int] = None,
     repeat_penalty: Optional[float] = None,
+    dry_multiplier: Optional[float] = None,
 ) -> Dict[str, Any]:
     """One LM Studio (OpenAI-compat) chat call. Returns the first choice's message."""
     payload: Dict[str, Any] = {
@@ -183,6 +185,8 @@ async def _chat(
         payload["response_format"] = response_format
     if repeat_penalty is not None:
         payload["repeat_penalty"] = repeat_penalty
+    if dry_multiplier is not None:
+        payload["dry_multiplier"] = dry_multiplier
 
     headers = {"Content-Type": "application/json"}
     if llm_config.api_key:
@@ -237,7 +241,8 @@ async def _run_medical_expert(
         {"role": "user", "content": user},
     ]
     try:
-        msg = await _chat(client, model or llm_config.med_model, messages, temperature=0.1, max_tokens=800)
+        msg = await _chat(client, model or llm_config.med_model, messages, temperature=0.1,
+                          max_tokens=800, dry_multiplier=EXPERT_DRY_MULTIPLIER)
         return _message_text(msg) or "(no expert response)"
     except Exception as e:  # tool failure must not abort the turn
         logger.warning("medical_expert tool failed: %s", e)
@@ -372,6 +377,7 @@ async def run_team(
                 msg = await _chat(
                     client, model, loop_messages,
                     tools=_tool_definitions(), temperature=temperature, max_tokens=max_tokens,
+                    dry_multiplier=ORCHESTRATOR_DRY_MULTIPLIER,  # DRY OFF: tool-calling, distortion risk
                 )
                 tool_calls = msg.get("tool_calls")
                 if not tool_calls:
@@ -423,6 +429,7 @@ async def run_team(
                 client, synth_model, synth_messages,
                 response_format=response_format, temperature=synth_temperature,
                 max_tokens=max_tokens, repeat_penalty=SYNTH_REPEAT_PENALTY,
+                dry_multiplier=SYNTH_DRY_MULTIPLIER,
             )
             content = _normalize_envelope(_message_text(msg))
             if content:
