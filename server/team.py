@@ -45,11 +45,10 @@ logger = logging.getLogger(__name__)
 # Small-model tool-calling degrades over long chains; keep the loop short.
 MAX_TOOL_ITERATIONS = 3
 
-# The orchestrator, medical_expert, and synthesis system prompts are now read
-# from files per request (server/prompt_loader.load_prompt), selected by
-# PROMPT_VARIANT, so a prompt edit changes behaviour with no rebuild and an A/B
-# can run two variants side by side. The byte-identical baked fallbacks live in
-# prompt_loader so a missing file never fails the turn.
+# The orchestrator, medical_expert, and synthesis system prompts are read from
+# files per request (server/prompt_loader.load_prompt) under server/prompts/, so a
+# prompt edit changes behaviour with no rebuild. A missing file fails loud — the
+# files are the single source of truth.
 
 # Prefix that marks a real (non-abstain) kb_search observation.
 _KB_BLOCK_HEADER = "Knowledge-base reference snippets"
@@ -353,9 +352,9 @@ async def run_team(
     expert_model = expert_model or llm_config.med_model
     chart = _chart_context(messages)
 
-    # Read the active prompt variant ONCE per request (PROMPT_VARIANT is static
-    # per instance); thread the expert text into the per-iteration expert call so
-    # the tool loop does not re-read it from disk each turn.
+    # Read the role prompts ONCE per request; thread the expert text into the
+    # per-iteration expert call so the tool loop does not re-read it from disk
+    # each turn.
     orchestrator_system = load_prompt(orchestrator_prompt or "orchestrator")
     expert_system = load_prompt(expert_prompt or "medical_expert")
     synthesis_instruction = load_prompt(synthesizer_prompt or "synthesis")

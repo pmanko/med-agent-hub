@@ -1,28 +1,28 @@
 """
-Prompt-loading tests (server/prompts.py + its wiring into server/team.py).
+Prompt-loading tests (server/prompt_loader.py + its wiring into server/team.py).
 
-The team's three system prompts are read from files per request, selected by the
-PROMPT_VARIANT env var, so a prompt edit changes behaviour with no rebuild and an
-A/B can run two variants side by side. These tests assert the MECHANISM — which
-prompt TEXT the team actually loads and sends — not the model's output (that is
-what the harness A/B run measures). `team._chat` is seamed: no model, no HTTP.
+The team's system prompts are plain files under server/prompts/, read per request
+so a prompt edit changes behaviour with no rebuild. These tests assert the
+MECHANISM — which prompt TEXT the loader returns and the team actually sends — not
+the model's output. `team._chat` is seamed: no model, no HTTP.
 
-v2 is a one-file delta: only synthesis.txt differs; orchestrator/medical_expert
-fall back to v1, which is what isolates the synthesis prompt as the single A/B
-variable. v1 must stay byte-identical to the original module constants.
+The files are the single source of truth (git is the version history); a referenced
+prompt with no file fails loud rather than silently substituting.
 """
 
 import json
-import os
 from pathlib import Path
 from unittest.mock import patch
+
+import pytest
 
 from server import prompt_loader, team
 
 PROMPTS_DIR = Path(team.__file__).parent / "prompts"
 
-# v2-only marker strings (verified absent in v1/synthesis.txt).
-V2_MARKERS = ("**In Depth**", "FALSE PREMISE")
+# Distinctive markers in the committed synthesis.txt (its two-section + false-premise
+# instructions); used to prove the synthesis prompt actually reaches the model.
+SYNTH_MARKERS = ("**In Depth**", "FALSE PREMISE")
 
 ENVELOPE = json.dumps({"answer": "Lisinopril 10 mg [1]", "citations": [1], "blocks": []})
 RESP_FORMAT = {"type": "json_schema", "json_schema": {"name": "chart_answer", "schema": {}}}
@@ -33,10 +33,10 @@ MESSAGES = [
 ]
 
 
-def _run_team_capturing_synth(variant):
-    """Run the team with PROMPT_VARIANT=`variant` (None -> unset), returning the
-    JSON-serialized message array sent to the constrained synthesis call — the turn
-    that carries the synthesis prompt. `team._chat` is seamed; no model, no HTTP."""
+def _run_team_capturing_synth():
+    """Run the team and return the JSON-serialized message array sent to the
+    constrained synthesis call — the turn that carries the synthesis prompt.
+    `team._chat` is seamed; no model, no HTTP."""
     import asyncio
 
     captured = {}
@@ -48,112 +48,65 @@ def _run_team_capturing_synth(variant):
             return {"content": ENVELOPE}
         return {"content": "ok", "tool_calls": None}
 
-    env = {k: v for k, v in os.environ.items() if k != "PROMPT_VARIANT"}
-    if variant is not None:
-        env["PROMPT_VARIANT"] = variant
-    with patch.dict(os.environ, env, clear=True), \
-            patch.object(team, "_chat", side_effect=fake_chat):
+    with patch.object(team, "_chat", side_effect=fake_chat):
         asyncio.run(team.run_team(MESSAGES, response_format=RESP_FORMAT, temperature=0.0))
     return json.dumps(captured["synth"])
 
 
-def test_default_variant_is_v1():
-    # No PROMPT_VARIANT set -> v1 (a missing env var must never 500 or pick v2).
-    env = {k: v for k, v in os.environ.items() if k != "PROMPT_VARIANT"}
-    with patch.dict(os.environ, env, clear=True):
-        assert prompt_loader.load_prompt("synthesis") == \
-            (PROMPTS_DIR / "v1" / "synthesis.txt").read_text(encoding="utf-8").rstrip("\n")
+def test_load_prompt_returns_the_committed_file_text():
+    # The loader reads prompts/<name>.txt verbatim (trailing newline stripped) for
+    # every name the team references.
+    for name in ("orchestrator", "medical_expert", "synthesis", "synthesis-low"):
+        on_disk = (PROMPTS_DIR / f"{name}.txt").read_text(encoding="utf-8").rstrip("\n")
+        assert on_disk, f"{name}.txt is empty"
+        assert prompt_loader.load_prompt(name) == on_disk
 
 
-def test_load_prompt_v1_is_byte_identical_to_the_baked_fallback():
-    # v1 is the TRUE control: the .txt files must match the baked-in constants the
-    # team used before the prompts were file-backed, so the A/B is unconfounded.
-    with patch.dict(os.environ, {"PROMPT_VARIANT": "v1"}):
-        for name in ("orchestrator", "medical_expert", "synthesis"):
-            on_disk = (PROMPTS_DIR / "v1" / f"{name}.txt").read_text(encoding="utf-8").rstrip("\n")
-            assert prompt_loader.load_prompt(name) == on_disk
-            assert prompt_loader.load_prompt(name) == prompt_loader._FALLBACK[name]
-
-
-def test_v2_overrides_synthesis_and_orchestrator_expert_falls_back_to_v1():
-    # v2/ ships synthesis.txt + orchestrator.txt (the always-consult orchestrator that drives
-    # the team's KB-grounded answers) but NOT medical_expert.txt. So under PROMPT_VARIANT=v2,
-    # synthesis + orchestrator resolve to v2 and medical_expert falls back to v1. v2 is a
-    # deliberate multi-prompt variant, not a synthesis-only single-variable A/B.
-    with patch.dict(os.environ, {"PROMPT_VARIANT": "v2"}):
-        synth = prompt_loader.load_prompt("synthesis")
-        orch = prompt_loader.load_prompt("orchestrator")
-        med = prompt_loader.load_prompt("medical_expert")
-    v2_synth = (PROMPTS_DIR / "v2" / "synthesis.txt").read_text(encoding="utf-8").rstrip("\n")
-    v1_synth = (PROMPTS_DIR / "v1" / "synthesis.txt").read_text(encoding="utf-8").rstrip("\n")
-    v2_orch = (PROMPTS_DIR / "v2" / "orchestrator.txt").read_text(encoding="utf-8").rstrip("\n")
-    v1_orch = (PROMPTS_DIR / "v1" / "orchestrator.txt").read_text(encoding="utf-8").rstrip("\n")
-    v1_med = (PROMPTS_DIR / "v1" / "medical_expert.txt").read_text(encoding="utf-8").rstrip("\n")
-    assert synth == v2_synth and synth != v1_synth
-    assert all(m in synth for m in V2_MARKERS)
-    assert orch == v2_orch and orch != v1_orch  # v2 overrides the orchestrator too
-    assert med == v1_med                         # medical_expert still falls back to v1
-
-
-def test_unknown_variant_falls_back_to_v1():
-    # A typo in PROMPT_VARIANT must degrade to v1, not error.
-    with patch.dict(os.environ, {"PROMPT_VARIANT": "does-not-exist"}):
-        assert prompt_loader.load_prompt("synthesis") == \
-            (PROMPTS_DIR / "v1" / "synthesis.txt").read_text(encoding="utf-8").rstrip("\n")
-
-
-def test_missing_file_falls_back_to_baked_constant(tmp_path, monkeypatch):
-    # Last-resort safety: if even the v1 file is unreadable, the baked-in constant
-    # is returned so a deleted/renamed prompt file never 500s the team.
-    monkeypatch.setattr(prompt_loader, "_DIR", tmp_path)  # empty dir: no variant files
-    with patch.dict(os.environ, {"PROMPT_VARIANT": "v1"}):
-        assert prompt_loader.load_prompt("synthesis") == prompt_loader._FALLBACK["synthesis"]
-        assert prompt_loader.load_prompt("orchestrator") == prompt_loader._FALLBACK["orchestrator"]
+def test_missing_prompt_file_fails_loud(tmp_path, monkeypatch):
+    # A referenced-but-absent prompt is a configuration bug: raise FileNotFoundError
+    # naming the path, never silently substitute. (Replaces the old baked-fallback.)
+    monkeypatch.setattr(prompt_loader, "_DIR", tmp_path)  # empty dir: no prompt files
+    with pytest.raises(FileNotFoundError) as exc_info:
+        prompt_loader.load_prompt("synthesis")
+    assert "synthesis" in str(exc_info.value)
 
 
 def test_load_prompt_reads_the_file_each_call_so_edits_are_live(tmp_path, monkeypatch):
     # A mounted .txt edit must change behaviour with NO restart -> the loader must
     # re-read the file per call, never memoize at import.
     monkeypatch.setattr(prompt_loader, "_DIR", tmp_path)
-    vdir = tmp_path / "v1"
-    vdir.mkdir()
-    f = vdir / "synthesis.txt"
+    f = tmp_path / "synthesis.txt"
     f.write_text("FIRST\n", encoding="utf-8")
-    with patch.dict(os.environ, {"PROMPT_VARIANT": "v1"}):
-        assert prompt_loader.load_prompt("synthesis") == "FIRST"
-        f.write_text("SECOND\n", encoding="utf-8")  # edit "the mounted file"
-        assert prompt_loader.load_prompt("synthesis") == "SECOND"
+    assert prompt_loader.load_prompt("synthesis") == "FIRST"
+    f.write_text("SECOND\n", encoding="utf-8")  # edit "the mounted file"
+    assert prompt_loader.load_prompt("synthesis") == "SECOND"
 
 
-def test_team_synthesis_uses_v2_text_when_variant_is_v2():
-    # Under PROMPT_VARIANT=v2 the constrained synthesis turn must carry the v2
-    # synthesis instruction (two-section + false-premise deltas), not the v1 text.
-    # Asserts on what the team SENDS (the seam), not the mocked return.
-    blob = _run_team_capturing_synth("v2")
-    for marker in V2_MARKERS:
-        assert marker in blob, f"v2 synthesis marker {marker!r} not sent to the model"
+def test_synthesis_low_is_a_distinct_prompt():
+    # The low level swaps synthesis -> synthesis-low (a synthesis prompt tuned for the
+    # smaller synthesizer). It must be its own file, distinct from the default.
+    assert prompt_loader.load_prompt("synthesis-low") != prompt_loader.load_prompt("synthesis")
 
 
-def test_team_synthesis_uses_v1_text_by_default():
-    # Default (no variant) must send v1 synthesis text — v2-only markers ABSENT.
-    # Locks v1 behaviour: file-backing the prompt changed nothing for the control.
-    blob = _run_team_capturing_synth(None)
-    for marker in V2_MARKERS:
-        assert marker not in blob, f"v2 marker {marker!r} leaked into the v1/default synthesis"
-    # And the v1 synthesis instruction text actually reached synthesis (a distinctive
-    # v1 tail phrase that is NOT present in v2).
-    assert "Keep the answer concise." in blob
+def test_team_sends_the_synthesis_prompt_to_the_model():
+    # Behaviour-preservation: the team's constrained synthesis turn must carry the
+    # committed synthesis instruction — the two-section + false-premise markers AND its
+    # distinctive "Keep the prose concise." tail. Asserts on what the team SENDS (the
+    # seam), not the mocked return.
+    blob = _run_team_capturing_synth()
+    for marker in SYNTH_MARKERS:
+        assert marker in blob, f"synthesis marker {marker!r} not sent to the model"
+    assert "Keep the prose concise." in blob
 
 
-def test_team_passes_through_a_schema_valid_two_section_table_envelope_under_v2():
-    # The v2 prompt asks for a two-section `answer` + a `blocks` table when the
-    # question enumerates. The model's compliance is the harness A/B's measurement;
-    # here we assert the team PRESERVES such an envelope end-to-end (does not drop or
-    # mangle `blocks`) and that it stays structurally valid for the consumer. The
-    # synthesis call is seamed to return a realistic v2-shaped envelope.
+def test_team_passes_through_a_schema_valid_two_section_table_envelope():
+    # The synthesis prompt asks for a two-section `answer` + a `blocks` table when the
+    # question enumerates. Assert the team PRESERVES such an envelope end-to-end (does
+    # not drop or mangle `blocks`) and that it stays structurally valid for the
+    # chartsearchai consumer. The synthesis call is seamed to return a realistic envelope.
     import asyncio
 
-    v2_envelope = json.dumps({
+    envelope = json.dumps({
         "answer": "**Answer**\nShe is on lamivudine, nevirapine, and stavudine [29], [30], [31].\n\n"
                   "**In Depth**\nThe regimen is stavudine-based [31]; per WHO HIV guidelines "
                   "stavudine is no longer a preferred backbone.",
@@ -177,13 +130,10 @@ def test_team_passes_through_a_schema_valid_two_section_table_envelope_under_v2(
     async def fake_chat(client, model, messages, *, tools=None, response_format=None,
                         temperature=None, max_tokens=None, **kwargs):
         if response_format is not None:
-            return {"content": v2_envelope}
+            return {"content": envelope}
         return {"content": "ok", "tool_calls": None}
 
-    env = {k: v for k, v in os.environ.items() if k != "PROMPT_VARIANT"}
-    env["PROMPT_VARIANT"] = "v2"
-    with patch.dict(os.environ, env, clear=True), \
-            patch.object(team, "_chat", side_effect=fake_chat):
+    with patch.object(team, "_chat", side_effect=fake_chat):
         out = asyncio.run(team.run_team(MESSAGES, response_format=RESP_FORMAT, temperature=0.0))
 
     env_obj = json.loads(out)
