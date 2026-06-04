@@ -75,21 +75,24 @@ def test_load_prompt_v1_is_byte_identical_to_the_baked_fallback():
             assert prompt_loader.load_prompt(name) == prompt_loader._FALLBACK[name]
 
 
-def test_v2_overrides_only_synthesis_others_fall_back_to_v1():
-    # v2/ ships ONLY synthesis.txt. The single-variable A/B requires orchestrator
-    # and medical_expert to resolve to their v1 text under PROMPT_VARIANT=v2.
+def test_v2_overrides_synthesis_and_orchestrator_expert_falls_back_to_v1():
+    # v2/ ships synthesis.txt + orchestrator.txt (the always-consult orchestrator that drives
+    # the team's KB-grounded answers) but NOT medical_expert.txt. So under PROMPT_VARIANT=v2,
+    # synthesis + orchestrator resolve to v2 and medical_expert falls back to v1. v2 is a
+    # deliberate multi-prompt variant, not a synthesis-only single-variable A/B.
     with patch.dict(os.environ, {"PROMPT_VARIANT": "v2"}):
         synth = prompt_loader.load_prompt("synthesis")
         orch = prompt_loader.load_prompt("orchestrator")
         med = prompt_loader.load_prompt("medical_expert")
     v2_synth = (PROMPTS_DIR / "v2" / "synthesis.txt").read_text(encoding="utf-8").rstrip("\n")
     v1_synth = (PROMPTS_DIR / "v1" / "synthesis.txt").read_text(encoding="utf-8").rstrip("\n")
+    v2_orch = (PROMPTS_DIR / "v2" / "orchestrator.txt").read_text(encoding="utf-8").rstrip("\n")
     v1_orch = (PROMPTS_DIR / "v1" / "orchestrator.txt").read_text(encoding="utf-8").rstrip("\n")
     v1_med = (PROMPTS_DIR / "v1" / "medical_expert.txt").read_text(encoding="utf-8").rstrip("\n")
     assert synth == v2_synth and synth != v1_synth
     assert all(m in synth for m in V2_MARKERS)
-    assert orch == v1_orch  # fell back to v1 (no v2/orchestrator.txt)
-    assert med == v1_med    # fell back to v1 (no v2/medical_expert.txt)
+    assert orch == v2_orch and orch != v1_orch  # v2 overrides the orchestrator too
+    assert med == v1_med                         # medical_expert still falls back to v1
 
 
 def test_unknown_variant_falls_back_to_v1():
