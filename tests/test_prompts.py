@@ -42,7 +42,7 @@ def _run_team_capturing_synth(variant):
     captured = {}
 
     async def fake_chat(client, model, messages, *, tools=None, response_format=None,
-                        temperature=None, max_tokens=None):
+                        temperature=None, max_tokens=None, **kwargs):
         if response_format is not None:
             captured["synth"] = messages
             return {"content": ENVELOPE}
@@ -172,7 +172,7 @@ def test_team_passes_through_a_schema_valid_two_section_table_envelope_under_v2(
     })
 
     async def fake_chat(client, model, messages, *, tools=None, response_format=None,
-                        temperature=None, max_tokens=None):
+                        temperature=None, max_tokens=None, **kwargs):
         if response_format is not None:
             return {"content": v2_envelope}
         return {"content": "ok", "tool_calls": None}

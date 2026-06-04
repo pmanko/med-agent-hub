@@ -13,7 +13,7 @@ from server import team
 
 def _fake_chat_factory(calls):
     async def fake_chat(client, model, messages, *, tools=None, response_format=None,
-                        temperature=None, max_tokens=None, frequency_penalty=None):
+                        temperature=None, max_tokens=None, repeat_penalty=None, dry_multiplier=None, **kwargs):
         calls.append((model, response_format is not None))
         if response_format is not None:  # synthesis turn (schema-bound)
             return {"content": json.dumps({"answer": "ok", "citations": [], "blocks": []})}
@@ -46,16 +46,16 @@ def test_synthesis_uses_synthesizer_model_loop_uses_orchestrator(monkeypatch):
 
 
 def test_synthesis_applies_anti_degeneration_params(monkeypatch):
-    """The synthesis call gets a frequency penalty + a temperature floor (breaks
-    the small synth's repetition loop); the orchestrator loop gets neither, so its
+    """The synthesis call gets a repeat penalty + a temperature floor (breaks the
+    small synth's repetition loop); the orchestrator loop gets neither, so its
     tool-calling stays at the request temperature. Red without the fix: synth's
-    frequency_penalty would be None and its temperature would be the request's 0.0."""
+    repeat_penalty would be None and its temperature would be the request's 0.0."""
     seen = []
 
     async def fake_chat(client, model, messages, *, tools=None, response_format=None,
-                        temperature=None, max_tokens=None, frequency_penalty=None):
+                        temperature=None, max_tokens=None, repeat_penalty=None, dry_multiplier=None, **kwargs):
         seen.append({"synth": response_format is not None,
-                     "temperature": temperature, "frequency_penalty": frequency_penalty})
+                     "temperature": temperature, "repeat_penalty": repeat_penalty})
         if response_format is not None:
             return {"content": json.dumps({"answer": "ok", "citations": [], "blocks": []})}
         return {"content": "", "tool_calls": None}
@@ -67,9 +67,9 @@ def test_synthesis_applies_anti_degeneration_params(monkeypatch):
     ))
     synth = [c for c in seen if c["synth"]]
     loop = [c for c in seen if not c["synth"]]
-    assert synth and synth[0]["frequency_penalty"] == team._SYNTH_FREQUENCY_PENALTY, seen
+    assert synth and synth[0]["repeat_penalty"] == team.SYNTH_REPEAT_PENALTY, seen
     assert synth[0]["temperature"] >= team._SYNTH_MIN_TEMPERATURE, seen
-    assert loop and all(c["frequency_penalty"] is None for c in loop), seen
+    assert loop and all(c["repeat_penalty"] is None for c in loop), seen
 
 
 def test_synthesis_reads_reasoning_content_when_content_empty(monkeypatch):
@@ -78,7 +78,7 @@ def test_synthesis_reads_reasoning_content_when_content_empty(monkeypatch):
     instead of falling back. Red without the fix: empty content -> run_team returns the
     'I could not produce a complete answer' fallback, so out['answer'] != the real answer."""
     async def fake_chat(client, model, messages, *, tools=None, response_format=None,
-                        temperature=None, max_tokens=None, frequency_penalty=None):
+                        temperature=None, max_tokens=None, repeat_penalty=None, dry_multiplier=None, **kwargs):
         if response_format is not None:  # synthesis turn: answer hidden in reasoning_content
             return {"content": "",
                     "reasoning_content": json.dumps({"answer": "qwen-ok", "citations": [], "blocks": []})}
@@ -101,7 +101,7 @@ def test_synthesis_normalizes_literal_newline_and_reconciles_citations(monkeypat
     literal = "**Answer**" + "\\n" + "Regimen is outdated [29], [30]."  # literal backslash-n
 
     async def fake_chat(client, model, messages, *, tools=None, response_format=None,
-                        temperature=None, max_tokens=None, frequency_penalty=None):
+                        temperature=None, max_tokens=None, repeat_penalty=None, dry_multiplier=None, **kwargs):
         if response_format is not None:
             return {"content": json.dumps({"answer": literal, "citations": [], "blocks": []})}
         return {"content": "", "tool_calls": None}

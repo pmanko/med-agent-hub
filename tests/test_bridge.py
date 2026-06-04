@@ -15,7 +15,7 @@ from fastapi.testclient import TestClient
 
 from server import team
 from server.main import app
-from server.openai_compat import TEAM_MODEL_ID
+from server.openai_compat import TEAM_PRESETS
 
 ENVELOPE = json.dumps({"answer": "Lisinopril 10 mg [1]", "citations": [1], "blocks": []})
 RESP_FORMAT = {"type": "json_schema", "json_schema": {"name": "chart_answer", "schema": {}}}
@@ -34,7 +34,7 @@ def test_run_team_produces_the_envelope_from_the_final_synthesis_call():
     # Orchestrator takes no tool action; the constrained synthesis call returns
     # the chart_answer envelope, which run_team passes straight through.
     async def fake_chat(client, model, messages, *, tools=None, response_format=None,
-                        temperature=None, max_tokens=None):
+                        temperature=None, max_tokens=None, **kwargs):
         if response_format is not None:
             return {"content": ENVELOPE}
         return {"content": "ok", "tool_calls": None}
@@ -54,7 +54,7 @@ def test_response_format_is_only_applied_on_the_final_synthesis_call():
     seen = []
 
     async def fake_chat(client, model, messages, *, tools=None, response_format=None,
-                        temperature=None, max_tokens=None):
+                        temperature=None, max_tokens=None, **kwargs):
         seen.append({"tools": bool(tools), "rf": bool(response_format)})
         return {"content": ENVELOPE} if response_format is not None else {"content": "ok", "tool_calls": None}
 
@@ -72,7 +72,7 @@ def test_orchestrator_consults_the_medical_expert_on_a_tool_call():
     calls = []
 
     async def fake_chat(client, model, messages, *, tools=None, response_format=None,
-                        temperature=None, max_tokens=None):
+                        temperature=None, max_tokens=None, **kwargs):
         calls.append(model)
         if response_format is not None:
             return {"content": ENVELOPE}
@@ -106,7 +106,7 @@ def test_kb_results_are_threaded_into_the_medical_expert():
     orch_turns = {"n": 0}
 
     async def fake_chat(client, model, messages, *, tools=None, response_format=None,
-                        temperature=None, max_tokens=None):
+                        temperature=None, max_tokens=None, **kwargs):
         if response_format is not None:
             return {"content": ENVELOPE}
         if model == team.llm_config.med_model:
@@ -140,7 +140,7 @@ def test_orchestrator_can_search_the_knowledge_base():
     captured = {}
 
     async def fake_chat(client, model, messages, *, tools=None, response_format=None,
-                        temperature=None, max_tokens=None):
+                        temperature=None, max_tokens=None, **kwargs):
         if response_format is not None:
             captured["synth"] = messages
             return {"content": ENVELOPE}
@@ -168,7 +168,7 @@ def test_orchestrator_can_search_the_knowledge_base():
 
 def test_run_team_falls_back_to_a_valid_envelope_when_synthesis_fails():
     async def fake_chat(client, model, messages, *, tools=None, response_format=None,
-                        temperature=None, max_tokens=None):
+                        temperature=None, max_tokens=None, **kwargs):
         if response_format is not None:
             raise RuntimeError("LM Studio 400: context overflow")
         return {"content": "ok", "tool_calls": None}
@@ -182,12 +182,12 @@ def test_run_team_falls_back_to_a_valid_envelope_when_synthesis_fails():
     assert env["citations"] == [] and env["blocks"] == []
 
 
-def test_v1_models_advertises_the_single_team_choice():
+def test_v1_models_advertises_the_team_presets():
     client = TestClient(app)
     r = client.get("/v1/models")
     assert r.status_code == 200
     ids = [m["id"] for m in r.json()["data"]]
-    assert ids == [TEAM_MODEL_ID]
+    assert ids == list(TEAM_PRESETS)
 
 
 def test_chat_completions_team_returns_openai_shape_with_the_envelope():
@@ -201,12 +201,12 @@ def test_chat_completions_team_returns_openai_shape_with_the_envelope():
         client = TestClient(app)
         r = client.post(
             "/v1/chat/completions",
-            json={"model": TEAM_MODEL_ID, "messages": MESSAGES, "response_format": RESP_FORMAT},
+            json={"model": "med-agent-team-med", "messages": MESSAGES, "response_format": RESP_FORMAT},
         )
 
     assert r.status_code == 200
     body = r.json()
-    assert body["model"] == TEAM_MODEL_ID
+    assert body["model"] == "med-agent-team-med"
     content = body["choices"][0]["message"]["content"]
     assert json.loads(content)["citations"] == [1]
 
