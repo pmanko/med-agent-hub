@@ -13,17 +13,17 @@
 # Model ids are the LLM backend's served ids (the llama-router section names).
 levels:
   med-agent-team-low:
-    orchestrator: gemma-e2b
-    expert: medgemma-1.5-4b        # small expert; set to null to drop the expert
+    orchestrator: gemma-e2b-q2     # gemma-4-E2B 2-bit (deliberately tiny orchestrator)
+    expert: medgemma-1.5-4b        # small expert (~3GB); set to null to drop the expert
     synthesizer: qwen3-4b
     synthesis_prompt: synthesis-low
 
   med-agent-team-med:
-    orchestrator: gemma-e4b
-    expert: medgemma-1.5-4b
+    orchestrator: gemma-e4b-q8     # gemma-4-E4B 8-bit
+    expert: medgemma-1.5-4b-q8     # medgemma-1.5-4b 8-bit
     synthesizer: qwen2.5-14b
 
   med-agent-team-high:
-    orchestrator: gemma-31b
+    orchestrator: gemma-31b        # gemma-4-31B-it
     expert: medgemma-27b
-    synthesizer: qwen3.6-35b
+    synthesizer: qwen3.6-35b-q6    # Qwen3.6-35B-A3B 6-bit (thinking synth)
