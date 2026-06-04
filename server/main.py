@@ -26,15 +26,18 @@ server_start_time = time.time()
 app = FastAPI(
     title="med-agent-hub",
     description=(
-        "A2A-routed medical chat. OpenAI-compat /v1/chat/completions front; "
-        "router agent dispatches to medical or clinical subagent."
+        "In-process Med Agent Team behind an OpenAI-compat /v1/chat/completions "
+        "+ /v1/models surface; one request runs the orchestrator → tools → "
+        "synthesis loop in this process."
     ),
 )
 
+# Server-to-server only (the chartsearchai backend calls the hub); no browser
+# credentials, so wildcard origins with credentials disabled is the valid combo.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )

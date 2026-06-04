@@ -2,13 +2,14 @@
 OpenAI-compatible bridge: the only consumer contract for med-agent-hub.
 
 `POST /v1/chat/completions` accepts a standard OpenAI chat request from a
-consumer (OpenMRS chartsearchai) and either runs the in-process Med Agent Team
-or forwards straight to a single LM Studio model — the latter gives a team-vs-raw
-A/B baseline and satisfies the picker's "needs >= 2 models" constraint.
+consumer (OpenMRS chartsearchai). If `model` is one of the advertised team
+presets it runs the in-process Med Agent Team for that level; any other `model`
+is forwarded straight to a single LM Studio model (a raw team-vs-single baseline).
 
-`GET /v1/models` advertises the team id plus the underlying model ids. We do NOT
-implement LM Studio's native `/api/v1/models`; letting it 404 tags this endpoint
-as `generic-openai-compat` to the consumer's model-switch probe.
+`GET /v1/models` advertises the three team presets (`med-agent-team-low/med/high`),
+which is what the consumer's model picker lists. We do NOT implement LM Studio's
+native `/api/v1/models`; letting it 404 tags this endpoint as
+`generic-openai-compat` to the consumer's model-switch probe.
 """
 
 import json
@@ -28,8 +29,6 @@ from .team import run_team, TEAM_PRESETS, team_config_for
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-TEAM_MODEL_ID = "med-agent-team"
 
 
 class ChatCompletionRequest(BaseModel):

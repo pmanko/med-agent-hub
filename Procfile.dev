@@ -1,4 +1,1 @@
 web: UVICORN_ENV_FILE=.env poetry run uvicorn server.main:app --host 0.0.0.0 --port ${WEB_PORT:-8080} --reload --env-file .env
-router: UVICORN_ENV_FILE=.env poetry run uvicorn server.sdk_agents.router_server:app --host 0.0.0.0 --port ${A2A_ROUTER_PORT:-9100} --reload --env-file .env
-medical: UVICORN_ENV_FILE=.env poetry run uvicorn server.sdk_agents.medical_server:app --host 0.0.0.0 --port ${A2A_MEDICAL_PORT:-${A2A_MEDGEMMA_PORT:-9101}} --reload --env-file .env
-clinical: UVICORN_ENV_FILE=.env poetry run uvicorn server.sdk_agents.clinical_server:app --host 0.0.0.0 --port ${A2A_CLINICAL_PORT:-9102} --reload --env-file .env
