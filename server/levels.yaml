@@ -27,3 +27,8 @@ levels:
     orchestrator: gemma-31b        # gemma-4-31B-it
     expert: medgemma-27b
     synthesizer: qwen3.6-35b-q6    # Qwen3.6-35B-A3B 6-bit (thinking synth)
+
+  med-agent-team-12b:
+    orchestrator: gemma-4-12b      # gemma-4-12B-it Q8 — strong dense orchestrator
+    expert: medgemma-1.5-4b-q8     # same expert as MED — isolates the orchestrator variable
+    synthesizer: qwen2.5-14b       # same synth as MED
