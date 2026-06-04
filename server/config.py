@@ -32,20 +32,10 @@ MED_MODEL = os.getenv("MED_MODEL", "medgemma-1.5-4b-it")
 SYNTHESIZER_MODEL = os.getenv("SYNTHESIZER_MODEL", ORCHESTRATOR_MODEL)
 CLINICAL_RESEARCH_MODEL = os.getenv("CLINICAL_RESEARCH_MODEL", "gemma-3-1b-it")
 
-# The three published team LEVELS (low / med / high). Each level fixes the synthesizer
-# + clinical-expert MODEL; the orchestrator (ORCHESTRATOR_MODEL) is shared across levels.
-# Persistent + env-overridable so the exact LM Studio ids are set without code edits.
-# The `low` level additionally runs an optimized synthesis prompt (team.py TEAM_PRESETS).
-SYNTH_MODEL_HIGH = os.getenv("SYNTH_MODEL_HIGH", "qwen3.6-35b-a3b-mlx")        # ~20GB MoE, reasoning (thinking always on in LM Studio)
-SYNTH_MODEL_MED = os.getenv("SYNTH_MODEL_MED", "qwen2.5-32b-instruct")         # ~18GB dense, non-reasoning (clean JSON, no thinking trace)
-SYNTH_MODEL_LOW = os.getenv("SYNTH_MODEL_LOW", "qwen2.5-14b-instruct-mlx")     # ~8GB dense, non-reasoning
-EXPERT_MODEL_HIGH = os.getenv("EXPERT_MODEL_HIGH", "medgemma-27b-text-it-mlx")  # 16GB; high-only
-EXPERT_MODEL_MED = os.getenv("EXPERT_MODEL_MED", MED_MODEL)   # medgemma-1.5-4b-it — shared with low so low+med simu-load fits 64GB
-EXPERT_MODEL_LOW = os.getenv("EXPERT_MODEL_LOW", MED_MODEL)   # medgemma-1.5-4b-it
-# HIGH uses a stronger orchestrator (gemma-4-26b-a4b) than the shared e4b: the orchestrator emits only
-# short tool-loop decisions (below the gemma-4 long-JSON collapse threshold), so the bigger MoE removes
-# the e4b reasoning bottleneck without collapse risk. low/med keep the e4b orchestrator (ORCHESTRATOR_MODEL).
-ORCHESTRATOR_MODEL_HIGH = os.getenv("ORCHESTRATOR_MODEL_HIGH", "google/gemma-4-26b-a4b")
+# Per-tier models (orchestrator / expert / synthesizer per level) now live in
+# server/levels.yaml, resolved by levels_loader and passed to run_team per request.
+# ORCHESTRATOR_MODEL / MED_MODEL / SYNTHESIZER_MODEL above are only the fallback
+# defaults for direct run_team calls (tests) and the raw-passthrough path.
 
 # Legacy alias for backward compatibility
 GENERAL_MODEL = ORCHESTRATOR_MODEL

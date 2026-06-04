@@ -13,9 +13,8 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from server import team
+from server import team, levels_loader
 from server.main import app
-from server.openai_compat import TEAM_PRESETS
 
 ENVELOPE = json.dumps({"answer": "Lisinopril 10 mg [1]", "citations": [1], "blocks": []})
 RESP_FORMAT = {"type": "json_schema", "json_schema": {"name": "chart_answer", "schema": {}}}
@@ -182,12 +181,12 @@ def test_run_team_falls_back_to_a_valid_envelope_when_synthesis_fails():
     assert env["citations"] == [] and env["blocks"] == []
 
 
-def test_v1_models_advertises_the_team_presets():
+def test_v1_models_advertises_the_levels():
     client = TestClient(app)
     r = client.get("/v1/models")
     assert r.status_code == 200
     ids = [m["id"] for m in r.json()["data"]]
-    assert ids == list(TEAM_PRESETS)
+    assert ids == levels_loader.level_ids()
 
 
 def test_chat_completions_team_returns_openai_shape_with_the_envelope():

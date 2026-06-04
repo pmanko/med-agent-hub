@@ -24,7 +24,8 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from .config import llm_config
-from .team import run_team, TEAM_PRESETS, team_config_for
+from .team import run_team
+from .levels_loader import level_ids, get_level
 
 logger = logging.getLogger(__name__)
 
@@ -42,11 +43,12 @@ class ChatCompletionRequest(BaseModel):
 
 
 def _advertised_models() -> List[str]:
-    """Advertise the team presets so the UI picker and chartsearchai's exact-match
-    served-model validation both accept them. Each id selects which model runs each
-    role (orchestrator/synthesizer/expert) per request — one instance serves any
-    config, no reboot. Raw backends stay callable via passthrough but aren't listed."""
-    return list(TEAM_PRESETS)
+    """Advertise the team levels (server/levels.yaml keys) so the UI picker and
+    chartsearchai's exact-match served-model validation both accept them. Each id
+    selects which model runs each role (orchestrator/synthesizer/expert) per request
+    — one instance serves any config, no reboot. Raw backends stay callable via
+    passthrough but aren't listed."""
+    return level_ids()
 
 
 @router.get("/v1/models")
@@ -83,16 +85,24 @@ async def _passthrough_content(req: ChatCompletionRequest) -> str:
 
 
 async def _content_for(req: ChatCompletionRequest) -> str:
-    """Team for the team id; raw passthrough for an advertised backend id."""
-    if req.model in TEAM_PRESETS:
-        return await run_team(
-            req.messages,
-            response_format=req.response_format,
-            temperature=req.temperature,
-            max_tokens=req.max_tokens,
-            **team_config_for(req.model),
-        )
-    return await _passthrough_content(req)
+    """Run the team for an advertised level id; raw passthrough for any other model."""
+    try:
+        level = get_level(req.model)
+    except KeyError:
+        return await _passthrough_content(req)
+    return await run_team(
+        req.messages,
+        response_format=req.response_format,
+        temperature=req.temperature,
+        max_tokens=req.max_tokens,
+        orchestrator_model=level.orchestrator,
+        synthesizer_model=level.synthesizer,
+        expert_model=level.expert,
+        orchestrator_prompt=level.orchestrator_prompt,
+        synthesizer_prompt=level.synthesis_prompt,
+        expert_prompt=level.expert_prompt,
+        has_expert=level.has_expert,
+    )
 
 
 def _completion_envelope(model: str, content: str) -> Dict[str, Any]:

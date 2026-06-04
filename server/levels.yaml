@@ -1,0 +1,29 @@
+# Advertised team levels — the /v1/models groupings the consumer's picker lists.
+#
+# Each key is a level id; each value fixes the per-role models (served by
+# LLM_BASE_URL) plus optional per-level prompt files. Read PER REQUEST, so editing
+# this (bind-mounted) file changes behaviour with no rebuild. This file is the
+# single source of truth for the team tiers.
+#
+#   add / remove a level     -> add / remove a block
+#   change a model           -> edit one line
+#   per-level prompt         -> set orchestrator_prompt / expert_prompt / synthesis_prompt
+#   run a level with NO expert -> `expert: null` (drops the medical_expert tool + role)
+#
+# Model ids are the LLM backend's served ids (the llama-router section names).
+levels:
+  med-agent-team-low:
+    orchestrator: gemma-e2b
+    expert: medgemma-1.5-4b        # small expert; set to null to drop the expert
+    synthesizer: qwen3-4b
+    synthesis_prompt: synthesis-low
+
+  med-agent-team-med:
+    orchestrator: gemma-e4b
+    expert: medgemma-1.5-4b
+    synthesizer: qwen2.5-14b
+
+  med-agent-team-high:
+    orchestrator: gemma-31b
+    expert: medgemma-27b
+    synthesizer: qwen3.6-35b

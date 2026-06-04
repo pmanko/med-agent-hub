@@ -1,35 +1,51 @@
-"""Per-request team-model selection: the OpenAI `model` id selects which model runs
-each role (orchestrator / synthesizer / expert), so ONE med-agent-hub serves any
-advertised config per request — no reboot. Advertised presets pass chartsearchai's
-exact-match served-model validation. Mocks the LM Studio boundary; exercises the
-real run_team + team_config_for. Run: pytest tests/test_team_config.py
+"""Team levels config: the OpenAI `model` id selects a level (server/levels.yaml),
+which fixes the per-role models (orchestrator / synthesizer / expert) + prompts, so
+ONE med-agent-hub serves any tier per request — no reboot. `expert: null` drops the
+medical_expert tool + role. Mocks the LM Studio boundary; exercises the real
+levels_loader + run_team. Run: pytest tests/test_team_config.py
 """
 
 import asyncio
 import json
 
-from server import team
+import pytest
+
+from server import team, levels_loader
 
 
-def test_team_config_for_maps_preset_ids():
-    from server import config as cfg
-    # med-agent-hub publishes EXACTLY three levels: low / med / high.
-    assert set(team.TEAM_PRESETS) == {"med-agent-team-low", "med-agent-team-med", "med-agent-team-high"}
-    # high: biggest synth + big expert (orchestrator stays the default e4b).
-    high = team.team_config_for("med-agent-team-high")
-    assert high["synthesizer_model"] == cfg.SYNTH_MODEL_HIGH
-    assert high["expert_model"] == cfg.EXPERT_MODEL_HIGH
-    # med: distinct mid-size synth + big expert.
-    med = team.team_config_for("med-agent-team-med")
-    assert med["synthesizer_model"] == cfg.SYNTH_MODEL_MED
-    assert med["expert_model"] == cfg.EXPERT_MODEL_MED
-    # low: small synth + small expert + an optimized synthesis prompt for that model class.
-    low = team.team_config_for("med-agent-team-low")
-    assert low["synthesizer_model"] == cfg.SYNTH_MODEL_LOW
-    assert low["expert_model"] == cfg.EXPERT_MODEL_LOW
-    assert low["synthesizer_prompt"] == "synthesis-low"
-    # an unadvertised id never crashes -> empty overrides (defaults)
-    assert team.team_config_for("med-agent-team-bogus") == {}
+def test_level_ids_advertises_the_configured_levels():
+    # med-agent-hub publishes exactly the keys in levels.yaml.
+    assert levels_loader.level_ids() == [
+        "med-agent-team-low", "med-agent-team-med", "med-agent-team-high"]
+
+
+def test_get_level_resolves_models_and_prompts():
+    low = levels_loader.get_level("med-agent-team-low")
+    assert low.orchestrator and low.synthesizer        # required roles present
+    assert low.synthesis_prompt == "synthesis-low"     # low's optimized synth prompt
+    high = levels_loader.get_level("med-agent-team-high")
+    assert high.expert and high.expert != low.expert   # high steps up to a bigger expert
+    assert high.synthesis_prompt == "synthesis"        # default prompt name
+
+
+def test_unknown_level_fails_loud():
+    with pytest.raises(KeyError):
+        levels_loader.get_level("med-agent-team-bogus")
+
+
+def test_expert_toggle_drops_the_medical_expert_tool():
+    # The whole point of the toggle: a level with no expert is offered no
+    # medical_expert tool. Red against the old hardcoded two-tool list.
+    names_with = [t["function"]["name"] for t in team._tool_definitions(has_expert=True)]
+    names_without = [t["function"]["name"] for t in team._tool_definitions(has_expert=False)]
+    assert "kb_search" in names_with and "medical_expert" in names_with
+    assert "kb_search" in names_without and "medical_expert" not in names_without
+
+
+def test_level_with_null_expert_reports_no_expert():
+    # A Level with expert unset reports has_expert False (drives the tool toggle).
+    assert levels_loader.Level(id="x", orchestrator="o", synthesizer="s", expert=None).has_expert is False
+    assert levels_loader.Level(id="y", orchestrator="o", synthesizer="s", expert="medgemma").has_expert is True
 
 
 def _stateful_fake(calls):

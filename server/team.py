@@ -33,9 +33,7 @@ import httpx
 
 from . import kb
 from .config import (
-    llm_config, SYNTH_MODEL_HIGH, SYNTH_MODEL_MED, SYNTH_MODEL_LOW,
-    EXPERT_MODEL_HIGH, EXPERT_MODEL_MED, EXPERT_MODEL_LOW,
-    ORCHESTRATOR_MODEL_HIGH, SYNTH_REPEAT_PENALTY,
+    llm_config, SYNTH_REPEAT_PENALTY,
     ORCHESTRATOR_DRY_MULTIPLIER, EXPERT_DRY_MULTIPLIER, SYNTH_DRY_MULTIPLIER,
 )
 from .prompt_loader import load_prompt
@@ -54,41 +52,18 @@ MAX_TOOL_ITERATIONS = 3
 _KB_BLOCK_HEADER = "Knowledge-base reference snippets"
 
 
-# The ONLY models med-agent-hub publishes: three team LEVELS. The OpenAI `model` id
-# selects the level; med-agent-hub applies that level's persistent per-role models +
-# prompts (never sent per request). The orchestrator is e4b for low/med, gemma-4-26b-a4b for high; the synthesizer
-# + clinical-expert models step up low -> med -> high; the `low` level swaps to a
-# synthesis prompt optimized for the smaller synthesizer's model class. Model ids are
-# config-driven (config.py, env-overridable). All three synthesizers are non-gemma-4
-# (Qwen), so none hit the gemma-4 repetition collapse (#622).
-TEAM_PRESETS: Dict[str, Dict[str, str]] = {
-    "med-agent-team-low": {
-        "synthesizer_model": SYNTH_MODEL_LOW,
-        "expert_model": EXPERT_MODEL_LOW,
-        "synthesizer_prompt": "synthesis-low",
-    },
-    "med-agent-team-med": {
-        "synthesizer_model": SYNTH_MODEL_MED,
-        "expert_model": EXPERT_MODEL_MED,
-    },
-    "med-agent-team-high": {
-        "synthesizer_model": SYNTH_MODEL_HIGH,
-        "expert_model": EXPERT_MODEL_HIGH,
-        "orchestrator_model": ORCHESTRATOR_MODEL_HIGH,
-    },
-}
+# Team levels (per-tier orchestrator/expert/synthesizer models + prompts) are
+# declared in server/levels.yaml and resolved by server/levels_loader (see
+# openai_compat._content_for). run_team takes the resolved per-role models, prompt
+# names, and the has_expert toggle as kwargs — no presets baked into code.
 
 
-def team_config_for(model_id: str) -> Dict[str, str]:
-    """Map an advertised team model id to run_team model overrides. Unknown ids
-    (which chartsearchai validation would have rejected) -> defaults (empty)."""
-    return dict(TEAM_PRESETS.get(model_id, {}))
-
-
-def _tool_definitions() -> List[Dict[str, Any]]:
-    """OpenAI tool definitions the orchestrator may call. Descriptions carry the
-    trigger keywords + ordering so a small model sequences kb_search then expert."""
-    return [
+def _tool_definitions(has_expert: bool = True) -> List[Dict[str, Any]]:
+    """OpenAI tool definitions the orchestrator may call. kb_search is always
+    offered; medical_expert only when the level has an expert (so a level with
+    expert: null runs with no expert tool). Descriptions carry the trigger
+    keywords + ordering so a small model sequences kb_search then expert."""
+    tools: List[Dict[str, Any]] = [
         {
             "type": "function",
             "function": {
@@ -146,6 +121,9 @@ def _tool_definitions() -> List[Dict[str, Any]]:
             },
         },
     ]
+    if not has_expert:
+        tools = [t for t in tools if t["function"]["name"] != "medical_expert"]
+    return tools
 
 
 def _chart_context(messages: List[Dict[str, Any]]) -> str:
@@ -338,6 +316,7 @@ async def run_team(
     orchestrator_prompt: Optional[str] = None,
     synthesizer_prompt: Optional[str] = None,
     expert_prompt: Optional[str] = None,
+    has_expert: bool = True,
 ) -> str:
     """
     Run the team for one chartsearchai turn.
@@ -375,7 +354,7 @@ async def run_team(
             for _ in range(MAX_TOOL_ITERATIONS):
                 msg = await _chat(
                     client, model, loop_messages,
-                    tools=_tool_definitions(), temperature=temperature, max_tokens=max_tokens,
+                    tools=_tool_definitions(has_expert), temperature=temperature, max_tokens=max_tokens,
                     dry_multiplier=ORCHESTRATOR_DRY_MULTIPLIER,  # DRY OFF: tool-calling, distortion risk
                 )
                 tool_calls = msg.get("tool_calls")
