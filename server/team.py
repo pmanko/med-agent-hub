@@ -199,6 +199,9 @@ async def _run_medical_expert(
     expert_system: str,
     kb_context: str = "",
     model: Optional[str] = None,
+    temperature: float = 0.1,
+    repeat_penalty: Optional[float] = None,
+    dry_multiplier: float = EXPERT_DRY_MULTIPLIER,
 ) -> str:
     """Typed clinical-expert tool: a single MedGemma call, free text (no schema).
     The KB block (when any was retrieved) is placed FIRST in the user message so the
@@ -218,8 +221,8 @@ async def _run_medical_expert(
         {"role": "user", "content": user},
     ]
     try:
-        msg = await _chat(client, model or llm_config.med_model, messages, temperature=0.1,
-                          max_tokens=800, dry_multiplier=EXPERT_DRY_MULTIPLIER)
+        msg = await _chat(client, model or llm_config.med_model, messages, temperature=temperature,
+                          max_tokens=800, repeat_penalty=repeat_penalty, dry_multiplier=dry_multiplier)
         return _message_text(msg) or "(no expert response)"
     except Exception as e:  # tool failure must not abort the turn
         logger.warning("medical_expert tool failed: %s", e)
@@ -323,6 +326,15 @@ _VALIDATOR_RF = {
 }
 
 
+def _knob(knobs: Optional[Dict[str, Any]], role: str, key: str, default: Any) -> Any:
+    """Resolve one per-role sampling knob from a level's `knobs` block, falling back to
+    the global default when the role or key is unset. knobs = {role: {key: value}}."""
+    role_knobs = (knobs or {}).get(role)
+    if isinstance(role_knobs, dict) and role_knobs.get(key) is not None:
+        return role_knobs[key]
+    return default
+
+
 def _validator_feedback(verdict: Dict[str, Any]) -> str:
     """Turn a flagged verdict into specific re-synthesis instructions."""
     parts = ["A reviewer audited your draft against the patient chart and found issues "
@@ -350,6 +362,9 @@ async def _run_validator(
     gathered: str,
     answer: str,
     max_tokens: Optional[int],
+    temperature: float = 0.0,
+    repeat_penalty: Optional[float] = None,
+    dry_multiplier: Optional[float] = None,
 ) -> Dict[str, Any]:
     """One audit pass: judge the gathered CONTEXT and the draft ANSWER separately
     against the chart. Returns {ok, answer_issues, context_issues}; fails OPEN (ok=True)
@@ -368,7 +383,8 @@ async def _run_validator(
     )
     msg = await _chat(
         client, validator_model, [{"role": "user", "content": audit_user}],
-        response_format=_VALIDATOR_RF, temperature=0.0, max_tokens=max_tokens)
+        response_format=_VALIDATOR_RF, temperature=temperature, max_tokens=max_tokens,
+        repeat_penalty=repeat_penalty, dry_multiplier=dry_multiplier)
     try:
         verdict = json.loads(_message_text(msg))
     except (json.JSONDecodeError, TypeError):
@@ -387,7 +403,12 @@ async def _audit_and_revise(
     synth_model: str,
     synth_messages: List[Dict[str, Any]],
     response_format: Optional[Dict[str, Any]],
-    temperature: float,
+    synth_temperature: float,
+    synth_repeat_penalty: Optional[float],
+    synth_dry: Optional[float],
+    validator_temperature: float,
+    validator_repeat_penalty: Optional[float],
+    validator_dry: Optional[float],
     max_tokens: Optional[int],
     max_loops: int,
 ) -> str:
@@ -398,7 +419,9 @@ async def _audit_and_revise(
         try:
             verdict = await _run_validator(
                 client, validator_model, validator_prompt,
-                chart=chart, gathered=gathered, answer=content, max_tokens=max_tokens)
+                chart=chart, gathered=gathered, answer=content, max_tokens=max_tokens,
+                temperature=validator_temperature, repeat_penalty=validator_repeat_penalty,
+                dry_multiplier=validator_dry)
         except Exception as e:
             logger.warning("validator call failed, keeping draft: %s", e)
             return content
@@ -411,9 +434,9 @@ async def _audit_and_revise(
         try:
             msg = await _chat(
                 client, synth_model, revise_messages,
-                response_format=response_format, temperature=temperature,
-                max_tokens=max_tokens, repeat_penalty=SYNTH_REPEAT_PENALTY,
-                dry_multiplier=SYNTH_DRY_MULTIPLIER)
+                response_format=response_format, temperature=synth_temperature,
+                max_tokens=max_tokens, repeat_penalty=synth_repeat_penalty,
+                dry_multiplier=synth_dry)
             revised = _normalize_envelope(_message_text(msg))
             if revised:
                 content = revised
@@ -439,6 +462,7 @@ async def run_team(
     validator_model: Optional[str] = None,
     validator_prompt: Optional[str] = None,
     validator_max_loops: int = 1,
+    knobs: Optional[Dict[str, Any]] = None,
 ) -> str:
     """
     Run the team for one chartsearchai turn.
@@ -452,6 +476,21 @@ async def run_team(
     synth_model = synthesizer_model or llm_config.synthesizer_model
     expert_model = expert_model or llm_config.med_model
     chart = _chart_context(messages)
+
+    # Per-role sampling knobs: a level may override any role's temperature / repeat_penalty
+    # / dry; unset falls back to today's global default for that role.
+    orch_temp = _knob(knobs, "orchestrator", "temperature", temperature)
+    orch_rp = _knob(knobs, "orchestrator", "repeat_penalty", None)
+    orch_dry = _knob(knobs, "orchestrator", "dry", ORCHESTRATOR_DRY_MULTIPLIER)
+    exp_temp = _knob(knobs, "expert", "temperature", 0.1)
+    exp_rp = _knob(knobs, "expert", "repeat_penalty", None)
+    exp_dry = _knob(knobs, "expert", "dry", EXPERT_DRY_MULTIPLIER)
+    synth_temp = _knob(knobs, "synthesizer", "temperature", max(temperature or 0.0, _SYNTH_MIN_TEMPERATURE))
+    synth_rp = _knob(knobs, "synthesizer", "repeat_penalty", SYNTH_REPEAT_PENALTY)
+    synth_dry = _knob(knobs, "synthesizer", "dry", SYNTH_DRY_MULTIPLIER)
+    val_temp = _knob(knobs, "validator", "temperature", 0.0)
+    val_rp = _knob(knobs, "validator", "repeat_penalty", None)
+    val_dry = _knob(knobs, "validator", "dry", None)
 
     # Read the role prompts ONCE per request; thread the expert text into the
     # per-iteration expert call so the tool loop does not re-read it from disk
@@ -476,8 +515,8 @@ async def run_team(
             for _ in range(MAX_TOOL_ITERATIONS):
                 msg = await _chat(
                     client, model, loop_messages,
-                    tools=_tool_definitions(has_expert), temperature=temperature, max_tokens=max_tokens,
-                    dry_multiplier=ORCHESTRATOR_DRY_MULTIPLIER,  # DRY OFF: tool-calling, distortion risk
+                    tools=_tool_definitions(has_expert), temperature=orch_temp, max_tokens=max_tokens,
+                    repeat_penalty=orch_rp, dry_multiplier=orch_dry,  # DRY default OFF for tool-calling
                 )
                 tool_calls = msg.get("tool_calls")
                 if not tool_calls:
@@ -498,7 +537,8 @@ async def run_team(
                         if name == "medical_expert":
                             observation = await _run_medical_expert(
                                 client, args.get("query", ""), chart, expert_system,
-                                kb_context=kb_context, model=expert_model)
+                                kb_context=kb_context, model=expert_model,
+                                temperature=exp_temp, repeat_penalty=exp_rp, dry_multiplier=exp_dry)
                             expert_notes.append(observation)
                         elif name == "kb_search":
                             observation = _run_kb_search(args.get("query", ""))
@@ -524,12 +564,11 @@ async def run_team(
         synth_user = synthesis_instruction + "\n\n" + gathered if gathered else synthesis_instruction
         synth_messages = list(messages) + [{"role": "user", "content": synth_user}]
         try:
-            synth_temperature = max(temperature or 0.0, _SYNTH_MIN_TEMPERATURE)
             msg = await _chat(
                 client, synth_model, synth_messages,
-                response_format=response_format, temperature=synth_temperature,
-                max_tokens=max_tokens, repeat_penalty=SYNTH_REPEAT_PENALTY,
-                dry_multiplier=SYNTH_DRY_MULTIPLIER,
+                response_format=response_format, temperature=synth_temp,
+                max_tokens=max_tokens, repeat_penalty=synth_rp,
+                dry_multiplier=synth_dry,
             )
             content = _normalize_envelope(_message_text(msg))
             if content:
@@ -539,7 +578,9 @@ async def run_team(
                         validator_model=validator_model, validator_prompt=validator_prompt,
                         chart=chart, gathered=gathered,
                         synth_model=synth_model, synth_messages=synth_messages,
-                        response_format=response_format, temperature=synth_temperature,
+                        response_format=response_format,
+                        synth_temperature=synth_temp, synth_repeat_penalty=synth_rp, synth_dry=synth_dry,
+                        validator_temperature=val_temp, validator_repeat_penalty=val_rp, validator_dry=val_dry,
                         max_tokens=max_tokens, max_loops=validator_max_loops)
                 return content
             logger.warning("synthesis returned empty content; using fallback envelope")

@@ -105,6 +105,7 @@ async def _content_for(req: ChatCompletionRequest) -> str:
         validator_model=level.validator,
         validator_prompt=level.validator_prompt,
         validator_max_loops=level.validator_max_loops,
+        knobs=level.knobs,
     )
 
 

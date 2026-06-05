@@ -9,9 +9,9 @@ runs the level with NO medical expert — the orchestrator is offered no
 ``medical_expert`` tool and the expert role is skipped.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import yaml
 
@@ -32,6 +32,10 @@ class Level:
     validator: Optional[str] = None  # None -> no post-synthesis audit round
     validator_prompt: str = "validation"
     validator_max_loops: int = 1
+    # Optional per-role sampling knobs: {role: {temperature, repeat_penalty, dry}}.
+    # A role's entry overrides the global default for that role only; unset -> default.
+    # Roles: orchestrator / expert / synthesizer / validator.
+    knobs: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def has_expert(self) -> bool:
@@ -76,6 +80,7 @@ def get_level(level_id: str) -> Level:
             validator=spec.get("validator"),
             validator_prompt=spec.get("validator_prompt", "validation"),
             validator_max_loops=spec.get("validator_max_loops", 1),
+            knobs=spec.get("knobs") or {},
         )
     except KeyError as exc:
         raise KeyError(f"level {level_id!r} missing required field {exc}") from exc
