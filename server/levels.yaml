@@ -26,6 +26,14 @@ levels:
     validator: gemma-e4b-q8        # floor candidate — try e4b first (2-bit e2b over-flagged); compare vs 12b
     validator_max_loops: 1
 
+  med-agent-team-low-validated-12b:   # same LOW tier, 12B validator — the floor comparison vs e4b
+    orchestrator: gemma-e2b-q2
+    expert: medgemma-1.5-4b
+    synthesizer: qwen3-4b
+    synthesis_prompt: synthesis-low
+    validator: gemma-4-12b
+    validator_max_loops: 1
+
   med-agent-team-med:
     orchestrator: gemma-e4b-q8     # gemma-4-E4B 8-bit
     expert: medgemma-1.5-4b-q8     # medgemma-1.5-4b 8-bit
