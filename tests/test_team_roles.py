@@ -41,8 +41,9 @@ def test_synthesis_uses_synthesizer_model_loop_uses_orchestrator(monkeypatch):
     loop_models = [m for (m, is_synth) in calls if not is_synth]
     synth_models = [m for (m, is_synth) in calls if is_synth]
     assert loop_models and all(m == "ORCH-MODEL" for m in loop_models), calls
-    assert synth_models == ["SYNTH-MODEL"], calls
-    assert json.loads(out)["answer"] == "ok"
+    # Two-call synthesis (Answer + In-Depth) — both run on the synthesizer model.
+    assert synth_models and all(m == "SYNTH-MODEL" for m in synth_models), calls
+    assert "ok" in json.loads(out)["answer"]
 
 
 def test_synthesis_applies_anti_degeneration_params(monkeypatch):
@@ -89,7 +90,7 @@ def test_synthesis_reads_reasoning_content_when_content_empty(monkeypatch):
         _MESSAGES, response_format=_RF,
         orchestrator_model="ORCH-MODEL", synthesizer_model="SYNTH-MODEL",
     ))
-    assert json.loads(out)["answer"] == "qwen-ok", out
+    assert "qwen-ok" in json.loads(out)["answer"], out
 
 
 def test_synthesis_normalizes_literal_newline_and_reconciles_citations(monkeypatch):

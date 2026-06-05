@@ -16,13 +16,11 @@ levels:
     orchestrator: gemma-e2b-q2     # gemma-4-E2B 2-bit (deliberately tiny orchestrator)
     expert: medgemma-1.5-4b        # small expert (~3GB); set to null to drop the expert
     synthesizer: qwen3-4b
-    synthesis_prompt: synthesis-low
 
   med-agent-team-low-validated:    # LOW + a validator at a competent FLOOR (not tier-scaled)
     orchestrator: gemma-e2b-q2
     expert: medgemma-1.5-4b
     synthesizer: qwen3-4b
-    synthesis_prompt: synthesis-low
     validator: gemma-e4b-q8        # floor candidate — try e4b first (2-bit e2b over-flagged); compare vs 12b
     validator_max_loops: 1
 
@@ -30,7 +28,6 @@ levels:
     orchestrator: gemma-e2b-q2
     expert: medgemma-1.5-4b
     synthesizer: qwen3-4b
-    synthesis_prompt: synthesis-low
     validator: gemma-4-12b
     validator_max_loops: 1
 

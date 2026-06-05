@@ -1,8 +1,16 @@
-"""Validator role: an optional post-synthesis audit that drives TWO INDEPENDENT remediation
-paths — the **Answer** (strict: re-synthesize, else abstain) and the **In Depth** (advisory,
-claim-level: block/strip exactly the claims the validator flags, Answer untouched, never abstain).
-The In Depth is emitted as an enumerated claim list so each claim is individually addressable.
-Mocks the LM Studio boundary (`_chat`) and exercises the real run_team.
+"""Two-call generation + two independent validators. From generation onward the **Answer**
+and the **In Depth** are DISTINCT: a separate Answer synthesis (bound to chartsearchai's
+{answer, citations, blocks} schema) and a separate In-Depth synthesis (a list of claim strings),
+each audited by its own validator, combined into one markdown body ("**Answer**\\n...\\n\\n**In
+Depth**\\n- ...") only at the chartsearchai handoff.
+
+  ANSWER (strict): a flagged-with-a-reason Answer -> re-synthesize, else ABSTAIN the turn.
+  IN DEPTH (advisory, claim-level): drop exactly the claims the validator flags; never abstains.
+
+Mocks only the LM Studio boundary (`_chat`) and exercises the real run_team end-to-end (asserting
+the final combined answer string). The mock branches on the response_format json_schema name so the
+four distinct call sites (chart_answer synth, in_depth synth, answer_verdict, indepth_verdict) are
+served independently — exactly how the production code distinguishes them.
 Run: pytest tests/test_validator.py
 """
 
@@ -16,130 +24,139 @@ _MESSAGES = [
     {"role": "user", "content": "patient chart"},
     {"role": "user", "content": "the question"},
 ]
+# chartsearchai's envelope response_format; its json_schema name is what the Answer synth call
+# carries, so the mock recognizes that call site by this name.
 _RF = {"type": "json_schema", "json_schema": {"name": "chart_answer"}}
 
 
 def _factory(calls, verdicts):
-    """Mock _chat. Orchestrator loop -> no tools (break to synth). Synth -> a versioned envelope
-    whose answer has an **Answer** + a two-bullet **In Depth**. Validator -> a verdict
-    {answer_ok, indepth_drop} pulled from `verdicts` (the real _run_validator clamps the drop)."""
-    state = {"synth": 0, "val": 0}
+    """Mock _chat that branches on the response_format json_schema name, mirroring the four
+    distinct call sites in team.run_team:
+
+      "chart_answer"   (Answer synthesis)   -> a versioned {answer, citations, blocks} envelope;
+      "in_depth"       (In-Depth synthesis) -> two versioned claim strings;
+      "answer_verdict" (Answer validator)   -> {answer_ok, answer_issues} pulled from `verdicts`;
+      "indepth_verdict"(In-Depth validator) -> {drop} pulled from `verdicts`;
+      no response_format (orchestrator loop) -> no tools, no content (break to synthesis).
+
+    `verdicts` is the per-Answer-audit-attempt list; the In-Depth `drop` is read from the FIRST
+    verdict (the In-Depth validator runs once)."""
+    state = {"answer_synth": 0, "indepth_synth": 0, "answer_val": 0}
 
     async def fake_chat(client, model, messages, *, tools=None, response_format=None,
                         temperature=None, max_tokens=None, repeat_penalty=None,
                         dry_multiplier=None, **kwargs):
         name = (response_format or {}).get("json_schema", {}).get("name")
         calls.append((model, name))
-        if name == "validator_verdict":
-            v = verdicts[min(state["val"], len(verdicts) - 1)]
-            state["val"] += 1
+
+        if name == "chart_answer":  # Answer synthesis (chartsearchai envelope schema)
+            n = state["answer_synth"]
+            state["answer_synth"] += 1
             return {"content": json.dumps({
-                "answer_ok": v["answer_ok"], "answer_issues": "" if v["answer_ok"] else "wrong value",
-                "indepth_drop": v.get("indepth_drop", []), "indepth_issues": ""})}
-        if response_format is not None:  # synthesis (chart_answer schema)
-            n = state["synth"]
-            state["synth"] += 1
+                "answer": f"ans-v{n}", "citations": [], "blocks": []})}
+
+        if name == "in_depth":  # In-Depth synthesis (claim list)
+            n = state["indepth_synth"]
+            state["indepth_synth"] += 1
             return {"content": json.dumps({
-                "answer": f"**Answer** ans-v{n}\n\n**In Depth**\n- claim-A-v{n} [1]\n- claim-B-v{n} per WHO",
-                "citations": [], "blocks": []})}
-        return {"content": "", "tool_calls": None}  # loop turn
+                "claims": [f"claim-A-v{n}", f"claim-B-v{n}"]})}
+
+        if name == "answer_verdict":  # Answer validator
+            v = verdicts[min(state["answer_val"], len(verdicts) - 1)]
+            state["answer_val"] += 1
+            return {"content": json.dumps({
+                "answer_ok": v["answer_ok"], "answer_issues": v.get("answer_issues", "")})}
+
+        if name == "indepth_verdict":  # In-Depth validator
+            drop = verdicts[0].get("drop", []) if verdicts else []
+            return {"content": json.dumps({"drop": drop, "issues": ""})}
+
+        return {"content": "", "tool_calls": None}  # orchestrator loop turn
 
     return fake_chat
 
 
 def _counts(calls):
-    val = sum(1 for m, n in calls if n == "validator_verdict")
-    synth = sum(1 for m, n in calls if n == "chart_answer")
-    return val, synth
+    answer_synth = sum(1 for _m, n in calls if n == "chart_answer")
+    indepth_synth = sum(1 for _m, n in calls if n == "in_depth")
+    answer_val = sum(1 for _m, n in calls if n == "answer_verdict")
+    indepth_val = sum(1 for _m, n in calls if n == "indepth_verdict")
+    return answer_synth, indepth_synth, answer_val, indepth_val
 
 
 def _run(verdicts, **kw):
     calls = []
-    monkey = team
-    monkey._chat = _factory(calls, verdicts)
+    team._chat = _factory(calls, verdicts)
     out = asyncio.run(team.run_team(
         _MESSAGES, response_format=_RF, orchestrator_model="ORCH",
         synthesizer_model="SYNTH", validator_model="VALIDATOR", **kw))
     return calls, json.loads(out)["answer"]
 
 
-# ---- pure helpers (claim addressability) -----------------------------------
-
-def test_split_answer_indepth_parses_bullets():
-    ans = "**Answer** the answer [3]\n\n**In Depth**\n- first claim [3]\n- second claim per WHO"
-    answer_part, claims = team._split_answer_indepth(ans)
-    assert "the answer" in answer_part and "**In Depth**" not in answer_part
-    assert claims == ["first claim [3]", "second claim per WHO"]
-
-
-def test_split_answer_indepth_no_section():
-    answer_part, claims = team._split_answer_indepth("**Answer** not documented.")
-    assert claims == []
-
-
-def test_strip_indepth_claims_removes_only_flagged():
-    env = json.dumps({"answer": "**Answer** A\n\n**In Depth**\n- keep me\n- drop me\n- keep me too",
-                      "citations": [], "blocks": []})
-    out = json.loads(team._strip_indepth_claims(env, [2]))["answer"]
-    assert "keep me" in out and "keep me too" in out
-    assert "drop me" not in out          # the flagged claim is gone
-    assert "**Answer** A" in out         # the Answer is untouched
+def test_no_validator_ships_answer_and_both_claims(monkeypatch):
+    """No validator -> ship the Answer + both In-Depth claim bullets, no audit calls."""
+    calls = []
+    monkeypatch.setattr(team, "_chat", _factory(calls, []))
+    out = asyncio.run(team.run_team(
+        _MESSAGES, response_format=_RF, orchestrator_model="ORCH", synthesizer_model="SYNTH"))
+    ans = json.loads(out)["answer"]
+    assert "**Answer**" in ans and "ans-v0" in ans
+    assert "claim-A-v0" in ans and "claim-B-v0" in ans
+    _as, _is, av, iv = _counts(calls)
+    assert av == 0 and iv == 0, calls  # no validator was configured
 
 
-def test_strip_all_claims_keeps_answer_with_note():
-    env = json.dumps({"answer": "**Answer** A\n\n**In Depth**\n- one\n- two", "citations": [], "blocks": []})
-    out = json.loads(team._strip_indepth_claims(env, [1, 2]))["answer"]
-    assert "**Answer** A" in out and "one" not in out and "two" not in out
-    assert "withheld" in out.lower()
+def test_both_clean_ships_full_body():
+    """Both validators pass -> FULL combined body: **Answer** + both In-Depth claims."""
+    calls, ans = _run([{"answer_ok": True, "drop": []}])
+    answer_synth, indepth_synth, answer_val, indepth_val = _counts(calls)
+    assert answer_synth == 1 and indepth_synth == 1, calls
+    assert answer_val == 1 and indepth_val == 1, calls
+    assert "**Answer**" in ans and "ans-v0" in ans
+    assert "**In Depth**" in ans
+    assert "claim-A-v0" in ans and "claim-B-v0" in ans
 
 
-# ---- end-to-end through run_team --------------------------------------------
-
-def test_validator_none_skips_audit(monkeypatch):
-    monkeypatch.setattr(team, "_chat", _factory([], []))
-    out = asyncio.run(team.run_team(_MESSAGES, response_format=_RF,
-                                    orchestrator_model="ORCH", synthesizer_model="SYNTH"))
-    assert "ans-v0" in json.loads(out)["answer"]
-
-
-def test_validator_both_clean_ships_full():
-    calls, ans = _run([{"answer_ok": True, "indepth_drop": []}])
-    val, synth = _counts(calls)
-    assert val == 1 and synth == 1, calls
-    assert "ans-v0" in ans and "claim-A-v0" in ans and "claim-B-v0" in ans
+def test_indepth_drop_strips_only_flagged_claim_no_resynth():
+    """In-Depth drop=[2]: keep the Answer + claim-A, strip claim-B. NOT an abstain, and the
+    In-Depth synth runs ONCE (the Answer is never re-synthesized for an In-Depth drop)."""
+    calls, ans = _run([{"answer_ok": True, "drop": [2]}])
+    answer_synth, indepth_synth, answer_val, indepth_val = _counts(calls)
+    assert answer_synth == 1, calls          # Answer synthesized once (no re-synth)
+    assert indepth_synth == 1, calls         # In-Depth synthesized once
+    assert answer_val == 1 and indepth_val == 1, calls
+    assert "ans-v0" in ans                    # Answer kept
+    assert "claim-A-v0" in ans               # claim #1 kept
+    assert "claim-B-v0" not in ans           # claim #2 dropped
+    assert "could not produce" not in ans.lower()  # NOT an abstain
 
 
-def test_validator_indepth_claim_stripped_keeps_answer():
-    """GRANULAR claim-level: drop claim #2 only — keep the Answer + claim #1, no re-synth, no abstain."""
-    calls, ans = _run([{"answer_ok": True, "indepth_drop": [2]}])
-    val, synth = _counts(calls)
-    assert val == 1 and synth == 1, calls       # audited once, NOT re-synthesized
-    assert "ans-v0" in ans                       # Answer kept
-    assert "claim-A-v0" in ans                   # claim #1 kept
-    assert "claim-B-v0" not in ans               # claim #2 stripped
-    assert "could not produce" not in ans.lower()  # NOT a full abstain
+def test_answer_flagged_with_reason_resynth_fixes_adopts_v1():
+    """ANSWER path: flagged WITH a reason -> re-synthesize -> now ok -> adopt the revision (v1)."""
+    calls, ans = _run([{"answer_ok": False, "answer_issues": "wrong dose"},
+                       {"answer_ok": True}], validator_max_loops=1)
+    answer_synth, indepth_synth, answer_val, indepth_val = _counts(calls)
+    assert answer_synth == 2 and answer_val == 2, calls  # re-synth + re-audit
+    assert "ans-v1" in ans                                # adopted the revision
+    assert indepth_synth == 1, calls                      # In-Depth still runs once afterward
 
 
-def test_validator_all_indepth_dropped_keeps_answer():
-    calls, ans = _run([{"answer_ok": True, "indepth_drop": [1, 2]}])
-    val, synth = _counts(calls)
-    assert val == 1 and synth == 1, calls
-    assert "ans-v0" in ans and "claim-A-v0" not in ans and "claim-B-v0" not in ans
-    assert "could not produce" not in ans.lower()  # In-Depth wipe never abstains the turn
+def test_answer_flagged_with_reason_persists_abstains():
+    """ANSWER path: flagged WITH a reason and STILL flagged after the fix -> abstain the turn."""
+    calls, ans = _run([{"answer_ok": False, "answer_issues": "wrong dose"},
+                       {"answer_ok": False, "answer_issues": "still wrong"}], validator_max_loops=1)
+    answer_synth, indepth_synth, answer_val, indepth_val = _counts(calls)
+    assert answer_synth == 2 and answer_val == 2, calls
+    assert "could not produce" in ans.lower()             # abstained
+    assert indepth_synth == 0, calls                      # no In-Depth on an abstained turn
 
 
-def test_validator_answer_flagged_resynth_fixes():
-    """ANSWER path is independent: flagged Answer -> re-synthesize -> now ok -> adopt."""
-    calls, ans = _run([{"answer_ok": False, "indepth_drop": []},
-                       {"answer_ok": True, "indepth_drop": []}], validator_max_loops=1)
-    val, synth = _counts(calls)
-    assert val == 2 and synth == 2, calls
-    assert "ans-v1" in ans
-
-
-def test_validator_answer_flagged_persists_abstains():
-    calls, ans = _run([{"answer_ok": False, "indepth_drop": []},
-                       {"answer_ok": False, "indepth_drop": []}], validator_max_loops=1)
-    val, synth = _counts(calls)
-    assert val == 2 and synth == 2, calls
-    assert "could not produce" in ans.lower()
+def test_answer_flagged_without_reason_ships_noise_guard():
+    """NOISE GUARD: answer_ok=False with EMPTY answer_issues is a reasonless flag -> treat as PASS,
+    ship the answer (NOT an abstain), and do not re-synthesize."""
+    calls, ans = _run([{"answer_ok": False, "answer_issues": ""}])
+    answer_synth, indepth_synth, answer_val, indepth_val = _counts(calls)
+    assert answer_synth == 1 and answer_val == 1, calls   # single synth + single audit, no re-synth
+    assert "ans-v0" in ans                                # shipped the answer
+    assert "could not produce" not in ans.lower()         # NOT an abstain
+    assert "claim-A-v0" in ans                            # In-Depth still flows through

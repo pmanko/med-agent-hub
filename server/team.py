@@ -6,8 +6,11 @@ Flow (prompt-driven, not a hardcoded pipeline): the orchestrator (Gemma-4-E4B)
 runs a short tool loop under its OWN system prompt — it is *strongly suggested*
 to call `kb_search` first for guideline/dose/threshold questions, then
 `medical_expert` (MedGemma) which reasons GIVEN the retrieved KB context, then
-stop. A final synthesis call — bound to chartsearchai's response_format — composes
-the strict {answer, citations, blocks} envelope from the gathered evidence.
+stop. Generation is then TWO distinct calls: an Answer synthesis (bound to
+chartsearchai's response_format) and a separate In-Depth synthesis that elaborates
+that answer. Each has its own validator, and the two are combined into a single
+markdown body ("**Answer**\n...\n\n**In Depth**\n- ...") only at the chartsearchai
+handoff, which still receives the strict {answer, citations, blocks} envelope.
 
 Design notes (see specs/artifacts/planning/react-team-orchestration-design.md):
 - The tool loop runs on its own message list under the orchestrator prompt, NOT
@@ -306,23 +309,53 @@ def _normalize_envelope(raw: str) -> str:
 # is the lever we send. (frequency_penalty here was previously a confirmed no-op.)
 _SYNTH_MIN_TEMPERATURE = 0.5
 
-# The validator returns a structured verdict. The Answer and the In Depth are judged on
-# DIFFERENT terms (their scope differs): the Answer is a strict, all-or-nothing chart-accuracy
-# gate; the In Depth is judged claim-by-claim, and the verdict names the specific claim numbers
-# to drop (block/strip). The two drive two INDEPENDENT remediation paths in _audit_and_revise.
-_VALIDATOR_RF = {
+# The Answer and the In Depth are DISTINCT from generation onward: two synthesis calls,
+# two validators. The In-Depth synthesis returns a list of claim strings; the In-Depth
+# validator returns the 1-based claim numbers to drop; the Answer validator returns a
+# strict pass/fail verdict with the reason. The Answer and In-Depth bodies are combined
+# into one markdown body only at the chartsearchai handoff.
+_INDEPTH_RF = {
     "type": "json_schema",
     "json_schema": {
-        "name": "validator_verdict",
+        "name": "in_depth",
+        "schema": {
+            "type": "object",
+            "properties": {
+                "claims": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["claims"],
+        },
+    },
+}
+
+
+_ANSWER_VERDICT_RF = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "answer_verdict",
         "schema": {
             "type": "object",
             "properties": {
                 "answer_ok": {"type": "boolean"},
                 "answer_issues": {"type": "string"},
-                "indepth_drop": {"type": "array", "items": {"type": "integer"}},
-                "indepth_issues": {"type": "string"},
             },
-            "required": ["answer_ok", "indepth_drop"],
+            "required": ["answer_ok"],
+        },
+    },
+}
+
+
+_INDEPTH_VERDICT_RF = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "indepth_verdict",
+        "schema": {
+            "type": "object",
+            "properties": {
+                "drop": {"type": "array", "items": {"type": "integer"}},
+                "issues": {"type": "string"},
+            },
+            "required": ["drop"],
         },
     },
 }
@@ -334,61 +367,6 @@ _VALIDATOR_ABSTAIN_MSG = (
 )
 
 
-_INDEPTH_HEADER_RE = re.compile(r"\*\*\s*in[\s\-]?depth\s*\*\*", re.IGNORECASE)
-_INDEPTH_BULLET_RE = re.compile(r"^\s*(?:[-*•]\s+|\d+[.)]\s+)")
-
-
-def _split_answer_indepth(answer_text: str) -> Tuple[str, List[str]]:
-    """Split a synthesized answer string into (answer_part, indepth_claims). The In Depth is
-    emitted as a markdown bullet list — one claim per bullet — so each claim is individually
-    addressable for claim-level validation. Returns claims=[] when there is no In Depth. If the
-    In-Depth body has no bullets it is treated as ONE claim, so it stays addressable either way."""
-    parts = _INDEPTH_HEADER_RE.split(answer_text or "", maxsplit=1)
-    answer_part = parts[0].rstrip()
-    if len(parts) < 2 or not parts[1].strip():
-        return answer_part, []
-    body = parts[1].strip()
-    lines = [ln for ln in body.splitlines() if ln.strip()]
-    if any(_INDEPTH_BULLET_RE.match(ln) for ln in lines):
-        claims = [_INDEPTH_BULLET_RE.sub("", ln).strip() for ln in lines if _INDEPTH_BULLET_RE.match(ln)]
-    else:
-        claims = [body.strip()]  # not bulleted -> one addressable claim
-    return answer_part, [c for c in claims if c]
-
-
-def _rebuild_answer(answer_part: str, claims: List[str]) -> str:
-    """Reassemble the answer string from the Answer part + the surviving In-Depth claim bullets.
-    With no claim left, ship just the Answer + a brief withheld note — an In-Depth-only miss
-    trims the elaboration, it never blocks the turn (advisory)."""
-    answer_part = answer_part.rstrip()
-    if not claims:
-        return answer_part + (
-            "\n\n_(Supporting detail withheld — it could not be grounded in the chart or the cited guidance.)_")
-    return answer_part + "\n\n**In Depth**\n" + "\n".join("- " + c for c in claims)
-
-
-def _strip_indepth_claims(envelope_json: str, drop: List[int]) -> str:
-    """Block/strip remediation: remove the 1-based In-Depth claim indices in `drop`, keep the
-    rest, leave the **Answer** untouched. Returns the envelope JSON unchanged if there is
-    nothing to drop / it is unparseable / there is no In Depth."""
-    dropset = {d for d in (drop or []) if isinstance(d, int)}
-    if not dropset:
-        return envelope_json
-    try:
-        env = json.loads(envelope_json)
-    except (json.JSONDecodeError, TypeError):
-        return envelope_json
-    ans = env.get("answer")
-    if not isinstance(ans, str):
-        return envelope_json
-    answer_part, claims = _split_answer_indepth(ans)
-    if not claims:
-        return envelope_json
-    kept = [c for i, c in enumerate(claims, start=1) if i not in dropset]
-    env["answer"] = _rebuild_answer(answer_part, kept)
-    return json.dumps(env)
-
-
 def _knob(knobs: Optional[Dict[str, Any]], role: str, key: str, default: Any) -> Any:
     """Resolve one per-role sampling knob from a level's `knobs` block, falling back to
     the global default when the role or key is unset. knobs = {role: {key: value}}."""
@@ -398,86 +376,220 @@ def _knob(knobs: Optional[Dict[str, Any]], role: str, key: str, default: Any) ->
     return default
 
 
-def _validator_feedback(verdict: Dict[str, Any]) -> str:
-    """Answer-focused re-synthesis guidance. The In Depth is remediated separately (claim-level
-    block/strip), so the re-synthesis only needs to fix the direct Answer."""
-    parts = ["Your goal is an accurate direct **Answer**, grounded only in the patient chart."]
+def _answer_body(answer_text: str, claims: List[str]) -> str:
+    """Combine the direct Answer and the In-Depth claims into one markdown body. The Answer
+    leads under a **Answer** header; non-empty claims follow as a **In Depth** bullet list."""
+    body = "**Answer**\n" + (answer_text or "").strip()
+    if claims:
+        body += "\n\n**In Depth**\n" + "\n".join("- " + c for c in claims)
+    return body
+
+
+def _assemble_envelope(
+    answer_text: str, citations: List[int], blocks: List[Any], claims: List[str]
+) -> str:
+    """Serialize the chartsearchai {answer, citations, blocks} envelope, where `answer` is the
+    combined Answer + In-Depth markdown body."""
+    return json.dumps({
+        "answer": _answer_body(answer_text, claims),
+        "citations": citations or [],
+        "blocks": blocks or [],
+    })
+
+
+def _answer_fields(normalized_json_str: str) -> Tuple[str, List[int], List[Any]]:
+    """Pull (answer_text, citations, blocks) out of a normalized envelope JSON string. Tolerant:
+    returns ("", [], []) on any junk / non-object / missing fields."""
+    try:
+        env = json.loads(normalized_json_str)
+    except (json.JSONDecodeError, TypeError):
+        return "", [], []
+    if not isinstance(env, dict):
+        return "", [], []
+    ans = env.get("answer")
+    answer_text = ans.strip() if isinstance(ans, str) else ""
+    citations = [c for c in (env.get("citations") or []) if isinstance(c, int)]
+    blocks = env.get("blocks") if isinstance(env.get("blocks"), list) else []
+    return answer_text, citations, blocks
+
+
+def _answer_feedback(verdict: Dict[str, Any]) -> str:
+    """Answer-focused re-synthesis guidance from the Answer verdict. The In Depth is generated
+    separately, so this only steers the direct Answer."""
+    parts = ["Your goal is an accurate direct answer, grounded only in the patient chart."]
     ai = (verdict.get("answer_issues") or "").strip()
     if ai:
-        parts.append("A reviewer found this problem with the Answer: " + ai)
+        parts.append("A reviewer found this problem with the answer: " + ai)
     parts.append(
-        "Rewrite the **Answer** to be correct using only chart-supported facts; where the chart "
-        "lacks the information, say 'not documented'. Keep the **In Depth** section as well.")
+        "Rewrite the direct answer to be correct using only chart-supported facts; where the chart "
+        "lacks the information, say 'not documented'.")
     return "\n".join(parts)
 
 
-async def _run_validator(
+async def _synthesize_answer(
+    client: httpx.AsyncClient,
+    synth_model: str,
+    base_messages: List[Dict[str, Any]],
+    answer_instruction: str,
+    gathered: str,
+    *,
+    response_format: Optional[Dict[str, Any]],
+    temperature: float,
+    max_tokens: Optional[int],
+    repeat_penalty: Optional[float],
+    dry: Optional[float],
+    extra_msgs: Optional[List[Dict[str, Any]]] = None,
+) -> Tuple[str, List[int], List[Any]]:
+    """Answer synthesis bound to chartsearchai's response_format. Returns the (answer_text,
+    citations, blocks) parsed from the envelope. FAIL-OPEN: returns ("", [], []) on any error."""
+    user = answer_instruction + ("\n\n" + gathered if gathered else "")
+    messages = list(base_messages) + [{"role": "user", "content": user}] + (extra_msgs or [])
+    try:
+        msg = await _chat(
+            client, synth_model, messages,
+            response_format=response_format, temperature=temperature,
+            max_tokens=max_tokens, repeat_penalty=repeat_penalty, dry_multiplier=dry)
+        return _answer_fields(_normalize_envelope(_message_text(msg)))
+    except Exception as e:
+        logger.warning("answer synthesis failed: %s", e)
+        return "", [], []
+
+
+async def _synthesize_indepth(
+    client: httpx.AsyncClient,
+    synth_model: str,
+    base_messages: List[Dict[str, Any]],
+    indepth_instruction: str,
+    gathered: str,
+    answer_text: str,
+    *,
+    temperature: float,
+    max_tokens: Optional[int],
+    repeat_penalty: Optional[float],
+    dry: Optional[float],
+) -> List[str]:
+    """In-Depth synthesis: elaborate the already-produced direct answer into a list of claim
+    strings (one addressable claim each). FAIL-OPEN: returns [] on any error."""
+    user = (
+        indepth_instruction
+        + "\n\n=== DIRECT ANSWER (elaborate THIS; do not restate it) ===\n" + answer_text
+        + ("\n\n=== GATHERED KB / EVIDENCE ===\n" + gathered if gathered else "")
+    )
+    messages = list(base_messages) + [{"role": "user", "content": user}]
+    try:
+        msg = await _chat(
+            client, synth_model, messages,
+            response_format=_INDEPTH_RF, temperature=temperature,
+            max_tokens=max_tokens, repeat_penalty=repeat_penalty, dry_multiplier=dry)
+        obj = json.loads(_message_text(msg))
+    except (Exception,):  # parse OR call failure -> no elaboration
+        logger.warning("in-depth synthesis failed -> no elaboration")
+        return []
+    if not isinstance(obj, dict):
+        return []
+    return [c.strip() for c in (obj.get("claims") or []) if isinstance(c, str) and c.strip()]
+
+
+async def _validate_answer(
     client: httpx.AsyncClient,
     validator_model: str,
-    validator_prompt: Optional[str],
     *,
     chart: str,
     gathered: str,
-    answer: str,
+    answer_text: str,
     max_tokens: Optional[int],
-    temperature: float = 0.0,
-    repeat_penalty: Optional[float] = None,
-    dry_multiplier: Optional[float] = None,
+    temperature: float,
+    repeat_penalty: Optional[float],
+    dry: Optional[float],
+    validation_prompt: str = "validation",
 ) -> Dict[str, Any]:
-    """One audit pass. The Answer is judged strictly for chart-accuracy; the In Depth is judged
-    claim-by-claim (chart-claims vs the chart; guideline-claims for not-fabricated + attributed +
-    relevantly applied). Returns {answer_ok, answer_issues, indepth_drop:[1-based claim #s to
-    remove], indepth_issues}. Fails OPEN (answer_ok=True, indepth_drop=[]) on any malformed
-    verdict so a flaky validator never blocks the run. `indepth_drop` is clamped to real claim #s."""
-    instruction = load_prompt(validator_prompt or "validation")
-    try:
-        obj = json.loads(answer)
-        answer_text = obj.get("answer", answer) if isinstance(obj, dict) else answer
-    except (json.JSONDecodeError, TypeError):
-        answer_text = answer
-    answer_part, claims = _split_answer_indepth(answer_text)
-    numbered = "\n".join(f"{i}. {c}" for i, c in enumerate(claims, start=1)) or "(no In-Depth claims)"
+    """Audit the direct Answer for chart-accuracy. Returns {answer_ok, answer_issues}. FAIL-OPEN:
+    {answer_ok: True} on any parse failure so a flaky validator never blocks the run."""
+    instruction = load_prompt(validation_prompt + "-answer")
     audit_user = (
         instruction
         + "\n\n=== PATIENT CHART (ground truth) ===\n" + (chart or "(none)")
         + "\n\n=== GATHERED KB / EVIDENCE (the guidance the team retrieved) ===\n" + (gathered or "(none)")
-        + "\n\n=== DRAFT ANSWER (judge strictly for chart-accuracy) ===\n" + answer_part
-        + "\n\n=== IN-DEPTH CLAIMS (numbered; return the numbers to DROP) ===\n" + numbered
+        + "\n\n=== DRAFT ANSWER ===\n" + answer_text
     )
     msg = await _chat(
         client, validator_model, [{"role": "user", "content": audit_user}],
-        response_format=_VALIDATOR_RF, temperature=temperature, max_tokens=max_tokens,
-        repeat_penalty=repeat_penalty, dry_multiplier=dry_multiplier)
+        response_format=_ANSWER_VERDICT_RF, temperature=temperature, max_tokens=max_tokens,
+        repeat_penalty=repeat_penalty, dry_multiplier=dry)
     raw = _message_text(msg)
     try:
         verdict = json.loads(raw)
     except (json.JSONDecodeError, TypeError):
-        logger.warning("validator[%s] verdict UNPARSEABLE -> FAIL-OPEN (pass); chart=%dch gathered=%dch raw=%r",
-                       validator_model, len(chart or ""), len(gathered or ""), raw[:240])
-        return {"answer_ok": True, "indepth_drop": []}
+        logger.warning("answer-validator[%s] verdict UNPARSEABLE -> FAIL-OPEN (pass); raw=%r",
+                       validator_model, raw[:240])
+        return {"answer_ok": True}
     if not isinstance(verdict, dict):
-        logger.warning("validator[%s] verdict not an object -> FAIL-OPEN; raw=%r", validator_model, raw[:240])
-        return {"answer_ok": True, "indepth_drop": []}
-    drop = [d for d in (verdict.get("indepth_drop") or []) if isinstance(d, int) and 1 <= d <= len(claims)]
-    verdict["indepth_drop"] = drop
-    logger.info("validator[%s] answer_ok=%s drop=%s/%d claims answer_issues=%r indepth_issues=%r (chart=%dch gathered=%dch)",
-                validator_model, verdict.get("answer_ok"), drop, len(claims),
-                (verdict.get("answer_issues") or "")[:160], (verdict.get("indepth_issues") or "")[:120],
-                len(chart or ""), len(gathered or ""))
+        logger.warning("answer-validator[%s] verdict not an object -> FAIL-OPEN; raw=%r",
+                       validator_model, raw[:240])
+        return {"answer_ok": True}
+    logger.info("answer-validator[%s] answer_ok=%s answer_issues=%r",
+                validator_model, verdict.get("answer_ok"), (verdict.get("answer_issues") or "")[:160])
     return verdict
 
 
-async def _audit_and_revise(
+async def _validate_indepth(
     client: httpx.AsyncClient,
-    content: str,
-    *,
     validator_model: str,
-    validator_prompt: Optional[str],
+    *,
     chart: str,
     gathered: str,
+    answer_text: str,
+    claims: List[str],
+    max_tokens: Optional[int],
+    temperature: float,
+    repeat_penalty: Optional[float],
+    dry: Optional[float],
+    validation_prompt: str = "validation",
+) -> List[int]:
+    """Audit the In-Depth claims claim-by-claim. Returns the 1-based claim numbers to DROP,
+    clamped to 1..len(claims). FAIL-OPEN: returns [] on any parse failure."""
+    instruction = load_prompt(validation_prompt + "-indepth")
+    numbered = "\n".join(f"{i}. {c}" for i, c in enumerate(claims, start=1))
+    audit_user = (
+        instruction
+        + "\n\n=== PATIENT CHART (ground truth) ===\n" + (chart or "(none)")
+        + "\n\n=== GATHERED KB / EVIDENCE (the guidance the team retrieved) ===\n" + (gathered or "(none)")
+        + "\n\n=== DIRECT ANSWER (context) ===\n" + answer_text
+        + "\n\n=== IN-DEPTH CLAIMS (numbered; return the numbers to DROP) ===\n" + numbered
+    )
+    msg = await _chat(
+        client, validator_model, [{"role": "user", "content": audit_user}],
+        response_format=_INDEPTH_VERDICT_RF, temperature=temperature, max_tokens=max_tokens,
+        repeat_penalty=repeat_penalty, dry_multiplier=dry)
+    raw = _message_text(msg)
+    try:
+        verdict = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        logger.warning("indepth-validator[%s] verdict UNPARSEABLE -> FAIL-OPEN (keep all); raw=%r",
+                       validator_model, raw[:240])
+        return []
+    if not isinstance(verdict, dict):
+        logger.warning("indepth-validator[%s] verdict not an object -> FAIL-OPEN; raw=%r",
+                       validator_model, raw[:240])
+        return []
+    drop = [d for d in (verdict.get("drop") or []) if isinstance(d, int) and 1 <= d <= len(claims)]
+    logger.info("indepth-validator[%s] drop=%s/%d claims issues=%r",
+                validator_model, drop, len(claims), (verdict.get("issues") or "")[:120])
+    return drop
+
+
+async def _synthesize_and_validate(
+    client: httpx.AsyncClient,
+    *,
+    base_messages: List[Dict[str, Any]],
+    gathered: str,
+    chart: str,
     synth_model: str,
-    synth_messages: List[Dict[str, Any]],
+    answer_instruction: str,
+    indepth_instruction: str,
     response_format: Optional[Dict[str, Any]],
+    validator_model: Optional[str],
+    validator_prompt: Optional[str] = None,
     synth_temperature: float,
     synth_repeat_penalty: Optional[float],
     synth_dry: Optional[float],
@@ -487,73 +599,91 @@ async def _audit_and_revise(
     max_tokens: Optional[int],
     max_loops: int,
 ) -> str:
-    """Post-synthesis audit driving TWO INDEPENDENT remediation paths off one verdict — because
-    the Answer and the In Depth have different scope and stakes:
+    """Two-call generation + two independent validators, combined into one envelope only here.
 
-      ANSWER (strict): if the direct Answer is flagged, re-synthesize it (Answer-focused feedback)
-        and re-audit, up to `max_loops`; if it still can't be made chart-accurate, ABSTAIN the turn
-        (never ship a wrong fact).
-      IN DEPTH (advisory, claim-level): block/strip exactly the claims the validator flags; the
-        Answer is never touched and an In-Depth miss never abstains the turn.
+      ANSWER (strict): synthesize the direct answer; if the Answer validator flags it WITH a
+        reason, re-synthesize (Answer-focused feedback) and re-validate up to `max_loops`. If it
+        still cannot be made chart-accurate, ABSTAIN the turn. A reasonless flag (answer_ok=False
+        with empty answer_issues) is treated as PASS so noise never abstains.
+      IN DEPTH (advisory, claim-level): synthesize claims from the final answer, then drop exactly
+        the claims the In-Depth validator flags. Never abstains the turn.
 
-    The only coupling is logical: if the Answer abstains there is no elaboration to ship. Never
-    raises — a validator outage fails OPEN (ship the draft); a NEGATIVE Answer verdict that cannot
-    be fixed abstains (we know the Answer is wrong)."""
+    FAIL-OPEN throughout: a validator outage ships the draft; only a reasoned, unfixable NEGATIVE
+    Answer verdict abstains."""
+    answer_text, citations, blocks = await _synthesize_answer(
+        client, synth_model, base_messages, answer_instruction, gathered,
+        response_format=response_format, temperature=synth_temperature,
+        max_tokens=max_tokens, repeat_penalty=synth_repeat_penalty, dry=synth_dry)
+    if not answer_text:
+        return _fallback_envelope(
+            "I could not produce a complete answer for this turn. Please try again.")
 
-    async def _audit(draft: str) -> Optional[Dict[str, Any]]:
+    # --- ANSWER path -----------------------------------------------------
+    if validator_model:
+        async def _audit(draft: str) -> Optional[Dict[str, Any]]:
+            try:
+                return await _validate_answer(
+                    client, validator_model, chart=chart, gathered=gathered, answer_text=draft,
+                    max_tokens=max_tokens, temperature=validator_temperature,
+                    repeat_penalty=validator_repeat_penalty, dry=validator_dry,
+                    validation_prompt=validator_prompt or "validation")
+            except Exception as e:
+                logger.warning("answer-validator call failed: %s", e)
+                return None  # fail-open
+
+        def _passed(verdict: Optional[Dict[str, Any]]) -> bool:
+            # Pass when: no verdict (fail-open), answer_ok True, OR a reasonless False flag.
+            if verdict is None or verdict.get("answer_ok", True):
+                return True
+            return not (verdict.get("answer_issues") or "").strip()
+
+        v = await _audit(answer_text)
+        if not _passed(v):
+            fixed = False
+            for _ in range(max(0, max_loops)):
+                logger.info("answer-validator: Answer flagged -> re-synthesizing")
+                attempt_text, attempt_cit, attempt_blk = await _synthesize_answer(
+                    client, synth_model, base_messages, answer_instruction, gathered,
+                    response_format=response_format, temperature=synth_temperature,
+                    max_tokens=max_tokens, repeat_penalty=synth_repeat_penalty, dry=synth_dry,
+                    extra_msgs=[
+                        {"role": "assistant",
+                         "content": _assemble_envelope(answer_text, citations, blocks, [])},
+                        {"role": "user", "content": _answer_feedback(v)},
+                    ])
+                if not attempt_text:
+                    break  # cannot fix a known-wrong Answer -> abstain
+                answer_text, citations, blocks = attempt_text, attempt_cit, attempt_blk
+                v = await _audit(answer_text)
+                if _passed(v):
+                    logger.info("answer-validator: revision fixed the Answer -> adopt")
+                    fixed = True
+                    break
+            if not fixed:
+                logger.info("answer-validator: Answer still flagged -> ABSTAINING")
+                return _fallback_envelope(_VALIDATOR_ABSTAIN_MSG)
+
+    # --- IN-DEPTH path ---------------------------------------------------
+    claims = await _synthesize_indepth(
+        client, synth_model, base_messages, indepth_instruction, gathered, answer_text,
+        temperature=synth_temperature, max_tokens=max_tokens,
+        repeat_penalty=synth_repeat_penalty, dry=synth_dry)
+    if validator_model and claims:
         try:
-            return await _run_validator(
-                client, validator_model, validator_prompt,
-                chart=chart, gathered=gathered, answer=draft, max_tokens=max_tokens,
+            drop = await _validate_indepth(
+                client, validator_model, chart=chart, gathered=gathered,
+                answer_text=answer_text, claims=claims, max_tokens=max_tokens,
                 temperature=validator_temperature, repeat_penalty=validator_repeat_penalty,
-                dry_multiplier=validator_dry)
+                dry=validator_dry, validation_prompt=validator_prompt or "validation")
         except Exception as e:
-            logger.warning("validator call failed: %s", e)
-            return None  # fail-open
-
-    def _apply_indepth(draft: str, verdict: Dict[str, Any]) -> str:
-        """IN-DEPTH path: block/strip the flagged claims (Answer untouched)."""
-        drop = verdict.get("indepth_drop") or []
+            logger.warning("indepth-validator call failed: %s", e)
+            drop = []  # fail-open
         if drop:
-            logger.info("validator: In Depth claims %s flagged -> block/strip (Answer untouched)", drop)
-            return _strip_indepth_claims(draft, drop)
-        return draft
+            logger.info("indepth-validator: claims %s flagged -> block/strip", drop)
+            dropset = set(drop)
+            claims = [c for i, c in enumerate(claims, start=1) if i not in dropset]
 
-    v = await _audit(content)
-    if v is None:
-        return content  # validator unavailable -> fail-open (we have no verdict)
-
-    # ANSWER sound -> ship it, then run the In-Depth path independently.
-    if v.get("answer_ok", True):
-        return _apply_indepth(content, v)
-
-    # ANSWER flagged -> its own remediation path (re-synthesize, re-audit, else abstain).
-    current, cur_verdict = content, v
-    for _ in range(max(0, max_loops)):
-        logger.info("validator: Answer flagged -> re-synthesizing (In Depth handled separately)")
-        revise_messages = synth_messages + [
-            {"role": "assistant", "content": current},
-            {"role": "user", "content": _validator_feedback(cur_verdict)},
-        ]
-        try:
-            msg = await _chat(
-                client, synth_model, revise_messages,
-                response_format=response_format, temperature=synth_temperature,
-                max_tokens=max_tokens, repeat_penalty=synth_repeat_penalty,
-                dry_multiplier=synth_dry)
-            revised = _normalize_envelope(_message_text(msg))
-        except Exception as e:
-            logger.warning("re-synthesis after validator flag failed: %s", e)
-            break  # cannot fix a known-wrong Answer -> abstain
-        if not revised:
-            break
-        rv = await _audit(revised)
-        if rv is None or rv.get("answer_ok", True):
-            logger.info("validator: revision fixed the Answer -> adopt (then run In-Depth path)")
-            return _apply_indepth(revised, rv or {"indepth_drop": []})
-        current, cur_verdict = revised, rv
-    logger.info("validator: Answer still flagged -> ABSTAINING (never ship a wrong answer)")
-    return _fallback_envelope(_VALIDATOR_ABSTAIN_MSG)
+    return _assemble_envelope(answer_text, citations, blocks, claims)
 
 
 async def run_team(
@@ -607,7 +737,12 @@ async def run_team(
     # each turn.
     orchestrator_system = load_prompt(orchestrator_prompt or "orchestrator")
     expert_system = load_prompt(expert_prompt or "medical_expert")
-    synthesis_instruction = load_prompt(synthesizer_prompt or "synthesis")
+    # Two-call synthesis: the level's synthesis_prompt / validator_prompt are BASE names; each
+    # role's answer/in-depth prompt is "<base>-answer" / "<base>-indepth" (default base
+    # "synthesis" / "validation"). A level can swap the whole set by overriding the base.
+    _synth_base = synthesizer_prompt or "synthesis"
+    answer_instruction = load_prompt(_synth_base + "-answer")
+    indepth_instruction = load_prompt(_synth_base + "-indepth")
 
     # The tool loop runs under the orchestrator's OWN system prompt — not
     # chartsearchai's envelope prompt, which biases a small model toward answering
@@ -666,36 +801,25 @@ async def run_team(
         except Exception as e:
             logger.warning("orchestrator tool loop failed, proceeding to synthesis: %s", e)
 
-        # --- final synthesis (constrained to the envelope) ------------------
-        # Rebuild from the ORIGINAL prefix (byte-identical for LM Studio's cache);
-        # append the gathered evidence + instruction as the last user turn, so the
-        # decisive evidence sits at the end of the array (lost-in-the-middle).
+        # --- generation: two distinct calls (answer + in-depth), each validated,
+        # combined into one envelope. The base prefix is the ORIGINAL chartsearchai
+        # array (byte-identical for LM Studio's cache); the gathered evidence rides on
+        # the last user turn so decisive evidence sits at the end (lost-in-the-middle).
         gathered = _gathered_evidence(kb_context, expert_notes)
-        synth_user = synthesis_instruction + "\n\n" + gathered if gathered else synthesis_instruction
-        synth_messages = list(messages) + [{"role": "user", "content": synth_user}]
         try:
-            msg = await _chat(
-                client, synth_model, synth_messages,
-                response_format=response_format, temperature=synth_temp,
-                max_tokens=max_tokens, repeat_penalty=synth_rp,
-                dry_multiplier=synth_dry,
-            )
-            content = _normalize_envelope(_message_text(msg))
-            if content:
-                if validator_model:
-                    content = await _audit_and_revise(
-                        client, content,
-                        validator_model=validator_model, validator_prompt=validator_prompt,
-                        chart=chart, gathered=gathered,
-                        synth_model=synth_model, synth_messages=synth_messages,
-                        response_format=response_format,
-                        synth_temperature=synth_temp, synth_repeat_penalty=synth_rp, synth_dry=synth_dry,
-                        validator_temperature=val_temp, validator_repeat_penalty=val_rp, validator_dry=val_dry,
-                        max_tokens=max_tokens, max_loops=validator_max_loops)
-                return content
-            logger.warning("synthesis returned empty content; using fallback envelope")
+            content = await _synthesize_and_validate(
+                client,
+                base_messages=list(messages), gathered=gathered, chart=chart,
+                synth_model=synth_model,
+                answer_instruction=answer_instruction, indepth_instruction=indepth_instruction,
+                response_format=response_format, validator_model=validator_model,
+                validator_prompt=validator_prompt,
+                synth_temperature=synth_temp, synth_repeat_penalty=synth_rp, synth_dry=synth_dry,
+                validator_temperature=val_temp, validator_repeat_penalty=val_rp, validator_dry=val_dry,
+                max_tokens=max_tokens, max_loops=validator_max_loops)
+            return content
         except Exception as e:
-            logger.error("synthesis call failed: %s", e, exc_info=True)
+            logger.error("synthesis failed: %s", e, exc_info=True)
 
     return _fallback_envelope(
         "I could not produce a complete answer for this turn. Please try again.")

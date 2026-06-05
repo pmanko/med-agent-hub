@@ -20,9 +20,9 @@ from server import prompt_loader, team
 
 PROMPTS_DIR = Path(team.__file__).parent / "prompts"
 
-# Distinctive markers in the committed synthesis.txt (its two-section + false-premise
-# instructions); used to prove the synthesis prompt actually reaches the model.
-SYNTH_MARKERS = ("**In Depth**", "FALSE PREMISE")
+# Distinctive markers from the two-call synthesis prompts (synthesis-answer + synthesis-indepth);
+# used to prove BOTH synthesis prompts actually reach the model.
+SYNTH_MARKERS = ("FALSE PREMISE", "DIRECT ANSWER ONLY", "IN-DEPTH elaboration")
 
 ENVELOPE = json.dumps({"answer": "Lisinopril 10 mg [1]", "citations": [1], "blocks": []})
 RESP_FORMAT = {"type": "json_schema", "json_schema": {"name": "chart_answer", "schema": {}}}
@@ -34,23 +34,23 @@ MESSAGES = [
 
 
 def _run_team_capturing_synth():
-    """Run the team and return the JSON-serialized message array sent to the
-    constrained synthesis call — the turn that carries the synthesis prompt.
+    """Run the team and return the JSON-serialized message arrays sent to the constrained
+    synthesis calls — the two turns (Answer + In-Depth) that carry the synthesis prompts.
     `team._chat` is seamed; no model, no HTTP."""
     import asyncio
 
-    captured = {}
+    captured = {"synths": []}
 
     async def fake_chat(client, model, messages, *, tools=None, response_format=None,
                         temperature=None, max_tokens=None, **kwargs):
         if response_format is not None:
-            captured["synth"] = messages
+            captured["synths"].append(messages)
             return {"content": ENVELOPE}
         return {"content": "ok", "tool_calls": None}
 
     with patch.object(team, "_chat", side_effect=fake_chat):
         asyncio.run(team.run_team(MESSAGES, response_format=RESP_FORMAT, temperature=0.0))
-    return json.dumps(captured["synth"])
+    return json.dumps(captured["synths"])
 
 
 def test_load_prompt_returns_the_committed_file_text():
@@ -88,15 +88,14 @@ def test_synthesis_low_is_a_distinct_prompt():
     assert prompt_loader.load_prompt("synthesis-low") != prompt_loader.load_prompt("synthesis")
 
 
-def test_team_sends_the_synthesis_prompt_to_the_model():
-    # Behaviour-preservation: the team's constrained synthesis turn must carry the
-    # committed synthesis instruction — the two-section + false-premise markers AND its
-    # distinctive "Keep the prose concise." tail. Asserts on what the team SENDS (the
+def test_team_sends_the_synthesis_prompts_to_the_model():
+    # Behaviour-preservation: the team's two constrained synthesis turns must carry the
+    # committed synthesis instructions — the Answer prompt (FALSE PREMISE, DIRECT ANSWER ONLY)
+    # and the In-Depth prompt (IN-DEPTH elaboration). Asserts on what the team SENDS (the
     # seam), not the mocked return.
     blob = _run_team_capturing_synth()
     for marker in SYNTH_MARKERS:
         assert marker in blob, f"synthesis marker {marker!r} not sent to the model"
-    assert "Keep the prose concise." in blob
 
 
 def test_team_passes_through_a_schema_valid_two_section_table_envelope():

@@ -1,0 +1,22 @@
+Write ONLY a JSON object with exactly one key: "claims" — an array of strings. Output nothing before or after the JSON object. No prose, no markdown, no code fences.
+
+GOAL: write the IN-DEPTH elaboration for the answer below as a list of claims. Each claim is ONE clinical point that shows how the retrieved KB / guideline guidance INFORMS this patient's answer, OR the clinical expert's interpretation of THIS chart.
+
+You will be given, appended after this instruction:
+- the DIRECT ANSWER (already written — do not repeat it), and
+- the GATHERED KB / EVIDENCE (knowledge-base reference snippets and the clinical expert's notes) plus the patient chart above.
+
+Each string in "claims":
+- States ONE idea only — a single clinical fact or piece of guidance, checkable on its own.
+- Names its source inline: a guideline / KB fact is attributed in prose (e.g. "per WHO HIV guidelines"); a fact from THIS patient's chart is cited with [N] (the numbered chart-record index).
+
+Rules:
+- Do NOT restate the direct answer.
+- Do NOT re-list chart tables, drugs, doses, dates, or order indices — that data is already shown elsewhere. The In Depth is reasoning and context, not a restatement of chart data.
+- NEVER wrap a guideline title, source name, or year in brackets — [N] is reserved for chart-record integers only. Name references in running prose.
+- Do not invent a record, dose, source name, guideline title, or index.
+- No generic "consult a doctor" disclaimer; do not restate the question.
+- If there is genuinely nothing valid to add, return {"claims": []}.
+
+Example output:
+{"claims": ["The chart lists a stavudine (d4T)-based regimen [4].", "Per WHO HIV guidelines, stavudine is no longer recommended because of frequent, often irreversible toxicity; tenofovir or zidovudine are the preferred nucleoside backbones."]}

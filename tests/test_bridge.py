@@ -42,14 +42,15 @@ def test_run_team_produces_the_envelope_from_the_final_synthesis_call():
         out = run(team.run_team(MESSAGES, response_format=RESP_FORMAT, temperature=0.0, max_tokens=1024))
 
     env = json.loads(out)
-    assert env["answer"] == "Lisinopril 10 mg [1]"
+    # The Answer synthesis text is wrapped under the **Answer** header in the combined body.
+    assert "**Answer**" in env["answer"] and "Lisinopril 10 mg [1]" in env["answer"]
     assert env["citations"] == [1]
     assert env["blocks"] == []
 
 
-def test_response_format_is_only_applied_on_the_final_synthesis_call():
+def test_response_format_is_only_applied_on_the_synthesis_calls():
     # The tool-selection turns must run PLAIN (no response_format); only the
-    # final synthesis is constrained. This is the load-bearing small-model rule.
+    # synthesis calls are constrained. This is the load-bearing small-model rule.
     seen = []
 
     async def fake_chat(client, model, messages, *, tools=None, response_format=None,
@@ -62,9 +63,9 @@ def test_response_format_is_only_applied_on_the_final_synthesis_call():
 
     # No single call mixes tools + response_format.
     assert all(not (c["tools"] and c["rf"]) for c in seen)
-    # Exactly one constrained (synthesis) call, and it carries no tools.
+    # The two-call synthesis (Answer + In-Depth) — both constrained, neither carries tools.
     rf_calls = [c for c in seen if c["rf"]]
-    assert len(rf_calls) == 1 and rf_calls[0]["tools"] is False
+    assert len(rf_calls) == 2 and all(c["tools"] is False for c in rf_calls)
 
 
 def test_orchestrator_consults_the_medical_expert_on_a_tool_call():

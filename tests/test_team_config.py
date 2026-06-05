@@ -25,7 +25,8 @@ def test_level_ids_advertises_the_configured_levels():
 def test_get_level_resolves_models_and_prompts():
     low = levels_loader.get_level("med-agent-team-low")
     assert low.orchestrator and low.synthesizer        # required roles present
-    assert low.synthesis_prompt == "synthesis-low"     # low's optimized synth prompt
+    # synthesis_prompt is the BASE name; two-call resolves <base>-answer / <base>-indepth.
+    assert low.synthesis_prompt == "synthesis"         # tier-agnostic two-call prompts (default base)
     high = levels_loader.get_level("med-agent-team-high")
     assert high.expert and high.expert != low.expert   # high steps up to a bigger expert
     assert high.synthesis_prompt == "synthesis"        # default prompt name
@@ -85,4 +86,5 @@ def test_run_team_routes_expert_model(monkeypatch):
     synth = [m for (m, t, rf) in calls if not t and rf]        # no-tools, rf = synthesis
     assert orch and all(m == "ORCH" for m in orch), calls
     assert expert == ["EXPERT"], calls
-    assert synth == ["SYNTH"], calls
+    # Two-call synthesis (Answer + In-Depth) — both on the synthesizer model.
+    assert synth and all(m == "SYNTH" for m in synth), calls
