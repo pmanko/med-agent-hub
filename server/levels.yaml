@@ -18,15 +18,37 @@ levels:
     synthesizer: qwen3-4b
     synthesis_prompt: synthesis-low
 
+  med-agent-team-low-validated:    # LOW + orchestrator-as-validator (scaled to the tier)
+    orchestrator: gemma-e2b-q2
+    expert: medgemma-1.5-4b
+    synthesizer: qwen3-4b
+    synthesis_prompt: synthesis-low
+    validator: gemma-e2b-q2        # the LOW orchestrator, cross-family vs qwen3-4b synth (tests the floor)
+    validator_max_loops: 1
+
   med-agent-team-med:
     orchestrator: gemma-e4b-q8     # gemma-4-E4B 8-bit
     expert: medgemma-1.5-4b-q8     # medgemma-1.5-4b 8-bit
     synthesizer: qwen2.5-14b
 
+  med-agent-team-med-validated:    # MED + orchestrator-as-validator (scaled to the tier)
+    orchestrator: gemma-e4b-q8
+    expert: medgemma-1.5-4b-q8
+    synthesizer: qwen2.5-14b
+    validator: gemma-e4b-q8        # the MED orchestrator, cross-family vs qwen2.5-14b synth
+    validator_max_loops: 1
+
   med-agent-team-high:
     orchestrator: gemma-31b        # gemma-4-31B-it
     expert: medgemma-27b
     synthesizer: qwen3.6-35b-q6    # Qwen3.6-35B-A3B 6-bit (thinking synth)
+
+  med-agent-team-high-validated:   # HIGH + orchestrator-as-validator (scaled to the tier)
+    orchestrator: gemma-31b
+    expert: medgemma-27b
+    synthesizer: qwen3.6-35b-q6
+    validator: gemma-31b           # the HIGH orchestrator, cross-family vs qwen3.6 synth (strongest local)
+    validator_max_loops: 1
 
   med-agent-team-12b:
     orchestrator: gemma-4-12b      # gemma-4-12B-it Q8 — strong dense orchestrator
