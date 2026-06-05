@@ -91,11 +91,10 @@ def test_validator_flag_loops_back_then_passes(monkeypatch):
     assert json.loads(out)["answer"] == "answer-v1"
 
 
-def test_validator_keeps_original_when_revision_still_flagged(monkeypatch):
-    """Re-validate-and-keep-best: the re-synthesis is itself re-audited, and if it is
-    STILL flagged the ORIGINAL draft is kept — a still-flagged rewrite is never trusted
-    over the original (false-flag / drift safety). RED on the old unconditional-accept
-    code, which returned the revision (answer-v1)."""
+def test_validator_abstains_when_revision_still_flagged(monkeypatch):
+    """Re-validate-and-keep-best, ABSTAIN terminal: a still-flagged revision is not
+    shipped, and NEITHER is the flagged original — the turn abstains (never ship an
+    answer the validator flagged). RED on the keep-original code, which returned v0."""
     calls = []
     monkeypatch.setattr(team, "_chat", _factory(calls, [False, False]))
     out = asyncio.run(team.run_team(
@@ -104,4 +103,6 @@ def test_validator_keeps_original_when_revision_still_flagged(monkeypatch):
         validator_model="VALIDATOR", validator_max_loops=1))
     val, synth = _counts(calls)
     assert val == 2 and synth == 2, calls            # draft audited + revision re-audited
-    assert json.loads(out)["answer"] == "answer-v0", out   # original kept, revision rejected
+    ans = json.loads(out)["answer"].lower()
+    assert "answer-v0" not in ans and "answer-v1" not in ans, out  # neither draft shipped
+    assert "could not" in ans or "not produce" in ans, out         # an abstention

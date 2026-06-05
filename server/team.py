@@ -326,6 +326,12 @@ _VALIDATOR_RF = {
 }
 
 
+_VALIDATOR_ABSTAIN_MSG = (
+    "I could not produce a reliably grounded answer for this turn — the available chart "
+    "data does not clearly support a confident response. Please review the chart directly."
+)
+
+
 def _knob(knobs: Optional[Dict[str, Any]], role: str, key: str, default: Any) -> Any:
     """Resolve one per-role sampling knob from a level's `knobs` block, falling back to
     the global default when the role or key is unset. knobs = {role: {key: value}}."""
@@ -464,8 +470,8 @@ async def _audit_and_revise(
         if revised_verdict is not None and revised_verdict.get("ok", False):
             logger.info("validator: revision cleared the flags -> adopted")
             return revised  # revision cleared the flags -> adopt it
-        logger.info("validator: revision still flagged -> kept the original draft")
-        return content  # revision still flagged -> keep the original draft
+        logger.info("validator: revision still flagged -> ABSTAINING (never ship a flagged answer)")
+        return _fallback_envelope(_VALIDATOR_ABSTAIN_MSG)  # don't ship the original OR the bad rewrite
     return content
 
 
