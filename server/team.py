@@ -29,7 +29,9 @@ Design notes (see specs/artifacts/planning/react-team-orchestration-design.md):
 
 import json
 import logging
+import os
 import re
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
@@ -132,6 +134,15 @@ def _tool_definitions(has_expert: bool = True) -> List[Dict[str, Any]]:
 def _chart_context(messages: List[Dict[str, Any]]) -> str:
     """The chart snapshot is chartsearchai's first user message (after system)."""
     for m in messages:
+        if m.get("role") == "user":
+            content = m.get("content")
+            return content if isinstance(content, str) else json.dumps(content)
+    return ""
+
+
+def _latest_user_text(messages: List[Dict[str, Any]]) -> str:
+    """The current turn's question is chartsearchai's LAST user message."""
+    for m in reversed(messages):
         if m.get("role") == "user":
             content = m.get("content")
             return content if isinstance(content, str) else json.dumps(content)
@@ -532,7 +543,7 @@ async def _validate_answer(
     return verdict
 
 
-async def _validate_indepth(
+async def _validate_indepth_verdict(
     client: httpx.AsyncClient,
     validator_model: str,
     *,
@@ -545,9 +556,9 @@ async def _validate_indepth(
     repeat_penalty: Optional[float],
     dry: Optional[float],
     validation_prompt: str = "validation",
-) -> List[int]:
-    """Audit the In-Depth claims claim-by-claim. Returns the 1-based claim numbers to DROP,
-    clamped to 1..len(claims). FAIL-OPEN: returns [] on any parse failure."""
+) -> Dict[str, Any]:
+    """Audit the In-Depth claims claim-by-claim. Returns {drop: [1-based claim numbers, clamped to
+    1..len(claims)], issues: str}. FAIL-OPEN: returns {drop: [], issues: ""} on any parse failure."""
     instruction = load_prompt(validation_prompt + "-indepth")
     numbered = "\n".join(f"{i}. {c}" for i, c in enumerate(claims, start=1))
     audit_user = (
@@ -567,15 +578,63 @@ async def _validate_indepth(
     except (json.JSONDecodeError, TypeError):
         logger.warning("indepth-validator[%s] verdict UNPARSEABLE -> FAIL-OPEN (keep all); raw=%r",
                        validator_model, raw[:240])
-        return []
+        return {"drop": [], "issues": ""}
     if not isinstance(verdict, dict):
         logger.warning("indepth-validator[%s] verdict not an object -> FAIL-OPEN; raw=%r",
                        validator_model, raw[:240])
-        return []
+        return {"drop": [], "issues": ""}
     drop = [d for d in (verdict.get("drop") or []) if isinstance(d, int) and 1 <= d <= len(claims)]
     logger.info("indepth-validator[%s] drop=%s/%d claims issues=%r",
                 validator_model, drop, len(claims), (verdict.get("issues") or "")[:120])
-    return drop
+    return {"drop": drop, "issues": verdict.get("issues", "")}
+
+
+def _nuanced_abstain(verdict: Optional[Dict[str, Any]], answer_text: str) -> str:
+    """Graceful abstain (Answer section). Instead of a blanket refusal, surface what the reviewer
+    found — the answer-validator's `answer_issues` already NAMES the correct chart fact — so the
+    clinician gets the grounded partial + the specific uncertainty. The In-Depth KB context is
+    still shipped separately by the caller."""
+    issue = ((verdict or {}).get("answer_issues") or "").strip()
+    if not issue:
+        return _VALIDATOR_ABSTAIN_MSG
+    return ("I could not confirm a reliable direct answer for this turn. A clinical review of the "
+            "draft found: " + issue + " Please verify against the chart before acting; the context "
+            "below is provided to help.")
+
+
+async def _gen_indepth(
+    client: httpx.AsyncClient, synth_model: str, base_messages: List[Dict[str, Any]],
+    indepth_instruction: str, gathered: str, answer_text: str, *,
+    validator_model: Optional[str], validator_prompt: Optional[str], chart: str,
+    synth_temperature: float, synth_repeat_penalty: Optional[float], synth_dry: Optional[float],
+    validator_temperature: float, validator_repeat_penalty: Optional[float], validator_dry: Optional[float],
+    max_tokens: Optional[int], steps: List[Dict[str, Any]],
+) -> List[str]:
+    """IN-DEPTH path: synthesize the KB-informed claim list, then block/strip the claims the
+    validator flags. Records both calls into `steps`. Returns the surviving claims."""
+    claims = await _synthesize_indepth(
+        client, synth_model, base_messages, indepth_instruction, gathered, answer_text,
+        temperature=synth_temperature, max_tokens=max_tokens,
+        repeat_penalty=synth_repeat_penalty, dry=synth_dry)
+    steps.append({"role": "indepth_synth", "model": synth_model, "claims": list(claims)})
+    if validator_model and claims:
+        try:
+            verdict = await _validate_indepth_verdict(
+                client, validator_model, chart=chart, gathered=gathered,
+                answer_text=answer_text, claims=claims, max_tokens=max_tokens,
+                temperature=validator_temperature, repeat_penalty=validator_repeat_penalty,
+                dry=validator_dry, validation_prompt=validator_prompt or "validation")
+        except Exception as e:
+            logger.warning("indepth-validator call failed: %s", e)
+            verdict = {"drop": [], "issues": ""}
+        drop = verdict.get("drop") or []
+        steps.append({"role": "indepth_validator", "model": validator_model,
+                      "drop": drop, "issues": verdict.get("issues", ""), "claims_in": len(claims)})
+        if drop:
+            logger.info("indepth-validator: claims %s flagged -> block/strip", drop)
+            dropset = set(drop)
+            claims = [c for i, c in enumerate(claims, start=1) if i not in dropset]
+    return claims
 
 
 async def _synthesize_and_validate(
@@ -598,38 +657,54 @@ async def _synthesize_and_validate(
     validator_dry: Optional[float],
     max_tokens: Optional[int],
     max_loops: int,
-) -> str:
+) -> Tuple[str, List[Dict[str, Any]], str]:
     """Two-call generation + two independent validators, combined into one envelope only here.
+    Returns (envelope_json, trace_steps, disposition) — the steps are the per-call reasoning
+    trace, the disposition is full / answer_only / stripped / abstain / synth_failed.
 
       ANSWER (strict): synthesize the direct answer; if the Answer validator flags it WITH a
         reason, re-synthesize (Answer-focused feedback) and re-validate up to `max_loops`. If it
-        still cannot be made chart-accurate, ABSTAIN the turn. A reasonless flag (answer_ok=False
-        with empty answer_issues) is treated as PASS so noise never abstains.
+        still cannot be made chart-accurate, ABSTAIN — but gracefully: a nuanced message (what the
+        review found) PLUS the In-Depth KB context. A reasonless flag (answer_ok=False with empty
+        answer_issues) is treated as PASS so noise never abstains.
       IN DEPTH (advisory, claim-level): synthesize claims from the final answer, then drop exactly
         the claims the In-Depth validator flags. Never abstains the turn.
 
     FAIL-OPEN throughout: a validator outage ships the draft; only a reasoned, unfixable NEGATIVE
     Answer verdict abstains."""
+    steps: List[Dict[str, Any]] = []
+    _idkw = dict(
+        validator_model=validator_model, validator_prompt=validator_prompt, chart=chart,
+        synth_temperature=synth_temperature, synth_repeat_penalty=synth_repeat_penalty, synth_dry=synth_dry,
+        validator_temperature=validator_temperature, validator_repeat_penalty=validator_repeat_penalty,
+        validator_dry=validator_dry, max_tokens=max_tokens, steps=steps)
+
     answer_text, citations, blocks = await _synthesize_answer(
         client, synth_model, base_messages, answer_instruction, gathered,
         response_format=response_format, temperature=synth_temperature,
         max_tokens=max_tokens, repeat_penalty=synth_repeat_penalty, dry=synth_dry)
+    steps.append({"role": "answer_synth", "model": synth_model, "output": answer_text, "citations": citations})
     if not answer_text:
-        return _fallback_envelope(
-            "I could not produce a complete answer for this turn. Please try again.")
+        return (_fallback_envelope(
+            "I could not produce a complete answer for this turn. Please try again."),
+            steps, "synth_failed")
 
     # --- ANSWER path -----------------------------------------------------
     if validator_model:
-        async def _audit(draft: str) -> Optional[Dict[str, Any]]:
+        async def _audit(draft: str, attempt: int) -> Optional[Dict[str, Any]]:
             try:
-                return await _validate_answer(
+                verdict = await _validate_answer(
                     client, validator_model, chart=chart, gathered=gathered, answer_text=draft,
                     max_tokens=max_tokens, temperature=validator_temperature,
                     repeat_penalty=validator_repeat_penalty, dry=validator_dry,
                     validation_prompt=validator_prompt or "validation")
             except Exception as e:
                 logger.warning("answer-validator call failed: %s", e)
-                return None  # fail-open
+                verdict = None  # fail-open
+            steps.append({"role": "answer_validator", "model": validator_model, "attempt": attempt,
+                          "answer_ok": (verdict or {}).get("answer_ok", True),
+                          "answer_issues": (verdict or {}).get("answer_issues", "")})
+            return verdict
 
         def _passed(verdict: Optional[Dict[str, Any]]) -> bool:
             # Pass when: no verdict (fail-open), answer_ok True, OR a reasonless False flag.
@@ -637,10 +712,10 @@ async def _synthesize_and_validate(
                 return True
             return not (verdict.get("answer_issues") or "").strip()
 
-        v = await _audit(answer_text)
+        v = await _audit(answer_text, 0)
         if not _passed(v):
             fixed = False
-            for _ in range(max(0, max_loops)):
+            for i in range(max(0, max_loops)):
                 logger.info("answer-validator: Answer flagged -> re-synthesizing")
                 attempt_text, attempt_cit, attempt_blk = await _synthesize_answer(
                     client, synth_model, base_messages, answer_instruction, gathered,
@@ -651,39 +726,65 @@ async def _synthesize_and_validate(
                          "content": _assemble_envelope(answer_text, citations, blocks, [])},
                         {"role": "user", "content": _answer_feedback(v)},
                     ])
+                steps.append({"role": "answer_resynth", "model": synth_model, "output": attempt_text})
                 if not attempt_text:
                     break  # cannot fix a known-wrong Answer -> abstain
                 answer_text, citations, blocks = attempt_text, attempt_cit, attempt_blk
-                v = await _audit(answer_text)
+                v = await _audit(answer_text, i + 1)
                 if _passed(v):
                     logger.info("answer-validator: revision fixed the Answer -> adopt")
                     fixed = True
                     break
             if not fixed:
-                logger.info("answer-validator: Answer still flagged -> ABSTAINING")
-                return _fallback_envelope(_VALIDATOR_ABSTAIN_MSG)
+                # GRACEFUL ABSTAIN: nuanced Answer (what the review found) + the In-Depth KB context.
+                logger.info("answer-validator: Answer still flagged -> ABSTAINING (graceful)")
+                claims = await _gen_indepth(
+                    client, synth_model, base_messages, indepth_instruction, gathered, answer_text, **_idkw)
+                return (_assemble_envelope(_nuanced_abstain(v, answer_text), [], [], claims),
+                        steps, "abstain")
 
     # --- IN-DEPTH path ---------------------------------------------------
-    claims = await _synthesize_indepth(
-        client, synth_model, base_messages, indepth_instruction, gathered, answer_text,
-        temperature=synth_temperature, max_tokens=max_tokens,
-        repeat_penalty=synth_repeat_penalty, dry=synth_dry)
-    if validator_model and claims:
-        try:
-            drop = await _validate_indepth(
-                client, validator_model, chart=chart, gathered=gathered,
-                answer_text=answer_text, claims=claims, max_tokens=max_tokens,
-                temperature=validator_temperature, repeat_penalty=validator_repeat_penalty,
-                dry=validator_dry, validation_prompt=validator_prompt or "validation")
-        except Exception as e:
-            logger.warning("indepth-validator call failed: %s", e)
-            drop = []  # fail-open
-        if drop:
-            logger.info("indepth-validator: claims %s flagged -> block/strip", drop)
-            dropset = set(drop)
-            claims = [c for i, c in enumerate(claims, start=1) if i not in dropset]
+    claims = await _gen_indepth(
+        client, synth_model, base_messages, indepth_instruction, gathered, answer_text, **_idkw)
+    indepth_step = next((s for s in reversed(steps) if s["role"] == "indepth_validator"), None)
+    disposition = "stripped" if (indepth_step and indepth_step.get("drop")) else ("full" if claims else "answer_only")
+    return _assemble_envelope(answer_text, citations, blocks, claims), steps, disposition
 
-    return _assemble_envelope(answer_text, citations, blocks, claims)
+
+# Per-turn reasoning trace: the hub appends one structured line per turn to a writable mount so the
+# live dashboard can render the full LLM flow (orchestrator -> kb/expert -> answer synth -> answer
+# validator(+resynth) -> in-depth synth -> in-depth validator -> disposition). The dashboard
+# correlates a trace line to a results.jsonl cell by level_id + the ts falling in the cell's
+# started_at..ended_at window (the runner is strictly sequential).
+_TRACE_DIR = os.environ.get("TEAM_TRACE_DIR", "/app/trace")
+
+
+def _write_trace(level_id: Optional[str], messages: List[Dict[str, Any]], *, orchestrator: str,
+                 expert: str, synthesizer: str, validator: Optional[str],
+                 steps: List[Dict[str, Any]], disposition: str) -> None:
+    """Append one per-turn reasoning-trace line. Best-effort: never raises (a trace-write failure
+    must never break a turn)."""
+    try:
+        question = ""
+        for m in reversed(messages):
+            if m.get("role") == "user":
+                c = m.get("content")
+                question = c if isinstance(c, str) else json.dumps(c)
+                break
+        entry = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "level_id": level_id,
+            "question": question[:2000],
+            "models": {"orchestrator": orchestrator, "expert": expert,
+                       "synthesizer": synthesizer, "validator": validator},
+            "disposition": disposition,
+            "steps": steps,
+        }
+        os.makedirs(_TRACE_DIR, exist_ok=True)
+        with open(os.path.join(_TRACE_DIR, "trace.jsonl"), "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, default=str) + "\n")
+    except Exception as e:  # pragma: no cover - defensive
+        logger.warning("trace write failed (non-fatal): %s", e)
 
 
 async def run_team(
@@ -703,6 +804,7 @@ async def run_team(
     validator_prompt: Optional[str] = None,
     validator_max_loops: int = 1,
     knobs: Optional[Dict[str, Any]] = None,
+    level_id: Optional[str] = None,
 ) -> str:
     """
     Run the team for one chartsearchai turn.
@@ -753,6 +855,7 @@ async def run_team(
 
     kb_context = ""          # accumulated KB snippets, threaded into the expert + synthesis
     expert_notes: List[str] = []  # accumulated clinical-expert observations
+    orch_steps: List[Dict[str, Any]] = []  # reasoning-trace steps for the orchestrator tool loop
 
     async with httpx.AsyncClient() as client:
         # --- tool loop (plain: tools, no response_format) -------------------
@@ -764,6 +867,8 @@ async def run_team(
                     repeat_penalty=orch_rp, dry_multiplier=orch_dry,  # DRY default OFF for tool-calling
                 )
                 tool_calls = msg.get("tool_calls")
+                orch_steps.append({"role": "orchestrator", "model": model,
+                                   "tool_calls": [tc.get("function", {}).get("name") for tc in (tool_calls or [])]})
                 if not tool_calls:
                     break  # orchestrator has gathered enough; proceed to synthesis
                 loop_messages.append(msg)
@@ -785,12 +890,17 @@ async def run_team(
                                 kb_context=kb_context, model=expert_model,
                                 temperature=exp_temp, repeat_penalty=exp_rp, dry_multiplier=exp_dry)
                             expert_notes.append(observation)
+                            orch_steps.append({"role": "medical_expert", "model": expert_model,
+                                               "query": args.get("query", ""), "note": observation[:400]})
                         elif name == "kb_search":
                             observation = _run_kb_search(args.get("query", ""))
-                            if observation.startswith(_KB_BLOCK_HEADER):
+                            hit = observation.startswith(_KB_BLOCK_HEADER)
+                            if hit:
                                 kb_context = (
                                     kb_context + "\n\n" + observation if kb_context else observation
                                 )
+                            orch_steps.append({"role": "kb_search", "query": args.get("query", ""),
+                                               "hit": hit, "chars": len(observation)})
                         else:
                             observation = f"(unknown tool: {name})"
                     loop_messages.append({
@@ -801,13 +911,26 @@ async def run_team(
         except Exception as e:
             logger.warning("orchestrator tool loop failed, proceeding to synthesis: %s", e)
 
+        # KB-retrieval fallback: small orchestrators often skip kb_search (esp. on follow-up
+        # turns), leaving the In-Depth with no guidance to ground. If nothing was gathered, do one
+        # deterministic kb_search on the question so the synthesis still has reference context.
+        if not kb_context:
+            q = _latest_user_text(messages)
+            if q:
+                obs = _run_kb_search(q)
+                hit = obs.startswith(_KB_BLOCK_HEADER)
+                if hit:
+                    kb_context = obs
+                orch_steps.append({"role": "kb_search", "query": q[:160], "hit": hit,
+                                   "chars": len(obs), "fallback": True})
+
         # --- generation: two distinct calls (answer + in-depth), each validated,
         # combined into one envelope. The base prefix is the ORIGINAL chartsearchai
         # array (byte-identical for LM Studio's cache); the gathered evidence rides on
         # the last user turn so decisive evidence sits at the end (lost-in-the-middle).
         gathered = _gathered_evidence(kb_context, expert_notes)
         try:
-            content = await _synthesize_and_validate(
+            content, synth_steps, disposition = await _synthesize_and_validate(
                 client,
                 base_messages=list(messages), gathered=gathered, chart=chart,
                 synth_model=synth_model,
@@ -817,9 +940,15 @@ async def run_team(
                 synth_temperature=synth_temp, synth_repeat_penalty=synth_rp, synth_dry=synth_dry,
                 validator_temperature=val_temp, validator_repeat_penalty=val_rp, validator_dry=val_dry,
                 max_tokens=max_tokens, max_loops=validator_max_loops)
+            _write_trace(level_id, messages, orchestrator=model, expert=expert_model,
+                         synthesizer=synth_model, validator=validator_model,
+                         steps=orch_steps + synth_steps, disposition=disposition)
             return content
         except Exception as e:
             logger.error("synthesis failed: %s", e, exc_info=True)
 
+    _write_trace(level_id, messages, orchestrator=model, expert=expert_model,
+                 synthesizer=synth_model, validator=validator_model,
+                 steps=orch_steps, disposition="synth_failed")
     return _fallback_envelope(
         "I could not produce a complete answer for this turn. Please try again.")

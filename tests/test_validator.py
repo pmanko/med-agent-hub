@@ -141,14 +141,18 @@ def test_answer_flagged_with_reason_resynth_fixes_adopts_v1():
     assert indepth_synth == 1, calls                      # In-Depth still runs once afterward
 
 
-def test_answer_flagged_with_reason_persists_abstains():
-    """ANSWER path: flagged WITH a reason and STILL flagged after the fix -> abstain the turn."""
+def test_answer_flagged_with_reason_persists_abstains_gracefully():
+    """ANSWER path: flagged WITH a reason and STILL flagged -> GRACEFUL abstain: a nuanced message
+    that surfaces what the review found (answer_issues), AND the In-Depth KB context is still shipped."""
     calls, ans = _run([{"answer_ok": False, "answer_issues": "wrong dose"},
                        {"answer_ok": False, "answer_issues": "still wrong"}], validator_max_loops=1)
     answer_synth, indepth_synth, answer_val, indepth_val = _counts(calls)
     assert answer_synth == 2 and answer_val == 2, calls
-    assert "could not produce" in ans.lower()             # abstained
-    assert indepth_synth == 0, calls                      # no In-Depth on an abstained turn
+    assert "could not confirm" in ans.lower()             # graceful abstain (nuanced wording)
+    assert "still wrong" in ans                           # surfaces the specific review finding
+    assert "ans-v" not in ans                             # the flagged draft answer is NOT shipped
+    assert indepth_synth == 1, calls                      # In-Depth KB context IS still generated
+    assert "claim-A-v0" in ans                            # ...and shipped alongside the abstain
 
 
 def test_answer_flagged_without_reason_ships_noise_guard():
@@ -160,3 +164,23 @@ def test_answer_flagged_without_reason_ships_noise_guard():
     assert "ans-v0" in ans                                # shipped the answer
     assert "could not produce" not in ans.lower()         # NOT an abstain
     assert "claim-A-v0" in ans                            # In-Depth still flows through
+
+
+def test_reasoning_trace_is_written_with_steps_and_disposition(tmp_path, monkeypatch):
+    """The hub appends a per-turn reasoning trace: the ordered steps (answer_synth, answer_validator,
+    indepth_synth, indepth_validator) + the disposition + the level_id correlation key."""
+    monkeypatch.setattr(team, "_TRACE_DIR", str(tmp_path))
+    calls = []
+    monkeypatch.setattr(team, "_chat", _factory(calls, [{"answer_ok": True, "drop": []}]))
+    asyncio.run(team.run_team(
+        _MESSAGES, response_format=_RF, orchestrator_model="ORCH", synthesizer_model="SYNTH",
+        validator_model="VALIDATOR", level_id="med-agent-team-low-validated"))
+    lines = (tmp_path / "trace.jsonl").read_text().splitlines()
+    assert len(lines) == 1, lines
+    entry = json.loads(lines[0])
+    assert entry["level_id"] == "med-agent-team-low-validated"
+    assert entry["disposition"] == "full"
+    roles = [s["role"] for s in entry["steps"]]
+    assert "answer_synth" in roles and "answer_validator" in roles
+    assert "indepth_synth" in roles and "indepth_validator" in roles
+    assert entry["ts"] and entry["models"]["synthesizer"] == "SYNTH"
