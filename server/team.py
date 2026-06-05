@@ -385,11 +385,20 @@ async def _run_validator(
         client, validator_model, [{"role": "user", "content": audit_user}],
         response_format=_VALIDATOR_RF, temperature=temperature, max_tokens=max_tokens,
         repeat_penalty=repeat_penalty, dry_multiplier=dry_multiplier)
+    raw = _message_text(msg)
     try:
-        verdict = json.loads(_message_text(msg))
+        verdict = json.loads(raw)
     except (json.JSONDecodeError, TypeError):
+        logger.warning("validator[%s] verdict UNPARSEABLE -> FAIL-OPEN (pass); chart=%dch gathered=%dch max_tokens=%s raw=%r",
+                       validator_model, len(chart or ""), len(gathered or ""), max_tokens, raw[:240])
         return {"ok": True}
-    return verdict if isinstance(verdict, dict) else {"ok": True}
+    if not isinstance(verdict, dict):
+        logger.warning("validator[%s] verdict not an object -> FAIL-OPEN; raw=%r", validator_model, raw[:240])
+        return {"ok": True}
+    logger.info("validator[%s] ok=%s answer_issues=%r context_issues=%r (chart=%dch gathered=%dch)",
+                validator_model, verdict.get("ok"), (verdict.get("answer_issues") or "")[:200],
+                (verdict.get("context_issues") or "")[:120], len(chart or ""), len(gathered or ""))
+    return verdict
 
 
 async def _audit_and_revise(
@@ -434,6 +443,7 @@ async def _audit_and_revise(
         verdict = await _audit(content)
         if verdict is None or verdict.get("ok", True):
             return content  # clean (or validator unavailable) -> keep draft
+        logger.info("validator flagged the draft -> re-synthesizing with feedback")
         revise_messages = synth_messages + [
             {"role": "assistant", "content": content},
             {"role": "user", "content": _validator_feedback(verdict)},
@@ -452,7 +462,9 @@ async def _audit_and_revise(
             return content  # empty revision -> keep original
         revised_verdict = await _audit(revised)
         if revised_verdict is not None and revised_verdict.get("ok", False):
+            logger.info("validator: revision cleared the flags -> adopted")
             return revised  # revision cleared the flags -> adopt it
+        logger.info("validator: revision still flagged -> kept the original draft")
         return content  # revision still flagged -> keep the original draft
     return content
 
