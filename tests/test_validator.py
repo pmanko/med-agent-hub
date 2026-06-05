@@ -114,21 +114,22 @@ def test_answer_yellow_fixed_on_retry_shows_message():
     a_synth, _i, a_val, _iv = _counts(calls)
     assert a_synth == 2 and a_val == 2, calls
     assert env["confidence"]["answer"]["level"] == "yellow"
-    assert "ans-v1" in env["answer"]                 # the corrected answer is presented
-    assert "🟡" in env["answer"]                       # yellow caveat in the body fallback
+    assert env["confidence"]["answer"]["note"]             # a clinician-facing note for the tag
+    assert "ans-v1" in env["answer"]                       # the corrected answer is presented
+    assert "confidence" not in env["answer"].lower()       # CLEAN body — confidence is a structured tag, not baked text
 
 
-def test_answer_red_presents_flagged_answer_with_caveat():
-    """Flagged + still flagged after re-synth -> RED: present the (last) answer + the criticism note,
-    NOT hidden, and structured confidence=red carrying the reviewer's reason."""
+def test_answer_red_presents_flagged_answer_with_structured_tag():
+    """Flagged + still flagged after re-synth -> RED: the (last) answer is PRESENTED (not hidden) in
+    a CLEAN body; the criticism rides the structured confidence (the tag's note), not baked text."""
     calls, env = _run([{"answer_ok": False, "answer_issues": "wrong dose"},
                        {"answer_ok": False, "answer_issues": "still wrong"}], validator_max_loops=1)
     a_synth, i_synth, a_val, _iv = _counts(calls)
     assert a_synth == 2 and a_val == 2, calls
     assert env["confidence"]["answer"]["level"] == "red"
-    assert "still wrong" in env["confidence"]["answer"]["note"]   # criticism surfaced
+    assert "still wrong" in env["confidence"]["answer"]["note"]   # criticism in the structured tag note
     assert "ans-v1" in env["answer"]                              # the answer IS presented (not hidden)
-    assert "🔴" in env["answer"]
+    assert "confidence" not in env["answer"].lower()             # clean body — no baked confidence text
     assert i_synth >= 1                                           # In-Depth still generated
 
 

@@ -381,31 +381,18 @@ def _knob(knobs: Optional[Dict[str, Any]], role: str, key: str, default: Any) ->
     return default
 
 
-_CONF_ICON = {"green": "🟢", "yellow": "🟡", "red": "🔴"}
+# Confidence level -> tag label (high=green, medium=yellow, low=red). The hub emits the structured
+# {level, note}; clients (dashboard/report, and chat once its schema is updated) render the tag.
+_CONF_LABEL = {"green": "High confidence", "yellow": "Medium confidence", "red": "Low confidence"}
 
 
-def _caveat(conf: Optional[Dict[str, Any]]) -> str:
-    """A one-line clinician-facing confidence caveat for a section (empty for green / no note)."""
-    if not conf:
-        return ""
-    level = conf.get("level")
-    note = (conf.get("note") or "").strip()
-    if level in (None, "green") or not note:
-        return ""
-    return "\n\n> " + _CONF_ICON.get(level, "") + " " + note
-
-
-def _answer_body(answer_text: str, claims: List[str],
-                 answer_conf: Optional[Dict[str, Any]] = None,
-                 indepth_conf: Optional[Dict[str, Any]] = None) -> str:
-    """Combine the direct Answer and the In-Depth claims into one markdown body, each followed by
-    its confidence caveat (a 🟡/🔴 note; green adds nothing). The Answer leads under a **Answer**
-    header; non-empty claims follow as a **In Depth** bullet list."""
-    body = "**Answer**\n" + (answer_text or "").strip() + _caveat(answer_conf)
+def _answer_body(answer_text: str, claims: List[str]) -> str:
+    """Combine the direct Answer and the In-Depth claims into one CLEAN markdown body (no confidence
+    text baked in — confidence is structured metadata a client renders as a tag). The Answer leads
+    under a **Answer** header; non-empty claims follow as a **In Depth** bullet list."""
+    body = "**Answer**\n" + (answer_text or "").strip()
     if claims:
-        body += "\n\n**In Depth**\n" + "\n".join("- " + c for c in claims) + _caveat(indepth_conf)
-    elif _caveat(indepth_conf):  # red In-Depth with no surviving claims still carries its note
-        body += "\n\n**In Depth**" + _caveat(indepth_conf)
+        body += "\n\n**In Depth**\n" + "\n".join("- " + c for c in claims)
     return body
 
 
@@ -413,12 +400,12 @@ def _assemble_envelope(
     answer_text: str, citations: List[int], blocks: List[Any], claims: List[str],
     answer_conf: Optional[Dict[str, Any]] = None, indepth_conf: Optional[Dict[str, Any]] = None,
 ) -> str:
-    """Serialize the chartsearchai {answer, citations, blocks} envelope, where `answer` is the
-    combined Answer + In-Depth markdown body. Also carries a forward-looking `confidence` block
-    (per-section {level, note}) — chartsearchai drops it today; the harness reads confidence from
-    the reasoning trace, and the markdown caveats render everywhere meanwhile."""
+    """Serialize the chartsearchai {answer, citations, blocks} envelope, where `answer` is the CLEAN
+    combined Answer + In-Depth markdown body. Carries a `confidence` block (per-section {level, note})
+    as structured metadata a client renders as a TAG — chartsearchai drops it today; the harness
+    reads confidence from the reasoning trace, the dashboard/report render the tag."""
     env: Dict[str, Any] = {
-        "answer": _answer_body(answer_text, claims, answer_conf, indepth_conf),
+        "answer": _answer_body(answer_text, claims),
         "citations": citations or [],
         "blocks": blocks or [],
     }
@@ -618,7 +605,7 @@ def _answer_note(level: str, first_issue: str, last_issue: str) -> str:
         base = "An initial draft was flagged on clinical review and corrected on a second pass"
         return base + ((" (first issue: " + first_issue + ")") if first_issue else "") + "."
     if level == "red":
-        return ("Low confidence — clinical review still flagged this after a revision: "
+        return ("Clinical review still flagged this after a revision: "
                 + (last_issue or first_issue or "the answer could not be confirmed against the chart.")
                 + " Verify against the chart before acting.")
     return ""
