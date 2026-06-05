@@ -1,9 +1,9 @@
-"""Validator role: an optional post-synthesis audit round. When a level sets a
-`validator` model, run_team audits the synthesized envelope (the main answer) AND
-the gathered context separately; on a flag it appends specific feedback and
-re-synthesizes, up to `validator_max_loops` cycles. `validator=None` skips it
-entirely (today's behaviour). Mocks the LM Studio boundary (`_chat`) and asserts
-the routing + loop-back, exercising the real run_team. Run: pytest tests/test_validator.py
+"""Validator role: an optional post-synthesis audit that judges the **Answer** and
+**In Depth** sections SEPARATELY and acts granularly — ship a clean draft; if only the
+In Depth is flagged keep the Answer and drop the In Depth; if the Answer is flagged
+re-synthesize, adopt the fix or (if still wrong) abstain. Never ships a wrong direct
+answer. Mocks the LM Studio boundary (`_chat`) and exercises the real run_team.
+Run: pytest tests/test_validator.py
 """
 
 import asyncio
@@ -19,10 +19,10 @@ _MESSAGES = [
 _RF = {"type": "json_schema", "json_schema": {"name": "chart_answer"}}
 
 
-def _factory(calls, validator_ok_seq):
+def _factory(calls, verdicts):
     """Mock _chat. Orchestrator loop -> no tools (break to synth). Synth -> a versioned
-    envelope so re-synth is distinguishable. Validator (model='VALIDATOR') -> a verdict
-    pulled from validator_ok_seq."""
+    two-section envelope. Validator (schema 'validator_verdict') -> a per-section verdict
+    {answer_ok, indepth_ok} pulled from `verdicts`."""
     state = {"synth": 0, "val": 0}
 
     async def fake_chat(client, model, messages, *, tools=None, response_format=None,
@@ -30,79 +30,90 @@ def _factory(calls, validator_ok_seq):
                         dry_multiplier=None, **kwargs):
         name = (response_format or {}).get("json_schema", {}).get("name")
         calls.append((model, name))
-        if model == "VALIDATOR":
-            ok = validator_ok_seq[min(state["val"], len(validator_ok_seq) - 1)]
+        if name == "validator_verdict":
+            v = verdicts[min(state["val"], len(verdicts) - 1)]
             state["val"] += 1
-            return {"content": json.dumps(
-                {"ok": ok,
-                 "answer_issues": "" if ok else "trend asserted from a single data point",
-                 "context_issues": ""})}
-        if response_format is not None:  # synthesis (schema-bound)
-            v = state["synth"]
+            return {"content": json.dumps({
+                "answer_ok": v["answer_ok"], "answer_issues": "" if v["answer_ok"] else "wrong value",
+                "indepth_ok": v["indepth_ok"], "indepth_issues": "" if v["indepth_ok"] else "fabricated trend"})}
+        if response_format is not None:  # synthesis (chart_answer schema)
+            n = state["synth"]
             state["synth"] += 1
-            return {"content": json.dumps({"answer": f"answer-v{v}", "citations": [], "blocks": []})}
+            return {"content": json.dumps(
+                {"answer": f"**Answer** ans-v{n} **In Depth** depth-v{n}", "citations": [], "blocks": []})}
         return {"content": "", "tool_calls": None}  # loop turn
 
     return fake_chat
 
 
 def _counts(calls):
-    val = [c for c in calls if c[0] == "VALIDATOR"]
-    synth = [c for c in calls if c[0] == "SYNTH"]
-    return len(val), len(synth)
+    val = sum(1 for m, n in calls if n == "validator_verdict")
+    synth = sum(1 for m, n in calls if n == "chart_answer")
+    return val, synth
+
+
+def _run(verdicts, **kw):
+    calls = []
+    import server.team as t
+    t._chat = _factory(calls, verdicts)
+    out = asyncio.run(team.run_team(
+        _MESSAGES, response_format=_RF, orchestrator_model="ORCH",
+        synthesizer_model="SYNTH", **kw))
+    return calls, json.loads(out)["answer"]
 
 
 def test_validator_none_skips_audit(monkeypatch):
-    """No validator configured -> no audit call, single synthesis (today's behaviour)."""
-    calls = []
-    monkeypatch.setattr(team, "_chat", _factory(calls, [True]))
-    out = asyncio.run(team.run_team(
-        _MESSAGES, response_format=_RF,
-        orchestrator_model="ORCH", synthesizer_model="SYNTH"))
-    val, synth = _counts(calls)
-    assert val == 0 and synth == 1, calls
-    assert json.loads(out)["answer"] == "answer-v0"
+    monkeypatch.setattr(team, "_chat", _factory([], []))
+    out = asyncio.run(team.run_team(_MESSAGES, response_format=_RF,
+                                    orchestrator_model="ORCH", synthesizer_model="SYNTH"))
+    assert "ans-v0" in json.loads(out)["answer"]
 
 
-def test_validator_clean_answer_no_resynth(monkeypatch):
-    """Validator passes the draft -> audited once, NOT re-synthesized."""
+def test_validator_both_sections_clean_ships(monkeypatch):
     calls = []
-    monkeypatch.setattr(team, "_chat", _factory(calls, [True]))
-    out = asyncio.run(team.run_team(
-        _MESSAGES, response_format=_RF,
-        orchestrator_model="ORCH", synthesizer_model="SYNTH",
-        validator_model="VALIDATOR"))
+    monkeypatch.setattr(team, "_chat", _factory(calls, [{"answer_ok": True, "indepth_ok": True}]))
+    out = asyncio.run(team.run_team(_MESSAGES, response_format=_RF, orchestrator_model="ORCH",
+                                    synthesizer_model="SYNTH", validator_model="VALIDATOR"))
     val, synth = _counts(calls)
     assert val == 1 and synth == 1, calls
-    assert json.loads(out)["answer"] == "answer-v0"
+    a = json.loads(out)["answer"]
+    assert "ans-v0" in a and "depth-v0" in a, a  # full two-section answer shipped
 
 
-def test_validator_flag_loops_back_then_passes(monkeypatch):
-    """Flag -> re-synthesize -> re-audit -> pass. Two synth calls, two audits; the
-    returned answer is the corrected re-synthesis (v1)."""
+def test_validator_indepth_flagged_keeps_answer_drops_indepth(monkeypatch):
+    """GRANULAR: Answer ok, In Depth flagged -> ship the Answer, drop the In Depth. RED on
+    the old all-or-nothing code (which abstained the whole turn)."""
     calls = []
-    monkeypatch.setattr(team, "_chat", _factory(calls, [False, True]))
-    out = asyncio.run(team.run_team(
-        _MESSAGES, response_format=_RF,
-        orchestrator_model="ORCH", synthesizer_model="SYNTH",
-        validator_model="VALIDATOR", validator_max_loops=2))
+    monkeypatch.setattr(team, "_chat", _factory(calls, [{"answer_ok": True, "indepth_ok": False}]))
+    out = asyncio.run(team.run_team(_MESSAGES, response_format=_RF, orchestrator_model="ORCH",
+                                    synthesizer_model="SYNTH", validator_model="VALIDATOR"))
     val, synth = _counts(calls)
-    assert synth == 2 and val == 2, calls
-    assert json.loads(out)["answer"] == "answer-v1"
+    assert val == 1 and synth == 1, calls          # audited once, NOT re-synthesized
+    a = json.loads(out)["answer"]
+    assert "ans-v0" in a, a                         # the grounded Answer is kept
+    assert "depth-v0" not in a, a                   # the flagged In Depth is dropped
+    assert "could not produce" not in a.lower(), a  # NOT a full abstain
 
 
-def test_validator_abstains_when_revision_still_flagged(monkeypatch):
-    """Re-validate-and-keep-best, ABSTAIN terminal: a still-flagged revision is not
-    shipped, and NEITHER is the flagged original — the turn abstains (never ship an
-    answer the validator flagged). RED on the keep-original code, which returned v0."""
+def test_validator_answer_flagged_resynth_fixes(monkeypatch):
+    """Answer flagged -> re-synthesize -> Answer now ok -> adopt the revision."""
     calls = []
-    monkeypatch.setattr(team, "_chat", _factory(calls, [False, False]))
-    out = asyncio.run(team.run_team(
-        _MESSAGES, response_format=_RF,
-        orchestrator_model="ORCH", synthesizer_model="SYNTH",
-        validator_model="VALIDATOR", validator_max_loops=1))
+    monkeypatch.setattr(team, "_chat", _factory(
+        calls, [{"answer_ok": False, "indepth_ok": False}, {"answer_ok": True, "indepth_ok": True}]))
+    out = asyncio.run(team.run_team(_MESSAGES, response_format=_RF, orchestrator_model="ORCH",
+                                    synthesizer_model="SYNTH", validator_model="VALIDATOR", validator_max_loops=1))
     val, synth = _counts(calls)
-    assert val == 2 and synth == 2, calls            # draft audited + revision re-audited
-    ans = json.loads(out)["answer"].lower()
-    assert "answer-v0" not in ans and "answer-v1" not in ans, out  # neither draft shipped
-    assert "could not" in ans or "not produce" in ans, out         # an abstention
+    assert val == 2 and synth == 2, calls
+    assert "ans-v1" in json.loads(out)["answer"]
+
+
+def test_validator_answer_flagged_persists_abstains(monkeypatch):
+    """Answer flagged + re-synth still flagged -> abstain (never ship a wrong direct answer)."""
+    calls = []
+    monkeypatch.setattr(team, "_chat", _factory(
+        calls, [{"answer_ok": False, "indepth_ok": False}, {"answer_ok": False, "indepth_ok": False}]))
+    out = asyncio.run(team.run_team(_MESSAGES, response_format=_RF, orchestrator_model="ORCH",
+                                    synthesizer_model="SYNTH", validator_model="VALIDATOR", validator_max_loops=1))
+    val, synth = _counts(calls)
+    assert val == 2 and synth == 2, calls
+    assert "could not produce" in json.loads(out)["answer"].lower()

@@ -316,11 +316,12 @@ _VALIDATOR_RF = {
         "schema": {
             "type": "object",
             "properties": {
-                "ok": {"type": "boolean"},
+                "answer_ok": {"type": "boolean"},
                 "answer_issues": {"type": "string"},
-                "context_issues": {"type": "string"},
+                "indepth_ok": {"type": "boolean"},
+                "indepth_issues": {"type": "string"},
             },
-            "required": ["ok"],
+            "required": ["answer_ok", "indepth_ok"],
         },
     },
 }
@@ -330,6 +331,22 @@ _VALIDATOR_ABSTAIN_MSG = (
     "I could not produce a reliably grounded answer for this turn — the available chart "
     "data does not clearly support a confident response. Please review the chart directly."
 )
+
+
+def _drop_indepth(envelope_json: str) -> str:
+    """Granular abstain: keep the **Answer** section, drop a flagged **In Depth** elaboration
+    (ship the grounded direct answer rather than abstaining the whole turn)."""
+    try:
+        env = json.loads(envelope_json)
+    except (json.JSONDecodeError, TypeError):
+        return envelope_json
+    ans = env.get("answer") or ""
+    parts = re.split(r"\*\*\s*in[\s\-]?depth\s*\*\*", ans, maxsplit=1, flags=re.IGNORECASE)
+    if len(parts) > 1:
+        env["answer"] = parts[0].rstrip() + (
+            "\n\n_(Detailed elaboration withheld — it could not be fully grounded in the chart.)_")
+        return json.dumps(env)
+    return envelope_json  # no In Depth section found -> unchanged
 
 
 def _knob(knobs: Optional[Dict[str, Any]], role: str, key: str, default: Any) -> Any:
@@ -346,11 +363,11 @@ def _validator_feedback(verdict: Dict[str, Any]) -> str:
     parts = ["Your goal is an accurate Answer and a valid, useful In Depth, grounded only in "
              "the patient chart. A reviewer found these gaps to that goal:"]
     ai = (verdict.get("answer_issues") or "").strip()
-    ci = (verdict.get("context_issues") or "").strip()
+    di = (verdict.get("indepth_issues") or "").strip()
     if ai:
         parts.append("Answer: " + ai)
-    if ci:
-        parts.append("Evidence/context: " + ci)
+    if di:
+        parts.append("In Depth: " + di)
     parts.append(
         "Rewrite to meet the goal: keep what is already accurate, correct the above using only "
         "chart-supported facts, and where the chart lacks the information say 'not documented'.")
@@ -393,15 +410,16 @@ async def _run_validator(
     try:
         verdict = json.loads(raw)
     except (json.JSONDecodeError, TypeError):
-        logger.warning("validator[%s] verdict UNPARSEABLE -> FAIL-OPEN (pass); chart=%dch gathered=%dch max_tokens=%s raw=%r",
-                       validator_model, len(chart or ""), len(gathered or ""), max_tokens, raw[:240])
-        return {"ok": True}
+        logger.warning("validator[%s] verdict UNPARSEABLE -> FAIL-OPEN (pass); chart=%dch gathered=%dch raw=%r",
+                       validator_model, len(chart or ""), len(gathered or ""), raw[:240])
+        return {"answer_ok": True, "indepth_ok": True}
     if not isinstance(verdict, dict):
         logger.warning("validator[%s] verdict not an object -> FAIL-OPEN; raw=%r", validator_model, raw[:240])
-        return {"ok": True}
-    logger.info("validator[%s] ok=%s answer_issues=%r context_issues=%r (chart=%dch gathered=%dch)",
-                validator_model, verdict.get("ok"), (verdict.get("answer_issues") or "")[:200],
-                (verdict.get("context_issues") or "")[:120], len(chart or ""), len(gathered or ""))
+        return {"answer_ok": True, "indepth_ok": True}
+    logger.info("validator[%s] answer_ok=%s indepth_ok=%s answer_issues=%r indepth_issues=%r (chart=%dch gathered=%dch)",
+                validator_model, verdict.get("answer_ok"), verdict.get("indepth_ok"),
+                (verdict.get("answer_issues") or "")[:160], (verdict.get("indepth_issues") or "")[:120],
+                len(chart or ""), len(gathered or ""))
     return verdict
 
 
@@ -425,12 +443,14 @@ async def _audit_and_revise(
     max_tokens: Optional[int],
     max_loops: int,
 ) -> str:
-    """Post-synthesis audit round with a RE-VALIDATE-AND-KEEP-BEST gate: validate the
-    draft; on a flag, re-synthesize with specific feedback and RE-AUDIT the revision —
-    adopt it only if it now passes, otherwise keep the original. A still-flagged rewrite
-    is never trusted over the original (false-flag / drift safety; the literature shows
-    unconditional self-revision can turn a correct answer wrong). Never raises — any
-    validator/re-synth failure keeps the current draft (fail-open)."""
+    """Post-synthesis audit round with GRANULAR, section-aware handling. The validator
+    judges the **Answer** and **In Depth** sections separately:
+      - both clean              -> ship the draft;
+      - Answer ok, In Depth bad -> ship the Answer, DROP the In Depth (don't abstain);
+      - Answer bad              -> re-synthesize; if the Answer is then ok, adopt it
+                                   (dropping the In Depth if still bad); if the Answer is
+                                   still bad, ABSTAIN (never ship a wrong direct answer).
+    Never raises — any validator/re-synth failure keeps the current draft (fail-open)."""
 
     async def _audit(draft: str) -> Optional[Dict[str, Any]]:
         try:
@@ -444,13 +464,16 @@ async def _audit_and_revise(
             return None  # fail-open
 
     for _ in range(max(0, max_loops)):
-        verdict = await _audit(content)
-        if verdict is None or verdict.get("ok", True):
-            return content  # clean (or validator unavailable) -> keep draft
-        logger.info("validator flagged the draft -> re-synthesizing with feedback")
+        v = await _audit(content)
+        if v is None or (v.get("answer_ok", True) and v.get("indepth_ok", True)):
+            return content  # both sections clean (or validator unavailable)
+        if v.get("answer_ok", True):
+            logger.info("validator: Answer ok, In Depth flagged -> keep Answer, drop In Depth")
+            return _drop_indepth(content)  # granular: ship the grounded Answer, drop the bad elaboration
+        logger.info("validator: Answer flagged -> re-synthesizing with feedback")
         revise_messages = synth_messages + [
             {"role": "assistant", "content": content},
-            {"role": "user", "content": _validator_feedback(verdict)},
+            {"role": "user", "content": _validator_feedback(v)},
         ]
         try:
             msg = await _chat(
@@ -464,12 +487,15 @@ async def _audit_and_revise(
             return content
         if not revised:
             return content  # empty revision -> keep original
-        revised_verdict = await _audit(revised)
-        if revised_verdict is not None and revised_verdict.get("ok", False):
-            logger.info("validator: revision cleared the flags -> adopted")
-            return revised  # revision cleared the flags -> adopt it
-        logger.info("validator: revision still flagged -> ABSTAINING (never ship a flagged answer)")
-        return _fallback_envelope(_VALIDATOR_ABSTAIN_MSG)  # don't ship the original OR the bad rewrite
+        rv = await _audit(revised)
+        if rv is None or rv.get("answer_ok", True):
+            if rv is None or rv.get("indepth_ok", True):
+                logger.info("validator: revision fixed the Answer -> adopted")
+                return revised
+            logger.info("validator: revision fixed the Answer, In Depth still flagged -> adopt + drop In Depth")
+            return _drop_indepth(revised)
+        logger.info("validator: Answer still flagged after re-synth -> ABSTAINING (never ship a wrong answer)")
+        return _fallback_envelope(_VALIDATOR_ABSTAIN_MSG)
     return content
 
 

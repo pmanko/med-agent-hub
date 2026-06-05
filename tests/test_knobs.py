@@ -28,7 +28,7 @@ def test_per_lane_knobs_route_to_each_role(monkeypatch):
         seen.append({"model": model, "temperature": temperature,
                      "repeat_penalty": repeat_penalty, "dry": dry_multiplier})
         if model == "VAL":
-            return {"content": json.dumps({"ok": False, "answer_issues": "x", "context_issues": ""})}
+            return {"content": json.dumps({"answer_ok": False, "answer_issues": "x", "indepth_ok": True, "indepth_issues": ""})}
         if response_format is not None:
             return {"content": json.dumps({"answer": "ok", "citations": [], "blocks": []})}
         return {"content": "", "tool_calls": None}
