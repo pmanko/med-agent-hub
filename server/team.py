@@ -372,12 +372,6 @@ _INDEPTH_VERDICT_RF = {
 }
 
 
-_VALIDATOR_ABSTAIN_MSG = (
-    "I could not produce a reliably grounded answer for this turn — the available chart "
-    "data does not clearly support a confident response. Please review the chart directly."
-)
-
-
 def _knob(knobs: Optional[Dict[str, Any]], role: str, key: str, default: Any) -> Any:
     """Resolve one per-role sampling knob from a level's `knobs` block, falling back to
     the global default when the role or key is unset. knobs = {role: {key: value}}."""
@@ -387,25 +381,51 @@ def _knob(knobs: Optional[Dict[str, Any]], role: str, key: str, default: Any) ->
     return default
 
 
-def _answer_body(answer_text: str, claims: List[str]) -> str:
-    """Combine the direct Answer and the In-Depth claims into one markdown body. The Answer
-    leads under a **Answer** header; non-empty claims follow as a **In Depth** bullet list."""
-    body = "**Answer**\n" + (answer_text or "").strip()
+_CONF_ICON = {"green": "🟢", "yellow": "🟡", "red": "🔴"}
+
+
+def _caveat(conf: Optional[Dict[str, Any]]) -> str:
+    """A one-line clinician-facing confidence caveat for a section (empty for green / no note)."""
+    if not conf:
+        return ""
+    level = conf.get("level")
+    note = (conf.get("note") or "").strip()
+    if level in (None, "green") or not note:
+        return ""
+    return "\n\n> " + _CONF_ICON.get(level, "") + " " + note
+
+
+def _answer_body(answer_text: str, claims: List[str],
+                 answer_conf: Optional[Dict[str, Any]] = None,
+                 indepth_conf: Optional[Dict[str, Any]] = None) -> str:
+    """Combine the direct Answer and the In-Depth claims into one markdown body, each followed by
+    its confidence caveat (a 🟡/🔴 note; green adds nothing). The Answer leads under a **Answer**
+    header; non-empty claims follow as a **In Depth** bullet list."""
+    body = "**Answer**\n" + (answer_text or "").strip() + _caveat(answer_conf)
     if claims:
-        body += "\n\n**In Depth**\n" + "\n".join("- " + c for c in claims)
+        body += "\n\n**In Depth**\n" + "\n".join("- " + c for c in claims) + _caveat(indepth_conf)
+    elif _caveat(indepth_conf):  # red In-Depth with no surviving claims still carries its note
+        body += "\n\n**In Depth**" + _caveat(indepth_conf)
     return body
 
 
 def _assemble_envelope(
-    answer_text: str, citations: List[int], blocks: List[Any], claims: List[str]
+    answer_text: str, citations: List[int], blocks: List[Any], claims: List[str],
+    answer_conf: Optional[Dict[str, Any]] = None, indepth_conf: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Serialize the chartsearchai {answer, citations, blocks} envelope, where `answer` is the
-    combined Answer + In-Depth markdown body."""
-    return json.dumps({
-        "answer": _answer_body(answer_text, claims),
+    combined Answer + In-Depth markdown body. Also carries a forward-looking `confidence` block
+    (per-section {level, note}) — chartsearchai drops it today; the harness reads confidence from
+    the reasoning trace, and the markdown caveats render everywhere meanwhile."""
+    env: Dict[str, Any] = {
+        "answer": _answer_body(answer_text, claims, answer_conf, indepth_conf),
         "citations": citations or [],
         "blocks": blocks or [],
-    })
+    }
+    if answer_conf or indepth_conf:
+        env["confidence"] = {"answer": answer_conf or {"level": "green", "note": ""},
+                             "in_depth": indepth_conf or {"level": "green", "note": ""}}
+    return json.dumps(env)
 
 
 def _answer_fields(normalized_json_str: str) -> Tuple[str, List[int], List[Any]]:
@@ -478,15 +498,17 @@ async def _synthesize_indepth(
     max_tokens: Optional[int],
     repeat_penalty: Optional[float],
     dry: Optional[float],
+    extra_msgs: Optional[List[Dict[str, Any]]] = None,
 ) -> List[str]:
     """In-Depth synthesis: elaborate the already-produced direct answer into a list of claim
-    strings (one addressable claim each). FAIL-OPEN: returns [] on any error."""
+    strings (one addressable claim each). `extra_msgs` carries the prior draft + validator
+    feedback on a re-synthesis pass. FAIL-OPEN: returns [] on any error."""
     user = (
         indepth_instruction
         + "\n\n=== DIRECT ANSWER (elaborate THIS; do not restate it) ===\n" + answer_text
         + ("\n\n=== GATHERED KB / EVIDENCE ===\n" + gathered if gathered else "")
     )
-    messages = list(base_messages) + [{"role": "user", "content": user}]
+    messages = list(base_messages) + [{"role": "user", "content": user}] + (extra_msgs or [])
     try:
         msg = await _chat(
             client, synth_model, messages,
@@ -589,17 +611,45 @@ async def _validate_indepth_verdict(
     return {"drop": drop, "issues": verdict.get("issues", "")}
 
 
-def _nuanced_abstain(verdict: Optional[Dict[str, Any]], answer_text: str) -> str:
-    """Graceful abstain (Answer section). Instead of a blanket refusal, surface what the reviewer
-    found — the answer-validator's `answer_issues` already NAMES the correct chart fact — so the
-    clinician gets the grounded partial + the specific uncertainty. The In-Depth KB context is
-    still shipped separately by the caller."""
-    issue = ((verdict or {}).get("answer_issues") or "").strip()
-    if not issue:
-        return _VALIDATOR_ABSTAIN_MSG
-    return ("I could not confirm a reliable direct answer for this turn. A clinical review of the "
-            "draft found: " + issue + " Please verify against the chart before acting; the context "
-            "below is provided to help.")
+def _answer_note(level: str, first_issue: str, last_issue: str) -> str:
+    """Clinician-facing confidence note for the Answer, composed deterministically from the
+    validator verdicts captured during the re-synth cycle (no extra LLM call)."""
+    if level == "yellow":
+        base = "An initial draft was flagged on clinical review and corrected on a second pass"
+        return base + ((" (first issue: " + first_issue + ")") if first_issue else "") + "."
+    if level == "red":
+        return ("Low confidence — clinical review still flagged this after a revision: "
+                + (last_issue or first_issue or "the answer could not be confirmed against the chart.")
+                + " Verify against the chart before acting.")
+    return ""
+
+
+def _indepth_note(level: str, n_dropped: int, issues: str) -> str:
+    """Clinician-facing confidence note for the In-Depth, from the validator verdict."""
+    if level == "yellow":
+        return "Supporting context was flagged on review and regenerated."
+    if level == "red":
+        base = "Some supporting context could not be reliably grounded"
+        if n_dropped:
+            base += " (" + str(n_dropped) + " point(s) removed)"
+        return base + ((": " + issues) if issues else "") + "."
+    return ""
+
+
+def _indepth_feedback(verdict: Dict[str, Any], claims: List[str]) -> str:
+    """In-Depth re-synthesis guidance from the validator verdict (the flagged claims + the note)."""
+    issues = (verdict.get("issues") or "").strip()
+    drop = verdict.get("drop") or []
+    flagged = "; ".join(claims[i - 1] for i in drop if 1 <= i <= len(claims))
+    parts = ["Some In-Depth points were flagged on clinical review."]
+    if flagged:
+        parts.append("Flagged points: " + flagged)
+    if issues:
+        parts.append("Reviewer note: " + issues)
+    parts.append("Rewrite the In-Depth as a fresh list of claims: drop or correct the flagged points, "
+                 "keep only well-grounded WHO/guideline guidance applied to this patient, and never "
+                 "invent a source, dose, or value.")
+    return "\n".join(parts)
 
 
 async def _gen_indepth(
@@ -608,33 +658,64 @@ async def _gen_indepth(
     validator_model: Optional[str], validator_prompt: Optional[str], chart: str,
     synth_temperature: float, synth_repeat_penalty: Optional[float], synth_dry: Optional[float],
     validator_temperature: float, validator_repeat_penalty: Optional[float], validator_dry: Optional[float],
-    max_tokens: Optional[int], steps: List[Dict[str, Any]],
-) -> List[str]:
-    """IN-DEPTH path: synthesize the KB-informed claim list, then block/strip the claims the
-    validator flags. Records both calls into `steps`. Returns the surviving claims."""
-    claims = await _synthesize_indepth(
-        client, synth_model, base_messages, indepth_instruction, gathered, answer_text,
-        temperature=synth_temperature, max_tokens=max_tokens,
-        repeat_penalty=synth_repeat_penalty, dry=synth_dry)
-    steps.append({"role": "indepth_synth", "model": synth_model, "claims": list(claims)})
-    if validator_model and claims:
+    max_tokens: Optional[int], max_loops: int, steps: List[Dict[str, Any]],
+) -> Tuple[List[str], Dict[str, Any]]:
+    """IN-DEPTH path with the same confidence cycle as the Answer: synthesize the KB-informed claim
+    list, audit it; if flagged, RE-SYNTHESIZE (with feedback) and re-audit BEFORE stripping. Returns
+    (surviving_claims, confidence) where confidence.level is green (clean first pass) / yellow
+    (flagged then cleared on re-synth) / red (still flagged -> the survivors are kept, the rest
+    block/stripped). Records every call into `steps`."""
+    green = {"level": "green", "note": ""}
+
+    async def _audit(cl: List[str], attempt: int) -> Dict[str, Any]:
         try:
             verdict = await _validate_indepth_verdict(
                 client, validator_model, chart=chart, gathered=gathered,
-                answer_text=answer_text, claims=claims, max_tokens=max_tokens,
+                answer_text=answer_text, claims=cl, max_tokens=max_tokens,
                 temperature=validator_temperature, repeat_penalty=validator_repeat_penalty,
                 dry=validator_dry, validation_prompt=validator_prompt or "validation")
         except Exception as e:
             logger.warning("indepth-validator call failed: %s", e)
             verdict = {"drop": [], "issues": ""}
-        drop = verdict.get("drop") or []
-        steps.append({"role": "indepth_validator", "model": validator_model,
-                      "drop": drop, "issues": verdict.get("issues", ""), "claims_in": len(claims)})
-        if drop:
-            logger.info("indepth-validator: claims %s flagged -> block/strip", drop)
-            dropset = set(drop)
-            claims = [c for i, c in enumerate(claims, start=1) if i not in dropset]
-    return claims
+        steps.append({"role": "indepth_validator", "model": validator_model, "attempt": attempt,
+                      "drop": verdict.get("drop") or [], "issues": verdict.get("issues", ""),
+                      "claims_in": len(cl)})
+        return verdict
+
+    claims = await _synthesize_indepth(
+        client, synth_model, base_messages, indepth_instruction, gathered, answer_text,
+        temperature=synth_temperature, max_tokens=max_tokens,
+        repeat_penalty=synth_repeat_penalty, dry=synth_dry)
+    steps.append({"role": "indepth_synth", "model": synth_model, "claims": list(claims)})
+    if not (validator_model and claims):
+        return claims, green
+
+    v = await _audit(claims, 0)
+    if not (v.get("drop") or []):
+        return claims, green
+
+    # flagged -> re-synthesize the In-Depth (feedback) and re-audit BEFORE stripping.
+    for _ in range(max(0, max_loops)):
+        logger.info("indepth-validator: claims flagged -> re-synthesizing")
+        revised = await _synthesize_indepth(
+            client, synth_model, base_messages, indepth_instruction, gathered, answer_text,
+            temperature=synth_temperature, max_tokens=max_tokens,
+            repeat_penalty=synth_repeat_penalty, dry=synth_dry,
+            extra_msgs=[{"role": "assistant", "content": json.dumps({"claims": claims})},
+                        {"role": "user", "content": _indepth_feedback(v, claims)}])
+        steps.append({"role": "indepth_resynth", "model": synth_model, "claims": list(revised)})
+        if not revised:
+            break
+        claims = revised
+        v = await _audit(claims, 1)
+        if not (v.get("drop") or []):
+            return claims, {"level": "yellow", "note": _indepth_note("yellow", 0, "")}
+
+    # still flagged after re-synth -> block/strip the remaining flagged claims (red).
+    drop = v.get("drop") or []
+    kept = [c for i, c in enumerate(claims, start=1) if i not in set(drop)]
+    logger.info("indepth-validator: still flagged after re-synth -> strip %s", drop)
+    return kept, {"level": "red", "note": _indepth_note("red", len(drop), v.get("issues", ""))}
 
 
 async def _synthesize_and_validate(
@@ -657,27 +738,26 @@ async def _synthesize_and_validate(
     validator_dry: Optional[float],
     max_tokens: Optional[int],
     max_loops: int,
-) -> Tuple[str, List[Dict[str, Any]], str]:
+) -> Tuple[str, List[Dict[str, Any]], Dict[str, Any], Dict[str, Any], str, List[str]]:
     """Two-call generation + two independent validators, combined into one envelope only here.
-    Returns (envelope_json, trace_steps, disposition) — the steps are the per-call reasoning
-    trace, the disposition is full / answer_only / stripped / abstain / synth_failed.
-
-      ANSWER (strict): synthesize the direct answer; if the Answer validator flags it WITH a
-        reason, re-synthesize (Answer-focused feedback) and re-validate up to `max_loops`. If it
-        still cannot be made chart-accurate, ABSTAIN — but gracefully: a nuanced message (what the
-        review found) PLUS the In-Depth KB context. A reasonless flag (answer_ok=False with empty
-        answer_issues) is treated as PASS so noise never abstains.
-      IN DEPTH (advisory, claim-level): synthesize claims from the final answer, then drop exactly
-        the claims the In-Depth validator flags. Never abstains the turn.
-
-    FAIL-OPEN throughout: a validator outage ships the draft; only a reasoned, unfixable NEGATIVE
-    Answer verdict abstains."""
+    Returns (envelope_json, trace_steps, answer_confidence, indepth_confidence, answer_text,
+    in_depth_claims) — the last two are the SHIPPED content (clean), so the trace package can carry
+    the structured pieces a client renders. Each confidence is
+    {level: green|yellow|red, note: <clinician caveat>} from that section's re-synth cycle:
+      green  = passed clinical review on the first pass;
+      yellow = flagged, re-synthesized, then cleared;
+      red    = flagged, re-synthesized, still flagged.
+    We ALWAYS present the answer — a red section ships with its criticism (no abstain); the renderer
+    collapses a red Answer by default. A reasonless Answer flag (answer_ok=False, empty
+    answer_issues) is treated as PASS so noise never lowers confidence. FAIL-OPEN: a validator
+    outage ships the draft at green."""
     steps: List[Dict[str, Any]] = []
     _idkw = dict(
         validator_model=validator_model, validator_prompt=validator_prompt, chart=chart,
         synth_temperature=synth_temperature, synth_repeat_penalty=synth_repeat_penalty, synth_dry=synth_dry,
         validator_temperature=validator_temperature, validator_repeat_penalty=validator_repeat_penalty,
-        validator_dry=validator_dry, max_tokens=max_tokens, steps=steps)
+        validator_dry=validator_dry, max_tokens=max_tokens, max_loops=max_loops, steps=steps)
+    green = {"level": "green", "note": ""}
 
     answer_text, citations, blocks = await _synthesize_answer(
         client, synth_model, base_messages, answer_instruction, gathered,
@@ -685,11 +765,13 @@ async def _synthesize_and_validate(
         max_tokens=max_tokens, repeat_penalty=synth_repeat_penalty, dry=synth_dry)
     steps.append({"role": "answer_synth", "model": synth_model, "output": answer_text, "citations": citations})
     if not answer_text:
+        conf = {"level": "red", "note": "The team could not produce an answer this turn."}
         return (_fallback_envelope(
             "I could not produce a complete answer for this turn. Please try again."),
-            steps, "synth_failed")
+            steps, conf, dict(green), "", [])
 
-    # --- ANSWER path -----------------------------------------------------
+    # --- ANSWER path (confidence: green clean / yellow fixed-on-retry / red still-flagged) ---
+    answer_conf = dict(green)
     if validator_model:
         async def _audit(draft: str, attempt: int) -> Optional[Dict[str, Any]]:
             try:
@@ -714,6 +796,7 @@ async def _synthesize_and_validate(
 
         v = await _audit(answer_text, 0)
         if not _passed(v):
+            first_issue = (v.get("answer_issues") or "").strip()
             fixed = False
             for i in range(max(0, max_loops)):
                 logger.info("answer-validator: Answer flagged -> re-synthesizing")
@@ -728,32 +811,31 @@ async def _synthesize_and_validate(
                     ])
                 steps.append({"role": "answer_resynth", "model": synth_model, "output": attempt_text})
                 if not attempt_text:
-                    break  # cannot fix a known-wrong Answer -> abstain
+                    break  # re-synth produced nothing; keep the last answer, mark red
                 answer_text, citations, blocks = attempt_text, attempt_cit, attempt_blk
                 v = await _audit(answer_text, i + 1)
                 if _passed(v):
-                    logger.info("answer-validator: revision fixed the Answer -> adopt")
+                    logger.info("answer-validator: revision fixed the Answer -> yellow")
                     fixed = True
                     break
-            if not fixed:
-                # GRACEFUL ABSTAIN: nuanced Answer (what the review found) + the In-Depth KB context.
-                logger.info("answer-validator: Answer still flagged -> ABSTAINING (graceful)")
-                claims = await _gen_indepth(
-                    client, synth_model, base_messages, indepth_instruction, gathered, answer_text, **_idkw)
-                return (_assemble_envelope(_nuanced_abstain(v, answer_text), [], [], claims),
-                        steps, "abstain")
+            if fixed:
+                answer_conf = {"level": "yellow", "note": _answer_note("yellow", first_issue, "")}
+            else:
+                # RED: keep the (last) flagged answer + its criticism — never hide it (renderer collapses).
+                last_issue = (v.get("answer_issues") or "").strip()
+                logger.info("answer-validator: Answer still flagged -> red (present + caveat)")
+                answer_conf = {"level": "red", "note": _answer_note("red", first_issue, last_issue)}
 
-    # --- IN-DEPTH path ---------------------------------------------------
-    claims = await _gen_indepth(
+    # --- IN-DEPTH path (same green/yellow/red cycle) ---------------------
+    claims, indepth_conf = await _gen_indepth(
         client, synth_model, base_messages, indepth_instruction, gathered, answer_text, **_idkw)
-    indepth_step = next((s for s in reversed(steps) if s["role"] == "indepth_validator"), None)
-    disposition = "stripped" if (indepth_step and indepth_step.get("drop")) else ("full" if claims else "answer_only")
-    return _assemble_envelope(answer_text, citations, blocks, claims), steps, disposition
+    return (_assemble_envelope(answer_text, citations, blocks, claims, answer_conf, indepth_conf),
+            steps, answer_conf, indepth_conf, answer_text, claims)
 
 
 # Per-turn reasoning trace: the hub appends one structured line per turn to a writable mount so the
 # live dashboard can render the full LLM flow (orchestrator -> kb/expert -> answer synth -> answer
-# validator(+resynth) -> in-depth synth -> in-depth validator -> disposition). The dashboard
+# validator(+resynth) -> in-depth synth -> in-depth validator) + per-section confidence. The dashboard
 # correlates a trace line to a results.jsonl cell by level_id + the ts falling in the cell's
 # started_at..ended_at window (the runner is strictly sequential).
 _TRACE_DIR = os.environ.get("TEAM_TRACE_DIR", "/app/trace")
@@ -761,9 +843,12 @@ _TRACE_DIR = os.environ.get("TEAM_TRACE_DIR", "/app/trace")
 
 def _write_trace(level_id: Optional[str], messages: List[Dict[str, Any]], *, orchestrator: str,
                  expert: str, synthesizer: str, validator: Optional[str],
-                 steps: List[Dict[str, Any]], disposition: str) -> None:
-    """Append one per-turn reasoning-trace line. Best-effort: never raises (a trace-write failure
-    must never break a turn)."""
+                 steps: List[Dict[str, Any]], answer_confidence: Dict[str, Any],
+                 indepth_confidence: Dict[str, Any], answer_text: str = "",
+                 in_depth_claims: Optional[List[str]] = None) -> None:
+    """Append one per-turn reasoning-trace line — the structured package a client renders (the
+    SHIPPED answer + in-depth claims + per-section confidence + the ordered call steps). Best-effort:
+    never raises (a trace-write failure must never break a turn)."""
     try:
         question = ""
         for m in reversed(messages):
@@ -777,7 +862,10 @@ def _write_trace(level_id: Optional[str], messages: List[Dict[str, Any]], *, orc
             "question": question[:2000],
             "models": {"orchestrator": orchestrator, "expert": expert,
                        "synthesizer": synthesizer, "validator": validator},
-            "disposition": disposition,
+            "answer_text": answer_text,
+            "in_depth_claims": in_depth_claims or [],
+            "answer_confidence": answer_confidence,
+            "indepth_confidence": indepth_confidence,
             "steps": steps,
         }
         os.makedirs(_TRACE_DIR, exist_ok=True)
@@ -930,25 +1018,29 @@ async def run_team(
         # the last user turn so decisive evidence sits at the end (lost-in-the-middle).
         gathered = _gathered_evidence(kb_context, expert_notes)
         try:
-            content, synth_steps, disposition = await _synthesize_and_validate(
-                client,
-                base_messages=list(messages), gathered=gathered, chart=chart,
-                synth_model=synth_model,
-                answer_instruction=answer_instruction, indepth_instruction=indepth_instruction,
-                response_format=response_format, validator_model=validator_model,
-                validator_prompt=validator_prompt,
-                synth_temperature=synth_temp, synth_repeat_penalty=synth_rp, synth_dry=synth_dry,
-                validator_temperature=val_temp, validator_repeat_penalty=val_rp, validator_dry=val_dry,
-                max_tokens=max_tokens, max_loops=validator_max_loops)
+            content, synth_steps, answer_conf, indepth_conf, answer_text, claims = \
+                await _synthesize_and_validate(
+                    client,
+                    base_messages=list(messages), gathered=gathered, chart=chart,
+                    synth_model=synth_model,
+                    answer_instruction=answer_instruction, indepth_instruction=indepth_instruction,
+                    response_format=response_format, validator_model=validator_model,
+                    validator_prompt=validator_prompt,
+                    synth_temperature=synth_temp, synth_repeat_penalty=synth_rp, synth_dry=synth_dry,
+                    validator_temperature=val_temp, validator_repeat_penalty=val_rp, validator_dry=val_dry,
+                    max_tokens=max_tokens, max_loops=validator_max_loops)
             _write_trace(level_id, messages, orchestrator=model, expert=expert_model,
                          synthesizer=synth_model, validator=validator_model,
-                         steps=orch_steps + synth_steps, disposition=disposition)
+                         steps=orch_steps + synth_steps,
+                         answer_confidence=answer_conf, indepth_confidence=indepth_conf,
+                         answer_text=answer_text, in_depth_claims=claims)
             return content
         except Exception as e:
             logger.error("synthesis failed: %s", e, exc_info=True)
 
     _write_trace(level_id, messages, orchestrator=model, expert=expert_model,
-                 synthesizer=synth_model, validator=validator_model,
-                 steps=orch_steps, disposition="synth_failed")
+                 synthesizer=synth_model, validator=validator_model, steps=orch_steps,
+                 answer_confidence={"level": "red", "note": "The team could not produce an answer this turn."},
+                 indepth_confidence={"level": "green", "note": ""})
     return _fallback_envelope(
         "I could not produce a complete answer for this turn. Please try again.")
