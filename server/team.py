@@ -27,7 +27,7 @@ Design notes (see specs/artifacts/planning/react-team-orchestration-design.md):
 import json
 import logging
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
@@ -306,9 +306,10 @@ def _normalize_envelope(raw: str) -> str:
 # is the lever we send. (frequency_penalty here was previously a confirmed no-op.)
 _SYNTH_MIN_TEMPERATURE = 0.5
 
-# The validator returns a structured verdict. The answer and the context are judged
-# as SEPARATE criteria (distinct issue fields) so the feedback localizes where the
-# error entered — bad gathered evidence vs bad synthesis.
+# The validator returns a structured verdict. The Answer and the In Depth are judged on
+# DIFFERENT terms (their scope differs): the Answer is a strict, all-or-nothing chart-accuracy
+# gate; the In Depth is judged claim-by-claim, and the verdict names the specific claim numbers
+# to drop (block/strip). The two drive two INDEPENDENT remediation paths in _audit_and_revise.
 _VALIDATOR_RF = {
     "type": "json_schema",
     "json_schema": {
@@ -318,10 +319,10 @@ _VALIDATOR_RF = {
             "properties": {
                 "answer_ok": {"type": "boolean"},
                 "answer_issues": {"type": "string"},
-                "indepth_ok": {"type": "boolean"},
+                "indepth_drop": {"type": "array", "items": {"type": "integer"}},
                 "indepth_issues": {"type": "string"},
             },
-            "required": ["answer_ok", "indepth_ok"],
+            "required": ["answer_ok", "indepth_drop"],
         },
     },
 }
@@ -333,20 +334,59 @@ _VALIDATOR_ABSTAIN_MSG = (
 )
 
 
-def _drop_indepth(envelope_json: str) -> str:
-    """Granular abstain: keep the **Answer** section, drop a flagged **In Depth** elaboration
-    (ship the grounded direct answer rather than abstaining the whole turn)."""
+_INDEPTH_HEADER_RE = re.compile(r"\*\*\s*in[\s\-]?depth\s*\*\*", re.IGNORECASE)
+_INDEPTH_BULLET_RE = re.compile(r"^\s*(?:[-*•]\s+|\d+[.)]\s+)")
+
+
+def _split_answer_indepth(answer_text: str) -> Tuple[str, List[str]]:
+    """Split a synthesized answer string into (answer_part, indepth_claims). The In Depth is
+    emitted as a markdown bullet list — one claim per bullet — so each claim is individually
+    addressable for claim-level validation. Returns claims=[] when there is no In Depth. If the
+    In-Depth body has no bullets it is treated as ONE claim, so it stays addressable either way."""
+    parts = _INDEPTH_HEADER_RE.split(answer_text or "", maxsplit=1)
+    answer_part = parts[0].rstrip()
+    if len(parts) < 2 or not parts[1].strip():
+        return answer_part, []
+    body = parts[1].strip()
+    lines = [ln for ln in body.splitlines() if ln.strip()]
+    if any(_INDEPTH_BULLET_RE.match(ln) for ln in lines):
+        claims = [_INDEPTH_BULLET_RE.sub("", ln).strip() for ln in lines if _INDEPTH_BULLET_RE.match(ln)]
+    else:
+        claims = [body.strip()]  # not bulleted -> one addressable claim
+    return answer_part, [c for c in claims if c]
+
+
+def _rebuild_answer(answer_part: str, claims: List[str]) -> str:
+    """Reassemble the answer string from the Answer part + the surviving In-Depth claim bullets.
+    With no claim left, ship just the Answer + a brief withheld note — an In-Depth-only miss
+    trims the elaboration, it never blocks the turn (advisory)."""
+    answer_part = answer_part.rstrip()
+    if not claims:
+        return answer_part + (
+            "\n\n_(Supporting detail withheld — it could not be grounded in the chart or the cited guidance.)_")
+    return answer_part + "\n\n**In Depth**\n" + "\n".join("- " + c for c in claims)
+
+
+def _strip_indepth_claims(envelope_json: str, drop: List[int]) -> str:
+    """Block/strip remediation: remove the 1-based In-Depth claim indices in `drop`, keep the
+    rest, leave the **Answer** untouched. Returns the envelope JSON unchanged if there is
+    nothing to drop / it is unparseable / there is no In Depth."""
+    dropset = {d for d in (drop or []) if isinstance(d, int)}
+    if not dropset:
+        return envelope_json
     try:
         env = json.loads(envelope_json)
     except (json.JSONDecodeError, TypeError):
         return envelope_json
-    ans = env.get("answer") or ""
-    parts = re.split(r"\*\*\s*in[\s\-]?depth\s*\*\*", ans, maxsplit=1, flags=re.IGNORECASE)
-    if len(parts) > 1:
-        env["answer"] = parts[0].rstrip() + (
-            "\n\n_(Detailed elaboration withheld — it could not be fully grounded in the chart.)_")
-        return json.dumps(env)
-    return envelope_json  # no In Depth section found -> unchanged
+    ans = env.get("answer")
+    if not isinstance(ans, str):
+        return envelope_json
+    answer_part, claims = _split_answer_indepth(ans)
+    if not claims:
+        return envelope_json
+    kept = [c for i, c in enumerate(claims, start=1) if i not in dropset]
+    env["answer"] = _rebuild_answer(answer_part, kept)
+    return json.dumps(env)
 
 
 def _knob(knobs: Optional[Dict[str, Any]], role: str, key: str, default: Any) -> Any:
@@ -359,18 +399,15 @@ def _knob(knobs: Optional[Dict[str, Any]], role: str, key: str, default: Any) ->
 
 
 def _validator_feedback(verdict: Dict[str, Any]) -> str:
-    """Turn a flagged verdict into goal-oriented re-synthesis guidance."""
-    parts = ["Your goal is an accurate Answer and a valid, useful In Depth, grounded only in "
-             "the patient chart. A reviewer found these gaps to that goal:"]
+    """Answer-focused re-synthesis guidance. The In Depth is remediated separately (claim-level
+    block/strip), so the re-synthesis only needs to fix the direct Answer."""
+    parts = ["Your goal is an accurate direct **Answer**, grounded only in the patient chart."]
     ai = (verdict.get("answer_issues") or "").strip()
-    di = (verdict.get("indepth_issues") or "").strip()
     if ai:
-        parts.append("Answer: " + ai)
-    if di:
-        parts.append("In Depth: " + di)
+        parts.append("A reviewer found this problem with the Answer: " + ai)
     parts.append(
-        "Rewrite to meet the goal: keep what is already accurate, correct the above using only "
-        "chart-supported facts, and where the chart lacks the information say 'not documented'.")
+        "Rewrite the **Answer** to be correct using only chart-supported facts; where the chart "
+        "lacks the information, say 'not documented'. Keep the **In Depth** section as well.")
     return "\n".join(parts)
 
 
@@ -387,20 +424,25 @@ async def _run_validator(
     repeat_penalty: Optional[float] = None,
     dry_multiplier: Optional[float] = None,
 ) -> Dict[str, Any]:
-    """One audit pass: judge the gathered CONTEXT and the draft ANSWER separately
-    against the chart. Returns {ok, answer_issues, context_issues}; fails OPEN (ok=True)
-    on any malformed verdict so a flaky validator never blocks the run."""
+    """One audit pass. The Answer is judged strictly for chart-accuracy; the In Depth is judged
+    claim-by-claim (chart-claims vs the chart; guideline-claims for not-fabricated + attributed +
+    relevantly applied). Returns {answer_ok, answer_issues, indepth_drop:[1-based claim #s to
+    remove], indepth_issues}. Fails OPEN (answer_ok=True, indepth_drop=[]) on any malformed
+    verdict so a flaky validator never blocks the run. `indepth_drop` is clamped to real claim #s."""
     instruction = load_prompt(validator_prompt or "validation")
     try:
         obj = json.loads(answer)
         answer_text = obj.get("answer", answer) if isinstance(obj, dict) else answer
     except (json.JSONDecodeError, TypeError):
         answer_text = answer
+    answer_part, claims = _split_answer_indepth(answer_text)
+    numbered = "\n".join(f"{i}. {c}" for i, c in enumerate(claims, start=1)) or "(no In-Depth claims)"
     audit_user = (
         instruction
         + "\n\n=== PATIENT CHART (ground truth) ===\n" + (chart or "(none)")
-        + "\n\n=== GATHERED CONTEXT (evidence the team collected) ===\n" + (gathered or "(none)")
-        + "\n\n=== DRAFT ANSWER (to audit) ===\n" + answer_text
+        + "\n\n=== GATHERED KB / EVIDENCE (the guidance the team retrieved) ===\n" + (gathered or "(none)")
+        + "\n\n=== DRAFT ANSWER (judge strictly for chart-accuracy) ===\n" + answer_part
+        + "\n\n=== IN-DEPTH CLAIMS (numbered; return the numbers to DROP) ===\n" + numbered
     )
     msg = await _chat(
         client, validator_model, [{"role": "user", "content": audit_user}],
@@ -412,12 +454,14 @@ async def _run_validator(
     except (json.JSONDecodeError, TypeError):
         logger.warning("validator[%s] verdict UNPARSEABLE -> FAIL-OPEN (pass); chart=%dch gathered=%dch raw=%r",
                        validator_model, len(chart or ""), len(gathered or ""), raw[:240])
-        return {"answer_ok": True, "indepth_ok": True}
+        return {"answer_ok": True, "indepth_drop": []}
     if not isinstance(verdict, dict):
         logger.warning("validator[%s] verdict not an object -> FAIL-OPEN; raw=%r", validator_model, raw[:240])
-        return {"answer_ok": True, "indepth_ok": True}
-    logger.info("validator[%s] answer_ok=%s indepth_ok=%s answer_issues=%r indepth_issues=%r (chart=%dch gathered=%dch)",
-                validator_model, verdict.get("answer_ok"), verdict.get("indepth_ok"),
+        return {"answer_ok": True, "indepth_drop": []}
+    drop = [d for d in (verdict.get("indepth_drop") or []) if isinstance(d, int) and 1 <= d <= len(claims)]
+    verdict["indepth_drop"] = drop
+    logger.info("validator[%s] answer_ok=%s drop=%s/%d claims answer_issues=%r indepth_issues=%r (chart=%dch gathered=%dch)",
+                validator_model, verdict.get("answer_ok"), drop, len(claims),
                 (verdict.get("answer_issues") or "")[:160], (verdict.get("indepth_issues") or "")[:120],
                 len(chart or ""), len(gathered or ""))
     return verdict
@@ -443,14 +487,18 @@ async def _audit_and_revise(
     max_tokens: Optional[int],
     max_loops: int,
 ) -> str:
-    """Post-synthesis audit round with GRANULAR, section-aware handling. The validator
-    judges the **Answer** and **In Depth** sections separately:
-      - both clean              -> ship the draft;
-      - Answer ok, In Depth bad -> ship the Answer, DROP the In Depth (don't abstain);
-      - Answer bad              -> re-synthesize; if the Answer is then ok, adopt it
-                                   (dropping the In Depth if still bad); if the Answer is
-                                   still bad, ABSTAIN (never ship a wrong direct answer).
-    Never raises — any validator/re-synth failure keeps the current draft (fail-open)."""
+    """Post-synthesis audit driving TWO INDEPENDENT remediation paths off one verdict — because
+    the Answer and the In Depth have different scope and stakes:
+
+      ANSWER (strict): if the direct Answer is flagged, re-synthesize it (Answer-focused feedback)
+        and re-audit, up to `max_loops`; if it still can't be made chart-accurate, ABSTAIN the turn
+        (never ship a wrong fact).
+      IN DEPTH (advisory, claim-level): block/strip exactly the claims the validator flags; the
+        Answer is never touched and an In-Depth miss never abstains the turn.
+
+    The only coupling is logical: if the Answer abstains there is no elaboration to ship. Never
+    raises — a validator outage fails OPEN (ship the draft); a NEGATIVE Answer verdict that cannot
+    be fixed abstains (we know the Answer is wrong)."""
 
     async def _audit(draft: str) -> Optional[Dict[str, Any]]:
         try:
@@ -463,17 +511,29 @@ async def _audit_and_revise(
             logger.warning("validator call failed: %s", e)
             return None  # fail-open
 
+    def _apply_indepth(draft: str, verdict: Dict[str, Any]) -> str:
+        """IN-DEPTH path: block/strip the flagged claims (Answer untouched)."""
+        drop = verdict.get("indepth_drop") or []
+        if drop:
+            logger.info("validator: In Depth claims %s flagged -> block/strip (Answer untouched)", drop)
+            return _strip_indepth_claims(draft, drop)
+        return draft
+
+    v = await _audit(content)
+    if v is None:
+        return content  # validator unavailable -> fail-open (we have no verdict)
+
+    # ANSWER sound -> ship it, then run the In-Depth path independently.
+    if v.get("answer_ok", True):
+        return _apply_indepth(content, v)
+
+    # ANSWER flagged -> its own remediation path (re-synthesize, re-audit, else abstain).
+    current, cur_verdict = content, v
     for _ in range(max(0, max_loops)):
-        v = await _audit(content)
-        if v is None or (v.get("answer_ok", True) and v.get("indepth_ok", True)):
-            return content  # both sections clean (or validator unavailable)
-        if v.get("answer_ok", True):
-            logger.info("validator: Answer ok, In Depth flagged -> keep Answer, drop In Depth")
-            return _drop_indepth(content)  # granular: ship the grounded Answer, drop the bad elaboration
-        logger.info("validator: Answer flagged -> re-synthesizing with feedback")
+        logger.info("validator: Answer flagged -> re-synthesizing (In Depth handled separately)")
         revise_messages = synth_messages + [
-            {"role": "assistant", "content": content},
-            {"role": "user", "content": _validator_feedback(v)},
+            {"role": "assistant", "content": current},
+            {"role": "user", "content": _validator_feedback(cur_verdict)},
         ]
         try:
             msg = await _chat(
@@ -483,20 +543,17 @@ async def _audit_and_revise(
                 dry_multiplier=synth_dry)
             revised = _normalize_envelope(_message_text(msg))
         except Exception as e:
-            logger.warning("re-synthesis after validator flag failed, keeping draft: %s", e)
-            return content
+            logger.warning("re-synthesis after validator flag failed: %s", e)
+            break  # cannot fix a known-wrong Answer -> abstain
         if not revised:
-            return content  # empty revision -> keep original
+            break
         rv = await _audit(revised)
         if rv is None or rv.get("answer_ok", True):
-            if rv is None or rv.get("indepth_ok", True):
-                logger.info("validator: revision fixed the Answer -> adopted")
-                return revised
-            logger.info("validator: revision fixed the Answer, In Depth still flagged -> adopt + drop In Depth")
-            return _drop_indepth(revised)
-        logger.info("validator: Answer still flagged after re-synth -> ABSTAINING (never ship a wrong answer)")
-        return _fallback_envelope(_VALIDATOR_ABSTAIN_MSG)
-    return content
+            logger.info("validator: revision fixed the Answer -> adopt (then run In-Depth path)")
+            return _apply_indepth(revised, rv or {"indepth_drop": []})
+        current, cur_verdict = revised, rv
+    logger.info("validator: Answer still flagged -> ABSTAINING (never ship a wrong answer)")
+    return _fallback_envelope(_VALIDATOR_ABSTAIN_MSG)
 
 
 async def run_team(

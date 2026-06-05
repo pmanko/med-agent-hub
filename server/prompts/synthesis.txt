@@ -2,18 +2,19 @@ You are now writing the final answer as the chart-answer JSON object {answer, ci
 
 STRUCTURE the `answer` string as two markdown sections, in this order:
 - `**Answer**` — the direct, bottom-line response in one or two sentences. Cite chart records inline with `[N]`.
-- `**In Depth**` — the supporting reasoning: the relevant knowledge-base guidance (attributed inline in prose) and the clinical expert's interpretation of THIS chart against it.
-FORMAT each header on its OWN line with a blank line after it, exactly like this (note the blank line between the header and its text):
+- `**In Depth**` — a markdown BULLET LIST, ONE claim per bullet: the relevant knowledge-base guidance (attributed inline in prose) and the clinical expert's interpretation of THIS chart against it. One idea per bullet, so each claim can stand (and be checked) on its own.
+FORMAT the **Answer** header on its own line; under **In Depth** put one `- ` bullet per claim, exactly like this (note the blank line between a header and its text):
 ```
 **Answer**
 <one or two sentences>
 
 **In Depth**
-<the reasoning>
+- <one claim, with its source: [N] for a chart fact, a named guideline for guidance>
+- <the next claim>
 ```
 DECIDE WHICH SECTIONS TO EMIT — pick exactly one case before you write:
 - (A) The fact is genuinely NOT documented in the chart at all (e.g. a value the record never stores, like blood type) -> emit ONLY `**Answer**` saying it is not documented. NO `**In Depth**`. Stop.
-- (B) OTHERWISE — for EVERY answerable question (the default) -> emit BOTH sections. `**In Depth**` carries the gathered clinical context: the knowledge-base reference guidance (attributed inline in prose) AND the clinical expert's interpretation of THIS chart against it — what the findings mean, the relevant guidance, the clinical implication. There is ALWAYS context worth surfacing, so NEVER write that "no external guidance was needed" or that the chart answers it by itself. Do NOT re-list the drugs, doses, dates, or order indices — the `blocks` table already shows them; the In-Depth is reasoning and context, not a restatement of chart data.
+- (B) OTHERWISE — for EVERY answerable question (the default) -> emit BOTH sections. Write `**In Depth**` as a bullet list, ONE claim per bullet, carrying the gathered clinical context: the knowledge-base reference guidance (attributed inline in prose) AND the clinical expert's interpretation of THIS chart against it — what the findings mean, the relevant guidance, the clinical implication. There is ALWAYS context worth surfacing, so NEVER write that "no external guidance was needed" or that the chart answers it by itself. Do NOT re-list the drugs, doses, dates, or order indices — the `blocks` table already shows them; the In-Depth is reasoning and context, not a restatement of chart data.
 
 Use ONLY these two `**bold**` headers — no nested headings, no tables inside the string (tabular data goes in `blocks`). `**In Depth**` is for REASONING ONLY — the retrieved reference guidance and the expert's interpretation of this chart against it. Do NOT use `**In Depth**` to re-list chart records, dates, order indices, or anything already shown in the `blocks` table; repeating chart data there is padding, not reasoning. Do not restate the question, do not add a generic "consult a doctor" disclaimer.
 
@@ -35,7 +36,8 @@ Worked example (mixed) — the `answer` text reads, each header on its OWN line 
 Her regimen is no longer first-line [4].
 
 **In Depth**
-The chart lists a stavudine (d4T)-based regimen [4]. Per WHO HIV guidelines, stavudine is no longer recommended because of frequent, often irreversible toxicity, and tenofovir or zidovudine are the preferred nucleoside backbones.
+- The chart lists a stavudine (d4T)-based regimen [4].
+- Per WHO HIV guidelines, stavudine is no longer recommended because of frequent, often irreversible toxicity; tenofovir or zidovudine are the preferred nucleoside backbones.
 
 citations: [4]  (the chart record for the regimen is cited; the WHO guidance is attributed inline with NO integer).
 

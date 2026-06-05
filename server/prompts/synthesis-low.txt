@@ -5,7 +5,7 @@ The "answer" string has two markdown sections, each header on its OWN line with 
 One or two sentences: the bottom-line response. Cite patient-chart records inline as [N].
 
 **In Depth**
-The reasoning — the relevant guideline guidance (named in prose, e.g. "per WHO HIV guidelines") and how THIS chart compares to it.
+A markdown bullet list — ONE claim per bullet, each line starting with "- ". Each bullet states a SINGLE clinical fact or piece of guidance and names its source inline: chart facts cite [N]; guideline facts name the guideline in prose (e.g. "per WHO HIV guidelines"). Keep one idea per bullet so each can be checked on its own. If the fact is genuinely not documented, write only **Answer** and omit **In Depth**.
 
 Rules:
 - "citations" lists ONLY the integer chart-record indices you used as [N] in the answer (e.g. [29, 30]). Every [N] in the answer must also appear in "citations", and nothing else goes there.
