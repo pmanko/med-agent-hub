@@ -18,12 +18,12 @@ levels:
     synthesizer: qwen3-4b
     synthesis_prompt: synthesis-low
 
-  med-agent-team-low-validated:    # LOW + orchestrator-as-validator (scaled to the tier)
+  med-agent-team-low-validated:    # LOW + a validator at a competent FLOOR (not tier-scaled)
     orchestrator: gemma-e2b-q2
     expert: medgemma-1.5-4b
     synthesizer: qwen3-4b
     synthesis_prompt: synthesis-low
-    validator: gemma-e2b-q2        # the LOW orchestrator, cross-family vs qwen3-4b synth (tests the floor)
+    validator: gemma-e4b-q8        # floor candidate — try e4b first (2-bit e2b over-flagged); compare vs 12b
     validator_max_loops: 1
 
   med-agent-team-med:

@@ -342,20 +342,18 @@ def _knob(knobs: Optional[Dict[str, Any]], role: str, key: str, default: Any) ->
 
 
 def _validator_feedback(verdict: Dict[str, Any]) -> str:
-    """Turn a flagged verdict into specific re-synthesis instructions."""
-    parts = ["A reviewer audited your draft against the patient chart and found issues "
-             "that MUST be fixed before the answer is returned:"]
+    """Turn a flagged verdict into goal-oriented re-synthesis guidance."""
+    parts = ["Your goal is an accurate Answer and a valid, useful In Depth, grounded only in "
+             "the patient chart. A reviewer found these gaps to that goal:"]
     ai = (verdict.get("answer_issues") or "").strip()
     ci = (verdict.get("context_issues") or "").strip()
     if ai:
-        parts.append("ANSWER problems: " + ai)
+        parts.append("Answer: " + ai)
     if ci:
-        parts.append("CONTEXT/evidence problems (do not carry these into the answer): " + ci)
+        parts.append("Evidence/context: " + ci)
     parts.append(
-        "Rewrite the answer using ONLY facts supported by the patient chart. Do not assert "
-        "a trend from fewer than two dated points, do not claim a time window the data does "
-        "not cover, keep every date matched to its real value, and answer 'not documented' "
-        "when the chart lacks the information.")
+        "Rewrite to meet the goal: keep what is already accurate, correct the above using only "
+        "chart-supported facts, and where the chart lacks the information say 'not documented'.")
     return "\n".join(parts)
 
 
