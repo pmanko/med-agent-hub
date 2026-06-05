@@ -29,10 +29,17 @@ class Level:
     orchestrator_prompt: str = "orchestrator"
     expert_prompt: str = "medical_expert"
     synthesis_prompt: str = "synthesis"
+    validator: Optional[str] = None  # None -> no post-synthesis audit round
+    validator_prompt: str = "validation"
+    validator_max_loops: int = 1
 
     @property
     def has_expert(self) -> bool:
         return bool(self.expert)
+
+    @property
+    def has_validator(self) -> bool:
+        return bool(self.validator)
 
 
 def _load_raw() -> Dict[str, dict]:
@@ -66,6 +73,9 @@ def get_level(level_id: str) -> Level:
             orchestrator_prompt=spec.get("orchestrator_prompt", "orchestrator"),
             expert_prompt=spec.get("expert_prompt", "medical_expert"),
             synthesis_prompt=spec.get("synthesis_prompt", "synthesis"),
+            validator=spec.get("validator"),
+            validator_prompt=spec.get("validator_prompt", "validation"),
+            validator_max_loops=spec.get("validator_max_loops", 1),
         )
     except KeyError as exc:
         raise KeyError(f"level {level_id!r} missing required field {exc}") from exc

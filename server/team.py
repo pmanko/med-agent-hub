@@ -303,6 +303,125 @@ def _normalize_envelope(raw: str) -> str:
 # is the lever we send. (frequency_penalty here was previously a confirmed no-op.)
 _SYNTH_MIN_TEMPERATURE = 0.5
 
+# The validator returns a structured verdict. The answer and the context are judged
+# as SEPARATE criteria (distinct issue fields) so the feedback localizes where the
+# error entered — bad gathered evidence vs bad synthesis.
+_VALIDATOR_RF = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "validator_verdict",
+        "schema": {
+            "type": "object",
+            "properties": {
+                "ok": {"type": "boolean"},
+                "answer_issues": {"type": "string"},
+                "context_issues": {"type": "string"},
+            },
+            "required": ["ok"],
+        },
+    },
+}
+
+
+def _validator_feedback(verdict: Dict[str, Any]) -> str:
+    """Turn a flagged verdict into specific re-synthesis instructions."""
+    parts = ["A reviewer audited your draft against the patient chart and found issues "
+             "that MUST be fixed before the answer is returned:"]
+    ai = (verdict.get("answer_issues") or "").strip()
+    ci = (verdict.get("context_issues") or "").strip()
+    if ai:
+        parts.append("ANSWER problems: " + ai)
+    if ci:
+        parts.append("CONTEXT/evidence problems (do not carry these into the answer): " + ci)
+    parts.append(
+        "Rewrite the answer using ONLY facts supported by the patient chart. Do not assert "
+        "a trend from fewer than two dated points, do not claim a time window the data does "
+        "not cover, keep every date matched to its real value, and answer 'not documented' "
+        "when the chart lacks the information.")
+    return "\n".join(parts)
+
+
+async def _run_validator(
+    client: httpx.AsyncClient,
+    validator_model: str,
+    validator_prompt: Optional[str],
+    *,
+    chart: str,
+    gathered: str,
+    answer: str,
+    max_tokens: Optional[int],
+) -> Dict[str, Any]:
+    """One audit pass: judge the gathered CONTEXT and the draft ANSWER separately
+    against the chart. Returns {ok, answer_issues, context_issues}; fails OPEN (ok=True)
+    on any malformed verdict so a flaky validator never blocks the run."""
+    instruction = load_prompt(validator_prompt or "validation")
+    try:
+        obj = json.loads(answer)
+        answer_text = obj.get("answer", answer) if isinstance(obj, dict) else answer
+    except (json.JSONDecodeError, TypeError):
+        answer_text = answer
+    audit_user = (
+        instruction
+        + "\n\n=== PATIENT CHART (ground truth) ===\n" + (chart or "(none)")
+        + "\n\n=== GATHERED CONTEXT (evidence the team collected) ===\n" + (gathered or "(none)")
+        + "\n\n=== DRAFT ANSWER (to audit) ===\n" + answer_text
+    )
+    msg = await _chat(
+        client, validator_model, [{"role": "user", "content": audit_user}],
+        response_format=_VALIDATOR_RF, temperature=0.0, max_tokens=max_tokens)
+    try:
+        verdict = json.loads(_message_text(msg))
+    except (json.JSONDecodeError, TypeError):
+        return {"ok": True}
+    return verdict if isinstance(verdict, dict) else {"ok": True}
+
+
+async def _audit_and_revise(
+    client: httpx.AsyncClient,
+    content: str,
+    *,
+    validator_model: str,
+    validator_prompt: Optional[str],
+    chart: str,
+    gathered: str,
+    synth_model: str,
+    synth_messages: List[Dict[str, Any]],
+    response_format: Optional[Dict[str, Any]],
+    temperature: float,
+    max_tokens: Optional[int],
+    max_loops: int,
+) -> str:
+    """Post-synthesis audit round: validate the draft, and on a flag append specific
+    feedback + re-synthesize, up to max_loops cycles. Returns the (possibly revised)
+    envelope. Never raises — any validator/re-synth failure keeps the current draft."""
+    for _ in range(max(0, max_loops)):
+        try:
+            verdict = await _run_validator(
+                client, validator_model, validator_prompt,
+                chart=chart, gathered=gathered, answer=content, max_tokens=max_tokens)
+        except Exception as e:
+            logger.warning("validator call failed, keeping draft: %s", e)
+            return content
+        if verdict.get("ok", True):
+            return content
+        revise_messages = synth_messages + [
+            {"role": "assistant", "content": content},
+            {"role": "user", "content": _validator_feedback(verdict)},
+        ]
+        try:
+            msg = await _chat(
+                client, synth_model, revise_messages,
+                response_format=response_format, temperature=temperature,
+                max_tokens=max_tokens, repeat_penalty=SYNTH_REPEAT_PENALTY,
+                dry_multiplier=SYNTH_DRY_MULTIPLIER)
+            revised = _normalize_envelope(_message_text(msg))
+            if revised:
+                content = revised
+        except Exception as e:
+            logger.warning("re-synthesis after validator flag failed, keeping draft: %s", e)
+            return content
+    return content
+
 
 async def run_team(
     messages: List[Dict[str, Any]],
@@ -317,6 +436,9 @@ async def run_team(
     synthesizer_prompt: Optional[str] = None,
     expert_prompt: Optional[str] = None,
     has_expert: bool = True,
+    validator_model: Optional[str] = None,
+    validator_prompt: Optional[str] = None,
+    validator_max_loops: int = 1,
 ) -> str:
     """
     Run the team for one chartsearchai turn.
@@ -411,6 +533,14 @@ async def run_team(
             )
             content = _normalize_envelope(_message_text(msg))
             if content:
+                if validator_model:
+                    content = await _audit_and_revise(
+                        client, content,
+                        validator_model=validator_model, validator_prompt=validator_prompt,
+                        chart=chart, gathered=gathered,
+                        synth_model=synth_model, synth_messages=synth_messages,
+                        response_format=response_format, temperature=synth_temperature,
+                        max_tokens=max_tokens, max_loops=validator_max_loops)
                 return content
             logger.warning("synthesis returned empty content; using fallback envelope")
         except Exception as e:

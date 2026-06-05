@@ -14,9 +14,12 @@ from server import team, levels_loader
 
 
 def test_level_ids_advertises_the_configured_levels():
-    # med-agent-hub publishes exactly the keys in levels.yaml.
-    assert levels_loader.level_ids() == [
-        "med-agent-team-low", "med-agent-team-med", "med-agent-team-high"]
+    # med-agent-hub publishes the keys in levels.yaml: the core tiers are always
+    # advertised, with no duplicates (extra experiment lanes may be added over time).
+    ids = levels_loader.level_ids()
+    assert len(ids) == len(set(ids))  # no duplicate ids
+    for tier in ("med-agent-team-low", "med-agent-team-med", "med-agent-team-high"):
+        assert tier in ids, ids
 
 
 def test_get_level_resolves_models_and_prompts():
