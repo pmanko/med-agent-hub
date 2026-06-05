@@ -412,21 +412,28 @@ async def _audit_and_revise(
     max_tokens: Optional[int],
     max_loops: int,
 ) -> str:
-    """Post-synthesis audit round: validate the draft, and on a flag append specific
-    feedback + re-synthesize, up to max_loops cycles. Returns the (possibly revised)
-    envelope. Never raises — any validator/re-synth failure keeps the current draft."""
-    for _ in range(max(0, max_loops)):
+    """Post-synthesis audit round with a RE-VALIDATE-AND-KEEP-BEST gate: validate the
+    draft; on a flag, re-synthesize with specific feedback and RE-AUDIT the revision —
+    adopt it only if it now passes, otherwise keep the original. A still-flagged rewrite
+    is never trusted over the original (false-flag / drift safety; the literature shows
+    unconditional self-revision can turn a correct answer wrong). Never raises — any
+    validator/re-synth failure keeps the current draft (fail-open)."""
+
+    async def _audit(draft: str) -> Optional[Dict[str, Any]]:
         try:
-            verdict = await _run_validator(
+            return await _run_validator(
                 client, validator_model, validator_prompt,
-                chart=chart, gathered=gathered, answer=content, max_tokens=max_tokens,
+                chart=chart, gathered=gathered, answer=draft, max_tokens=max_tokens,
                 temperature=validator_temperature, repeat_penalty=validator_repeat_penalty,
                 dry_multiplier=validator_dry)
         except Exception as e:
-            logger.warning("validator call failed, keeping draft: %s", e)
-            return content
-        if verdict.get("ok", True):
-            return content
+            logger.warning("validator call failed: %s", e)
+            return None  # fail-open
+
+    for _ in range(max(0, max_loops)):
+        verdict = await _audit(content)
+        if verdict is None or verdict.get("ok", True):
+            return content  # clean (or validator unavailable) -> keep draft
         revise_messages = synth_messages + [
             {"role": "assistant", "content": content},
             {"role": "user", "content": _validator_feedback(verdict)},
@@ -438,11 +445,15 @@ async def _audit_and_revise(
                 max_tokens=max_tokens, repeat_penalty=synth_repeat_penalty,
                 dry_multiplier=synth_dry)
             revised = _normalize_envelope(_message_text(msg))
-            if revised:
-                content = revised
         except Exception as e:
             logger.warning("re-synthesis after validator flag failed, keeping draft: %s", e)
             return content
+        if not revised:
+            return content  # empty revision -> keep original
+        revised_verdict = await _audit(revised)
+        if revised_verdict is not None and revised_verdict.get("ok", False):
+            return revised  # revision cleared the flags -> adopt it
+        return content  # revision still flagged -> keep the original draft
     return content
 
 

@@ -91,15 +91,17 @@ def test_validator_flag_loops_back_then_passes(monkeypatch):
     assert json.loads(out)["answer"] == "answer-v1"
 
 
-def test_validator_respects_max_loops(monkeypatch):
-    """Persistent flag with max_loops=1 -> exactly one audit + one re-synth, then stop
-    (return the best effort rather than loop forever)."""
+def test_validator_keeps_original_when_revision_still_flagged(monkeypatch):
+    """Re-validate-and-keep-best: the re-synthesis is itself re-audited, and if it is
+    STILL flagged the ORIGINAL draft is kept — a still-flagged rewrite is never trusted
+    over the original (false-flag / drift safety). RED on the old unconditional-accept
+    code, which returned the revision (answer-v1)."""
     calls = []
-    monkeypatch.setattr(team, "_chat", _factory(calls, [False, False, False]))
+    monkeypatch.setattr(team, "_chat", _factory(calls, [False, False]))
     out = asyncio.run(team.run_team(
         _MESSAGES, response_format=_RF,
         orchestrator_model="ORCH", synthesizer_model="SYNTH",
         validator_model="VALIDATOR", validator_max_loops=1))
     val, synth = _counts(calls)
-    assert val == 1 and synth == 2, calls
-    assert json.loads(out)["answer"] == "answer-v1"
+    assert val == 2 and synth == 2, calls            # draft audited + revision re-audited
+    assert json.loads(out)["answer"] == "answer-v0", out   # original kept, revision rejected
