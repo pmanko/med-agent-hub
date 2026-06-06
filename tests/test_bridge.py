@@ -48,6 +48,33 @@ def test_run_team_produces_the_envelope_from_the_final_synthesis_call():
     assert env["blocks"] == []
 
 
+def test_parity_lane_single_call_bare_envelope():
+    # The parity lane (two_call=False): orchestration still runs, but synthesis is ONE
+    # chartsearchai-style call (synthesizer_prompt is a WHOLE prompt), validator off, and the
+    # output is the BARE {answer, citations, blocks} envelope -- no **Answer**/**In Depth**
+    # wrapper, no confidence block -- so it matches the direct single-LLM arms' format.
+    rf_calls = []
+
+    async def fake_chat(client, model, messages, *, tools=None, response_format=None,
+                        temperature=None, max_tokens=None, **kwargs):
+        if response_format is not None:
+            rf_calls.append(model)
+            return {"content": ENVELOPE}
+        return {"content": "ok", "tool_calls": None}
+
+    with patch.object(team, "_chat", side_effect=fake_chat):
+        out = run(team.run_team(
+            MESSAGES, response_format=RESP_FORMAT, temperature=0.0, max_tokens=1024,
+            synthesizer_prompt="synthesis-chartsearchai", two_call=False, validator_model=None))
+
+    env = json.loads(out)
+    assert env["answer"] == "Lisinopril 10 mg [1]"          # raw answer, NOT wrapped under **Answer**
+    assert "**Answer**" not in env["answer"] and "**In Depth**" not in env["answer"]
+    assert env["citations"] == [1] and env["blocks"] == []
+    assert "confidence" not in env                           # bare envelope, no confidence block
+    assert len(rf_calls) == 1                                # ONE synthesis call, not the two-call split
+
+
 def test_response_format_is_only_applied_on_the_synthesis_calls():
     # The tool-selection turns must run PLAIN (no response_format); only the
     # synthesis calls are constrained. This is the load-bearing small-model rule.

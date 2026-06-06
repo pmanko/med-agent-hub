@@ -161,3 +161,4 @@ node_modules/
 # throwaway smoke-test venv (not the poetry env)
 .venv-smoke/
 .venv-test/
+trace/

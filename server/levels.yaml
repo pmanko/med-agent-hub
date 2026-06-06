@@ -36,11 +36,11 @@ levels:
     expert: medgemma-1.5-4b-q8     # medgemma-1.5-4b 8-bit
     synthesizer: qwen2.5-14b
 
-  med-agent-team-med-validated:    # MED + orchestrator-as-validator (scaled to the tier)
+  med-agent-team-med-validated:    # MED + a competent validator (12B — e4b is below the floor)
     orchestrator: gemma-e4b-q8
     expert: medgemma-1.5-4b-q8
     synthesizer: qwen2.5-14b
-    validator: gemma-e4b-q8        # the MED orchestrator, cross-family vs qwen2.5-14b synth
+    validator: gemma-4-12b         # 12B validator (the floor finding); cross-family vs qwen2.5-14b synth
     validator_max_loops: 1
 
   med-agent-team-high:
@@ -59,3 +59,10 @@ levels:
     orchestrator: gemma-4-12b      # gemma-4-12B-it Q8 — strong dense orchestrator
     expert: medgemma-1.5-4b-q8     # same expert as MED — isolates the orchestrator variable
     synthesizer: qwen2.5-14b       # same synth as MED
+
+  med-agent-team-parity:           # chartsearchai-PARITY: hub orchestration + temporal block, but
+    orchestrator: gemma-e4b-q8     # the MED-tier roles, chartsearchai's DEFAULT_SYSTEM_PROMPT, and a
+    expert: medgemma-1.5-4b-q8     # SINGLE synthesis call with the validator OFF -> the bare
+    synthesizer: qwen2.5-14b       # {answer,citations,blocks} envelope, matching the direct arms.
+    synthesis_prompt: synthesis-chartsearchai   # whole chartsearchai prompt (NOT the -answer/-indepth split)
+    two_call: false                # isolates "does orchestration help, holding prompt+format = chartsearchai default"

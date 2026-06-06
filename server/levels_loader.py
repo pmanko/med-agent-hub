@@ -32,6 +32,15 @@ class Level:
     validator: Optional[str] = None  # None -> no post-synthesis audit round
     validator_prompt: str = "validation"
     validator_max_loops: int = 1
+    # Two-call synthesis (Answer + In-Depth, default) vs a single chartsearchai-style call.
+    # two_call: false -> the "parity" shape: ONE synthesis call using synthesis_prompt as a
+    # whole prompt (not split into -answer/-indepth), validator skipped, output is the bare
+    # chartsearchai {answer, citations, blocks} envelope (no In-Depth body, no confidence).
+    two_call: bool = True
+    # Reference-date anchor (the simulated "now" for recency/series). None -> fall back to the
+    # HUB_ANCHOR env (run-wide) then "latest_record" (the max date in the chart). Modes:
+    # "latest_record" | an explicit ISO date "YYYY-MM-DD" | "wall_clock".
+    anchor: Optional[str] = None
     # Optional per-role sampling knobs: {role: {temperature, repeat_penalty, dry}}.
     # A role's entry overrides the global default for that role only; unset -> default.
     # Roles: orchestrator / expert / synthesizer / validator.
@@ -80,6 +89,8 @@ def get_level(level_id: str) -> Level:
             validator=spec.get("validator"),
             validator_prompt=spec.get("validator_prompt", "validation"),
             validator_max_loops=spec.get("validator_max_loops", 1),
+            two_call=spec.get("two_call", True),
+            anchor=spec.get("anchor"),
             knobs=spec.get("knobs") or {},
         )
     except KeyError as exc:

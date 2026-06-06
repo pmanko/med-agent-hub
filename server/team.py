@@ -37,6 +37,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import httpx
 
 from . import kb
+from . import temporal
 from .config import (
     llm_config, SYNTH_REPEAT_PENALTY,
     ORCHESTRATOR_DRY_MULTIPLIER, EXPERT_DRY_MULTIPLIER, SYNTH_DRY_MULTIPLIER,
@@ -832,7 +833,8 @@ def _write_trace(level_id: Optional[str], messages: List[Dict[str, Any]], *, orc
                  expert: str, synthesizer: str, validator: Optional[str],
                  steps: List[Dict[str, Any]], answer_confidence: Dict[str, Any],
                  indepth_confidence: Dict[str, Any], answer_text: str = "",
-                 in_depth_claims: Optional[List[str]] = None) -> None:
+                 in_depth_claims: Optional[List[str]] = None,
+                 reference_date: Optional[str] = None) -> None:
     """Append one per-turn reasoning-trace line — the structured package a client renders (the
     SHIPPED answer + in-depth claims + per-section confidence + the ordered call steps). Best-effort:
     never raises (a trace-write failure must never break a turn)."""
@@ -847,6 +849,7 @@ def _write_trace(level_id: Optional[str], messages: List[Dict[str, Any]], *, orc
             "ts": datetime.now(timezone.utc).isoformat(),
             "level_id": level_id,
             "question": question[:2000],
+            "reference_date": reference_date,
             "models": {"orchestrator": orchestrator, "expert": expert,
                        "synthesizer": synthesizer, "validator": validator},
             "answer_text": answer_text,
@@ -878,6 +881,8 @@ async def run_team(
     validator_model: Optional[str] = None,
     validator_prompt: Optional[str] = None,
     validator_max_loops: int = 1,
+    two_call: bool = True,
+    anchor: Optional[str] = None,
     knobs: Optional[Dict[str, Any]] = None,
     level_id: Optional[str] = None,
 ) -> str:
@@ -893,6 +898,7 @@ async def run_team(
     synth_model = synthesizer_model or llm_config.synthesizer_model
     expert_model = expert_model or llm_config.med_model
     chart = _chart_context(messages)
+    reference_date: Optional[str] = None  # resolved below; recorded in the trace for the judge
 
     # Per-role sampling knobs: a level may override any role's temperature / repeat_penalty
     # / dry; unset falls back to today's global default for that role.
@@ -917,9 +923,15 @@ async def run_team(
     # Two-call synthesis: the level's synthesis_prompt / validator_prompt are BASE names; each
     # role's answer/in-depth prompt is "<base>-answer" / "<base>-indepth" (default base
     # "synthesis" / "validation"). A level can swap the whole set by overriding the base.
+    # Parity (two_call=False): synthesis_prompt is a WHOLE prompt (no -answer/-indepth split) —
+    # one call, no in-depth, validator skipped — so the output is the bare chartsearchai envelope.
     _synth_base = synthesizer_prompt or "synthesis"
-    answer_instruction = load_prompt(_synth_base + "-answer")
-    indepth_instruction = load_prompt(_synth_base + "-indepth")
+    if two_call:
+        answer_instruction = load_prompt(_synth_base + "-answer")
+        indepth_instruction = load_prompt(_synth_base + "-indepth")
+    else:
+        answer_instruction = load_prompt(_synth_base)
+        indepth_instruction = None
 
     # The tool loop runs under the orchestrator's OWN system prompt — not
     # chartsearchai's envelope prompt, which biases a small model toward answering
@@ -1004,30 +1016,70 @@ async def run_team(
         # array (byte-identical for LM Studio's cache); the gathered evidence rides on
         # the last user turn so decisive evidence sits at the end (lost-in-the-middle).
         gathered = _gathered_evidence(kb_context, expert_notes)
-        try:
-            content, synth_steps, answer_conf, indepth_conf, answer_text, claims = \
-                await _synthesize_and_validate(
-                    client,
-                    base_messages=list(messages), gathered=gathered, chart=chart,
-                    synth_model=synth_model,
-                    answer_instruction=answer_instruction, indepth_instruction=indepth_instruction,
-                    response_format=response_format, validator_model=validator_model,
-                    validator_prompt=validator_prompt,
-                    synth_temperature=synth_temp, synth_repeat_penalty=synth_rp, synth_dry=synth_dry,
-                    validator_temperature=val_temp, validator_repeat_penalty=val_rp, validator_dry=val_dry,
-                    max_tokens=max_tokens, max_loops=validator_max_loops)
-            _write_trace(level_id, messages, orchestrator=model, expert=expert_model,
-                         synthesizer=synth_model, validator=validator_model,
-                         steps=orch_steps + synth_steps,
-                         answer_confidence=answer_conf, indepth_confidence=indepth_conf,
-                         answer_text=answer_text, in_depth_claims=claims)
-            return content
-        except Exception as e:
-            logger.error("synthesis failed: %s", e, exc_info=True)
+
+        # Deterministic temporal grounding: resolve the reference "now" (level anchor ->
+        # HUB_ANCHOR env -> latest record date) and prepend the computed series so the synth +
+        # validator REPORT dated facts ("most recent", trend, window) instead of deriving them.
+        anchor_mode = anchor or os.environ.get("HUB_ANCHOR")
+        reference_date = temporal.resolve_anchor(anchor_mode, chart)
+        temporal_block = temporal.build_temporal_block(chart, reference_date)
+        if temporal_block:
+            gathered = temporal_block + ("\n\n" + gathered if gathered else "")
+
+        if not two_call:
+            # Parity lane: ONE chartsearchai-style synthesis call (answer_instruction is the whole
+            # chartsearchai prompt), NO In-Depth, validator skipped -> the bare chartsearchai
+            # {answer, citations, blocks} envelope, so the output format matches the direct
+            # single-LLM arms. Orchestration (kb_search + expert) + the temporal block still feed it.
+            try:
+                p_answer, p_citations, p_blocks = await _synthesize_answer(
+                    client, synth_model, base_messages=list(messages),
+                    answer_instruction=answer_instruction, gathered=gathered,
+                    response_format=response_format, temperature=synth_temp,
+                    max_tokens=max_tokens, repeat_penalty=synth_rp, dry=synth_dry)
+                if p_answer:
+                    _parity_conf = {"level": "green",
+                                    "note": "parity lane: chartsearchai prompt, single call, validator off"}
+                    _write_trace(level_id, messages, orchestrator=model, expert=expert_model,
+                                 synthesizer=synth_model, validator=None,
+                                 steps=orch_steps + [{"role": "synthesizer", "model": synth_model,
+                                                      "mode": "parity-single-call"}],
+                                 answer_confidence=_parity_conf, indepth_confidence=_parity_conf,
+                                 answer_text=p_answer, in_depth_claims=[],
+                                 reference_date=reference_date)
+                    # Bare chartsearchai envelope built directly (NOT _assemble_envelope, which
+                    # forces a "**Answer**" header): no In-Depth, no confidence -> matches direct arms.
+                    return json.dumps({"answer": p_answer,
+                                       "citations": p_citations or [],
+                                       "blocks": p_blocks or []})
+            except Exception as e:
+                logger.error("parity synthesis failed: %s", e, exc_info=True)
+        else:
+            try:
+                content, synth_steps, answer_conf, indepth_conf, answer_text, claims = \
+                    await _synthesize_and_validate(
+                        client,
+                        base_messages=list(messages), gathered=gathered, chart=chart,
+                        synth_model=synth_model,
+                        answer_instruction=answer_instruction, indepth_instruction=indepth_instruction,
+                        response_format=response_format, validator_model=validator_model,
+                        validator_prompt=validator_prompt,
+                        synth_temperature=synth_temp, synth_repeat_penalty=synth_rp, synth_dry=synth_dry,
+                        validator_temperature=val_temp, validator_repeat_penalty=val_rp, validator_dry=val_dry,
+                        max_tokens=max_tokens, max_loops=validator_max_loops)
+                _write_trace(level_id, messages, orchestrator=model, expert=expert_model,
+                             synthesizer=synth_model, validator=validator_model,
+                             steps=orch_steps + synth_steps,
+                             answer_confidence=answer_conf, indepth_confidence=indepth_conf,
+                             answer_text=answer_text, in_depth_claims=claims,
+                             reference_date=reference_date)
+                return content
+            except Exception as e:
+                logger.error("synthesis failed: %s", e, exc_info=True)
 
     _write_trace(level_id, messages, orchestrator=model, expert=expert_model,
                  synthesizer=synth_model, validator=validator_model, steps=orch_steps,
                  answer_confidence={"level": "red", "note": "The team could not produce an answer this turn."},
-                 indepth_confidence={"level": "green", "note": ""})
+                 indepth_confidence={"level": "green", "note": ""}, reference_date=reference_date)
     return _fallback_envelope(
         "I could not produce a complete answer for this turn. Please try again.")
