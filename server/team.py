@@ -27,6 +27,7 @@ Design notes (see specs/artifacts/planning/react-team-orchestration-design.md):
   the turn still synthesizes; a hard failure returns a minimal fallback envelope.
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -150,6 +151,18 @@ def _latest_user_text(messages: List[Dict[str, Any]]) -> str:
     return ""
 
 
+# Serialize ALL calls to the LLM backend hub-wide. The llama.cpp router (build 9430) has an
+# unfixed TOCTOU race in models-max eviction (ggml-org/llama.cpp#20137, closed "not planned"):
+# concurrent requests bypass the load gate, so a request can land on a model the router is
+# evicting -> it force-kills that child after DEFAULT_STOP_TIMEOUT (hardcoded 10s) -> the call
+# fails with "Failed to read connection" (also #18063 on stream:false). The issue's own
+# recommendation is to QUEUE requests instead of letting them bypass; since the router won't,
+# we serialize client-side: exactly one model request in flight at a time, so the router only
+# ever loads/evicts ONE model with no concurrent request to race -> clean sequential loading
+# (the single-GPU host serves one model at a time regardless, so this costs no real throughput).
+_ROUTER_LOCK = asyncio.Lock()
+
+
 async def _chat(
     client: httpx.AsyncClient,
     model: str,
@@ -187,11 +200,15 @@ async def _chat(
     url = f"{llm_config.base_url.rstrip('/')}/v1/chat/completions"
     logger.info("team _chat: model=%s tools=%s response_format=%s",
                 model, bool(tools), bool(response_format))
-    resp = await client.post(url, json=payload, headers=headers, timeout=180.0)
+    # Hold the lock for the WHOLE request (load + generate) so the router never sees a second
+    # request while it is loading/evicting a model. Timeout covers a cold big-model load + a long
+    # thinking generation. The lock makes loads strictly sequential — no eviction-vs-serve race.
+    async with _ROUTER_LOCK:
+        resp = await client.post(url, json=payload, headers=headers, timeout=600.0)
     if resp.status_code >= 400:
-        # Surface LM Studio's reason (context overflow, bad schema, etc.) — bare
+        # Surface the backend's reason (context overflow, bad schema, model-load failure) — bare
         # status codes are not actionable.
-        logger.error("LM Studio %s for model=%s tools=%s response_format=%s: %s",
+        logger.error("router %s for model=%s tools=%s response_format=%s: %s",
                      resp.status_code, model, bool(tools), bool(response_format),
                      resp.text[:800])
         resp.raise_for_status()
