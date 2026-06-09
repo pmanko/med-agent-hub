@@ -1,0 +1,68 @@
+# Advertised team levels — the /v1/models groupings the consumer's picker lists.
+#
+# Each key is a level id; each value fixes the per-role models (served by
+# LLM_BASE_URL) plus optional per-level prompt files. Read PER REQUEST, so editing
+# this (bind-mounted) file changes behaviour with no rebuild. This file is the
+# single source of truth for the team tiers.
+#
+#   add / remove a level     -> add / remove a block
+#   change a model           -> edit one line
+#   per-level prompt         -> set orchestrator_prompt / expert_prompt / synthesis_prompt
+#   run a level with NO expert -> `expert: null` (drops the medical_expert tool + role)
+#
+# Model ids are the LLM backend's served ids (the llama-router section names).
+levels:
+  med-agent-team-low:
+    orchestrator: gemma-e2b-q2     # gemma-4-E2B 2-bit (deliberately tiny orchestrator)
+    expert: medgemma-1.5-4b        # small expert (~3GB); set to null to drop the expert
+    synthesizer: qwen3-4b
+
+  med-agent-team-low-validated:    # LOW + a validator at a competent FLOOR (not tier-scaled)
+    orchestrator: gemma-e2b-q2
+    expert: medgemma-1.5-4b
+    synthesizer: qwen3-4b
+    validator: gemma-e4b-q8        # floor candidate — try e4b first (2-bit e2b over-flagged); compare vs 12b
+    validator_max_loops: 1
+
+  med-agent-team-low-validated-12b:   # same LOW tier, 12B validator — the floor comparison vs e4b
+    orchestrator: gemma-e2b-q2
+    expert: medgemma-1.5-4b
+    synthesizer: qwen3-4b
+    validator: gemma-4-12b
+    validator_max_loops: 1
+
+  med-agent-team-med:
+    orchestrator: gemma-e4b-q8     # gemma-4-E4B 8-bit
+    expert: medgemma-1.5-4b-q8     # medgemma-1.5-4b 8-bit
+    synthesizer: qwen2.5-14b
+
+  med-agent-team-med-validated:    # MED + a competent validator (12B — e4b is below the floor)
+    orchestrator: gemma-e4b-q8
+    expert: medgemma-1.5-4b-q8
+    synthesizer: qwen2.5-14b
+    validator: gemma-4-12b         # 12B validator (the floor finding); cross-family vs qwen2.5-14b synth
+    validator_max_loops: 1
+
+  med-agent-team-high:
+    orchestrator: gemma-31b        # gemma-4-31B-it
+    expert: medgemma-27b
+    synthesizer: qwen3.6-35b-q6    # Qwen3.6-35B-A3B 6-bit (thinking synth)
+
+  med-agent-team-high-validated:   # HIGH + orchestrator-as-validator (scaled to the tier)
+    orchestrator: gemma-31b
+    expert: medgemma-27b
+    synthesizer: qwen3.6-35b-q6
+    validator: gemma-31b           # the HIGH orchestrator, cross-family vs qwen3.6 synth (strongest local)
+    validator_max_loops: 1
+
+  med-agent-team-12b:
+    orchestrator: gemma-4-12b      # gemma-4-12B-it Q8 — strong dense orchestrator
+    expert: medgemma-1.5-4b-q8     # same expert as MED — isolates the orchestrator variable
+    synthesizer: qwen2.5-14b       # same synth as MED
+
+  med-agent-team-parity:           # chartsearchai-PARITY: hub orchestration + temporal block, but
+    orchestrator: gemma-e4b-q8     # the MED-tier roles, chartsearchai's DEFAULT_SYSTEM_PROMPT, and a
+    expert: medgemma-1.5-4b-q8     # SINGLE synthesis call with the validator OFF -> the bare
+    synthesizer: qwen2.5-14b       # {answer,citations,blocks} envelope, matching the direct arms.
+    synthesis_prompt: synthesis-chartsearchai   # whole chartsearchai prompt (NOT the -answer/-indepth split)
+    two_call: false                # isolates "does orchestration help, holding prompt+format = chartsearchai default"

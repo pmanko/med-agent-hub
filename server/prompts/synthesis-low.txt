@@ -1,0 +1,14 @@
+Write ONLY a JSON object with exactly three keys: "answer" (a string), "citations" (an array of integers), "blocks" (an array). Output nothing before or after the JSON object.
+
+The "answer" string has two markdown sections, each header on its OWN line with a real line break (press a newline — never type a literal backslash-n):
+**Answer**
+One or two sentences: the bottom-line response. Cite patient-chart records inline as [N].
+
+**In Depth**
+A markdown bullet list — ONE claim per bullet, each line starting with "- ". Each bullet states a SINGLE clinical fact or piece of guidance and names its source inline: chart facts cite [N]; guideline facts name the guideline in prose (e.g. "per WHO HIV guidelines"). Keep one idea per bullet so each can be checked on its own. If the fact is genuinely not documented, write only **Answer** and omit **In Depth**.
+
+Rules:
+- "citations" lists ONLY the integer chart-record indices you used as [N] in the answer (e.g. [29, 30]). Every [N] in the answer must also appear in "citations", and nothing else goes there.
+- Guideline / reference facts are named in prose and are NEVER given an [N] and NEVER placed in "citations".
+- Use only the patient chart above and the gathered evidence below. If neither supports the answer, say so plainly — never invent a record, dose, source name, or index.
+- Be concise. Leave "blocks" as [] unless the answer enumerates multiple items (then put them in one table block).

@@ -19,10 +19,23 @@ load_dotenv(dotenv_path=env_file)
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://localhost:1234")
 LLM_API_KEY = os.getenv("LLM_API_KEY", "")  # Empty for local LM Studio
 
-# Model selection
-ORCHESTRATOR_MODEL = os.getenv("ORCHESTRATOR_MODEL", "meta-llama-3.1-8b-instruct")
-MED_MODEL = os.getenv("MED_MODEL", "medgemma-4b-it-mlx")
+# Model selection (swappable via env). Defaults are the roadmap team: a
+# gemma-4 e4b orchestrator+synthesizer and a medgemma-1.5-4b medical expert.
+# Use the official `google/` gemma-4 build — some community GGUFs (unsloth,
+# e2b) ship a broken jinja tool template that 400s on tool-calling.
+ORCHESTRATOR_MODEL = os.getenv("ORCHESTRATOR_MODEL", "google/gemma-4-e4b")
+MED_MODEL = os.getenv("MED_MODEL", "medgemma-1.5-4b-it")
+# Synthesizer composes the final {answer,citations,blocks} envelope. Defaults to the
+# orchestrator model (prior behaviour); set SYNTHESIZER_MODEL to a larger model so the
+# single synthesis call gets more capability while a small/fast orchestrator runs the
+# multi-call tool loop.
+SYNTHESIZER_MODEL = os.getenv("SYNTHESIZER_MODEL", ORCHESTRATOR_MODEL)
 CLINICAL_RESEARCH_MODEL = os.getenv("CLINICAL_RESEARCH_MODEL", "gemma-3-1b-it")
+
+# Per-tier models (orchestrator / expert / synthesizer per level) now live in
+# server/levels.yaml, resolved by levels_loader and passed to run_team per request.
+# ORCHESTRATOR_MODEL / MED_MODEL / SYNTHESIZER_MODEL above are only the fallback
+# defaults for direct run_team calls (tests) and the raw-passthrough path.
 
 # Legacy alias for backward compatibility
 GENERAL_MODEL = ORCHESTRATOR_MODEL
@@ -31,11 +44,28 @@ GENERAL_MODEL = ORCHESTRATOR_MODEL
 LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.2"))
 LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "2000"))  # Increased default for longer responses
 
+# Synthesis anti-repetition lever. LM Studio's OpenAI API silently DROPS
+# frequency_penalty and the DRY sampler on its MLX engine — only `repeat_penalty`
+# is honored — so the synthesis call sends this. ~1.15; keep <=1.3 (higher distorts
+# output / drives language drift on small models).
+SYNTH_REPEAT_PENALTY = float(os.getenv("SYNTH_REPEAT_PENALTY", "1.15"))
+
+# Per-role DRY (n-gram anti-repetition) multiplier, sent on each role's chat call. Honored by
+# a real llama.cpp server (the router); LM Studio MLX silently drops it (no-op), so it's safe
+# to always send. ORCHESTRATOR runs at 0 (DRY OFF): it emits tool-call JSON in a loop, and DRY's
+# sequence penalty can distort the repeated call structure. EXPERT (free text) + SYNTH (the
+# loop-prone JSON envelope) keep DRY on. Per-ROLE, so the orchestrator's gemma differs from the
+# same gemma serving the single-LLM parity arm (which keeps DRY).
+ORCHESTRATOR_DRY_MULTIPLIER = float(os.getenv("ORCHESTRATOR_DRY_MULTIPLIER", "0.0"))
+EXPERT_DRY_MULTIPLIER = float(os.getenv("EXPERT_DRY_MULTIPLIER", "0.8"))
+SYNTH_DRY_MULTIPLIER = float(os.getenv("SYNTH_DRY_MULTIPLIER", "0.8"))
+
 # Create a config object for cleaner imports
 class LLMConfig:
     base_url = LLM_BASE_URL
     api_key = LLM_API_KEY
     orchestrator_model = ORCHESTRATOR_MODEL
+    synthesizer_model = SYNTHESIZER_MODEL
     med_model = MED_MODEL
     clinical_research_model = CLINICAL_RESEARCH_MODEL
     general_model = GENERAL_MODEL  # backward compat

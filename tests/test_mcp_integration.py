@@ -27,7 +27,6 @@ class MedicalAgentTester:
     def __init__(self):
         self.router_url = os.getenv("A2A_ROUTER_URL", "http://localhost:9100")
         self.clinical_url = os.getenv("A2A_CLINICAL_URL", "http://localhost:9102")
-        self.admin_url = os.getenv("A2A_ADMIN_URL", "http://localhost:9103")
         self.httpx_client = httpx.AsyncClient(timeout=300.0)
         self.test_results = []
         
@@ -51,8 +50,6 @@ class MedicalAgentTester:
             url = self.router_url
         elif target_agent == "clinical":
             url = self.clinical_url
-        elif target_agent == "admin":
-            url = self.admin_url
         else:
             raise ValueError(f"Unknown agent: {target_agent}")
         
