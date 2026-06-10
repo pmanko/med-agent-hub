@@ -1,7 +1,7 @@
 [tool.poetry]
 name = "med-agent-hub"
 version = "0.1.0"
-description = "Multi-agent medical chat application with A2A protocol support and FHIR integration"
+description = "In-process Med Agent Team (orchestrator/expert/synthesis/validation) behind an OpenAI-compatible /v1 bridge, with declarative levels"
 authors = ["OMRS AI Team <team@example.com>"]
 readme = "README.md"
 package-mode = false
