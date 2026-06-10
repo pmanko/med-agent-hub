@@ -3,7 +3,7 @@ name: hub-ci
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, "feat/**", "fix/**", harness-integration]
 
 jobs:
   # The fast deterministic suite: levels/config parsing, validator, prompts,
