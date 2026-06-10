@@ -42,6 +42,13 @@ setuptools = "^75.0.0"
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
 
+[tool.pytest.ini_options]
+# package-mode = false means the project itself is never installed; tests import
+# the repo-root `server` package, so pytest must put the root on sys.path itself
+# (otherwise only `python -m pytest` from the root works).
+pythonpath = ["."]
+testpaths = ["tests"]
+
 [tool.black]
 line-length = 88
 target-version = ['py39']
