@@ -92,7 +92,6 @@ def test_current_config(env_file=".env"):
     spark_host = os.getenv("SPARK_THRIFT_HOST")
     spark_port = int(os.getenv("SPARK_THRIFT_PORT", "10001"))
     if spark_host:
-        import socket
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(3)
         tcp_ok = sock.connect_ex((spark_host, spark_port)) == 0
