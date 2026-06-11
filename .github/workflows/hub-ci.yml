@@ -1,0 +1,41 @@
+name: hub-ci
+
+on:
+  pull_request:
+  push:
+    branches: [main, "feat/**", "fix/**", harness-integration]
+
+jobs:
+  # The fast deterministic suite: levels/config parsing, validator, prompts,
+  # temporal, KB, roles, and the /v1 OpenAI-compat contract (test_bridge) that
+  # both the validation harness and the OpenMRS chat consume. No network, no
+  # models — anything LLM-dependent is exercised by the harness's validate
+  # runs, not here.
+  unit-and-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # Same Poetry version the Dockerfile pins, so the lockfile parses identically.
+      - name: Install Poetry
+        run: pip install "poetry==1.8.3"
+
+      - name: Install dependencies (locked)
+        run: poetry install --with dev --no-interaction
+
+      - name: Run tests
+        run: poetry run pytest -q tests/
+
+  # The hub ships exclusively as a container (compose service med-agent-hub);
+  # a broken Dockerfile is invisible to pytest but breaks the whole stack.
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build .
