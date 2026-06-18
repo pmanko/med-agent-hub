@@ -21,8 +21,8 @@ Design notes (see specs/artifacts/planning/react-team-orchestration-design.md):
   longer carries that dependency) so the clinical model reasons WITH the guidance.
 - Tool-selection turns run PLAIN (tools, no response_format); only the final
   synthesis is schema-constrained. Mixing the two in one call is unreliable sub-7B.
-- Duplicate tool calls in one assistant message are deduped (Gemma+LM Studio bug
-  #1756 emits identical duplicates regardless of parallel_tool_calls).
+- Duplicate tool calls in one assistant message are deduped (Gemma+LM Studio
+  emits identical duplicates regardless of parallel_tool_calls).
 - Every path returns a schema-valid envelope: a failed/slow tool is skipped and
   the turn still synthesizes; a hard failure returns a minimal fallback envelope.
 """
@@ -335,7 +335,7 @@ def _normalize_envelope(raw: str) -> str:
 # orchestrator's tool loop keeps the request temperature so tool-calling stays
 # deterministic. NOTE: LM Studio's MLX OpenAI engine SILENTLY DROPS frequency_penalty
 # (and DRY) — only `repeat_penalty` (config.SYNTH_REPEAT_PENALTY) is honored, so that
-# is the lever we send. (frequency_penalty here was previously a confirmed no-op.)
+# is the lever we send.
 _SYNTH_MIN_TEMPERATURE = 0.5
 
 # The Answer and the In Depth are DISTINCT from generation onward: two synthesis calls,
@@ -976,7 +976,7 @@ async def run_team(
                 if not tool_calls:
                     break  # orchestrator has gathered enough; proceed to synthesis
                 loop_messages.append(msg)
-                seen: set = set()  # dedupe identical calls within this message (bug #1756)
+                seen: set = set()  # dedupe identical calls within this message
                 for tc in tool_calls:
                     name = tc.get("function", {}).get("name")
                     try:

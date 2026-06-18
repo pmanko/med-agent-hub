@@ -39,7 +39,7 @@ def test_unknown_level_fails_loud():
 
 def test_expert_toggle_drops_the_medical_expert_tool():
     # The whole point of the toggle: a level with no expert is offered no
-    # medical_expert tool. Red against the old hardcoded two-tool list.
+    # medical_expert tool.
     names_with = [t["function"]["name"] for t in team._tool_definitions(has_expert=True)]
     names_without = [t["function"]["name"] for t in team._tool_definitions(has_expert=False)]
     assert "kb_search" in names_with and "medical_expert" in names_with

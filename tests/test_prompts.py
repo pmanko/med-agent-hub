@@ -64,7 +64,7 @@ def test_load_prompt_returns_the_committed_file_text():
 
 def test_missing_prompt_file_fails_loud(tmp_path, monkeypatch):
     # A referenced-but-absent prompt is a configuration bug: raise FileNotFoundError
-    # naming the path, never silently substitute. (Replaces the old baked-fallback.)
+    # naming the path, never silently substitute.
     monkeypatch.setattr(prompt_loader, "_DIR", tmp_path)  # empty dir: no prompt files
     with pytest.raises(FileNotFoundError) as exc_info:
         prompt_loader.load_prompt("synthesis")

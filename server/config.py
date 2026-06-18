@@ -19,14 +19,14 @@ load_dotenv(dotenv_path=env_file)
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://localhost:1234")
 LLM_API_KEY = os.getenv("LLM_API_KEY", "")  # Empty for local LM Studio
 
-# Model selection (swappable via env). Defaults are the roadmap team: a
+# Model selection (swappable via env). Defaults: a
 # gemma-4 e4b orchestrator+synthesizer and a medgemma-1.5-4b medical expert.
 # Use the official `google/` gemma-4 build — some community GGUFs (unsloth,
 # e2b) ship a broken jinja tool template that 400s on tool-calling.
 ORCHESTRATOR_MODEL = os.getenv("ORCHESTRATOR_MODEL", "google/gemma-4-e4b")
 MED_MODEL = os.getenv("MED_MODEL", "medgemma-1.5-4b-it")
 # Synthesizer composes the final {answer,citations,blocks} envelope. Defaults to the
-# orchestrator model (prior behaviour); set SYNTHESIZER_MODEL to a larger model so the
+# orchestrator model; set SYNTHESIZER_MODEL to a larger model so the
 # single synthesis call gets more capability while a small/fast orchestrator runs the
 # multi-call tool loop.
 SYNTHESIZER_MODEL = os.getenv("SYNTHESIZER_MODEL", ORCHESTRATOR_MODEL)
