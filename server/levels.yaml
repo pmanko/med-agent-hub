@@ -113,3 +113,33 @@ levels:
     synthesis_prompt: synthesis-chartsearchai
     two_call: false
     indepth_shared: true
+
+  # Two-call architecture IN-DEPTH legs (one per writer): no answer synthesis — elaborate the prior
+  # answer carried in the session history. The harness fires these as a separate same-session call.
+  indepth-only-gemma-4-12b:
+    orchestrator: gemma-e4b-q8
+    expert: null
+    synthesizer: gemma-4-12b
+    two_call: false
+    indepth_only: true
+
+  indepth-only-qwen2.5-14b:
+    orchestrator: gemma-e4b-q8
+    expert: null
+    synthesizer: qwen2.5-14b
+    two_call: false
+    indepth_only: true
+
+  indepth-only-medgemma-27b:
+    orchestrator: gemma-e4b-q8
+    expert: null
+    synthesizer: medgemma-27b
+    two_call: false
+    indepth_only: true
+
+  indepth-only-lfm2-24b-a2b:
+    orchestrator: gemma-e4b-q8
+    expert: null
+    synthesizer: lfm2-24b-a2b
+    two_call: false
+    indepth_only: true
