@@ -36,11 +36,42 @@ levels:
     expert: medgemma-1.5-4b-q8     # medgemma-1.5-4b 8-bit
     synthesizer: qwen2.5-14b
 
+  med-agent-team-liquid:           # all-Liquid: LFM2 orchestrator + LFM2 expert (NO medical training — the
+    orchestrator: lfm2-2.6b        # handicap being measured) + LFM2 writer. No validator (matches med baseline).
+    expert: lfm2-8b-a1b
+    synthesizer: lfm2-24b-a2b
+
+  med-agent-team-med-liquid:       # Liquid-swapped, medgemma expert KEPT: isolates Liquid in the non-medical
+    orchestrator: lfm2-2.6b        # (coordinator + writer) roles. Differs from med ONLY in those two roles.
+    expert: medgemma-1.5-4b-q8
+    synthesizer: lfm2-24b-a2b
+
+  med-agent-team-med-liquid-validated:  # med-liquid + a NON-Liquid 12B validator: does a strong cross-check catch
+    orchestrator: lfm2-2.6b             # the Liquid fabrications (hidden CD4, reversed weight trend, fabricated drugs)?
+    expert: medgemma-1.5-4b-q8
+    synthesizer: lfm2-24b-a2b
+    validator: gemma-4-12b              # non-Liquid 12B validator (the competent-floor finding from med-validated)
+    validator_max_loops: 1
+
+  med-agent-team-med-liquid-qwensynth:  # Liquid COORDINATOR ONLY: non-Liquid writer (qwen) + medgemma expert,
+    orchestrator: lfm2-2.6b             # WITH a validator (load-bearing: drives the re-synth cycle + the answer
+    expert: medgemma-1.5-4b-q8          # confidence). Does removing the Liquid writer fix safety?
+    synthesizer: qwen2.5-14b
+    validator: gemma-4-12b
+    validator_max_loops: 1
+
   med-agent-team-med-validated:    # MED + a competent validator (12B — e4b is below the floor)
     orchestrator: gemma-e4b-q8
     expert: medgemma-1.5-4b-q8
     synthesizer: qwen2.5-14b
     validator: gemma-4-12b         # 12B validator (the floor finding); cross-family vs qwen2.5-14b synth
+    validator_max_loops: 1
+
+  med-agent-team-med-liquidwriter-validated:  # 2x2 ablation cell: Liquid WRITER only (non-Liquid gemma coord +
+    orchestrator: gemma-e4b-q8                 # medgemma expert + LFM2 writer), validated. Differs from med-validated
+    expert: medgemma-1.5-4b-q8                 # ONLY in the writer -> isolates the Liquid writer's effect.
+    synthesizer: lfm2-24b-a2b
+    validator: gemma-4-12b
     validator_max_loops: 1
 
   med-agent-team-high:
