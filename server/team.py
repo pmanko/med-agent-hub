@@ -151,6 +151,15 @@ def _latest_user_text(messages: List[Dict[str, Any]]) -> str:
     return ""
 
 
+def _latest_assistant_text(messages: List[Dict[str, Any]]) -> str:
+    """The prior answer to elaborate (two-call in-depth-only mode) is the LAST assistant message."""
+    for m in reversed(messages):
+        if m.get("role") == "assistant":
+            content = m.get("content")
+            return content if isinstance(content, str) else json.dumps(content)
+    return ""
+
+
 # Serialize ALL calls to the LLM backend hub-wide. The llama.cpp router (build 9430) has an
 # unfixed TOCTOU race in models-max eviction (ggml-org/llama.cpp#20137, closed "not planned"):
 # concurrent requests bypass the load gate, so a request can land on a model the router is
@@ -900,6 +909,7 @@ async def run_team(
     validator_max_loops: int = 1,
     two_call: bool = True,
     indepth_shared: bool = False,
+    indepth_only: bool = False,
     anchor: Optional[str] = None,
     knobs: Optional[Dict[str, Any]] = None,
     level_id: Optional[str] = None,
@@ -944,7 +954,12 @@ async def run_team(
     # Parity (two_call=False): synthesis_prompt is a WHOLE prompt (no -answer/-indepth split) —
     # one call, no in-depth, validator skipped — so the output is the bare chartsearchai envelope.
     _synth_base = synthesizer_prompt or "synthesis"
-    if two_call:
+    if indepth_only:
+        # Two-call IN-DEPTH leg: no answer synthesis at all, only the shared "synthesis-indepth"
+        # prompt (so the answer prompt — which may not exist for this base — is never loaded).
+        answer_instruction = None
+        indepth_instruction = load_prompt("synthesis-indepth")
+    elif two_call:
         answer_instruction = load_prompt(_synth_base + "-answer")
         indepth_instruction = load_prompt(_synth_base + "-indepth")
     else:
@@ -1046,6 +1061,26 @@ async def run_team(
         temporal_block = temporal.build_temporal_block(chart, reference_date)
         if temporal_block:
             gathered = temporal_block + ("\n\n" + gathered if gathered else "")
+
+        if indepth_only:
+            # Two-call architecture: produce ONLY the In-Depth, elaborating the prior answer carried
+            # in the message history (the answer was already returned to the caller by the first call).
+            # Per-arm writer = synth_model; no answer synthesis, no validator. Fail-open -> empty body.
+            prior_answer = _latest_assistant_text(messages)
+            claims = await _synthesize_indepth(
+                client, synth_model, base_messages=list(messages),
+                indepth_instruction=indepth_instruction, gathered=gathered, answer_text=prior_answer,
+                temperature=synth_temp, max_tokens=max_tokens, repeat_penalty=synth_rp, dry=synth_dry)
+            _io_conf = {"level": "n/a", "note": "in-depth-only: single pass, no validator"}
+            _write_trace(level_id, messages, orchestrator=model, expert=expert_model,
+                         synthesizer=synth_model, validator=None,
+                         steps=orch_steps + [{"role": "synthesizer", "model": synth_model,
+                                              "mode": "in-depth-only"}],
+                         answer_confidence=_io_conf, indepth_confidence=_io_conf,
+                         answer_text=prior_answer, in_depth_claims=claims,
+                         reference_date=reference_date)
+            body = "**In Depth**\n" + "\n".join("- " + c for c in claims) if claims else ""
+            return json.dumps({"answer": body, "citations": [], "blocks": []})
 
         if not two_call:
             # Parity lane: ONE chartsearchai-style synthesis call (answer_instruction is the whole

@@ -171,6 +171,23 @@ def test_single_indepth_suppresses_gathered_on_answer_keeps_it_for_indepth():
     assert "WHO: start ART promptly" in (captured.get("indepth_gathered") or "")   # In-Depth still grounded
 
 
+def test_indepth_only_skips_answer_and_elaborates_the_prior_answer():
+    # P1 (two-call architecture): the in-depth-only mode takes a prior ASSISTANT answer from the
+    # message history and produces ONLY the In-Depth — no answer-synthesis call — so the harness can
+    # fire it as a separate, later call (answer first, in-depth follows).
+    seen = []
+    msgs = MESSAGES + [{"role": "assistant", "content": "Lisinopril 10 mg [1]"}]
+    with patch.object(team, "_chat", side_effect=_branching_fake_chat(seen)):
+        out = run(team.run_team(
+            msgs, response_format=RESP_FORMAT, max_tokens=1024,
+            synthesizer_prompt="synthesis-chartsearchai", indepth_only=True,
+            has_expert=False, validator_model=None))
+    env = json.loads(out)
+    assert "in_depth" in seen and "chart_answer" not in seen   # in-depth produced, NO answer synthesis
+    assert "**In Depth**" in env["answer"] and "Per WHO guidance" in env["answer"]
+    assert "**Answer**" not in env["answer"]                   # in-depth-only artifact, no Answer section
+
+
 def test_response_format_is_only_applied_on_the_synthesis_calls():
     # The tool-selection turns must run PLAIN (no response_format); only the
     # synthesis calls are constrained. This is the load-bearing small-model rule.
