@@ -1071,7 +1071,7 @@ async def run_team(
                 client, synth_model, base_messages=list(messages),
                 indepth_instruction=indepth_instruction, gathered=gathered, answer_text=prior_answer,
                 temperature=synth_temp, max_tokens=max_tokens, repeat_penalty=synth_rp, dry=synth_dry)
-            _io_conf = {"level": "n/a", "note": "in-depth-only: single pass, no validator"}
+            _io_conf = {"level": "green", "note": "in-depth-only: single pass, no validator"}
             _write_trace(level_id, messages, orchestrator=model, expert=expert_model,
                          synthesizer=synth_model, validator=None,
                          steps=orch_steps + [{"role": "synthesizer", "model": synth_model,
@@ -1107,7 +1107,7 @@ async def run_team(
                             indepth_instruction=indepth_instruction, gathered=gathered,
                             answer_text=p_answer, temperature=synth_temp, max_tokens=max_tokens,
                             repeat_penalty=synth_rp, dry=synth_dry)
-                        _shared_conf = {"level": "n/a",
+                        _shared_conf = {"level": "green",
                                         "note": "shared in-depth: single pass, no validator"}
                         _write_trace(level_id, messages, orchestrator=model, expert=expert_model,
                                      synthesizer=synth_model, validator=None,
