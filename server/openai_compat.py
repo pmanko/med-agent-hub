@@ -106,6 +106,8 @@ async def _content_for(req: ChatCompletionRequest) -> str:
         validator_prompt=level.validator_prompt,
         validator_max_loops=level.validator_max_loops,
         two_call=level.two_call,
+        indepth_shared=level.indepth_shared,
+        indepth_only=level.indepth_only,
         anchor=level.anchor,
         knobs=level.knobs,
         level_id=req.model,  # the advertised level id == the harness backend_id (trace correlation key)

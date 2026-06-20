@@ -37,6 +37,13 @@ class Level:
     # whole prompt (not split into -answer/-indepth), validator skipped, output is the bare
     # chartsearchai {answer, citations, blocks} envelope (no In-Depth body, no confidence).
     two_call: bool = True
+    # two_call:false + indepth_shared:true -> the parity Answer PLUS one shared single-pass In-Depth
+    # (the synthesis-indepth prompt, no validator). Lets a single-model-style arm emit an In-Depth
+    # section so it is judged on the background dimension too. Default off -> existing levels unchanged.
+    indepth_shared: bool = False
+    # indepth_only:true -> the two-call architecture's IN-DEPTH leg: skip answer synthesis entirely
+    # and produce only the In-Depth, elaborating the prior answer carried in the message history.
+    indepth_only: bool = False
     # Reference-date anchor (the simulated "now" for recency/series). None -> fall back to the
     # HUB_ANCHOR env (run-wide) then "latest_record" (the max date in the chart). Modes:
     # "latest_record" | an explicit ISO date "YYYY-MM-DD" | "wall_clock".
@@ -90,6 +97,8 @@ def get_level(level_id: str) -> Level:
             validator_prompt=spec.get("validator_prompt", "validation"),
             validator_max_loops=spec.get("validator_max_loops", 1),
             two_call=spec.get("two_call", True),
+            indepth_shared=spec.get("indepth_shared", False),
+            indepth_only=spec.get("indepth_only", False),
             anchor=spec.get("anchor"),
             knobs=spec.get("knobs") or {},
         )

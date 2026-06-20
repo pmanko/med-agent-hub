@@ -151,6 +151,15 @@ def _latest_user_text(messages: List[Dict[str, Any]]) -> str:
     return ""
 
 
+def _latest_assistant_text(messages: List[Dict[str, Any]]) -> str:
+    """The prior answer to elaborate (two-call in-depth-only mode) is the LAST assistant message."""
+    for m in reversed(messages):
+        if m.get("role") == "assistant":
+            content = m.get("content")
+            return content if isinstance(content, str) else json.dumps(content)
+    return ""
+
+
 # Serialize ALL calls to the LLM backend hub-wide. The llama.cpp router (build 9430) has an
 # unfixed TOCTOU race in models-max eviction (ggml-org/llama.cpp#20137, closed "not planned"):
 # concurrent requests bypass the load gate, so a request can land on a model the router is
@@ -899,6 +908,8 @@ async def run_team(
     validator_prompt: Optional[str] = None,
     validator_max_loops: int = 1,
     two_call: bool = True,
+    indepth_shared: bool = False,
+    indepth_only: bool = False,
     anchor: Optional[str] = None,
     knobs: Optional[Dict[str, Any]] = None,
     level_id: Optional[str] = None,
@@ -943,12 +954,20 @@ async def run_team(
     # Parity (two_call=False): synthesis_prompt is a WHOLE prompt (no -answer/-indepth split) —
     # one call, no in-depth, validator skipped — so the output is the bare chartsearchai envelope.
     _synth_base = synthesizer_prompt or "synthesis"
-    if two_call:
+    if indepth_only:
+        # Two-call IN-DEPTH leg: no answer synthesis at all, only the shared "synthesis-indepth"
+        # prompt (so the answer prompt — which may not exist for this base — is never loaded).
+        answer_instruction = None
+        indepth_instruction = load_prompt("synthesis-indepth")
+    elif two_call:
         answer_instruction = load_prompt(_synth_base + "-answer")
         indepth_instruction = load_prompt(_synth_base + "-indepth")
     else:
         answer_instruction = load_prompt(_synth_base)
-        indepth_instruction = None
+        # Parity Answer + a SHARED single-pass In-Depth uses the fixed "synthesis-indepth" prompt
+        # (shared across the parity team and the single-model In-Depth-parity arm), NOT a
+        # "<base>-indepth" split (which does not exist for the chartsearchai parity base).
+        indepth_instruction = load_prompt("synthesis-indepth") if indepth_shared else None
 
     # The tool loop runs under the orchestrator's OWN system prompt — not
     # chartsearchai's envelope prompt, which biases a small model toward answering
@@ -1043,18 +1062,62 @@ async def run_team(
         if temporal_block:
             gathered = temporal_block + ("\n\n" + gathered if gathered else "")
 
+        if indepth_only:
+            # Two-call architecture: produce ONLY the In-Depth, elaborating the prior answer carried
+            # in the message history (the answer was already returned to the caller by the first call).
+            # Per-arm writer = synth_model; no answer synthesis, no validator. Fail-open -> empty body.
+            prior_answer = _latest_assistant_text(messages)
+            claims = await _synthesize_indepth(
+                client, synth_model, base_messages=list(messages),
+                indepth_instruction=indepth_instruction, gathered=gathered, answer_text=prior_answer,
+                temperature=synth_temp, max_tokens=max_tokens, repeat_penalty=synth_rp, dry=synth_dry)
+            _io_conf = {"level": "green", "note": "in-depth-only: single pass, no validator"}
+            _write_trace(level_id, messages, orchestrator=model, expert=expert_model,
+                         synthesizer=synth_model, validator=None,
+                         steps=orch_steps + [{"role": "synthesizer", "model": synth_model,
+                                              "mode": "in-depth-only"}],
+                         answer_confidence=_io_conf, indepth_confidence=_io_conf,
+                         answer_text=prior_answer, in_depth_claims=claims,
+                         reference_date=reference_date)
+            body = "**In Depth**\n" + "\n".join("- " + c for c in claims) if claims else ""
+            return json.dumps({"answer": body, "citations": [], "blocks": []})
+
         if not two_call:
             # Parity lane: ONE chartsearchai-style synthesis call (answer_instruction is the whole
             # chartsearchai prompt), NO In-Depth, validator skipped -> the bare chartsearchai
             # {answer, citations, blocks} envelope, so the output format matches the direct
             # single-LLM arms. Orchestration (kb_search + expert) + the temporal block still feed it.
+            # R1 (answer identity): for a degenerate single (no expert) that ALSO emits In-Depth,
+            # suppress the gathered evidence on the ANSWER call so the answer prompt stays identical
+            # to the vanilla single arm; the shared In-Depth pass still gets the gathered context.
+            answer_gathered = "" if (indepth_shared and not has_expert) else gathered
             try:
                 p_answer, p_citations, p_blocks = await _synthesize_answer(
                     client, synth_model, base_messages=list(messages),
-                    answer_instruction=answer_instruction, gathered=gathered,
+                    answer_instruction=answer_instruction, gathered=answer_gathered,
                     response_format=response_format, temperature=synth_temp,
                     max_tokens=max_tokens, repeat_penalty=synth_rp, dry=synth_dry)
                 if p_answer:
+                    if indepth_shared:
+                        # SHARED single-pass In-Depth (synthesis-indepth prompt, no validator): the
+                        # parity Answer PLUS a combined **Answer**/**In Depth** body, so the arm is
+                        # judged on the background dimension too. Fail-open -> [] on any error.
+                        claims = await _synthesize_indepth(
+                            client, synth_model, base_messages=list(messages),
+                            indepth_instruction=indepth_instruction, gathered=gathered,
+                            answer_text=p_answer, temperature=synth_temp, max_tokens=max_tokens,
+                            repeat_penalty=synth_rp, dry=synth_dry)
+                        _shared_conf = {"level": "green",
+                                        "note": "shared in-depth: single pass, no validator"}
+                        _write_trace(level_id, messages, orchestrator=model, expert=expert_model,
+                                     synthesizer=synth_model, validator=None,
+                                     steps=orch_steps + [{"role": "synthesizer", "model": synth_model,
+                                                          "mode": "parity-answer+shared-indepth"}],
+                                     answer_confidence=_shared_conf, indepth_confidence=_shared_conf,
+                                     answer_text=p_answer, in_depth_claims=claims,
+                                     reference_date=reference_date)
+                        # Combined **Answer** / **In Depth** body; no confidence block (no validator).
+                        return _assemble_envelope(p_answer, p_citations, p_blocks, claims)
                     _parity_conf = {"level": "green",
                                     "note": "parity lane: chartsearchai prompt, single call, validator off"}
                     _write_trace(level_id, messages, orchestrator=model, expert=expert_model,
