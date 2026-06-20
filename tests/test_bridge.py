@@ -75,6 +75,102 @@ def test_parity_lane_single_call_bare_envelope():
     assert len(rf_calls) == 1                                # ONE synthesis call, not the two-call split
 
 
+INDEPTH = json.dumps({"claims": ["Per WHO guidance, start ART promptly after diagnosis.",
+                                 "Monitor CD4 roughly every 6 months on stable therapy."]})
+
+
+def _branching_fake_chat(seen):
+    """A fake `_chat` that distinguishes the Answer call (chart_answer schema -> ENVELOPE) from the
+    shared In-Depth call (in_depth schema -> claims) and records each constrained call's schema
+    name, so a test can assert exactly which synthesis / validator passes ran."""
+    async def fake_chat(client, model, messages, *, tools=None, response_format=None,
+                        temperature=None, max_tokens=None, **kwargs):
+        if response_format is None:
+            return {"content": "ok", "tool_calls": None}
+        name = (response_format.get("json_schema") or {}).get("name")
+        seen.append(name)
+        return {"content": INDEPTH} if name == "in_depth" else {"content": ENVELOPE}
+    return fake_chat
+
+
+def test_parity_indepth_emits_answer_and_shared_indepth():
+    # Parity lane + indepth_shared: the Answer is the parity (chartsearchai-prompt) single call,
+    # THEN one shared In-Depth pass elaborates it -> the combined **Answer**/**In Depth** body so
+    # a single-model-style arm is judged on the background dimension too.
+    seen = []
+    with patch.object(team, "_chat", side_effect=_branching_fake_chat(seen)):
+        out = run(team.run_team(
+            MESSAGES, response_format=RESP_FORMAT, temperature=0.0, max_tokens=1024,
+            synthesizer_prompt="synthesis-chartsearchai", two_call=False,
+            indepth_shared=True, has_expert=False, validator_model=None))
+    env = json.loads(out)
+    assert "**Answer**" in env["answer"] and "Lisinopril 10 mg [1]" in env["answer"]
+    assert "**In Depth**" in env["answer"] and "Per WHO guidance" in env["answer"]
+    assert env["citations"] == [1]
+    assert seen.count("chart_answer") == 1 and seen.count("in_depth") == 1  # one Answer + one In-Depth
+
+
+def test_shared_indepth_is_single_pass_no_validator():
+    # Even with a validator configured, the shared In-Depth lane runs ONE in-depth pass and NO
+    # validator round -- it is the simpler single-pass path, not the validated two-call cycle.
+    seen = []
+    with patch.object(team, "_chat", side_effect=_branching_fake_chat(seen)):
+        run(team.run_team(
+            MESSAGES, response_format=RESP_FORMAT, temperature=0.0, max_tokens=1024,
+            synthesizer_prompt="synthesis-chartsearchai", two_call=False,
+            indepth_shared=True, has_expert=False, validator_model="gemma-4-12b"))
+    assert seen.count("in_depth") == 1
+    assert "answer_verdict" not in seen and "indepth_verdict" not in seen   # zero validator calls
+
+
+def test_parity_indepth_off_stays_bare_envelope():
+    # Regression guard: with indepth_shared unset the parity lane is the existing BARE envelope
+    # (no **In Depth**, no confidence) -- validated/parity behavior must be byte-for-byte untouched.
+    seen = []
+    with patch.object(team, "_chat", side_effect=_branching_fake_chat(seen)):
+        out = run(team.run_team(
+            MESSAGES, response_format=RESP_FORMAT, temperature=0.0, max_tokens=1024,
+            synthesizer_prompt="synthesis-chartsearchai", two_call=False, validator_model=None))
+    env = json.loads(out)
+    assert env["answer"] == "Lisinopril 10 mg [1]"
+    assert "**In Depth**" not in env["answer"] and "confidence" not in env
+    assert seen.count("in_depth") == 0
+
+
+def test_single_indepth_suppresses_gathered_on_answer_keeps_it_for_indepth():
+    # R1 answer-identity: a degenerate single (no expert) emitting In-Depth calls the ANSWER synthesis
+    # with gathered="" (its answer prompt == the vanilla single arm), while the In-Depth pass STILL
+    # receives the gathered KB evidence. Forcing a KB hit makes the suppression observable (not a no-op).
+    captured = {}
+
+    async def fake_answer(client, synth_model, base_messages=None, answer_instruction=None,
+                          gathered=None, *, response_format=None, temperature=None, max_tokens=None,
+                          repeat_penalty=None, dry=None, extra_msgs=None):
+        captured["answer_gathered"] = gathered
+        return ("Answer text [1]", [1], [])
+
+    async def fake_indepth(client, synth_model, base_messages=None, indepth_instruction=None,
+                           gathered=None, answer_text=None, *, temperature=None, max_tokens=None,
+                           repeat_penalty=None, dry=None, extra_msgs=None):
+        captured["indepth_gathered"] = gathered
+        return ["a claim"]
+
+    async def fake_chat(client, model, messages, *, tools=None, response_format=None, **kwargs):
+        return {"content": "ok", "tool_calls": None}
+
+    with patch.object(team, "_chat", side_effect=fake_chat), \
+         patch.object(team, "_run_kb_search",
+                      return_value=team._KB_BLOCK_HEADER + "\nWHO: start ART promptly"), \
+         patch.object(team, "_synthesize_answer", side_effect=fake_answer), \
+         patch.object(team, "_synthesize_indepth", side_effect=fake_indepth):
+        run(team.run_team(MESSAGES, response_format=RESP_FORMAT, max_tokens=1024,
+                          synthesizer_prompt="synthesis-chartsearchai", two_call=False,
+                          indepth_shared=True, has_expert=False, validator_model=None))
+
+    assert captured["answer_gathered"] == ""                                       # R1: answer prompt vanilla
+    assert "WHO: start ART promptly" in (captured.get("indepth_gathered") or "")   # In-Depth still grounded
+
+
 def test_response_format_is_only_applied_on_the_synthesis_calls():
     # The tool-selection turns must run PLAIN (no response_format); only the
     # synthesis calls are constrained. This is the load-bearing small-model rule.

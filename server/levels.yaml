@@ -97,3 +97,19 @@ levels:
     synthesizer: qwen2.5-14b       # {answer,citations,blocks} envelope, matching the direct arms.
     synthesis_prompt: synthesis-chartsearchai   # whole chartsearchai prompt (NOT the -answer/-indepth split)
     two_call: false                # isolates "does orchestration help, holding prompt+format = chartsearchai default"
+
+  med-agent-team-parity-indepth:   # PARITY team + a SHARED single-pass In-Depth (no validator): the
+    orchestrator: gemma-e4b-q8     # parity Answer PLUS one synthesis-indepth pass, so the parity team is
+    expert: medgemma-1.5-4b-q8     # judged on the background dimension too (vs the single arm below).
+    synthesizer: qwen2.5-14b
+    synthesis_prompt: synthesis-chartsearchai
+    two_call: false
+    indepth_shared: true
+
+  single-12b-indepth:              # SINGLE-model In-Depth parity: the 12B writer alone (no expert) does
+    orchestrator: gemma-e4b-q8     # the chartsearchai-prompt Answer (gathered suppressed on the answer ->
+    expert: null                   # matches the vanilla 12b-baseline) PLUS the shared single-pass In-Depth,
+    synthesizer: gemma-4-12b       # so a single model is judged on background head-to-head with the team.
+    synthesis_prompt: synthesis-chartsearchai
+    two_call: false
+    indepth_shared: true

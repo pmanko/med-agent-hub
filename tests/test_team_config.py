@@ -52,6 +52,23 @@ def test_level_with_null_expert_reports_no_expert():
     assert levels_loader.Level(id="y", orchestrator="o", synthesizer="s", expert="medgemma").has_expert is True
 
 
+def test_indepth_shared_level_resolves():
+    # The single-model In-Depth-parity lane: parity shape (two_call false) + shared In-Depth ON,
+    # no expert, the 12B writer -> a single model that ALSO emits an In-Depth section.
+    lv = levels_loader.get_level("single-12b-indepth")
+    assert lv.two_call is False
+    assert lv.indepth_shared is True
+    assert lv.has_expert is False
+    assert lv.synthesizer == "gemma-4-12b"
+
+
+def test_existing_levels_default_indepth_shared_false():
+    # indepth_shared defaults OFF so every pre-existing level (validated teams, bare parity)
+    # is unchanged.
+    for tier in ("med-agent-team-med-validated", "med-agent-team-parity", "med-agent-team-high"):
+        assert levels_loader.get_level(tier).indepth_shared is False, tier
+
+
 def _stateful_fake(calls):
     """Orchestrator calls medical_expert on its first turn, then stops; synthesis
     is the response_format turn. Lets us see which model each role uses."""
