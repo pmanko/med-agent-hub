@@ -82,6 +82,19 @@ def get_level(level_id: str) -> Level:
     """Resolve one level. Fail loud on an unknown id or a missing required field."""
     raw = _load_raw()
     if level_id not in raw:
+        # Generic In-Depth leg: "indepth-only:<writer-model>" resolves dynamically to a single
+        # shared-prompt In-Depth pass on ANY router model — no hand-authored level needed — so the
+        # two-call In-Depth is available for parity across every arm/run. The orchestrator only
+        # carries the prior answer in session history; the writer (synthesizer) does the In-Depth.
+        if level_id.startswith("indepth-only:") and level_id.split(":", 1)[1]:
+            return Level(
+                id=level_id,
+                orchestrator="gemma-e4b-q8",
+                synthesizer=level_id.split(":", 1)[1],
+                expert=None,
+                two_call=False,
+                indepth_only=True,
+            )
         raise KeyError(f"unknown level {level_id!r}; levels.yaml defines {list(raw)}")
     spec = raw[level_id] or {}
     try:
