@@ -47,8 +47,22 @@ def _advertised_models() -> List[str]:
     chartsearchai's exact-match served-model validation both accept them. Each id
     selects which model runs each role (orchestrator/synthesizer/expert) per request
     — one instance serves any config, no reboot. Raw backends stay callable via
-    passthrough but aren't listed."""
-    return level_ids()
+    passthrough but aren't listed.
+
+    Also advertise the generic two-call In-Depth leg ``indepth-only:<writer>`` for every
+    model the router serves, so chartsearchai's exact-match validation accepts the dynamic
+    levels get_level() resolves on the fly (no hand-authored per-writer level needed)."""
+    ids = list(level_ids())
+    try:
+        import httpx
+        resp = httpx.get(f"{llm_config.base_url.rstrip('/')}/v1/models", timeout=3.0)
+        for m in resp.json().get("data", []):
+            mid = m.get("id")
+            if mid:
+                ids.append(f"indepth-only:{mid}")
+    except Exception:
+        pass  # router unreachable -> advertise levels only; direct-to-hub callers still work
+    return ids
 
 
 @router.get("/v1/models")
