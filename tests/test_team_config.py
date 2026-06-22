@@ -88,6 +88,24 @@ def test_unknown_non_indepth_level_still_fails_loud():
         levels_loader.get_level("totally-bogus-level")
 
 
+def test_advertised_models_includes_dynamic_indepth_legs(monkeypatch):
+    # chartsearchai exact-match-validates the requested model against /v1/models, so the dynamic
+    # indepth-only:<writer> legs MUST be advertised for every router model — else they 400 mid-run
+    # (the regression this guards). Mock the router's /v1/models so the test is hermetic.
+    import httpx
+    from server import openai_compat
+
+    class _Resp:
+        def json(self):
+            return {"data": [{"id": "mistral-nemo-12b-q8"}, {"id": "qwen3.6-35b"}]}
+
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: _Resp())
+    ids = openai_compat._advertised_models()
+    assert "indepth-only:mistral-nemo-12b-q8" in ids
+    assert "indepth-only:qwen3.6-35b" in ids
+    assert "med-agent-team-med" in ids  # static levels still advertised alongside
+
+
 def _stateful_fake(calls):
     """Orchestrator calls medical_expert on its first turn, then stops; synthesis
     is the response_format turn. Lets us see which model each role uses."""
