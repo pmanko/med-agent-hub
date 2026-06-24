@@ -44,6 +44,9 @@ class Level:
     # indepth_only:true -> the two-call architecture's IN-DEPTH leg: skip answer synthesis entirely
     # and produce only the In-Depth, elaborating the prior answer carried in the message history.
     indepth_only: bool = False
+    # solo:true (P1) -> SINGLE scaffolding: one model, no orchestrator/team. run_team skips the tool
+    # loop; the writer answers from the deterministic context. False -> team. Orthogonal to context.
+    solo: bool = False
     # Reference-date anchor (the simulated "now" for recency/series). None -> fall back to the
     # HUB_ANCHOR env (run-wide) then "latest_record" (the max date in the chart). Modes:
     # "latest_record" | an explicit ISO date "YYYY-MM-DD" | "wall_clock".
@@ -87,26 +90,30 @@ def get_level(level_id: str) -> Level:
         # two-call In-Depth is available for parity across every arm/run. The orchestrator only
         # carries the prior answer in session history; the writer (synthesizer) does the In-Depth.
         if level_id.startswith("indepth-only:") and level_id.split(":", 1)[1]:
+            _w = level_id.split(":", 1)[1]
             return Level(
                 id=level_id,
-                orchestrator="gemma-e4b-q8",
-                synthesizer=level_id.split(":", 1)[1],
+                orchestrator=_w,
+                synthesizer=_w,
                 expert=None,
                 two_call=False,
                 indepth_only=True,
+                solo=True,  # P1: single-model In-Depth leg — no orchestrator/team
             )
         # Generic Answer leg: "answer:<writer>" mirrors indepth-only — a single CONTEXTUAL answer
         # through the hub (the parity lane: one answer call with the full gathered evidence incl the
         # temporal block, no In-Depth, no validator), so a two-call arm routes BOTH legs through the
         # hub with symmetric context. The orchestrator gathers; the writer (synthesizer) answers.
         if level_id.startswith("answer:") and level_id.split(":", 1)[1]:
+            _w = level_id.split(":", 1)[1]
             return Level(
                 id=level_id,
-                orchestrator="gemma-e4b-q8",
-                synthesizer=level_id.split(":", 1)[1],
+                orchestrator=_w,
+                synthesizer=_w,
                 expert=None,
-                synthesis_prompt="synthesis-chartsearchai",  # bare answer (no In-Depth), like the parity levels
+                synthesis_prompt="synthesis-chartsearchai",  # bare chartsearchai answer (no In-Depth)
                 two_call=False,
+                solo=True,  # P1: single-model Answer leg — no orchestrator/team (this is the fix)
             )
         raise KeyError(f"unknown level {level_id!r}; levels.yaml defines {list(raw)}")
     spec = raw[level_id] or {}
@@ -125,6 +132,7 @@ def get_level(level_id: str) -> Level:
             two_call=spec.get("two_call", True),
             indepth_shared=spec.get("indepth_shared", False),
             indepth_only=spec.get("indepth_only", False),
+            solo=spec.get("solo", False),
             anchor=spec.get("anchor"),
             knobs=spec.get("knobs") or {},
         )

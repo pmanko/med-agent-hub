@@ -40,6 +40,7 @@ class ChatCompletionRequest(BaseModel):
     temperature: Optional[float] = None
     max_tokens: Optional[int] = None
     stream: bool = False
+    context: Optional[Dict[str, Any]] = None  # P1: context-spec override (temporal/kb/expert); used in P3
 
 
 def _advertised_models() -> List[str]:
@@ -123,6 +124,8 @@ async def _content_for(req: ChatCompletionRequest) -> str:
         two_call=level.two_call,
         indepth_shared=level.indepth_shared,
         indepth_only=level.indepth_only,
+        solo=level.solo,
+        context=req.context,
         anchor=level.anchor,
         knobs=level.knobs,
         level_id=req.model,  # the advertised level id == the harness backend_id (trace correlation key)

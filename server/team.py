@@ -910,6 +910,8 @@ async def run_team(
     two_call: bool = True,
     indepth_shared: bool = False,
     indepth_only: bool = False,
+    solo: bool = False,
+    context: Optional[Dict[str, Any]] = None,
     anchor: Optional[str] = None,
     knobs: Optional[Dict[str, Any]] = None,
     level_id: Optional[str] = None,
@@ -942,6 +944,15 @@ async def run_team(
     val_temp = _knob(knobs, "validator", "temperature", 0.0)
     val_rp = _knob(knobs, "validator", "repeat_penalty", None)
     val_dry = _knob(knobs, "validator", "dry", None)
+
+    # Context spec (P1): what evidence to assemble — temporal default on; kb/expert opt-in. Independent
+    # of scaffolding (solo vs team). From the level default or the request's context field.
+    spec = context or {}
+    want_temporal = spec.get("temporal", True)
+    want_kb = spec.get("kb", False)
+    want_expert = spec.get("expert", False)
+    trace_orch = None if solo else model  # solo = no orchestrator/team in the trace
+    trace_expert = expert_model if has_expert else None  # only surface an expert that is actually used
 
     # Read the role prompts ONCE per request; thread the expert text into the
     # per-iteration expert call so the tool loop does not re-read it from disk
@@ -981,9 +992,25 @@ async def run_team(
     orch_steps: List[Dict[str, Any]] = []  # reasoning-trace steps for the orchestrator tool loop
 
     async with httpx.AsyncClient() as client:
-        # --- tool loop (plain: tools, no response_format) -------------------
+        if solo:
+            # SINGLE scaffolding (P1): deterministic, spec-gated context — NO orchestrator LLM. The
+            # writer answers from the assembled context; team vs single is independent of context.
+            _q = _latest_user_text(messages) or ""
+            if want_kb:
+                _obs = _run_kb_search(_q)
+                if _obs.startswith(_KB_BLOCK_HEADER):
+                    kb_context = _obs
+                orch_steps.append({"role": "kb_search", "query": _q[:160],
+                                   "hit": bool(kb_context), "solo": True})
+            if want_expert:
+                _note = await _run_medical_expert(
+                    client, _q, chart, expert_system, kb_context=kb_context, model=expert_model,
+                    temperature=exp_temp, repeat_penalty=exp_rp, dry_multiplier=exp_dry)
+                expert_notes.append(_note)
+                orch_steps.append({"role": "medical_expert", "model": expert_model, "solo": True})
+        # --- tool loop (plain: tools, no response_format) — skipped when solo -----
         try:
-            for _ in range(MAX_TOOL_ITERATIONS):
+            for _ in (range(MAX_TOOL_ITERATIONS) if not solo else ()):
                 msg = await _chat(
                     client, model, loop_messages,
                     tools=_tool_definitions(has_expert), temperature=orch_temp, max_tokens=max_tokens,
@@ -1037,7 +1064,7 @@ async def run_team(
         # KB-retrieval fallback: small orchestrators often skip kb_search (esp. on follow-up
         # turns), leaving the In-Depth with no guidance to ground. If nothing was gathered, do one
         # deterministic kb_search on the question so the synthesis still has reference context.
-        if not kb_context:
+        if not solo and not kb_context:
             q = _latest_user_text(messages)
             if q:
                 obs = _run_kb_search(q)
@@ -1056,11 +1083,12 @@ async def run_team(
         # Deterministic temporal grounding: resolve the reference "now" (level anchor ->
         # HUB_ANCHOR env -> latest record date) and prepend the computed series so the synth +
         # validator REPORT dated facts ("most recent", trend, window) instead of deriving them.
-        anchor_mode = anchor or os.environ.get("HUB_ANCHOR")
-        reference_date = temporal.resolve_anchor(anchor_mode, chart)
-        temporal_block = temporal.build_temporal_block(chart, reference_date)
-        if temporal_block:
-            gathered = temporal_block + ("\n\n" + gathered if gathered else "")
+        if want_temporal:  # P1: context-spec gates temporal (default on); off = the temporal ablation (P3)
+            anchor_mode = anchor or os.environ.get("HUB_ANCHOR")
+            reference_date = temporal.resolve_anchor(anchor_mode, chart)
+            temporal_block = temporal.build_temporal_block(chart, reference_date)
+            if temporal_block:
+                gathered = temporal_block + ("\n\n" + gathered if gathered else "")
 
         if indepth_only:
             # Two-call architecture: produce ONLY the In-Depth, elaborating the prior answer carried
@@ -1072,7 +1100,7 @@ async def run_team(
                 indepth_instruction=indepth_instruction, gathered=gathered, answer_text=prior_answer,
                 temperature=synth_temp, max_tokens=max_tokens, repeat_penalty=synth_rp, dry=synth_dry)
             _io_conf = {"level": "green", "note": "in-depth-only: single pass, no validator"}
-            _write_trace(level_id, messages, orchestrator=model, expert=expert_model,
+            _write_trace(level_id, messages, orchestrator=trace_orch, expert=trace_expert,
                          synthesizer=synth_model, validator=None,
                          steps=orch_steps + [{"role": "synthesizer", "model": synth_model,
                                               "mode": "in-depth-only"}],
@@ -1090,7 +1118,7 @@ async def run_team(
             # R1 (answer identity): for a degenerate single (no expert) that ALSO emits In-Depth,
             # suppress the gathered evidence on the ANSWER call so the answer prompt stays identical
             # to the vanilla single arm; the shared In-Depth pass still gets the gathered context.
-            answer_gathered = "" if (indepth_shared and not has_expert) else gathered
+            answer_gathered = gathered  # P1: R1 deleted — the Answer gets the same context as the In-Depth
             try:
                 p_answer, p_citations, p_blocks = await _synthesize_answer(
                     client, synth_model, base_messages=list(messages),
@@ -1109,7 +1137,7 @@ async def run_team(
                             repeat_penalty=synth_rp, dry=synth_dry)
                         _shared_conf = {"level": "green",
                                         "note": "shared in-depth: single pass, no validator"}
-                        _write_trace(level_id, messages, orchestrator=model, expert=expert_model,
+                        _write_trace(level_id, messages, orchestrator=trace_orch, expert=trace_expert,
                                      synthesizer=synth_model, validator=None,
                                      steps=orch_steps + [{"role": "synthesizer", "model": synth_model,
                                                           "mode": "parity-answer+shared-indepth"}],
@@ -1120,7 +1148,7 @@ async def run_team(
                         return _assemble_envelope(p_answer, p_citations, p_blocks, claims)
                     _parity_conf = {"level": "green",
                                     "note": "parity lane: chartsearchai prompt, single call, validator off"}
-                    _write_trace(level_id, messages, orchestrator=model, expert=expert_model,
+                    _write_trace(level_id, messages, orchestrator=trace_orch, expert=trace_expert,
                                  synthesizer=synth_model, validator=None,
                                  steps=orch_steps + [{"role": "synthesizer", "model": synth_model,
                                                       "mode": "parity-single-call"}],
@@ -1147,7 +1175,7 @@ async def run_team(
                         synth_temperature=synth_temp, synth_repeat_penalty=synth_rp, synth_dry=synth_dry,
                         validator_temperature=val_temp, validator_repeat_penalty=val_rp, validator_dry=val_dry,
                         max_tokens=max_tokens, max_loops=validator_max_loops)
-                _write_trace(level_id, messages, orchestrator=model, expert=expert_model,
+                _write_trace(level_id, messages, orchestrator=trace_orch, expert=trace_expert,
                              synthesizer=synth_model, validator=validator_model,
                              steps=orch_steps + synth_steps,
                              answer_confidence=answer_conf, indepth_confidence=indepth_conf,
@@ -1157,7 +1185,7 @@ async def run_team(
             except Exception as e:
                 logger.error("synthesis failed: %s", e, exc_info=True)
 
-    _write_trace(level_id, messages, orchestrator=model, expert=expert_model,
+    _write_trace(level_id, messages, orchestrator=trace_orch, expert=trace_expert,
                  synthesizer=synth_model, validator=validator_model, steps=orch_steps,
                  answer_confidence={"level": "red", "note": "The team could not produce an answer this turn."},
                  indepth_confidence={"level": "green", "note": ""}, reference_date=reference_date)

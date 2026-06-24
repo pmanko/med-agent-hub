@@ -79,6 +79,7 @@ def test_generic_indepth_only_resolves_any_writer():
         assert lv.indepth_only is True
         assert lv.two_call is False
         assert lv.has_expert is False
+        assert lv.solo is True  # P1: single scaffolding
 
 
 def test_generic_answer_resolves_any_writer():
@@ -91,7 +92,8 @@ def test_generic_answer_resolves_any_writer():
         assert lv.two_call is False
         assert lv.indepth_only is False and lv.indepth_shared is False
         assert lv.has_expert is False
-        assert lv.synthesis_prompt == "synthesis-chartsearchai"  # bare answer (no In-Depth), like parity
+        assert lv.solo is True  # P1: single scaffolding (no orchestrator/team) — the fix
+        assert lv.synthesis_prompt == "synthesis-chartsearchai"  # bare answer (no In-Depth)
 
 
 def test_unknown_non_indepth_level_still_fails_loud():
