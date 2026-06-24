@@ -327,7 +327,12 @@ def test_v1_models_advertises_the_levels():
     r = client.get("/v1/models")
     assert r.status_code == 200
     ids = [m["id"] for m in r.json()["data"]]
-    assert ids == levels_loader.level_ids()
+    # the configured levels are always advertised; _advertised_models() ALSO appends a dynamic
+    # indepth-only:<router-model> leg per router model when the router is reachable. Assert
+    # containment + that any extras are those dynamic legs — env-robust (router up or down).
+    levels = levels_loader.level_ids()
+    assert set(levels) <= set(ids)
+    assert all(i in levels or i.startswith("indepth-only:") for i in ids)
 
 
 def test_chat_completions_team_returns_openai_shape_with_the_envelope():
