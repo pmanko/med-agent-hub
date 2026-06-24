@@ -332,7 +332,7 @@ def test_v1_models_advertises_the_levels():
     # containment + that any extras are those dynamic legs — env-robust (router up or down).
     levels = levels_loader.level_ids()
     assert set(levels) <= set(ids)
-    assert all(i in levels or i.startswith("indepth-only:") for i in ids)
+    assert all(i in levels or i.startswith(("indepth-only:", "answer:")) for i in ids)
 
 
 def test_chat_completions_team_returns_openai_shape_with_the_envelope():

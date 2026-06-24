@@ -95,6 +95,18 @@ def get_level(level_id: str) -> Level:
                 two_call=False,
                 indepth_only=True,
             )
+        # Generic Answer leg: "answer:<writer>" mirrors indepth-only — a single CONTEXTUAL answer
+        # through the hub (the parity lane: one answer call with the full gathered evidence incl the
+        # temporal block, no In-Depth, no validator), so a two-call arm routes BOTH legs through the
+        # hub with symmetric context. The orchestrator gathers; the writer (synthesizer) answers.
+        if level_id.startswith("answer:") and level_id.split(":", 1)[1]:
+            return Level(
+                id=level_id,
+                orchestrator="gemma-e4b-q8",
+                synthesizer=level_id.split(":", 1)[1],
+                expert=None,
+                two_call=False,
+            )
         raise KeyError(f"unknown level {level_id!r}; levels.yaml defines {list(raw)}")
     spec = raw[level_id] or {}
     try:

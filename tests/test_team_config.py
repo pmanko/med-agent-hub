@@ -81,6 +81,18 @@ def test_generic_indepth_only_resolves_any_writer():
         assert lv.has_expert is False
 
 
+def test_generic_answer_resolves_any_writer():
+    # "answer:<writer>" mirrors indepth-only: a single CONTEXTUAL Answer leg through the hub (the
+    # parity lane — one answer call with full gathered incl the temporal block, no In-Depth, no
+    # validator), so a two-call arm routes BOTH legs through the hub with symmetric context (not raw).
+    for writer in ("gemma-4-12b", "qwen2.5-14b"):
+        lv = levels_loader.get_level(f"answer:{writer}")
+        assert lv.synthesizer == writer
+        assert lv.two_call is False
+        assert lv.indepth_only is False and lv.indepth_shared is False
+        assert lv.has_expert is False
+
+
 def test_unknown_non_indepth_level_still_fails_loud():
     # The dynamic path is gated to the "indepth-only:" prefix — anything else still raises.
     import pytest
@@ -103,6 +115,8 @@ def test_advertised_models_includes_dynamic_indepth_legs(monkeypatch):
     ids = openai_compat._advertised_models()
     assert "indepth-only:mistral-nemo-12b-q8" in ids
     assert "indepth-only:qwen3.6-35b" in ids
+    assert "answer:mistral-nemo-12b-q8" in ids   # the Answer leg advertised too (both legs hub-served)
+    assert "answer:qwen3.6-35b" in ids
     assert "med-agent-team-med" in ids  # static levels still advertised alongside
 
 

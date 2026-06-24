@@ -49,9 +49,9 @@ def _advertised_models() -> List[str]:
     — one instance serves any config, no reboot. Raw backends stay callable via
     passthrough but aren't listed.
 
-    Also advertise the generic two-call In-Depth leg ``indepth-only:<writer>`` for every
-    model the router serves, so chartsearchai's exact-match validation accepts the dynamic
-    levels get_level() resolves on the fly (no hand-authored per-writer level needed)."""
+    Also advertise the generic two-call legs ``answer:<writer>`` and ``indepth-only:<writer>``
+    for every model the router serves, so chartsearchai's exact-match validation accepts the
+    dynamic levels get_level() resolves on the fly (no hand-authored per-writer level needed)."""
     ids = list(level_ids())
     try:
         import httpx
@@ -60,6 +60,7 @@ def _advertised_models() -> List[str]:
             mid = m.get("id")
             if mid:
                 ids.append(f"indepth-only:{mid}")
+                ids.append(f"answer:{mid}")
     except Exception:
         pass  # router unreachable -> advertise levels only; direct-to-hub callers still work
     return ids
