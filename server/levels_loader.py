@@ -105,6 +105,7 @@ def get_level(level_id: str) -> Level:
                 orchestrator="gemma-e4b-q8",
                 synthesizer=level_id.split(":", 1)[1],
                 expert=None,
+                synthesis_prompt="synthesis-chartsearchai",  # bare answer (no In-Depth), like the parity levels
                 two_call=False,
             )
         raise KeyError(f"unknown level {level_id!r}; levels.yaml defines {list(raw)}")

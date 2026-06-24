@@ -91,6 +91,7 @@ def test_generic_answer_resolves_any_writer():
         assert lv.two_call is False
         assert lv.indepth_only is False and lv.indepth_shared is False
         assert lv.has_expert is False
+        assert lv.synthesis_prompt == "synthesis-chartsearchai"  # bare answer (no In-Depth), like parity
 
 
 def test_unknown_non_indepth_level_still_fails_loud():
