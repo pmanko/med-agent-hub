@@ -80,3 +80,36 @@ def test_block_single_point_makes_no_trend_claim():
 
 def test_block_empty_without_anchor_or_series():
     assert temporal.build_temporal_block("no dates", None) == ""
+
+
+# ---- run-length compression (real Ellcky chart: only 8/276 lines keep the date) -------------
+
+# A real fragment of Ellcky's heavily-compressed chart: the run leader [1] carries (2026-02-02);
+# the numeric follow-ons [19]/[20]/[21]/[24] DROP it (same-date run-length compression). temporal.py
+# must carry the run date forward, or it silently loses every compressed measurement — the Ellcky
+# temporal failures. (Aloice, by contrast, is date-per-line, so its parser already works.)
+_COMPRESSED = """Patient records (most recent first):
+[1] (2026-02-02) Condition: Acute coryza. Status: ACTIVE. Onset: 2026-02-02
+[19] Body surface area: 45.5
+[20] Height (cm): 67 cm
+[21] Pulse: 147 beats/min
+[24] Weight (kg): 6.2 kg
+"""
+
+
+def test_parse_carries_date_forward_across_run_length_compression():
+    obs = temporal.parse_dated_observations(_COMPRESSED)
+    by = {(o["concept"], o["date"]): o["value"] for o in obs}
+    # the dateless follow-ons inherit the run-leader's 2026-02-02 — DROPPED on today's regex (RED)
+    assert by.get(("Weight", "2026-02-02")) == 6.2
+    assert by.get(("Height", "2026-02-02")) == 67.0
+    assert by.get(("Pulse", "2026-02-02")) == 147.0
+    assert by.get(("Body surface area", "2026-02-02")) == 45.5
+
+
+def test_block_states_most_recent_record_date_for_last_visit():
+    # "When was the last visit?" needs the most-recent RECORD date stated explicitly, so the model
+    # REPORTS it instead of fabricating (the am-last-visit failure). Distinct from the anchor/now.
+    block = temporal.build_temporal_block(_CHART, "2006-06-01")  # anchor (now) != latest record
+    line = next((l for l in block.splitlines() if l.startswith("Most recent record")), None)
+    assert line is not None and "2006-05-18" in line  # the chart's max date = the last visit

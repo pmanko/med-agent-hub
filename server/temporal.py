@@ -14,7 +14,11 @@ import datetime as _dt
 import re
 from typing import Any, Dict, List, Optional
 
-_RECORD_RE = re.compile(r"^\[(\d+)\]\s*\((\d{4}-\d{2}-\d{2})\)\s*(.+)$")
+# A record line is `[N] <rest>`; the date `(YYYY-MM-DD)` is present only on the FIRST line of a
+# same-date run (the serializer run-length-compresses it — e.g. Ellcky keeps 8/276 dates), so it is
+# parsed as an OPTIONAL prefix and carried forward to the dateless follow-ons.
+_REC_RE = re.compile(r"^\[(\d+)\]\s*(.*)$")
+_DATE_PREFIX_RE = re.compile(r"^\((\d{4}-\d{2}-\d{2})\)\s*(.*)$")
 _DATE_RE = re.compile(r"\((\d{4}-\d{2}-\d{2})\)")
 _ISO_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 _LEADING_NUM_RE = re.compile(r"^([+-]?\d+(?:\.\d+)?)\s*(.*)$")
@@ -45,17 +49,26 @@ def _clean_concept(raw: str) -> str:
 
 
 def parse_dated_observations(chart: str) -> List[Dict[str, Any]]:
-    """Parse `[N] (date) <Class> — <concept>: <value> <unit>` lines into numeric observations:
-       {index, date, concept, value, unit, raw}. Only rows whose value begins with a number (true
-       numeric series) are kept — drug orders / Yes-No assessments are skipped. De-duplicated per
-       (concept, date), keeping the first occurrence (the chart is already one row per date)."""
+    """Parse `[N] [(date)] <Class> — <concept>: <value> <unit>` lines into numeric observations:
+       {index, date, concept, value, unit, raw}. The `(date)` appears only on the FIRST line of a
+       same-date run (run-length compression) and is carried forward to the dateless follow-ons.
+       Only rows whose value begins with a number (true numeric series) are kept — drug orders /
+       Yes-No assessments are skipped. De-duplicated per (concept, date), keeping the first."""
     out: List[Dict[str, Any]] = []
     seen: set = set()
+    last_date: Optional[str] = None
     for line in (chart or "").splitlines():
-        m = _RECORD_RE.match(line.strip())
+        m = _REC_RE.match(line.strip())
         if not m:
             continue
-        index, date, rest = int(m.group(1)), m.group(2), m.group(3)
+        index, rest = int(m.group(1)), m.group(2)
+        dm = _DATE_PREFIX_RE.match(rest)
+        if dm:  # run leader carries the date; same-date follow-ons drop it -> carry forward
+            last_date = dm.group(1)
+            rest = dm.group(2)
+        date = last_date
+        if date is None:
+            continue  # record(s) before any dated line — no date to attribute
         if " — " in rest:
             rest = rest.split(" — ", 1)[1]
         if ":" not in rest:
@@ -91,6 +104,12 @@ def build_temporal_block(chart: str, anchor: Optional[str]) -> str:
             f"Current date: {anchor}. Interpret \"current\", \"recent\", and \"most recent\" "
             f"relative to THIS date; the patient's records may predate it. Use the dated series "
             f"below verbatim — do not infer dates, values, or trends not shown."
+        )
+    all_dates = _DATE_RE.findall(chart or "")
+    if all_dates:
+        lines.append(
+            f"Most recent record in the chart: {max(all_dates)} — treat this as the latest "
+            f"visit/encounter date (answer \"last visit\" / \"most recent\" from it; do not infer)."
         )
     by_concept: Dict[str, List[Dict[str, Any]]] = {}
     for o in obs:
