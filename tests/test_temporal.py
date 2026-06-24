@@ -111,5 +111,32 @@ def test_block_states_most_recent_record_date_for_last_visit():
     # "When was the last visit?" needs the most-recent RECORD date stated explicitly, so the model
     # REPORTS it instead of fabricating (the am-last-visit failure). Distinct from the anchor/now.
     block = temporal.build_temporal_block(_CHART, "2006-06-01")  # anchor (now) != latest record
-    line = next((l for l in block.splitlines() if l.startswith("Most recent record")), None)
-    assert line is not None and "2006-05-18" in line  # the chart's max date = the last visit
+    line = next((l for l in block.splitlines() if l.startswith("Most recent clinical visit")), None)
+    assert line is not None and "2006-05-18" in line  # the chart's max CLINICAL date = the last visit
+
+
+# ---- typed event timeline: an administrative record (e.g. a Program enrollment) must NOT be reported
+# as "the last visit" even when its date is the chart's max. The real am-last-visit failure: Aloice's
+# TB Program enrollment 2026-05-20 post-dates the last clinical visit 2026-01-07, and max(all dates)
+# picked the enrollment. The timeline TYPES events so a Program is labeled administrative, not a visit. --
+
+_PROGRAM_CONFOUND = """Patient records (most recent first):
+[1] (2026-05-20) Program: Tuberculosis treatment program. Status: Active. Current state: GROUP TB
+[2] (2026-01-07) Assessment — Scheduled visit: No
+[3] (2026-01-07) Finding — Weight (kg): 41.0 kg
+[4] (2025-12-31) Finding — Weight (kg): 42.0 kg
+"""
+
+
+def test_event_timeline_excludes_program_enrollment_from_last_visit():
+    block = temporal.build_temporal_block(_PROGRAM_CONFOUND, anchor="2026-06-20")
+    visit_line = next((l for l in block.splitlines() if l.startswith("Most recent clinical visit")), None)
+    assert visit_line is not None, block
+    assert "2026-01-07" in visit_line and "2026-05-20" not in visit_line  # the visit, not the enrollment
+    admin_line = next((l for l in block.splitlines() if "Administrative record" in l), None)
+    assert admin_line is not None and "2026-05-20" in admin_line and "Tuberculosis" in admin_line
+
+
+def test_resolve_anchor_latest_record_ignores_program_enrollment():
+    # the default "now" = the last CLINICAL record date, not a post-dated administrative enrollment
+    assert temporal.resolve_anchor("latest_record", _PROGRAM_CONFOUND) == "2026-01-07"

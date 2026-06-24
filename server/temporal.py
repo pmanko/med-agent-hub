@@ -23,10 +23,45 @@ _DATE_RE = re.compile(r"\((\d{4}-\d{2}-\d{2})\)")
 _ISO_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 _LEADING_NUM_RE = re.compile(r"^([+-]?\d+(?:\.\d+)?)\s*(.*)$")
 
+# Record classes whose date is NOT a clinical visit: an administrative enrollment (a Program) carries
+# its enrollment date, which can post-date the last actual visit (Aloice's TB Program "enrolled"
+# 2026-05-20 when the last clinical visit was 2026-01-07). These are labeled, never reported as a visit.
+_ADMIN_CLASSES = {"Program"}
+
+
+def _record_class(body: str) -> str:
+    """The leading class token of a record body: 'Finding — Weight: 41' -> 'Finding';
+       'Program: TB Program...' -> 'Program'; 'Drug order: Lamivudine' -> 'Drug order'."""
+    head = body.split(" — ", 1)[0]
+    head = head.split(":", 1)[0]
+    return head.strip()
+
+
+def parse_events(chart: str) -> List[Dict[str, str]]:
+    """One {date, cls, body} per record line, carrying the run-leader's date forward to dateless
+       follow-ons (run-length compression). cls types the event for the timeline (Finding / Test /
+       Assessment / Drug order / Program / ...)."""
+    out: List[Dict[str, str]] = []
+    last_date: Optional[str] = None
+    for line in (chart or "").splitlines():
+        m = _REC_RE.match(line.strip())
+        if not m:
+            continue
+        body = m.group(2)
+        dm = _DATE_PREFIX_RE.match(body)
+        if dm:
+            last_date = dm.group(1)
+            body = dm.group(2)
+        if last_date is None:
+            continue
+        out.append({"date": last_date, "cls": _record_class(body), "body": body})
+    return out
+
 
 def resolve_anchor(anchor: Optional[str], chart: str) -> Optional[str]:
     """Resolve the reference 'now' (ISO date).
-       - None / 'latest_record' -> the max (YYYY-MM-DD) in the chart text (data-derived);
+       - None / 'latest_record' -> the max date of a CLINICAL record (administrative enrollments are
+         excluded — a Program can post-date the last visit and must not define 'now');
        - 'wall_clock' -> today's date (real clock);
        - an explicit 'YYYY-MM-DD' -> itself.
     Returns None when latest_record is requested but the chart has no dates."""
@@ -35,6 +70,9 @@ def resolve_anchor(anchor: Optional[str], chart: str) -> Optional[str]:
         return _dt.date.today().isoformat()
     if _ISO_RE.fullmatch(mode):
         return mode
+    clinical = [e["date"] for e in parse_events(chart) if e["cls"] not in _ADMIN_CLASSES]
+    if clinical:
+        return max(clinical)
     dates = _DATE_RE.findall(chart or "")
     return max(dates) if dates else None
 
@@ -105,12 +143,27 @@ def build_temporal_block(chart: str, anchor: Optional[str]) -> str:
             f"relative to THIS date; the patient's records may predate it. Use the dated series "
             f"below verbatim — do not infer dates, values, or trends not shown."
         )
-    all_dates = _DATE_RE.findall(chart or "")
-    if all_dates:
+    # Typed event timeline: "last visit"/"most recent" must resolve to a clinical visit/encounter,
+    # NOT the chart's max date (which can be an administrative Program enrollment that post-dates the
+    # last visit). Type each record by class; report the most-recent CLINICAL date + the visit dates,
+    # and list administrative records separately so they are never mistaken for a visit.
+    events = parse_events(chart)
+    visit_dates = sorted({e["date"] for e in events if e["cls"] not in _ADMIN_CLASSES}, reverse=True)
+    if visit_dates:
         lines.append(
-            f"Most recent record in the chart: {max(all_dates)} — treat this as the latest "
-            f"visit/encounter date (answer \"last visit\" / \"most recent\" from it; do not infer)."
+            f"Most recent clinical visit/encounter: {visit_dates[0]}. Answer \"last visit\" / "
+            f"\"most recent visit\" from THIS date — the administrative records below are NOT visits."
         )
+        shown = visit_dates[:12]
+        more = f" (+{len(visit_dates) - 12} earlier)" if len(visit_dates) > 12 else ""
+        lines.append("Clinical visit/encounter dates (newest first): " + ", ".join(shown) + more + ".")
+    seen_admin: set = set()
+    for e in sorted((e for e in events if e["cls"] in _ADMIN_CLASSES), key=lambda e: e["date"], reverse=True):
+        summary = e["body"].split(". ")[0].strip()
+        if (e["date"], summary) in seen_admin:
+            continue
+        seen_admin.add((e["date"], summary))
+        lines.append(f"Administrative record on {e['date']} (NOT a visit): {summary}.")
     by_concept: Dict[str, List[Dict[str, Any]]] = {}
     for o in obs:
         by_concept.setdefault(o["concept"], []).append(o)
