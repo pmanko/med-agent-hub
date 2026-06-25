@@ -114,6 +114,38 @@ levels:
     two_call: false
     indepth_shared: true
 
+  # --- Method arms: small-orch + Qwen validator vs the bare single, on the two strong writers (12B, A4B).
+  # The Answer uses the SAME chartsearchai prompt as the single arms + a COMPOSABLE Qwen validator
+  # (validation-strict, two_call=false), so single-vs-team isolates the scaffolding, not the prompt. No
+  # expert; the harness fires the In-Depth as a separate indepth-only leg, so the Answer is the bare envelope.
+  med-agent-team-12b-qwenval:
+    orchestrator: gemma-e4b-q8
+    expert: null
+    synthesizer: gemma-4-12b
+    validator: qwen2.5-14b
+    validator_prompt: validation-strict
+    validator_max_loops: 1
+    synthesis_prompt: synthesis-chartsearchai
+    two_call: false
+
+  med-agent-team-a4b-qwenval:        # same scaffolding, the A4B MoE writer
+    orchestrator: gemma-e4b-q8
+    expert: null
+    synthesizer: gemma-26b
+    validator: qwen2.5-14b
+    validator_prompt: validation-strict
+    validator_max_loops: 1
+    synthesis_prompt: synthesis-chartsearchai
+    two_call: false
+
+  single-12b-cite-or-abstain:        # prompt lever: 12B alone, cite-or-abstain Answer prompt, no validator
+    orchestrator: gemma-4-12b        # (solo -> orchestrator unused but a required field)
+    expert: null
+    synthesizer: gemma-4-12b
+    synthesis_prompt: synthesis-cite-or-abstain
+    two_call: false
+    solo: true
+
   # Two-call architecture IN-DEPTH legs (one per writer): no answer synthesis — elaborate the prior
   # answer carried in the session history. The harness fires these as a separate same-session call.
   indepth-only-gemma-4-12b:
