@@ -732,6 +732,93 @@ async def _gen_indepth(
     return kept, {"level": "red", "note": _indepth_note("red", len(drop), v.get("issues", ""))}
 
 
+async def _validate_and_refine_answer(
+    client: httpx.AsyncClient,
+    *,
+    synth_model: str,
+    base_messages: List[Dict[str, Any]],
+    answer_instruction: str,
+    gathered: str,
+    response_format: Optional[Dict[str, Any]],
+    answer_text: str,
+    citations: List[int],
+    blocks: List[Dict[str, Any]],
+    validator_model: Optional[str],
+    validator_prompt: Optional[str],
+    chart: str,
+    synth_temperature: float,
+    synth_repeat_penalty: Optional[float],
+    synth_dry: Optional[float],
+    validator_temperature: float,
+    validator_repeat_penalty: Optional[float],
+    validator_dry: Optional[float],
+    max_tokens: Optional[int],
+    max_loops: int,
+    steps: List[Dict[str, Any]],
+) -> Tuple[str, List[int], List[Dict[str, Any]], Dict[str, Any]]:
+    """Audit the draft Answer against the chart and, on a genuine flag, re-synthesize up to max_loops.
+    A COMPOSABLE post-synthesis step — orthogonal to two_call, so the parity path and the two-call path
+    share ONE validator. Gated by validator_model: unset (or a fail-open outage) -> green, draft unchanged.
+    Returns (answer_text, citations, blocks, answer_conf{level: green|yellow|red, note})."""
+    answer_conf = {"level": "green", "note": ""}
+    if not validator_model:
+        return answer_text, citations, blocks, answer_conf
+
+    async def _audit(draft: str, attempt: int) -> Optional[Dict[str, Any]]:
+        try:
+            verdict = await _validate_answer(
+                client, validator_model, chart=chart, gathered=gathered, answer_text=draft,
+                max_tokens=max_tokens, temperature=validator_temperature,
+                repeat_penalty=validator_repeat_penalty, dry=validator_dry,
+                validation_prompt=validator_prompt or "validation")
+        except Exception as e:
+            logger.warning("answer-validator call failed: %s", e)
+            verdict = None  # fail-open
+        steps.append({"role": "answer_validator", "model": validator_model, "attempt": attempt,
+                      "answer_ok": (verdict or {}).get("answer_ok", True),
+                      "answer_issues": (verdict or {}).get("answer_issues", "")})
+        return verdict
+
+    def _passed(verdict: Optional[Dict[str, Any]]) -> bool:
+        # Pass when: no verdict (fail-open), answer_ok True, OR a reasonless False flag.
+        if verdict is None or verdict.get("answer_ok", True):
+            return True
+        return not (verdict.get("answer_issues") or "").strip()
+
+    v = await _audit(answer_text, 0)
+    if not _passed(v):
+        first_issue = (v.get("answer_issues") or "").strip()
+        fixed = False
+        for i in range(max(0, max_loops)):
+            logger.info("answer-validator: Answer flagged -> re-synthesizing")
+            attempt_text, attempt_cit, attempt_blk = await _synthesize_answer(
+                client, synth_model, base_messages, answer_instruction, gathered,
+                response_format=response_format, temperature=synth_temperature,
+                max_tokens=max_tokens, repeat_penalty=synth_repeat_penalty, dry=synth_dry,
+                extra_msgs=[
+                    {"role": "assistant",
+                     "content": _assemble_envelope(answer_text, citations, blocks, [])},
+                    {"role": "user", "content": _answer_feedback(v)},
+                ])
+            steps.append({"role": "answer_resynth", "model": synth_model, "output": attempt_text})
+            if not attempt_text:
+                break  # re-synth produced nothing; keep the last answer, mark red
+            answer_text, citations, blocks = attempt_text, attempt_cit, attempt_blk
+            v = await _audit(answer_text, i + 1)
+            if _passed(v):
+                logger.info("answer-validator: revision fixed the Answer -> yellow")
+                fixed = True
+                break
+        if fixed:
+            answer_conf = {"level": "yellow", "note": _answer_note("yellow", first_issue, "")}
+        else:
+            # RED: keep the (last) flagged answer + its criticism — never hide it (renderer collapses).
+            last_issue = (v.get("answer_issues") or "").strip()
+            logger.info("answer-validator: Answer still flagged -> red (present + caveat)")
+            answer_conf = {"level": "red", "note": _answer_note("red", first_issue, last_issue)}
+    return answer_text, citations, blocks, answer_conf
+
+
 async def _synthesize_and_validate(
     client: httpx.AsyncClient,
     *,
@@ -784,61 +871,15 @@ async def _synthesize_and_validate(
             "I could not produce a complete answer for this turn. Please try again."),
             steps, conf, dict(green), "", [])
 
-    # --- ANSWER path (confidence: green clean / yellow fixed-on-retry / red still-flagged) ---
-    answer_conf = dict(green)
-    if validator_model:
-        async def _audit(draft: str, attempt: int) -> Optional[Dict[str, Any]]:
-            try:
-                verdict = await _validate_answer(
-                    client, validator_model, chart=chart, gathered=gathered, answer_text=draft,
-                    max_tokens=max_tokens, temperature=validator_temperature,
-                    repeat_penalty=validator_repeat_penalty, dry=validator_dry,
-                    validation_prompt=validator_prompt or "validation")
-            except Exception as e:
-                logger.warning("answer-validator call failed: %s", e)
-                verdict = None  # fail-open
-            steps.append({"role": "answer_validator", "model": validator_model, "attempt": attempt,
-                          "answer_ok": (verdict or {}).get("answer_ok", True),
-                          "answer_issues": (verdict or {}).get("answer_issues", "")})
-            return verdict
-
-        def _passed(verdict: Optional[Dict[str, Any]]) -> bool:
-            # Pass when: no verdict (fail-open), answer_ok True, OR a reasonless False flag.
-            if verdict is None or verdict.get("answer_ok", True):
-                return True
-            return not (verdict.get("answer_issues") or "").strip()
-
-        v = await _audit(answer_text, 0)
-        if not _passed(v):
-            first_issue = (v.get("answer_issues") or "").strip()
-            fixed = False
-            for i in range(max(0, max_loops)):
-                logger.info("answer-validator: Answer flagged -> re-synthesizing")
-                attempt_text, attempt_cit, attempt_blk = await _synthesize_answer(
-                    client, synth_model, base_messages, answer_instruction, gathered,
-                    response_format=response_format, temperature=synth_temperature,
-                    max_tokens=max_tokens, repeat_penalty=synth_repeat_penalty, dry=synth_dry,
-                    extra_msgs=[
-                        {"role": "assistant",
-                         "content": _assemble_envelope(answer_text, citations, blocks, [])},
-                        {"role": "user", "content": _answer_feedback(v)},
-                    ])
-                steps.append({"role": "answer_resynth", "model": synth_model, "output": attempt_text})
-                if not attempt_text:
-                    break  # re-synth produced nothing; keep the last answer, mark red
-                answer_text, citations, blocks = attempt_text, attempt_cit, attempt_blk
-                v = await _audit(answer_text, i + 1)
-                if _passed(v):
-                    logger.info("answer-validator: revision fixed the Answer -> yellow")
-                    fixed = True
-                    break
-            if fixed:
-                answer_conf = {"level": "yellow", "note": _answer_note("yellow", first_issue, "")}
-            else:
-                # RED: keep the (last) flagged answer + its criticism — never hide it (renderer collapses).
-                last_issue = (v.get("answer_issues") or "").strip()
-                logger.info("answer-validator: Answer still flagged -> red (present + caveat)")
-                answer_conf = {"level": "red", "note": _answer_note("red", first_issue, last_issue)}
+    # --- ANSWER path: composable validate-and-refine (shared with the parity path) ---
+    answer_text, citations, blocks, answer_conf = await _validate_and_refine_answer(
+        client, synth_model=synth_model, base_messages=base_messages,
+        answer_instruction=answer_instruction, gathered=gathered, response_format=response_format,
+        answer_text=answer_text, citations=citations, blocks=blocks,
+        validator_model=validator_model, validator_prompt=validator_prompt, chart=chart,
+        synth_temperature=synth_temperature, synth_repeat_penalty=synth_repeat_penalty, synth_dry=synth_dry,
+        validator_temperature=validator_temperature, validator_repeat_penalty=validator_repeat_penalty,
+        validator_dry=validator_dry, max_tokens=max_tokens, max_loops=max_loops, steps=steps)
 
     # --- IN-DEPTH path (same green/yellow/red cycle) ---------------------
     claims, indepth_conf = await _gen_indepth(
@@ -1146,10 +1187,23 @@ async def run_team(
                                      reference_date=reference_date)
                         # Combined **Answer** / **In Depth** body; no confidence block (no validator).
                         return _assemble_envelope(p_answer, p_citations, p_blocks, claims)
-                    _parity_conf = {"level": "green",
-                                    "note": "parity lane: chartsearchai prompt, single call, validator off"}
+                    # Composable validator (validator ⊥ two_call): audit + refine the bare-parity Answer
+                    # ONLY (the shared-in-depth lane above is single-pass by design), so a two_call=False
+                    # team can pair a validator with the SAME answer prompt as the singles.
+                    p_answer, p_citations, p_blocks, _val_conf = await _validate_and_refine_answer(
+                        client, synth_model=synth_model, base_messages=list(messages),
+                        answer_instruction=answer_instruction, gathered=answer_gathered,
+                        response_format=response_format,
+                        answer_text=p_answer, citations=p_citations, blocks=p_blocks,
+                        validator_model=validator_model, validator_prompt=validator_prompt, chart=chart,
+                        synth_temperature=synth_temp, synth_repeat_penalty=synth_rp, synth_dry=synth_dry,
+                        validator_temperature=val_temp, validator_repeat_penalty=val_rp, validator_dry=val_dry,
+                        max_tokens=max_tokens, max_loops=validator_max_loops, steps=orch_steps)
+                    _parity_conf = _val_conf if validator_model else {
+                        "level": "green",
+                        "note": "parity lane: chartsearchai prompt, single call, validator off"}
                     _write_trace(level_id, messages, orchestrator=trace_orch, expert=trace_expert,
-                                 synthesizer=synth_model, validator=None,
+                                 synthesizer=synth_model, validator=validator_model,
                                  steps=orch_steps + [{"role": "synthesizer", "model": synth_model,
                                                       "mode": "parity-single-call"}],
                                  answer_confidence=_parity_conf, indepth_confidence=_parity_conf,

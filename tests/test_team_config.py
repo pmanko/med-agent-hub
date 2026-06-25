@@ -159,3 +159,30 @@ def test_run_team_routes_expert_model(monkeypatch):
     assert expert == ["EXPERT"], calls
     # Two-call synthesis (Answer + In-Depth) — both on the synthesizer model.
     assert synth and all(m == "SYNTH" for m in synth), calls
+
+
+def test_validator_runs_on_the_parity_path(monkeypatch):
+    # The answer-validator is a COMPOSABLE post-synthesis step (validator is orthogonal to two_call):
+    # it must run on the two_call=False parity path too, not only two_call=True. Assert the validator
+    # MODEL is actually invoked when a two_call=False team sets a validator. RED before the decoupling
+    # (parity skipped the validator); GREEN after.
+    calls = []
+
+    async def fake_chat(client, model, messages, *, tools=None, response_format=None,
+                        temperature=None, max_tokens=None, repeat_penalty=None, dry_multiplier=None, **kwargs):
+        calls.append(model)
+        if model == "VALIDATOR":                                   # answer-validator audit turn
+            return {"content": json.dumps({"answer_ok": True, "answer_issues": ""})}
+        if response_format is not None:                            # synthesis turn
+            return {"content": json.dumps({"answer": "ok", "citations": [], "blocks": []})}
+        return {"content": "", "tool_calls": None}                 # orchestrator turn -> stop
+
+    monkeypatch.setattr(team, "_chat", fake_chat)
+    asyncio.run(team.run_team(
+        [{"role": "system", "content": "s"}, {"role": "user", "content": "chart"},
+         {"role": "user", "content": "q"}],
+        response_format={"type": "json_schema", "json_schema": {}},
+        orchestrator_model="ORCH", synthesizer_model="SYNTH", expert_model=None, has_expert=False,
+        synthesizer_prompt="synthesis-chartsearchai", two_call=False, validator_model="VALIDATOR",
+    ))
+    assert "VALIDATOR" in calls, f"validator must run on the two_call=False parity path; called: {calls}"
