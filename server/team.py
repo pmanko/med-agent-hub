@@ -1206,7 +1206,9 @@ async def run_team(
                                  synthesizer=synth_model, validator=validator_model,
                                  steps=orch_steps + [{"role": "synthesizer", "model": synth_model,
                                                       "mode": "parity-single-call"}],
-                                 answer_confidence=_parity_conf, indepth_confidence=_parity_conf,
+                                 # The parity Answer call produces NO In-Depth (it's a separate
+                                 # indepth-only call) — don't paint the Answer's verdict onto it.
+                                 answer_confidence=_parity_conf, indepth_confidence=None,
                                  answer_text=p_answer, in_depth_claims=[],
                                  reference_date=reference_date)
                     # Bare chartsearchai envelope built directly (NOT _assemble_envelope, which
