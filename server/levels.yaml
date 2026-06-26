@@ -138,6 +138,37 @@ levels:
     synthesis_prompt: synthesis-chartsearchai
     two_call: false
 
+  # --- Dev-set lever arms (solo writer, NO orchestrator distraction — isolate each lever) ---
+  single-12b-coverage:               # completeness lever: bare 12B writer + the coverage synthesis prompt
+    orchestrator: gemma-4-12b
+    expert: null
+    synthesizer: gemma-4-12b
+    synthesis_prompt: synthesis-coverage
+    two_call: false
+    solo: true
+
+  single-12b-rewriteval:             # rewrite validator on the bare writer (NO orchestrator) — isolates the validator
+    orchestrator: gemma-4-12b
+    expert: null
+    synthesizer: gemma-4-12b
+    validator: qwen2.5-14b
+    validator_prompt: validation-rewrite
+    validator_max_loops: 1
+    synthesis_prompt: synthesis-chartsearchai
+    two_call: false
+    solo: true
+
+  single-12b-coverage-rewrite:       # both levers: coverage prompt + rewrite validator, bare writer
+    orchestrator: gemma-4-12b
+    expert: null
+    synthesizer: gemma-4-12b
+    validator: qwen2.5-14b
+    validator_prompt: validation-rewrite
+    validator_max_loops: 1
+    synthesis_prompt: synthesis-coverage
+    two_call: false
+    solo: true
+
   med-agent-team-12b-rewriteval:     # A/B vs -12b-qwenval: SAME team, the validator REWRITES instead of regenerating
     orchestrator: gemma-e4b-q8
     expert: null
