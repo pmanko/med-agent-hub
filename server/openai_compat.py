@@ -41,6 +41,7 @@ class ChatCompletionRequest(BaseModel):
     max_tokens: Optional[int] = None
     stream: bool = False
     context: Optional[Dict[str, Any]] = None  # P1: context-spec override (temporal/kb/expert); used in P3
+    patient: Optional[str] = None  # when set, the hub RETRIEVES this patient's chart from querystore (else uses the chart in messages)
 
 
 def _advertised_models() -> List[str]:
@@ -126,6 +127,7 @@ async def _content_for(req: ChatCompletionRequest) -> str:
         indepth_only=level.indepth_only,
         solo=level.solo,
         context=req.context,
+        patient=req.patient,
         anchor=level.anchor,
         knobs=level.knobs,
         level_id=req.model,  # the advertised level id == the harness backend_id (trace correlation key)

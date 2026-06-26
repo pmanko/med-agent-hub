@@ -122,6 +122,14 @@ OPENMRS_FHIR_BASE_URL = os.getenv("OPENMRS_FHIR_BASE_URL", "")
 OPENMRS_USERNAME = os.getenv("OPENMRS_USERNAME", "admin" if OPENMRS_FHIR_BASE_URL else "")
 OPENMRS_PASSWORD = os.getenv("OPENMRS_PASSWORD", "Admin123" if OPENMRS_FHIR_BASE_URL else "")
 
+# Querystore read API (OpenMRS module) — the hub's chart-retrieval source over REST (ADR Decision 16).
+# When QUERYSTORE_BASE_URL is set (the OpenMRS app root), a request carrying a `patient` ref makes the hub
+# fetch + serialize that patient's chart itself; a chart already in `messages` is used as-is (additive —
+# the legacy chartsearchai path is unchanged). Auth is a service account (coarse Get-Patients gate).
+QUERYSTORE_BASE_URL = os.getenv("QUERYSTORE_BASE_URL", "")
+QUERYSTORE_USERNAME = os.getenv("QUERYSTORE_USERNAME", "admin" if QUERYSTORE_BASE_URL else "")
+QUERYSTORE_PASSWORD = os.getenv("QUERYSTORE_PASSWORD", "Admin123" if QUERYSTORE_BASE_URL else "")
+
 # Local FHIR Parquet files
 FHIR_PARQUET_DIR = os.getenv("FHIR_PARQUET_DIR", "")
 
@@ -204,6 +212,12 @@ class OpenMRSConfig:
     auth_username = OPENMRS_USERNAME
     auth_password = OPENMRS_PASSWORD
 
+class QueryStoreConfig:
+    base_url = QUERYSTORE_BASE_URL
+    username = QUERYSTORE_USERNAME
+    password = QUERYSTORE_PASSWORD
+    enabled = bool(QUERYSTORE_BASE_URL)
+
 class SparkConfig:
     host = SPARK_THRIFT_HOST
     port = SPARK_THRIFT_PORT
@@ -218,6 +232,7 @@ agent_config = AgentConfig()
 a2a_endpoints = A2AEndpoints()
 orchestrator_config = OrchestatorConfig()
 openmrs_config = OpenMRSConfig()
+querystore_config = QueryStoreConfig()
 spark_config = SparkConfig()
 local_config = LocalConfig()
 

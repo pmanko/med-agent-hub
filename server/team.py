@@ -40,9 +40,11 @@ import httpx
 from . import kb
 from . import temporal
 from .config import (
-    llm_config, SYNTH_REPEAT_PENALTY,
+    llm_config, querystore_config, SYNTH_REPEAT_PENALTY,
     ORCHESTRATOR_DRY_MULTIPLIER, EXPERT_DRY_MULTIPLIER, SYNTH_DRY_MULTIPLIER,
 )
+from .querystore_client import QueryStoreClient
+from .chart_serializer import render_chart
 from .prompt_loader import load_prompt
 
 logger = logging.getLogger(__name__)
@@ -140,6 +142,26 @@ def _chart_context(messages: List[Dict[str, Any]]) -> str:
             content = m.get("content")
             return content if isinstance(content, str) else json.dumps(content)
     return ""
+
+
+async def _retrieve_chart(patient_uuid: str) -> str:
+    """Fetch + render a patient's chart from querystore over REST (ADR Decision 16) — the hub as a
+    direct, non-JVM querystore client. Degrades to an empty chart on any failure (querystore disabled,
+    unavailable, auth, or unknown patient), mirroring the in-process consumer's empty-chart fallback so a
+    retrieval outage never breaks the turn."""
+    if not querystore_config.enabled:
+        logger.warning("patient ref given but QUERYSTORE_BASE_URL is unset — returning empty chart")
+        return ""
+    try:
+        client = QueryStoreClient(
+            querystore_config.base_url, querystore_config.username, querystore_config.password)
+        records = await client.get_patient_chart(patient_uuid)
+        text, _mappings = render_chart(records)
+        return text
+    except Exception as e:
+        logger.warning("querystore retrieval failed for patient=%s — returning empty chart: %s",
+                       patient_uuid, e)
+        return ""
 
 
 def _latest_user_text(messages: List[Dict[str, Any]]) -> str:
@@ -956,6 +978,7 @@ async def run_team(
     anchor: Optional[str] = None,
     knobs: Optional[Dict[str, Any]] = None,
     level_id: Optional[str] = None,
+    patient: Optional[str] = None,
 ) -> str:
     """
     Run the team for one chartsearchai turn.
@@ -968,6 +991,17 @@ async def run_team(
     model = orchestrator_model or llm_config.orchestrator_model
     synth_model = synthesizer_model or llm_config.synthesizer_model
     expert_model = expert_model or llm_config.med_model
+    # Chart source: a `patient` ref → the hub RETRIEVES + serializes the chart from querystore (the hub
+    # owns context) and injects it as the chartsearchai-shaped user(chart) message BEFORE the question —
+    # the synthesizer reads the chart from base_messages (never the `chart` var), so it must be a message.
+    # Otherwise the chart already in `messages` (the chartsearchai path) is used unchanged.
+    if patient:
+        chart_text = await _retrieve_chart(patient)
+        if chart_text:
+            messages = list(messages)
+            _at = 1 if (messages and messages[0].get("role") == "system") else 0
+            messages.insert(_at, {"role": "user",
+                                  "content": "Patient records (most recent first):\n" + chart_text})
     chart = _chart_context(messages)
     reference_date: Optional[str] = None  # resolved below; recorded in the trace for the judge
 
