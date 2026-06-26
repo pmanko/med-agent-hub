@@ -404,6 +404,41 @@ _ANSWER_VERDICT_RF = {
     },
 }
 
+# Rewrite-validator verdict (the "suggest the fix" mode): the validator LOCALIZES each chart
+# contradiction (wrong phrase + grounding record + replacement) AND returns the surgically-corrected
+# answer, so the refine loop ADOPTS the validator's fix instead of asking the writer to regenerate. The
+# research basis: actionable, localized feedback beats a binary verdict, and a surgical edit avoids the
+# over-correction that a from-scratch regenerate inflicts on the already-correct parts of a strong answer.
+_REWRITE_VERDICT_RF = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "rewrite_verdict",
+        "schema": {
+            "type": "object",
+            "properties": {
+                "answer_ok": {"type": "boolean"},
+                "errors": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "wrong": {"type": "string"},
+                            "chart": {"type": "string"},
+                            "fix": {"type": "string"},
+                        },
+                    },
+                },
+                "corrected_answer": {"type": "string"},
+            },
+            "required": ["answer_ok"],
+        },
+    },
+}
+
+# A validator_prompt with this stem selects the rewrite path (loads <stem>-answer.txt + the rewrite
+# schema + the adopt-the-fix loop); the default "validation" keeps the regenerate path unchanged.
+_REWRITE_VALIDATOR_PROMPT = "validation-rewrite"
+
 
 _INDEPTH_VERDICT_RF = {
     "type": "json_schema",
@@ -601,6 +636,51 @@ async def _validate_answer(
     return verdict
 
 
+async def _validate_answer_rewrite(
+    client: httpx.AsyncClient,
+    validator_model: str,
+    *,
+    chart: str,
+    gathered: str,
+    answer_text: str,
+    max_tokens: Optional[int],
+    temperature: float,
+    repeat_penalty: Optional[float],
+    dry: Optional[float],
+    validation_prompt: str = _REWRITE_VALIDATOR_PROMPT,
+) -> Dict[str, Any]:
+    """Rewrite-mode audit: localize each chart contradiction AND return the corrected answer. Returns
+    {answer_ok, errors:[{wrong,chart,fix}], corrected_answer}. FAIL-OPEN: {answer_ok: True, errors: []}
+    on any parse failure so a flaky validator never blocks the run."""
+    instruction = load_prompt(validation_prompt + "-answer")
+    audit_user = (
+        instruction
+        + "\n\n=== PATIENT CHART (ground truth) ===\n" + (chart or "(none)")
+        + "\n\n=== GATHERED KB / EVIDENCE (the guidance the team retrieved) ===\n" + (gathered or "(none)")
+        + "\n\n=== DRAFT ANSWER ===\n" + answer_text
+    )
+    msg = await _chat(
+        client, validator_model, [{"role": "user", "content": audit_user}],
+        response_format=_REWRITE_VERDICT_RF, temperature=temperature, max_tokens=max_tokens,
+        repeat_penalty=repeat_penalty, dry_multiplier=dry)
+    raw = _message_text(msg)
+    try:
+        verdict = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        logger.warning("rewrite-validator[%s] verdict UNPARSEABLE -> FAIL-OPEN (pass); raw=%r",
+                       validator_model, raw[:240])
+        return {"answer_ok": True, "errors": []}
+    if not isinstance(verdict, dict):
+        logger.warning("rewrite-validator[%s] verdict not an object -> FAIL-OPEN; raw=%r",
+                       validator_model, raw[:240])
+        return {"answer_ok": True, "errors": []}
+    errors = [e for e in (verdict.get("errors") or []) if isinstance(e, dict)]
+    logger.info("rewrite-validator[%s] answer_ok=%s n_errors=%d",
+                validator_model, verdict.get("answer_ok"), len(errors))
+    return {"answer_ok": verdict.get("answer_ok", True), "errors": errors,
+            "corrected_answer": (verdict.get("corrected_answer") or "").strip()}
+
+
 async def _validate_indepth_verdict(
     client: httpx.AsyncClient,
     validator_model: str,
@@ -754,6 +834,26 @@ async def _gen_indepth(
     return kept, {"level": "red", "note": _indepth_note("red", len(drop), v.get("issues", ""))}
 
 
+def _extract_citations(text: str) -> List[int]:
+    """The 1-based [N] citation indices a corrected answer cites, in order, deduped — so an adopted
+    rewrite carries its own citations rather than the superseded draft's."""
+    return sorted({int(m) for m in re.findall(r"\[(\d+)\]", text or "")})
+
+
+def _rw_issue(verdict: Optional[Dict[str, Any]]) -> str:
+    """A clinician-facing issue string from a rewrite verdict's first localized error (the chart-correct
+    fact), for the confidence caveat."""
+    errs = (verdict or {}).get("errors") or []
+    if not errs:
+        return ""
+    e = errs[0]
+    return (e.get("chart") or e.get("fix") or "").strip()
+
+
+def _is_rewrite_validator(validator_prompt: Optional[str]) -> bool:
+    return (validator_prompt or "").strip().startswith(_REWRITE_VALIDATOR_PROMPT)
+
+
 async def _validate_and_refine_answer(
     client: httpx.AsyncClient,
     *,
@@ -785,6 +885,57 @@ async def _validate_and_refine_answer(
     answer_conf = {"level": "green", "note": ""}
     if not validator_model:
         return answer_text, citations, blocks, answer_conf
+
+    # REWRITE MODE: the validator localizes each chart contradiction AND returns the surgically-corrected
+    # answer. We ADOPT that fix (re-extracting its [N] citations), re-audit it, and keep the BEST
+    # (fewest-errors) version seen — never regressing below the original draft. That surgical-edit +
+    # never-regress design is the over-correction guard the regenerate path lacks: a from-scratch
+    # re-synthesis re-touches the already-correct parts and can make a strong answer worse (the 12B-team
+    # harm regression), whereas adopting a localized fix only changes what a record contradicts.
+    if _is_rewrite_validator(validator_prompt):
+        async def _audit_rw(draft: str, attempt: int) -> Optional[Dict[str, Any]]:
+            try:
+                verdict = await _validate_answer_rewrite(
+                    client, validator_model, chart=chart, gathered=gathered, answer_text=draft,
+                    max_tokens=max_tokens, temperature=validator_temperature,
+                    repeat_penalty=validator_repeat_penalty, dry=validator_dry,
+                    validation_prompt=validator_prompt or _REWRITE_VALIDATOR_PROMPT)
+            except Exception as e:
+                logger.warning("rewrite-validator call failed: %s", e)
+                verdict = None  # fail-open
+            errs = (verdict or {}).get("errors") or []
+            steps.append({"role": "answer_validator", "mode": "rewrite", "model": validator_model,
+                          "attempt": attempt, "answer_ok": (verdict or {}).get("answer_ok", True),
+                          "n_errors": len(errs), "errors": errs})
+            return verdict
+
+        v = await _audit_rw(answer_text, 0)
+        # fail-open or a clean pass (no localized contradiction) -> green, draft untouched.
+        if v is None or v.get("answer_ok", True) or not v.get("errors"):
+            return answer_text, citations, blocks, answer_conf
+        first_issue = _rw_issue(v)
+        best_text, best_cit, best_n = answer_text, citations, len(v.get("errors") or [])
+        cleared = False
+        for i in range(max(1, max_loops)):
+            corrected = (v.get("corrected_answer") or "").strip()
+            if not corrected or corrected == best_text:
+                break  # flagged but no usable rewrite offered -> keep the best so far
+            cand_cit = _extract_citations(corrected) or best_cit
+            v = await _audit_rw(corrected, i + 1)
+            n = len((v or {}).get("errors") or []) if v else 0
+            if v is None or v.get("answer_ok", True) or n == 0:
+                best_text, best_cit, cleared = corrected, cand_cit, True
+                break
+            if n < best_n:  # strictly fewer errors -> adopt, then try to fix the rest
+                best_text, best_cit, best_n = corrected, cand_cit, n
+            else:
+                break  # not better -> stop; keep the previous best (never regress)
+        if cleared:
+            answer_conf = {"level": "yellow", "note": _answer_note("yellow", first_issue, "")}
+        else:
+            # Still flagged: present the best version (adopted improvement or the original) + a caveat.
+            answer_conf = {"level": "red", "note": _answer_note("red", first_issue, _rw_issue(v))}
+        return best_text, best_cit, blocks, answer_conf
 
     async def _audit(draft: str, attempt: int) -> Optional[Dict[str, Any]]:
         try:
