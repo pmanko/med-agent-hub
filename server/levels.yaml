@@ -210,6 +210,27 @@ levels:
     synthesis_prompt: synthesis-chartsearchai
     two_call: false
 
+  med-agent-team-12b-date-warn:      # Wider temporal/date run: same 12B team, date contract prompt, gate WARN.
+    orchestrator: gemma-e4b-q8
+    expert: null
+    synthesizer: gemma-4-12b
+    validator: qwen2.5-14b
+    validator_prompt: validation-strict
+    validator_max_loops: 1
+    synthesis_prompt: synthesis-date-output-contract
+    temporal_gate: warn
+    two_call: false
+
+  med-agent-team-high-date-warn:     # Wider temporal/date run: high team, date contract prompt, gate WARN.
+    orchestrator: gemma-31b
+    expert: medgemma-27b
+    synthesizer: qwen3.6-35b-q6
+    validator: gemma-31b
+    validator_max_loops: 1
+    synthesis_prompt: synthesis-date-output-contract
+    temporal_gate: warn
+    two_call: false
+
   single-12b-cite-or-abstain:        # prompt lever: 12B alone, cite-or-abstain Answer prompt, no validator
     orchestrator: gemma-4-12b        # (solo -> orchestrator unused but a required field)
     expert: null

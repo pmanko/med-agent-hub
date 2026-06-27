@@ -131,6 +131,23 @@ def test_temporal_gate_dynamic_answer_levels_use_run_anchor_and_modes():
     assert off.solo is True and warn.solo is True and enforce.solo is True
 
 
+def test_wide_date_team_levels_use_contract_prompt_and_warn_gate():
+    low = levels_loader.get_level("med-agent-team-12b-date-warn")
+    assert low.synthesizer == "gemma-4-12b"
+    assert low.validator == "qwen2.5-14b"
+    assert low.synthesis_prompt == "synthesis-date-output-contract"
+    assert low.temporal_gate == "warn"
+    assert low.two_call is False
+
+    high = levels_loader.get_level("med-agent-team-high-date-warn")
+    assert high.orchestrator == "gemma-31b"
+    assert high.expert == "medgemma-27b"
+    assert high.synthesizer == "qwen3.6-35b-q6"
+    assert high.validator == "gemma-31b"
+    assert high.synthesis_prompt == "synthesis-date-output-contract"
+    assert high.temporal_gate == "warn"
+
+
 def test_unknown_non_indepth_level_still_fails_loud():
     # The dynamic path is gated to the "indepth-only:" prefix — anything else still raises.
     import pytest
