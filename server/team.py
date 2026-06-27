@@ -515,6 +515,113 @@ def _answer_fields(normalized_json_str: str) -> Tuple[str, List[int], List[Any]]
     return answer_text, citations, blocks
 
 
+def _block_temporal_text_and_refs(blocks: List[Any]) -> Tuple[str, List[int]]:
+    """Flatten table/block cell text so deterministic gates see model-generated dates in
+    structured output, not only dates in the prose answer."""
+    texts: List[str] = []
+    refs: List[int] = []
+
+    def walk(value: Any) -> None:
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if key == "refs" and isinstance(child, list):
+                    refs.extend(i for i in child if isinstance(i, int))
+                else:
+                    walk(child)
+        elif isinstance(value, list):
+            for child in value:
+                walk(child)
+        elif isinstance(value, str):
+            texts.append(value)
+
+    walk(blocks or [])
+    return "\n".join(texts), sorted(set(refs))
+
+
+def _gate_failure_note(gate: Optional[Dict[str, Any]]) -> str:
+    checks = (gate or {}).get("checks") or []
+    for c in checks:
+        if c.get("status") == "fail":
+            return c.get("reason") or "a deterministic temporal check failed."
+    for c in checks:
+        if c.get("status") == "warn":
+            return c.get("reason") or "a deterministic temporal check warned."
+    return ""
+
+
+def _merge_temporal_gate_conf(
+    conf: Optional[Dict[str, Any]], gate: Optional[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """Fold deterministic temporal-gate status into the structured Answer confidence."""
+    base = dict(conf or {"level": "green", "note": ""})
+    if not gate or gate.get("mode") == "off" or gate.get("status") not in {"warn", "fail"}:
+        return base
+    applied = gate.get("applied")
+    target_level = "yellow"
+    if gate.get("status") == "fail" and applied not in {"patch"}:
+        target_level = "red"
+    order = {"green": 0, "yellow": 1, "red": 2}
+    if order.get(target_level, 0) > order.get(base.get("level", "green"), 0):
+        base["level"] = target_level
+    reason = _gate_failure_note(gate)
+    if applied == "patch":
+        note = "Deterministic temporal gate corrected the answer before validation"
+    elif applied == "fallback":
+        note = "Deterministic temporal gate blocked the draft answer"
+    elif gate.get("mode") == "warn":
+        note = "Deterministic temporal gate warning"
+    else:
+        note = "Deterministic temporal gate"
+    if reason:
+        note += ": " + reason
+    note += "."
+    existing = (base.get("note") or "").strip()
+    base["note"] = (existing + " " + note).strip() if existing else note
+    return base
+
+
+def _apply_temporal_gate(
+    *,
+    question: str,
+    answer_text: str,
+    citations: List[int],
+    blocks: List[Any],
+    temporal_facts: Optional[Dict[str, Any]],
+    temporal_gate_mode: str,
+    steps: List[Dict[str, Any]],
+) -> Tuple[str, List[int], List[Any], Dict[str, Any], Optional[str]]:
+    """Run the deterministic temporal gate and optionally replace the answer in enforce mode."""
+    block_text, block_refs = _block_temporal_text_and_refs(blocks)
+    gate_answer_text = answer_text + (("\n" + block_text) if block_text else "")
+    gate_citations = sorted(set(citations or []) | set(block_refs))
+    gate = temporal.run_temporal_gate(
+        question, gate_answer_text, gate_citations, temporal_facts, temporal_gate_mode
+    )
+    original_answer = None
+    gate["applied"] = "none"
+    if gate.get("mode") == "enforce" and gate.get("status") == "fail":
+        original_answer = answer_text
+        patch = (gate.get("patch_answer") or "").strip()
+        patch_citations = [c for c in (gate.get("patch_citations") or []) if isinstance(c, int)]
+        if patch:
+            answer_text, citations, blocks = patch, patch_citations, []
+            gate["applied"] = "patch"
+        else:
+            answer_text, citations, blocks = (
+                "I cannot safely answer this temporal question because deterministic temporal "
+                "validation found a contradiction in the draft answer. Please verify against the chart."
+            ), [], []
+            gate["applied"] = "fallback"
+    steps.append({
+        "role": "temporal_gate",
+        "mode": gate.get("mode"),
+        "status": gate.get("status"),
+        "applied": gate.get("applied"),
+        "n_checks": len(gate.get("checks") or []),
+    })
+    return answer_text, citations, blocks, gate, original_answer
+
+
 def _answer_feedback(verdict: Dict[str, Any]) -> str:
     """Answer-focused re-synthesis guidance from the Answer verdict. The In Depth is generated
     separately, so this only steers the direct Answer."""
@@ -998,6 +1105,8 @@ async def _synthesize_and_validate(
     base_messages: List[Dict[str, Any]],
     gathered: str,
     chart: str,
+    temporal_facts: Optional[Dict[str, Any]],
+    temporal_gate_mode: str,
     synth_model: str,
     answer_instruction: str,
     indepth_instruction: str,
@@ -1012,11 +1121,11 @@ async def _synthesize_and_validate(
     validator_dry: Optional[float],
     max_tokens: Optional[int],
     max_loops: int,
-) -> Tuple[str, List[Dict[str, Any]], Dict[str, Any], Dict[str, Any], str, List[str]]:
+) -> Tuple[str, List[Dict[str, Any]], Dict[str, Any], Dict[str, Any], str, List[str], Dict[str, Any], Optional[str]]:
     """Two-call generation + two independent validators, combined into one envelope only here.
     Returns (envelope_json, trace_steps, answer_confidence, indepth_confidence, answer_text,
-    in_depth_claims) — the last two are the SHIPPED content (clean), so the trace package can carry
-    the structured pieces a client renders. Each confidence is
+    in_depth_claims, temporal_gate, original_answer_text) — answer_text/in_depth_claims are the
+    SHIPPED content, so the trace package can carry the structured pieces a client renders. Each confidence is
     {level: green|yellow|red, note: <clinician caveat>} from that section's re-synth cycle:
       green  = passed clinical review on the first pass;
       yellow = flagged, re-synthesized, then cleared;
@@ -1042,7 +1151,15 @@ async def _synthesize_and_validate(
         conf = {"level": "red", "note": "The team could not produce an answer this turn."}
         return (_fallback_envelope(
             "I could not produce a complete answer for this turn. Please try again."),
-            steps, conf, dict(green), "", [])
+            steps, conf, dict(green), "", [],
+            temporal.run_temporal_gate(_latest_user_text(base_messages), "", [], temporal_facts, temporal_gate_mode),
+            None)
+
+    temporal_gate, original_answer_text = None, None
+    answer_text, citations, blocks, temporal_gate, original_answer_text = _apply_temporal_gate(
+        question=_latest_user_text(base_messages), answer_text=answer_text, citations=citations,
+        blocks=blocks, temporal_facts=temporal_facts, temporal_gate_mode=temporal_gate_mode,
+        steps=steps)
 
     # --- ANSWER path: composable validate-and-refine (shared with the parity path) ---
     answer_text, citations, blocks, answer_conf = await _validate_and_refine_answer(
@@ -1053,12 +1170,13 @@ async def _synthesize_and_validate(
         synth_temperature=synth_temperature, synth_repeat_penalty=synth_repeat_penalty, synth_dry=synth_dry,
         validator_temperature=validator_temperature, validator_repeat_penalty=validator_repeat_penalty,
         validator_dry=validator_dry, max_tokens=max_tokens, max_loops=max_loops, steps=steps)
+    answer_conf = _merge_temporal_gate_conf(answer_conf, temporal_gate)
 
     # --- IN-DEPTH path (same green/yellow/red cycle) ---------------------
     claims, indepth_conf = await _gen_indepth(
         client, synth_model, base_messages, indepth_instruction, gathered, answer_text, **_idkw)
     return (_assemble_envelope(answer_text, citations, blocks, claims, answer_conf, indepth_conf),
-            steps, answer_conf, indepth_conf, answer_text, claims)
+            steps, answer_conf, indepth_conf, answer_text, claims, temporal_gate, original_answer_text)
 
 
 # Per-turn reasoning trace: the hub appends one structured line per turn to a writable mount so the
@@ -1074,7 +1192,10 @@ def _write_trace(level_id: Optional[str], messages: List[Dict[str, Any]], *, orc
                  steps: List[Dict[str, Any]], answer_confidence: Dict[str, Any],
                  indepth_confidence: Dict[str, Any], answer_text: str = "",
                  in_depth_claims: Optional[List[str]] = None,
-                 reference_date: Optional[str] = None) -> None:
+                 reference_date: Optional[str] = None,
+                 temporal_facts: Optional[Dict[str, Any]] = None,
+                 temporal_gate: Optional[Dict[str, Any]] = None,
+                 original_answer_text: Optional[str] = None) -> None:
     """Append one per-turn reasoning-trace line — the structured package a client renders (the
     SHIPPED answer + in-depth claims + per-section confidence + the ordered call steps). Best-effort:
     never raises (a trace-write failure must never break a turn)."""
@@ -1096,6 +1217,12 @@ def _write_trace(level_id: Optional[str], messages: List[Dict[str, Any]], *, orc
             "in_depth_claims": in_depth_claims or [],
             "answer_confidence": answer_confidence,
             "indepth_confidence": indepth_confidence,
+            "temporal_facts_schema_version": (
+                temporal_facts.get("schema_version") if isinstance(temporal_facts, dict) else None
+            ),
+            "temporal_facts_summary": temporal.compact_temporal_facts_summary(temporal_facts),
+            "temporal_gate": temporal_gate,
+            "original_answer_text": original_answer_text,
             "steps": steps,
         }
         os.makedirs(_TRACE_DIR, exist_ok=True)
@@ -1126,6 +1253,7 @@ async def run_team(
     indepth_only: bool = False,
     solo: bool = False,
     context: Optional[Dict[str, Any]] = None,
+    temporal_gate: str = "off",
     anchor: Optional[str] = None,
     knobs: Optional[Dict[str, Any]] = None,
     level_id: Optional[str] = None,
@@ -1155,6 +1283,7 @@ async def run_team(
                                   "content": "Patient records (most recent first):\n" + chart_text})
     chart = _chart_context(messages)
     reference_date: Optional[str] = None  # resolved below; recorded in the trace for the judge
+    temporal_facts: Optional[Dict[str, Any]] = None
 
     # Per-role sampling knobs: a level may override any role's temperature / repeat_penalty
     # / dry; unset falls back to today's global default for that role.
@@ -1175,6 +1304,7 @@ async def run_team(
     # of scaffolding (solo vs team). From the level default or the request's context field.
     spec = context or {}
     want_temporal = spec.get("temporal", True)
+    temporal_gate_mode = str(spec.get("temporal_gate", temporal_gate or "off")).strip().lower()
     want_kb = spec.get("kb", False)
     want_expert = spec.get("expert", False)
     trace_orch = None if solo else model  # solo = no orchestrator/team in the trace
@@ -1192,10 +1322,10 @@ async def run_team(
     # one call, no in-depth, validator skipped — so the output is the bare chartsearchai envelope.
     _synth_base = synthesizer_prompt or "synthesis"
     if indepth_only:
-        # Two-call IN-DEPTH leg: no answer synthesis at all, only the shared "synthesis-indepth"
-        # prompt (so the answer prompt — which may not exist for this base — is never loaded).
+        # Two-call IN-DEPTH leg: no answer synthesis at all, only the configured in-depth prompt
+        # (default "synthesis-indepth"; dynamic ids can select another prompt file).
         answer_instruction = None
-        indepth_instruction = load_prompt("synthesis-indepth")
+        indepth_instruction = load_prompt(_synth_base)
     elif two_call:
         answer_instruction = load_prompt(_synth_base + "-answer")
         indepth_instruction = load_prompt(_synth_base + "-indepth")
@@ -1312,9 +1442,11 @@ async def run_team(
         if want_temporal:  # P1: context-spec gates temporal (default on); off = the temporal ablation (P3)
             anchor_mode = anchor or os.environ.get("HUB_ANCHOR")
             reference_date = temporal.resolve_anchor(anchor_mode, chart)
-            temporal_block = temporal.build_temporal_block(chart, reference_date)
-            if temporal_block:
-                gathered = temporal_block + ("\n\n" + gathered if gathered else "")
+            temporal_facts = temporal.build_temporal_facts(
+                chart, reference_date, anchor_mode=anchor_mode or "latest_record")
+            temporal_facts_block = temporal.render_temporal_facts(temporal_facts)
+            if temporal_facts_block:
+                gathered = temporal_facts_block + ("\n\n" + gathered if gathered else "")
 
         if indepth_only:
             # Two-call architecture: produce ONLY the In-Depth, elaborating the prior answer carried
@@ -1332,7 +1464,7 @@ async def run_team(
                                               "mode": "in-depth-only"}],
                          answer_confidence=_io_conf, indepth_confidence=_io_conf,
                          answer_text=prior_answer, in_depth_claims=claims,
-                         reference_date=reference_date)
+                         reference_date=reference_date, temporal_facts=temporal_facts)
             body = "**In Depth**\n" + "\n".join("- " + c for c in claims) if claims else ""
             return json.dumps({"answer": body, "citations": [], "blocks": []})
 
@@ -1352,6 +1484,11 @@ async def run_team(
                     response_format=response_format, temperature=synth_temp,
                     max_tokens=max_tokens, repeat_penalty=synth_rp, dry=synth_dry)
                 if p_answer:
+                    p_answer, p_citations, p_blocks, _temporal_gate, _original_answer = \
+                        _apply_temporal_gate(
+                            question=_latest_user_text(messages), answer_text=p_answer,
+                            citations=p_citations, blocks=p_blocks, temporal_facts=temporal_facts,
+                            temporal_gate_mode=temporal_gate_mode, steps=orch_steps)
                     if indepth_shared:
                         # SHARED single-pass In-Depth (synthesis-indepth prompt, no validator): the
                         # parity Answer PLUS a combined **Answer**/**In Depth** body, so the arm is
@@ -1363,15 +1500,19 @@ async def run_team(
                             repeat_penalty=synth_rp, dry=synth_dry)
                         _shared_conf = {"level": "green",
                                         "note": "shared in-depth: single pass, no validator"}
+                        _shared_conf = _merge_temporal_gate_conf(_shared_conf, _temporal_gate)
                         _write_trace(level_id, messages, orchestrator=trace_orch, expert=trace_expert,
                                      synthesizer=synth_model, validator=None,
                                      steps=orch_steps + [{"role": "synthesizer", "model": synth_model,
                                                           "mode": "parity-answer+shared-indepth"}],
                                      answer_confidence=_shared_conf, indepth_confidence=_shared_conf,
                                      answer_text=p_answer, in_depth_claims=claims,
-                                     reference_date=reference_date)
+                                     reference_date=reference_date, temporal_facts=temporal_facts,
+                                     temporal_gate=_temporal_gate,
+                                     original_answer_text=_original_answer)
                         # Combined **Answer** / **In Depth** body; no confidence block (no validator).
-                        return _assemble_envelope(p_answer, p_citations, p_blocks, claims)
+                        return _assemble_envelope(
+                            p_answer, p_citations, p_blocks, claims, _shared_conf, _shared_conf)
                     # Composable validator (validator ⊥ two_call): audit + refine the bare-parity Answer
                     # ONLY (the shared-in-depth lane above is single-pass by design), so a two_call=False
                     # team can pair a validator with the SAME answer prompt as the singles.
@@ -1387,6 +1528,7 @@ async def run_team(
                     _parity_conf = _val_conf if validator_model else {
                         "level": "green",
                         "note": "parity lane: chartsearchai prompt, single call, validator off"}
+                    _parity_conf = _merge_temporal_gate_conf(_parity_conf, _temporal_gate)
                     _write_trace(level_id, messages, orchestrator=trace_orch, expert=trace_expert,
                                  synthesizer=synth_model, validator=validator_model,
                                  steps=orch_steps + [{"role": "synthesizer", "model": synth_model,
@@ -1395,7 +1537,9 @@ async def run_team(
                                  # indepth-only call) — don't paint the Answer's verdict onto it.
                                  answer_confidence=_parity_conf, indepth_confidence=None,
                                  answer_text=p_answer, in_depth_claims=[],
-                                 reference_date=reference_date)
+                                 reference_date=reference_date, temporal_facts=temporal_facts,
+                                 temporal_gate=_temporal_gate,
+                                 original_answer_text=_original_answer)
                     # Bare chartsearchai envelope built directly (NOT _assemble_envelope, which
                     # forces a "**Answer**" header): no In-Depth, no confidence -> matches direct arms.
                     return json.dumps({"answer": p_answer,
@@ -1405,10 +1549,12 @@ async def run_team(
                 logger.error("parity synthesis failed: %s", e, exc_info=True)
         else:
             try:
-                content, synth_steps, answer_conf, indepth_conf, answer_text, claims = \
+                content, synth_steps, answer_conf, indepth_conf, answer_text, claims, \
+                    _temporal_gate, _original_answer = \
                     await _synthesize_and_validate(
                         client,
                         base_messages=list(messages), gathered=gathered, chart=chart,
+                        temporal_facts=temporal_facts, temporal_gate_mode=temporal_gate_mode,
                         synth_model=synth_model,
                         answer_instruction=answer_instruction, indepth_instruction=indepth_instruction,
                         response_format=response_format, validator_model=validator_model,
@@ -1421,7 +1567,9 @@ async def run_team(
                              steps=orch_steps + synth_steps,
                              answer_confidence=answer_conf, indepth_confidence=indepth_conf,
                              answer_text=answer_text, in_depth_claims=claims,
-                             reference_date=reference_date)
+                             reference_date=reference_date, temporal_facts=temporal_facts,
+                             temporal_gate=_temporal_gate,
+                             original_answer_text=_original_answer)
                 return content
             except Exception as e:
                 logger.error("synthesis failed: %s", e, exc_info=True)
@@ -1429,6 +1577,7 @@ async def run_team(
     _write_trace(level_id, messages, orchestrator=trace_orch, expert=trace_expert,
                  synthesizer=synth_model, validator=validator_model, steps=orch_steps,
                  answer_confidence={"level": "red", "note": "The team could not produce an answer this turn."},
-                 indepth_confidence={"level": "green", "note": ""}, reference_date=reference_date)
+                 indepth_confidence={"level": "green", "note": ""}, reference_date=reference_date,
+                 temporal_facts=temporal_facts)
     return _fallback_envelope(
         "I could not produce a complete answer for this turn. Please try again.")

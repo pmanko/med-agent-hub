@@ -16,6 +16,32 @@ from typing import Any, Dict, List, Optional
 import yaml
 
 _PATH = Path(__file__).parent / "levels.yaml"
+_TEMPORAL_GATE_MODES = {"off", "warn", "enforce"}
+
+
+def _split_dynamic_prompt_level(level_id: str, prefix: str) -> tuple[str, str | None, str | None]:
+    """Parse dynamic prompt-level ids.
+
+    Supported forms:
+      answer:<writer>
+      answer:<writer>@<prompt>
+      answer:<writer>@<prompt>~<temporal_gate>
+      indepth-only:<writer>
+      indepth-only:<writer>@<prompt>
+
+    ``@`` and ``~`` are deliberately not valid in our router model ids or prompt
+    stems, which keeps this parser tiny and makes backend configs easy to read.
+    """
+    rest = level_id[len(prefix):]
+    writer_prompt, sep, gate = rest.partition("~")
+    if sep and gate not in _TEMPORAL_GATE_MODES:
+        raise KeyError(
+            f"dynamic level {level_id!r} has invalid temporal gate {gate!r}; "
+            f"expected one of {sorted(_TEMPORAL_GATE_MODES)}")
+    writer, at, prompt = writer_prompt.partition("@")
+    if not writer:
+        raise KeyError(f"dynamic level {level_id!r} is missing a writer model id")
+    return writer, (prompt if at and prompt else None), (gate if sep else None)
 
 
 @dataclass(frozen=True)
@@ -51,6 +77,9 @@ class Level:
     # HUB_ANCHOR env (run-wide) then "latest_record" (the max date in the chart). Modes:
     # "latest_record" | an explicit ISO date "YYYY-MM-DD" | "wall_clock".
     anchor: Optional[str] = None
+    # Deterministic temporal gate mode. off preserves existing behavior; warn records gate failures;
+    # enforce replaces high-confidence temporal contradictions before the optional LLM validator.
+    temporal_gate: str = "off"
     # Optional per-role sampling knobs: {role: {temperature, repeat_penalty, dry}}.
     # A role's entry overrides the global default for that role only; unset -> default.
     # Roles: orchestrator / expert / synthesizer / validator.
@@ -90,12 +119,13 @@ def get_level(level_id: str) -> Level:
         # two-call In-Depth is available for parity across every arm/run. The orchestrator only
         # carries the prior answer in session history; the writer (synthesizer) does the In-Depth.
         if level_id.startswith("indepth-only:") and level_id.split(":", 1)[1]:
-            _w = level_id.split(":", 1)[1]
+            _w, _prompt, _gate = _split_dynamic_prompt_level(level_id, "indepth-only:")
             return Level(
                 id=level_id,
                 orchestrator=_w,
                 synthesizer=_w,
                 expert=None,
+                synthesis_prompt=_prompt or "synthesis-indepth",
                 two_call=False,
                 indepth_only=True,
                 solo=True,  # P1: single-model In-Depth leg — no orchestrator/team
@@ -105,15 +135,16 @@ def get_level(level_id: str) -> Level:
         # temporal block, no In-Depth, no validator), so a two-call arm routes BOTH legs through the
         # hub with symmetric context. The orchestrator gathers; the writer (synthesizer) answers.
         if level_id.startswith("answer:") and level_id.split(":", 1)[1]:
-            _w = level_id.split(":", 1)[1]
+            _w, _prompt, _gate = _split_dynamic_prompt_level(level_id, "answer:")
             return Level(
                 id=level_id,
                 orchestrator=_w,
                 synthesizer=_w,
                 expert=None,
-                synthesis_prompt="synthesis-chartsearchai",  # bare chartsearchai answer (no In-Depth)
+                synthesis_prompt=_prompt or "synthesis-chartsearchai",
                 two_call=False,
                 solo=True,  # P1: single-model Answer leg — no orchestrator/team (this is the fix)
+                temporal_gate=_gate or "off",
             )
         raise KeyError(f"unknown level {level_id!r}; levels.yaml defines {list(raw)}")
     spec = raw[level_id] or {}
@@ -134,6 +165,7 @@ def get_level(level_id: str) -> Level:
             indepth_only=spec.get("indepth_only", False),
             solo=spec.get("solo", False),
             anchor=spec.get("anchor"),
+            temporal_gate=str(spec.get("temporal_gate", "off")).lower(),
             knobs=spec.get("knobs") or {},
         )
     except KeyError as exc:

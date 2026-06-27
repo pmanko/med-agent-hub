@@ -82,6 +82,15 @@ def test_generic_indepth_only_resolves_any_writer():
         assert lv.solo is True  # P1: single scaffolding
 
 
+def test_generic_indepth_only_accepts_prompt_variant():
+    lv = levels_loader.get_level("indepth-only:gemma-4-12b@synthesis-indepth")
+    assert lv.synthesizer == "gemma-4-12b"
+    assert lv.indepth_only is True
+    assert lv.two_call is False
+    assert lv.synthesis_prompt == "synthesis-indepth"
+    assert lv.solo is True
+
+
 def test_generic_answer_resolves_any_writer():
     # "answer:<writer>" mirrors indepth-only: a single CONTEXTUAL Answer leg through the hub (the
     # parity lane — one answer call with full gathered incl the temporal block, no In-Depth, no
@@ -94,6 +103,32 @@ def test_generic_answer_resolves_any_writer():
         assert lv.has_expert is False
         assert lv.solo is True  # P1: single scaffolding (no orchestrator/team) — the fix
         assert lv.synthesis_prompt == "synthesis-chartsearchai"  # bare answer (no In-Depth)
+
+
+def test_generic_answer_accepts_prompt_variant_and_temporal_gate():
+    lv = levels_loader.get_level("answer:gemma-e4b-q8@synthesis-date-output-contract~warn")
+    assert lv.synthesizer == "gemma-e4b-q8"
+    assert lv.synthesis_prompt == "synthesis-date-output-contract"
+    assert lv.temporal_gate == "warn"
+    assert lv.two_call is False
+    assert lv.solo is True
+    assert lv.has_expert is False
+
+
+def test_generic_answer_rejects_unknown_temporal_gate():
+    with pytest.raises(KeyError):
+        levels_loader.get_level("answer:gemma-e4b-q8@synthesis-chartsearchai~maybe")
+
+
+def test_temporal_gate_dynamic_answer_levels_use_run_anchor_and_modes():
+    off = levels_loader.get_level("answer:gemma-4-12b@synthesis-chartsearchai~off")
+    warn = levels_loader.get_level("answer:gemma-4-12b@synthesis-chartsearchai~warn")
+    enforce = levels_loader.get_level("answer:gemma-26b@synthesis-chartsearchai~enforce")
+    assert off.temporal_gate == "off"
+    assert warn.temporal_gate == "warn"
+    assert enforce.temporal_gate == "enforce"
+    assert {off.anchor, warn.anchor, enforce.anchor} == {None}
+    assert off.solo is True and warn.solo is True and enforce.solo is True
 
 
 def test_unknown_non_indepth_level_still_fails_loud():
@@ -115,11 +150,19 @@ def test_advertised_models_includes_dynamic_indepth_legs(monkeypatch):
             return {"data": [{"id": "mistral-nemo-12b-q8"}, {"id": "qwen3.6-35b"}]}
 
     monkeypatch.setattr(httpx, "get", lambda *a, **k: _Resp())
+    monkeypatch.setattr(openai_compat, "prompt_names", lambda: [
+        "synthesis-chartsearchai",
+        "synthesis-date-output-contract",
+        "synthesis-indepth",
+    ])
     ids = openai_compat._advertised_models()
     assert "indepth-only:mistral-nemo-12b-q8" in ids
     assert "indepth-only:qwen3.6-35b" in ids
     assert "answer:mistral-nemo-12b-q8" in ids   # the Answer leg advertised too (both legs hub-served)
     assert "answer:qwen3.6-35b" in ids
+    assert "answer:mistral-nemo-12b-q8@synthesis-date-output-contract~warn" in ids
+    assert "answer:qwen3.6-35b@synthesis-date-output-contract~enforce" in ids
+    assert "indepth-only:qwen3.6-35b@synthesis-indepth" in ids
     assert "med-agent-team-med" in ids  # static levels still advertised alongside
 
 

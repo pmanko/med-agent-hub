@@ -127,6 +127,12 @@ _PROGRAM_CONFOUND = """Patient records (most recent first):
 [4] (2025-12-31) Finding — Weight (kg): 42.0 kg
 """
 
+_WEIGHT_WITH_HOSPITALIZATION = """Patient records (most recent first):
+[1] (2026-01-07) Finding — Weight (kg): 41.0 kg
+[2] (2025-12-31) Finding — Weight (kg): 42.0 kg
+[3] (2025-10-22) Finding — Number of hospitalizations in past year: 27 # hospitalizations
+"""
+
 
 def test_event_timeline_excludes_program_enrollment_from_last_visit():
     block = temporal.build_temporal_block(_PROGRAM_CONFOUND, anchor="2026-06-20")
@@ -140,3 +146,190 @@ def test_event_timeline_excludes_program_enrollment_from_last_visit():
 def test_resolve_anchor_latest_record_ignores_program_enrollment():
     # the default "now" = the last CLINICAL record date, not a post-dated administrative enrollment
     assert temporal.resolve_anchor("latest_record", _PROGRAM_CONFOUND) == "2026-01-07"
+
+
+# ---- temporal_facts.v1.1 sidecar -------------------------------------------
+
+def test_temporal_facts_captures_return_visit_dates_and_classifies_against_anchor():
+    facts = temporal.build_temporal_facts(_CHART, "2006-06-01")
+    assert facts["schema_version"] == "temporal_facts.v1.1"
+    assert facts["reference_date"] == "2006-06-01"
+    assert facts["reference_date_id"] == "D2006_06_01"
+    assert facts["last_clinical_encounter"]["date"] == "2006-05-18"
+    assert facts["last_clinical_encounter"]["date_id"] == "D2006_05_18"
+
+    ledger = {d["iso"]: d for d in facts["date_ledger"]}
+    assert ledger["2006-05-18"]["date_id"] == "D2006_05_18"
+    assert ledger["2006-05-18"]["year"] == 2006
+    assert ledger["2006-05-18"]["month"] == 5
+    assert ledger["2006-05-18"]["month_name"] == "May"
+    assert ledger["2006-05-18"]["day"] == 18
+    assert "2005-12-01" in ledger  # deterministic past-6-months window boundary
+
+    rv = facts["return_visit_dates"]
+    assert rv and rv[0]["concept"] == "Return visit date"
+    assert rv[0]["value_date"] == "2006-05-18"
+    assert rv[0]["value_date_id"] == "D2006_05_18"
+    assert rv[0]["relation_to_reference"] == "past"
+
+    appt = facts["appointment_candidates"]
+    assert appt["past"][0]["date"] == "2006-05-18"
+    assert appt["past"][0]["date_id"] == "D2006_05_18"
+    assert appt["future"] == []
+
+    wt = next(s for s in facts["numeric_series"] if s["concept"] == "Weight")
+    assert wt["points"][-1]["effective_date_id"] == "D2006_05_18"
+    assert wt["window"]["start_date_id"] == "D2006_03_03"
+
+
+def test_render_temporal_facts_includes_full_json_sidecar_marker():
+    facts = temporal.build_temporal_facts(_CHART, "2006-05-18")
+    rendered = temporal.render_temporal_facts(facts)
+    assert "temporal_facts.v1.1" in rendered
+    assert '"date_ledger"' in rendered
+    assert '"return_visit_dates"' in rendered
+    assert '"numeric_series"' in rendered
+
+
+# ---- temporal gate ----------------------------------------------------------
+
+def test_gate_off_is_noop_metadata_only():
+    facts = temporal.build_temporal_facts(_CHART, "2006-06-01")
+    gate = temporal.run_temporal_gate(
+        "Does this patient have any upcoming appointments?",
+        "The next appointment is 2006-05-18 [5].",
+        [5],
+        facts,
+        "off",
+    )
+    assert gate["mode"] == "off"
+    assert gate["status"] == "not_applicable"
+    assert gate["checks"] == []
+
+
+def test_gate_fails_past_return_visit_called_upcoming_and_offers_patch():
+    facts = temporal.build_temporal_facts(_CHART, "2006-06-01")
+    gate = temporal.run_temporal_gate(
+        "Does this patient have any upcoming appointments?",
+        "The next upcoming appointment is 2006-05-18 [5].",
+        [5],
+        facts,
+        "enforce",
+    )
+    assert gate["status"] == "fail"
+    assert any(c["id"] == "upcoming_date" and c["status"] == "fail" for c in gate["checks"])
+    assert "No upcoming appointment is documented after 2006-06-01" in gate["patch_answer"]
+    assert gate["patch_citations"] == [5]
+
+
+def test_gate_warn_mode_reports_but_does_not_patch_by_itself():
+    facts = temporal.build_temporal_facts(_CHART, "2006-06-01")
+    gate = temporal.run_temporal_gate(
+        "Does this patient have any upcoming appointments?",
+        "The next upcoming appointment is 2006-05-18 [5].",
+        [5],
+        facts,
+        "warn",
+    )
+    assert gate["mode"] == "warn"
+    assert gate["status"] == "fail"
+    assert gate["patch_answer"]  # patch is advisory; callers apply it only in enforce mode
+
+
+def test_gate_fails_wrong_last_visit_date():
+    facts = temporal.build_temporal_facts(_CHART, "2006-06-01")
+    gate = temporal.run_temporal_gate(
+        "When was this patient's last visit?",
+        "The last visit was 2006-05-11 [47].",
+        [47],
+        facts,
+        "enforce",
+    )
+    assert gate["status"] == "fail"
+    assert any(c["id"] == "last_visit" for c in gate["checks"])
+    assert "2006-05-18" in gate["patch_answer"]
+
+
+def test_gate_fails_single_point_trend_claim():
+    facts = temporal.build_temporal_facts(_CHART, "2006-06-01")
+    gate = temporal.run_temporal_gate(
+        "What is the CD4 trend?",
+        "The CD4 count is decreasing over time, most recently 72 cells/uL [218].",
+        [218],
+        facts,
+        "enforce",
+    )
+    assert gate["status"] == "fail"
+    assert any(c["id"] == "single_point_trend" for c in gate["checks"])
+    assert "A trend cannot be determined from one point" in gate["patch_answer"]
+
+
+def test_gate_fails_contradictory_weight_direction_and_wrong_date_value_binding():
+    facts = temporal.build_temporal_facts(_CHART, "2006-06-01")
+    gate = temporal.run_temporal_gate(
+        "How has this patient's weight changed?",
+        "The weight increased to 52 kg on 2006-05-18 [15].",
+        [15],
+        facts,
+        "enforce",
+    )
+    assert gate["status"] == "fail"
+    ids = {c["id"] for c in gate["checks"] if c["status"] == "fail"}
+    assert {"trend_direction", "date_value_binding"} <= ids
+
+
+def test_gate_fails_malformed_date_output_and_can_patch_selected_series():
+    facts = temporal.build_temporal_facts(_CHART, "2006-06-01")
+    gate = temporal.run_temporal_gate(
+        "How has this patient's weight changed?",
+        "The weight decreased to 41 kg on 2006-05- 18 [15].",
+        [15],
+        facts,
+        "enforce",
+    )
+    assert gate["status"] == "fail"
+    assert any(c["id"] == "date_format" for c in gate["checks"])
+    assert gate["patch_answer"].startswith("The documented Weight series decreased")
+
+
+def test_gate_fails_valid_iso_date_that_is_not_in_ledger():
+    facts = temporal.build_temporal_facts(_CHART, "2006-06-01")
+    gate = temporal.run_temporal_gate(
+        "Were there orders in the past 6 months?",
+        "There was a drug order on 3025-12-31 [26].",
+        [26],
+        facts,
+        "warn",
+    )
+    assert gate["status"] == "fail"
+    check = next(c for c in gate["checks"] if c["id"] == "date_format")
+    assert "not present in date_ledger" in check["reason"]
+
+
+def test_gate_fails_exposed_internal_date_id():
+    facts = temporal.build_temporal_facts(_CHART, "2006-06-01")
+    gate = temporal.run_temporal_gate(
+        "How has this patient's weight changed?",
+        "The first weight was on date D2006_03_03 and the most recent was 2006-05-18 [15].",
+        [15],
+        facts,
+        "enforce",
+    )
+    assert gate["status"] == "fail"
+    check = next(c for c in gate["checks"] if c["id"] == "date_format")
+    assert "internal matching" in check["reason"]
+
+
+def test_gate_does_not_select_hospitalizations_from_generic_past_year_words():
+    facts = temporal.build_temporal_facts(_WEIGHT_WITH_HOSPITALIZATION, "2026-06-20")
+    gate = temporal.run_temporal_gate(
+        "How has this patient's weight changed over the past year?",
+        "The documented weight decreased from 42 kg on 2025-12-31 [2] to 41 kg on 2026-01-07 [1].",
+        [1, 2],
+        facts,
+        "warn",
+    )
+    failed_ids = {c["id"] for c in gate["checks"] if c["status"] == "fail"}
+    assert "single_point_trend" not in failed_ids
+    assert "date_value_binding" not in failed_ids
+    assert all("hospitalizations" not in c["reason"] for c in gate["checks"])

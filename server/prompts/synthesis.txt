@@ -41,5 +41,5 @@ Her regimen is no longer first-line [4].
 
 citations: [4]  (the chart record for the regimen is cited; the WHO guidance is attributed inline with NO integer).
 
-Emit a `table` block when the answer lists/enumerates multiple items (e.g. a medication or lab list); otherwise leave `blocks` empty. Put each cited record's index in that cell's `refs`. Keep the prose concise.
+Emit a `table` block when the answer lists/enumerates multiple items (e.g. a medication or lab list); otherwise leave `blocks` empty. Put each cited record's index in that cell's `refs`. Keep the prose concise, and do not repeat every table citation inline in the answer summary.
 Include a column ONLY if the chart actually supplies that value for at least one row — do NOT add a column (e.g. dose, date) whose cells you would leave blank. An all-empty column is malformed; drop it and keep only columns you can populate from the records.
