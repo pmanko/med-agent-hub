@@ -133,3 +133,50 @@ def test_temporal_gate_warn_records_failure_without_changing_answer(monkeypatch,
     assert gate["status"] == "fail"
     assert gate["applied"] == "none"
     assert trace["original_answer_text"] is None
+
+
+# ---- envelope-shape equivalence (the unify must NOT change any arm's output shape) ----
+# A setup quirk in the envelope (bare vs sectioned) would confound LLM comparison, so pin each shape.
+
+def _shape_chat():
+    async def fake_chat(client, model, messages, *, tools=None, response_format=None, **kwargs):
+        name = (response_format or {}).get("json_schema", {}).get("name")
+        if name == "in_depth":
+            return {"content": json.dumps({"claims": ["WHO anemia threshold is Hgb < 12 g/dL."]})}
+        if name in ("rewrite_verdict", "indepth_verdict", "answer_verdict"):
+            return {"content": json.dumps({"answer_ok": True, "errors": [], "drop": []})}
+        if response_format is not None:  # the answer synth (chart_answer envelope)
+            return {"content": json.dumps({"answer": "Hemoglobin 7.1 g/dL [1].", "citations": [1], "blocks": []})}
+        return {"content": "", "tool_calls": None}  # orchestrator: no tools
+    return fake_chat
+
+
+def test_parity_no_indepth_ships_bare_envelope(monkeypatch):
+    """Parity (two_call=False, no shared In-Depth) ships the BARE {answer,citations,blocks} — no
+    **Answer** header — so its output is byte-identical to the direct single-LLM arms."""
+    monkeypatch.setattr(team, "_chat", _shape_chat())
+    out = asyncio.run(team.run_team(_MSGS, response_format=_RF, orchestrator_model="ORCH",
+                                    synthesizer_model="SYNTH", has_expert=False, two_call=False, solo=True))
+    ans = json.loads(out)["answer"]
+    assert "**Answer**" not in ans and "**In Depth**" not in ans, ans
+    assert "7.1" in ans
+
+
+def test_parity_shared_indepth_ships_sectioned(monkeypatch):
+    """Parity + shared In-Depth ships the sectioned **Answer** / **In Depth** body."""
+    monkeypatch.setattr(team, "_chat", _shape_chat())
+    out = asyncio.run(team.run_team(_MSGS, response_format=_RF, orchestrator_model="ORCH",
+                                    synthesizer_model="SYNTH", has_expert=False, two_call=False,
+                                    solo=True, indepth_shared=True))
+    ans = json.loads(out)["answer"]
+    assert "**Answer**" in ans and "**In Depth**" in ans, ans
+
+
+def test_two_call_ships_sectioned(monkeypatch):
+    """Two-call ships the sectioned **Answer** / **In Depth** body."""
+    monkeypatch.setattr(team, "_chat", _shape_chat())
+    out = asyncio.run(team.run_team(_MSGS, response_format=_RF, orchestrator_model="ORCH",
+                                    synthesizer_model="SYNTH", validator_model="VAL",
+                                    has_expert=False, two_call=True, solo=True))
+    ans = json.loads(out)["answer"]
+    assert "**Answer**" in ans and "**In Depth**" in ans, ans

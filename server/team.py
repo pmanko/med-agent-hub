@@ -1051,7 +1051,8 @@ async def _synthesize_and_validate(
     validator_dry: Optional[float],
     max_tokens: Optional[int],
     max_loops: int,
-    include_indepth: bool = True,
+    indepth_mode: str = "split",   # "split" (validated two-call In-Depth) | "shared" (single-pass) | "none"
+    bare_envelope: bool = False,   # True -> the bare chartsearchai {answer,citations,blocks} (parity), no **Answer** header
 ) -> Tuple[str, List[Dict[str, Any]], Dict[str, Any], Dict[str, Any], str, List[str], Dict[str, Any], Optional[str]]:
     """Two-call generation + two independent validators, combined into one envelope only here.
     Returns (envelope_json, trace_steps, answer_confidence, indepth_confidence, answer_text,
@@ -1103,15 +1104,30 @@ async def _synthesize_and_validate(
         validator_dry=validator_dry, max_tokens=max_tokens, max_loops=max_loops, steps=steps)
     answer_conf = _merge_temporal_gate_conf(answer_conf, temporal_gate)
 
-    if not include_indepth:
-        return (_assemble_answer_only_envelope(answer_text, citations, blocks, answer_conf),
-                steps, answer_conf, {}, answer_text, [], temporal_gate, original_answer_text)
+    # --- IN-DEPTH: split (validated two-call) | shared (single-pass, no validator) | none ---
+    claims: List[str] = []
+    indepth_conf: Dict[str, Any] = {}
+    if indepth_mode == "split":
+        claims, indepth_conf = await _gen_indepth(
+            client, synth_model, base_messages, indepth_instruction, gathered, answer_text, **_idkw)
+    elif indepth_mode == "shared":
+        claims = await _synthesize_indepth(
+            client, synth_model, base_messages=base_messages, indepth_instruction=indepth_instruction,
+            gathered=gathered, answer_text=answer_text, temperature=synth_temperature,
+            max_tokens=max_tokens, repeat_penalty=synth_repeat_penalty, dry=synth_dry)
+        indepth_conf = answer_conf  # shared pass has no separate validator -> shares the Answer confidence
 
-    # --- IN-DEPTH path (same green/yellow/red cycle) ---------------------
-    claims, indepth_conf = await _gen_indepth(
-        client, synth_model, base_messages, indepth_instruction, gathered, answer_text, **_idkw)
-    return (_assemble_envelope(answer_text, citations, blocks, claims, answer_conf, indepth_conf),
-            steps, answer_conf, indepth_conf, answer_text, claims, temporal_gate, original_answer_text)
+    # --- assemble (envelope shape keyed by mode, so each arm's output is byte-exact) ---
+    if indepth_mode in ("split", "shared"):
+        # sectioned **Answer** / **In Depth** body (two-call and parity-shared)
+        content = _assemble_envelope(answer_text, citations, blocks, claims, answer_conf, indepth_conf)
+    elif bare_envelope:
+        # bare chartsearchai envelope, NO header — matches the direct single-LLM arms (parity, no In-Depth)
+        content = json.dumps({"answer": answer_text, "citations": citations or [], "blocks": blocks or []})
+    else:
+        # answer-only leg of a two-call level (In-Depth deferred to the caller's second leg)
+        content = _assemble_answer_only_envelope(answer_text, citations, blocks, answer_conf)
+    return (content, steps, answer_conf, indepth_conf, answer_text, claims, temporal_gate, original_answer_text)
 
 
 # Per-turn reasoning trace: the hub appends one structured line per turn to a writable mount so the
@@ -1409,112 +1425,47 @@ async def run_team(
             body = "**In Depth**\n" + "\n".join("- " + c for c in claims) if claims else ""
             return json.dumps({"answer": body, "citations": [], "blocks": []})
 
+        # --- UNIFIED generation: parity / two-call / answer-only all run through ONE path
+        # (_synthesize_and_validate). The envelope shape + In-Depth mode are flags so each arm's output
+        # stays byte-exact, while the substance gate + temporal gate + the single validator live in one
+        # place for every arm:
+        #   parity (not two_call), no shared In-Depth -> bare {answer,citations,blocks} (matches the singles)
+        #   parity + indepth_shared                   -> sectioned Answer/In-Depth (single-pass In-Depth)
+        #   two-call                                  -> sectioned, validated two-call In-Depth
+        #   two-call + answer_only                    -> answer-only leg (In-Depth deferred to the 2nd call)
         if not two_call:
-            # Parity lane: ONE chartsearchai-style synthesis call (answer_instruction is the whole
-            # chartsearchai prompt), NO In-Depth, validator skipped -> the bare chartsearchai
-            # {answer, citations, blocks} envelope, so the output format matches the direct
-            # single-LLM arms. Orchestration (kb_search + expert) + the temporal block still feed it.
-            # R1 (answer identity): for a degenerate single (no expert) that ALSO emits In-Depth,
-            # suppress the gathered evidence on the ANSWER call so the answer prompt stays identical
-            # to the vanilla single arm; the shared In-Depth pass still gets the gathered context.
-            answer_gathered = gathered  # P1: R1 deleted — the Answer gets the same context as the In-Depth
-            try:
-                p_answer, p_citations, p_blocks = await _synthesize_answer(
-                    client, synth_model, base_messages=list(messages),
-                    answer_instruction=answer_instruction, gathered=answer_gathered,
-                    response_format=response_format, temperature=synth_temp,
-                    max_tokens=max_tokens, repeat_penalty=synth_rp, dry=synth_dry)
-                if p_answer:
-                    p_answer, p_citations, p_blocks, _temporal_gate, _original_answer = \
-                        _apply_temporal_gate(
-                            question=_latest_user_text(messages), answer_text=p_answer,
-                            citations=p_citations, blocks=p_blocks, temporal_facts=temporal_facts,
-                            temporal_gate_mode=temporal_gate_mode, steps=orch_steps)
-                    if indepth_shared:
-                        # SHARED single-pass In-Depth (synthesis-indepth prompt, no validator): the
-                        # parity Answer PLUS a combined **Answer**/**In Depth** body, so the arm is
-                        # judged on the background dimension too. Fail-open -> [] on any error.
-                        claims = await _synthesize_indepth(
-                            client, synth_model, base_messages=list(messages),
-                            indepth_instruction=indepth_instruction, gathered=gathered,
-                            answer_text=p_answer, temperature=synth_temp, max_tokens=max_tokens,
-                            repeat_penalty=synth_rp, dry=synth_dry)
-                        _shared_conf = {"level": "green",
-                                        "note": "shared in-depth: single pass, no validator"}
-                        _shared_conf = _merge_temporal_gate_conf(_shared_conf, _temporal_gate)
-                        _write_trace(level_id, messages, orchestrator=trace_orch, expert=trace_expert,
-                                     synthesizer=synth_model, validator=None,
-                                     steps=orch_steps + [{"role": "synthesizer", "model": synth_model,
-                                                          "mode": "parity-answer+shared-indepth"}],
-                                     answer_confidence=_shared_conf, indepth_confidence=_shared_conf,
-                                     answer_text=p_answer, in_depth_claims=claims,
-                                     reference_date=reference_date, temporal_facts=temporal_facts,
-                                     temporal_gate=_temporal_gate,
-                                     original_answer_text=_original_answer)
-                        # Combined **Answer** / **In Depth** body; no confidence block (no validator).
-                        return _assemble_envelope(
-                            p_answer, p_citations, p_blocks, claims, _shared_conf, _shared_conf)
-                    # Composable validator (validator ⊥ two_call): audit + refine the bare-parity Answer
-                    # ONLY (the shared-in-depth lane above is single-pass by design), so a two_call=False
-                    # team can pair a validator with the SAME answer prompt as the singles.
-                    p_answer, p_citations, p_blocks, _val_conf = await _validate_and_refine_answer(
-                        client, synth_model=synth_model, base_messages=list(messages),
-                        answer_instruction=answer_instruction, gathered=answer_gathered,
-                        response_format=response_format,
-                        answer_text=p_answer, citations=p_citations, blocks=p_blocks,
-                        validator_model=validator_model, validator_prompt=validator_prompt, chart=chart,
-                        synth_temperature=synth_temp, synth_repeat_penalty=synth_rp, synth_dry=synth_dry,
-                        validator_temperature=val_temp, validator_repeat_penalty=val_rp, validator_dry=val_dry,
-                        max_tokens=max_tokens, max_loops=validator_max_loops, steps=orch_steps)
-                    _parity_conf = _val_conf if validator_model else {
-                        "level": "green",
-                        "note": "parity lane: chartsearchai prompt, single call, validator off"}
-                    _parity_conf = _merge_temporal_gate_conf(_parity_conf, _temporal_gate)
-                    _write_trace(level_id, messages, orchestrator=trace_orch, expert=trace_expert,
-                                 synthesizer=synth_model, validator=validator_model,
-                                 steps=orch_steps + [{"role": "synthesizer", "model": synth_model,
-                                                      "mode": "parity-single-call"}],
-                                 # The parity Answer call produces NO In-Depth (it's a separate
-                                 # indepth-only call) — don't paint the Answer's verdict onto it.
-                                 answer_confidence=_parity_conf, indepth_confidence=None,
-                                 answer_text=p_answer, in_depth_claims=[],
-                                 reference_date=reference_date, temporal_facts=temporal_facts,
-                                 temporal_gate=_temporal_gate,
-                                 original_answer_text=_original_answer)
-                    # Bare chartsearchai envelope built directly (NOT _assemble_envelope, which
-                    # forces a "**Answer**" header): no In-Depth, no confidence -> matches direct arms.
-                    return json.dumps({"answer": p_answer,
-                                       "citations": p_citations or [],
-                                       "blocks": p_blocks or []})
-            except Exception as e:
-                logger.error("parity synthesis failed: %s", e, exc_info=True)
+            indepth_mode = "shared" if indepth_shared else "none"
+            bare_envelope = not indepth_shared
         else:
-            try:
-                content, synth_steps, answer_conf, indepth_conf, answer_text, claims, \
-                    _temporal_gate, _original_answer = \
-                    await _synthesize_and_validate(
-                        client,
-                        base_messages=list(messages), gathered=gathered, chart=chart,
-                        temporal_facts=temporal_facts, temporal_gate_mode=temporal_gate_mode,
-                        synth_model=synth_model,
-                        answer_instruction=answer_instruction, indepth_instruction=indepth_instruction,
-                        response_format=response_format, validator_model=validator_model,
-                        validator_prompt=validator_prompt,
-                        synth_temperature=synth_temp, synth_repeat_penalty=synth_rp, synth_dry=synth_dry,
-                        validator_temperature=val_temp, validator_repeat_penalty=val_rp, validator_dry=val_dry,
-                        max_tokens=max_tokens, max_loops=validator_max_loops,
-                        include_indepth=not answer_only)
-                _write_trace(level_id, messages, orchestrator=trace_orch, expert=trace_expert,
-                             synthesizer=synth_model, validator=validator_model,
-                             steps=orch_steps + synth_steps,
-                             answer_confidence=answer_conf, indepth_confidence=indepth_conf,
-                             answer_text=answer_text, in_depth_claims=claims,
-                             reference_date=reference_date, temporal_facts=temporal_facts,
-                             temporal_gate=_temporal_gate,
-                             original_answer_text=_original_answer)
-                return content
-            except Exception as e:
-                logger.error("synthesis failed: %s", e, exc_info=True)
+            indepth_mode = "none" if answer_only else "split"
+            bare_envelope = False
+        try:
+            content, synth_steps, answer_conf, indepth_conf, answer_text, claims, \
+                _temporal_gate, _original_answer = await _synthesize_and_validate(
+                    client,
+                    base_messages=list(messages), gathered=gathered, chart=chart,
+                    temporal_facts=temporal_facts, temporal_gate_mode=temporal_gate_mode,
+                    synth_model=synth_model,
+                    answer_instruction=answer_instruction, indepth_instruction=indepth_instruction,
+                    response_format=response_format, validator_model=validator_model,
+                    validator_prompt=validator_prompt,
+                    synth_temperature=synth_temp, synth_repeat_penalty=synth_rp, synth_dry=synth_dry,
+                    validator_temperature=val_temp, validator_repeat_penalty=val_rp, validator_dry=val_dry,
+                    max_tokens=max_tokens, max_loops=validator_max_loops,
+                    indepth_mode=indepth_mode, bare_envelope=bare_envelope)
+            # A parity Answer carries NO In-Depth confidence on the trace (its In-Depth is a separate
+            # indepth-only call) — match the direct single-LLM arms.
+            trace_indepth_conf = None if (bare_envelope and indepth_mode == "none") else indepth_conf
+            _write_trace(level_id, messages, orchestrator=trace_orch, expert=trace_expert,
+                         synthesizer=synth_model, validator=validator_model,
+                         steps=orch_steps + synth_steps,
+                         answer_confidence=answer_conf, indepth_confidence=trace_indepth_conf,
+                         answer_text=answer_text, in_depth_claims=claims,
+                         reference_date=reference_date, temporal_facts=temporal_facts,
+                         temporal_gate=_temporal_gate, original_answer_text=_original_answer)
+            return content
+        except Exception as e:
+            logger.error("synthesis failed: %s", e, exc_info=True)
 
     _write_trace(level_id, messages, orchestrator=trace_orch, expert=trace_expert,
                  synthesizer=synth_model, validator=validator_model, steps=orch_steps,
