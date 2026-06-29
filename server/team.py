@@ -327,9 +327,27 @@ def _gathered_evidence(kb_context: str, expert_notes: List[str]) -> str:
     return "Gathered evidence:\n\n" + "\n\n".join(parts)
 
 
-def _fallback_envelope(answer: str) -> str:
+# The single fallback-answer string. Defined ONCE so the hub and harness/validate/runner.py::_row_is_good
+# reference the same sentinel — the hub must never SHIP what the runner would re-run on --resume.
+FALLBACK_ANSWER = "I could not produce a complete answer for this turn. Please try again."
+
+
+def _fallback_envelope(answer: str = FALLBACK_ANSWER) -> str:
     """A minimal, always-schema-valid chart_answer envelope."""
     return json.dumps({"answer": answer, "citations": [], "blocks": []})
+
+
+def _is_substantive_answer(text: Optional[str]) -> bool:
+    """Deterministic 'is this a real answer?' check — mirrors harness runner._row_is_good's text predicate
+    (non-empty after strip · has an alphanumeric char · not the fallback message). The LLM validator fails
+    open on a "." answer (no concrete error to name), so this cheap check, not the validator, is what
+    guarantees an empty/punctuation-only/fallback answer never ships green."""
+    ans = (text or "").strip()
+    if not ans:
+        return False
+    if not any(ch.isalnum() for ch in ans):
+        return False
+    return "could not produce a complete answer" not in ans
 
 
 def _normalize_envelope(raw: str) -> str:
@@ -388,21 +406,6 @@ _INDEPTH_RF = {
     },
 }
 
-
-_ANSWER_VERDICT_RF = {
-    "type": "json_schema",
-    "json_schema": {
-        "name": "answer_verdict",
-        "schema": {
-            "type": "object",
-            "properties": {
-                "answer_ok": {"type": "boolean"},
-                "answer_issues": {"type": "string"},
-            },
-            "required": ["answer_ok"],
-        },
-    },
-}
 
 # Rewrite-validator verdict (the "suggest the fix" mode): the validator LOCALIZES each chart
 # contradiction (wrong phrase + grounding record + replacement) AND returns the surgically-corrected
@@ -496,6 +499,25 @@ def _assemble_envelope(
     if answer_conf or indepth_conf:
         env["confidence"] = {"answer": answer_conf or {"level": "green", "note": ""},
                              "in_depth": indepth_conf or {"level": "green", "note": ""}}
+    return json.dumps(env)
+
+
+def _assemble_answer_only_envelope(
+    answer_text: str, citations: List[int], blocks: List[Any],
+    answer_conf: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Serialize the staged UX Answer leg without an In-Depth placeholder in the markdown body.
+
+    The caller attaches In-Depth as structured/pending UI state, so the answer body remains the
+    direct clinical answer rather than pretending the background section already exists.
+    """
+    env: Dict[str, Any] = {
+        "answer": answer_text or "",
+        "citations": citations or [],
+        "blocks": blocks or [],
+    }
+    if answer_conf:
+        env["confidence"] = {"answer": answer_conf}
     return json.dumps(env)
 
 
@@ -622,19 +644,6 @@ def _apply_temporal_gate(
     return answer_text, citations, blocks, gate, original_answer
 
 
-def _answer_feedback(verdict: Dict[str, Any]) -> str:
-    """Answer-focused re-synthesis guidance from the Answer verdict. The In Depth is generated
-    separately, so this only steers the direct Answer."""
-    parts = ["Your goal is an accurate direct answer, grounded only in the patient chart."]
-    ai = (verdict.get("answer_issues") or "").strip()
-    if ai:
-        parts.append("A reviewer found this problem with the answer: " + ai)
-    parts.append(
-        "Rewrite the direct answer to be correct using only chart-supported facts; where the chart "
-        "lacks the information, say 'not documented'.")
-    return "\n".join(parts)
-
-
 async def _synthesize_answer(
     client: httpx.AsyncClient,
     synth_model: str,
@@ -699,48 +708,6 @@ async def _synthesize_indepth(
     if not isinstance(obj, dict):
         return []
     return [c.strip() for c in (obj.get("claims") or []) if isinstance(c, str) and c.strip()]
-
-
-async def _validate_answer(
-    client: httpx.AsyncClient,
-    validator_model: str,
-    *,
-    chart: str,
-    gathered: str,
-    answer_text: str,
-    max_tokens: Optional[int],
-    temperature: float,
-    repeat_penalty: Optional[float],
-    dry: Optional[float],
-    validation_prompt: str = "validation",
-) -> Dict[str, Any]:
-    """Audit the direct Answer for chart-accuracy. Returns {answer_ok, answer_issues}. FAIL-OPEN:
-    {answer_ok: True} on any parse failure so a flaky validator never blocks the run."""
-    instruction = load_prompt(validation_prompt + "-answer")
-    audit_user = (
-        instruction
-        + "\n\n=== PATIENT CHART (ground truth) ===\n" + (chart or "(none)")
-        + "\n\n=== GATHERED KB / EVIDENCE (the guidance the team retrieved) ===\n" + (gathered or "(none)")
-        + "\n\n=== DRAFT ANSWER ===\n" + answer_text
-    )
-    msg = await _chat(
-        client, validator_model, [{"role": "user", "content": audit_user}],
-        response_format=_ANSWER_VERDICT_RF, temperature=temperature, max_tokens=max_tokens,
-        repeat_penalty=repeat_penalty, dry_multiplier=dry)
-    raw = _message_text(msg)
-    try:
-        verdict = json.loads(raw)
-    except (json.JSONDecodeError, TypeError):
-        logger.warning("answer-validator[%s] verdict UNPARSEABLE -> FAIL-OPEN (pass); raw=%r",
-                       validator_model, raw[:240])
-        return {"answer_ok": True}
-    if not isinstance(verdict, dict):
-        logger.warning("answer-validator[%s] verdict not an object -> FAIL-OPEN; raw=%r",
-                       validator_model, raw[:240])
-        return {"answer_ok": True}
-    logger.info("answer-validator[%s] answer_ok=%s answer_issues=%r",
-                validator_model, verdict.get("answer_ok"), (verdict.get("answer_issues") or "")[:160])
-    return verdict
 
 
 async def _validate_answer_rewrite(
@@ -957,10 +924,6 @@ def _rw_issue(verdict: Optional[Dict[str, Any]]) -> str:
     return (e.get("chart") or e.get("fix") or "").strip()
 
 
-def _is_rewrite_validator(validator_prompt: Optional[str]) -> bool:
-    return (validator_prompt or "").strip().startswith(_REWRITE_VALIDATOR_PROMPT)
-
-
 async def _validate_and_refine_answer(
     client: httpx.AsyncClient,
     *,
@@ -990,113 +953,80 @@ async def _validate_and_refine_answer(
     share ONE validator. Gated by validator_model: unset (or a fail-open outage) -> green, draft unchanged.
     Returns (answer_text, citations, blocks, answer_conf{level: green|yellow|red, note})."""
     answer_conf = {"level": "green", "note": ""}
-    if not validator_model:
-        return answer_text, citations, blocks, answer_conf
 
-    # REWRITE MODE: the validator localizes each chart contradiction AND returns the surgically-corrected
-    # answer. We ADOPT that fix (re-extracting its [N] citations), re-audit it, and keep the BEST
-    # (fewest-errors) version seen — never regressing below the original draft. That surgical-edit +
-    # never-regress design is the over-correction guard the regenerate path lacks: a from-scratch
-    # re-synthesis re-touches the already-correct parts and can make a strong answer worse (the 12B-team
-    # harm regression), whereas adopting a localized fix only changes what a record contradicts.
-    if _is_rewrite_validator(validator_prompt):
-        async def _audit_rw(draft: str, attempt: int) -> Optional[Dict[str, Any]]:
-            try:
-                verdict = await _validate_answer_rewrite(
-                    client, validator_model, chart=chart, gathered=gathered, answer_text=draft,
-                    max_tokens=max_tokens, temperature=validator_temperature,
-                    repeat_penalty=validator_repeat_penalty, dry=validator_dry,
-                    validation_prompt=validator_prompt or _REWRITE_VALIDATOR_PROMPT)
-            except Exception as e:
-                logger.warning("rewrite-validator call failed: %s", e)
-                verdict = None  # fail-open
-            errs = (verdict or {}).get("errors") or []
-            steps.append({"role": "answer_validator", "mode": "rewrite", "model": validator_model,
-                          "attempt": attempt, "answer_ok": (verdict or {}).get("answer_ok", True),
-                          "n_errors": len(errs), "errors": errs})
-            return verdict
-
-        v = await _audit_rw(answer_text, 0)
-        # fail-open or a clean pass (no localized contradiction) -> green, draft untouched.
-        if v is None or v.get("answer_ok", True) or not v.get("errors"):
-            return answer_text, citations, blocks, answer_conf
-        first_issue = _rw_issue(v)
-        best_text, best_cit, best_n = answer_text, citations, len(v.get("errors") or [])
-        cleared = False
+    # --- Deterministic substance gate (always; NO model). A non-substantive draft (empty /
+    # punctuation-only / the fallback string) must NEVER ship green — the LLM validator fails open on a
+    # "." answer. Re-synthesize up to max_loops; if it stays non-substantive, ship the fallback envelope
+    # with RED confidence. Mirrors harness runner._row_is_good so the hub never ships what resume re-runs.
+    if not _is_substantive_answer(answer_text):
         for i in range(max(1, max_loops)):
-            corrected = (v.get("corrected_answer") or "").strip()
-            if not corrected or corrected == best_text:
-                break  # flagged but no usable rewrite offered -> keep the best so far
-            cand_cit = _extract_citations(corrected) or best_cit
-            v = await _audit_rw(corrected, i + 1)
-            n = len((v or {}).get("errors") or []) if v else 0
-            if v is None or v.get("answer_ok", True) or n == 0:
-                best_text, best_cit, cleared = corrected, cand_cit, True
-                break
-            if n < best_n:  # strictly fewer errors -> adopt, then try to fix the rest
-                best_text, best_cit, best_n = corrected, cand_cit, n
-            else:
-                break  # not better -> stop; keep the previous best (never regress)
-        if cleared:
-            answer_conf = {"level": "yellow", "note": _answer_note("yellow", first_issue, "")}
-        else:
-            # Still flagged: present the best version (adopted improvement or the original) + a caveat.
-            answer_conf = {"level": "red", "note": _answer_note("red", first_issue, _rw_issue(v))}
-        return best_text, best_cit, blocks, answer_conf
-
-    async def _audit(draft: str, attempt: int) -> Optional[Dict[str, Any]]:
-        try:
-            verdict = await _validate_answer(
-                client, validator_model, chart=chart, gathered=gathered, answer_text=draft,
-                max_tokens=max_tokens, temperature=validator_temperature,
-                repeat_penalty=validator_repeat_penalty, dry=validator_dry,
-                validation_prompt=validator_prompt or "validation")
-        except Exception as e:
-            logger.warning("answer-validator call failed: %s", e)
-            verdict = None  # fail-open
-        steps.append({"role": "answer_validator", "model": validator_model, "attempt": attempt,
-                      "answer_ok": (verdict or {}).get("answer_ok", True),
-                      "answer_issues": (verdict or {}).get("answer_issues", "")})
-        return verdict
-
-    def _passed(verdict: Optional[Dict[str, Any]]) -> bool:
-        # Pass when: no verdict (fail-open), answer_ok True, OR a reasonless False flag.
-        if verdict is None or verdict.get("answer_ok", True):
-            return True
-        return not (verdict.get("answer_issues") or "").strip()
-
-    v = await _audit(answer_text, 0)
-    if not _passed(v):
-        first_issue = (v.get("answer_issues") or "").strip()
-        fixed = False
-        for i in range(max(0, max_loops)):
-            logger.info("answer-validator: Answer flagged -> re-synthesizing")
             attempt_text, attempt_cit, attempt_blk = await _synthesize_answer(
                 client, synth_model, base_messages, answer_instruction, gathered,
                 response_format=response_format, temperature=synth_temperature,
-                max_tokens=max_tokens, repeat_penalty=synth_repeat_penalty, dry=synth_dry,
-                extra_msgs=[
-                    {"role": "assistant",
-                     "content": _assemble_envelope(answer_text, citations, blocks, [])},
-                    {"role": "user", "content": _answer_feedback(v)},
-                ])
-            steps.append({"role": "answer_resynth", "model": synth_model, "output": attempt_text})
-            if not attempt_text:
-                break  # re-synth produced nothing; keep the last answer, mark red
-            answer_text, citations, blocks = attempt_text, attempt_cit, attempt_blk
-            v = await _audit(answer_text, i + 1)
-            if _passed(v):
-                logger.info("answer-validator: revision fixed the Answer -> yellow")
-                fixed = True
+                max_tokens=max_tokens, repeat_penalty=synth_repeat_penalty, dry=synth_dry)
+            steps.append({"role": "answer_resynth", "model": synth_model,
+                          "reason": "non-substantive", "attempt": i + 1, "output": attempt_text})
+            if _is_substantive_answer(attempt_text):
+                answer_text, citations, blocks = attempt_text, attempt_cit, attempt_blk
+                answer_conf = {"level": "yellow",
+                               "note": _answer_note("yellow", "the first draft was not a usable answer", "")}
                 break
-        if fixed:
-            answer_conf = {"level": "yellow", "note": _answer_note("yellow", first_issue, "")}
         else:
-            # RED: keep the (last) flagged answer + its criticism — never hide it (renderer collapses).
-            last_issue = (v.get("answer_issues") or "").strip()
-            logger.info("answer-validator: Answer still flagged -> red (present + caveat)")
-            answer_conf = {"level": "red", "note": _answer_note("red", first_issue, last_issue)}
-    return answer_text, citations, blocks, answer_conf
+            steps.append({"role": "substance_gate", "result": "fallback", "model": synth_model})
+            return (FALLBACK_ANSWER, [], [],
+                    {"level": "red",
+                     "note": "The team could not produce a usable answer this turn. Verify against the chart."})
+
+    if not validator_model:
+        return answer_text, citations, blocks, answer_conf
+
+    # --- Single answer validator: REWRITE mode. The validator localizes each chart contradiction AND
+    # returns the surgically-corrected answer; we ADOPT that fix (re-extracting its [N] citations),
+    # re-audit, and keep the BEST (fewest-errors) version — never regressing below the draft. (The old
+    # regenerate path — re-synthesizing the whole answer from a one-line critique, which could degrade a
+    # strong answer — was removed; rewrite won the A/B.)
+    async def _audit_rw(draft: str, attempt: int) -> Optional[Dict[str, Any]]:
+        try:
+            verdict = await _validate_answer_rewrite(
+                client, validator_model, chart=chart, gathered=gathered, answer_text=draft,
+                max_tokens=max_tokens, temperature=validator_temperature,
+                repeat_penalty=validator_repeat_penalty, dry=validator_dry,
+                validation_prompt=_REWRITE_VALIDATOR_PROMPT)
+        except Exception as e:
+            logger.warning("rewrite-validator call failed: %s", e)
+            verdict = None  # fail-open
+        errs = (verdict or {}).get("errors") or []
+        steps.append({"role": "answer_validator", "mode": "rewrite", "model": validator_model,
+                      "attempt": attempt, "answer_ok": (verdict or {}).get("answer_ok", True),
+                      "n_errors": len(errs), "errors": errs})
+        return verdict
+
+    v = await _audit_rw(answer_text, 0)
+    # fail-open or a clean pass -> keep current conf (green, or yellow if the substance gate re-synthesized).
+    if v is None or v.get("answer_ok", True) or not v.get("errors"):
+        return answer_text, citations, blocks, answer_conf
+    first_issue = _rw_issue(v)
+    best_text, best_cit, best_n = answer_text, citations, len(v.get("errors") or [])
+    cleared = False
+    for i in range(max(1, max_loops)):
+        corrected = (v.get("corrected_answer") or "").strip()
+        if not corrected or corrected == best_text:
+            break  # flagged but no usable rewrite offered -> keep the best so far
+        cand_cit = _extract_citations(corrected) or best_cit
+        v = await _audit_rw(corrected, i + 1)
+        n = len((v or {}).get("errors") or []) if v else 0
+        if v is None or v.get("answer_ok", True) or n == 0:
+            best_text, best_cit, cleared = corrected, cand_cit, True
+            break
+        if n < best_n:  # strictly fewer errors -> adopt, then try to fix the rest
+            best_text, best_cit, best_n = corrected, cand_cit, n
+        else:
+            break  # not better -> stop; keep the previous best (never regress)
+    if cleared:
+        answer_conf = {"level": "yellow", "note": _answer_note("yellow", first_issue, "")}
+    else:
+        answer_conf = {"level": "red", "note": _answer_note("red", first_issue, _rw_issue(v))}
+    return best_text, best_cit, blocks, answer_conf
 
 
 async def _synthesize_and_validate(
@@ -1121,6 +1051,7 @@ async def _synthesize_and_validate(
     validator_dry: Optional[float],
     max_tokens: Optional[int],
     max_loops: int,
+    include_indepth: bool = True,
 ) -> Tuple[str, List[Dict[str, Any]], Dict[str, Any], Dict[str, Any], str, List[str], Dict[str, Any], Optional[str]]:
     """Two-call generation + two independent validators, combined into one envelope only here.
     Returns (envelope_json, trace_steps, answer_confidence, indepth_confidence, answer_text,
@@ -1171,6 +1102,10 @@ async def _synthesize_and_validate(
         validator_temperature=validator_temperature, validator_repeat_penalty=validator_repeat_penalty,
         validator_dry=validator_dry, max_tokens=max_tokens, max_loops=max_loops, steps=steps)
     answer_conf = _merge_temporal_gate_conf(answer_conf, temporal_gate)
+
+    if not include_indepth:
+        return (_assemble_answer_only_envelope(answer_text, citations, blocks, answer_conf),
+                steps, answer_conf, {}, answer_text, [], temporal_gate, original_answer_text)
 
     # --- IN-DEPTH path (same green/yellow/red cycle) ---------------------
     claims, indepth_conf = await _gen_indepth(
@@ -1251,6 +1186,7 @@ async def run_team(
     two_call: bool = True,
     indepth_shared: bool = False,
     indepth_only: bool = False,
+    answer_only: bool = False,
     solo: bool = False,
     context: Optional[Dict[str, Any]] = None,
     temporal_gate: str = "off",
@@ -1326,6 +1262,11 @@ async def run_team(
         # (default "synthesis-indepth"; dynamic ids can select another prompt file).
         answer_instruction = None
         indepth_instruction = load_prompt(_synth_base)
+    elif answer_only and two_call:
+        # Staged Answer leg for a normal two-call level: keep the level's direct-answer prompt and
+        # validator/gate behavior, but defer In-Depth to the caller's second leg.
+        answer_instruction = load_prompt(_synth_base + "-answer")
+        indepth_instruction = None
     elif two_call:
         answer_instruction = load_prompt(_synth_base + "-answer")
         indepth_instruction = load_prompt(_synth_base + "-indepth")
@@ -1561,7 +1502,8 @@ async def run_team(
                         validator_prompt=validator_prompt,
                         synth_temperature=synth_temp, synth_repeat_penalty=synth_rp, synth_dry=synth_dry,
                         validator_temperature=val_temp, validator_repeat_penalty=val_rp, validator_dry=val_dry,
-                        max_tokens=max_tokens, max_loops=validator_max_loops)
+                        max_tokens=max_tokens, max_loops=validator_max_loops,
+                        include_indepth=not answer_only)
                 _write_trace(level_id, messages, orchestrator=trace_orch, expert=trace_expert,
                              synthesizer=synth_model, validator=validator_model,
                              steps=orch_steps + synth_steps,

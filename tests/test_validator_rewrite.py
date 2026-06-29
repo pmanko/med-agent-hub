@@ -71,6 +71,47 @@ def _err(wrong, chart, fix):
     return {"wrong": wrong, "chart": chart, "fix": fix}
 
 
+def _factory_answers(calls, answers, rewrite_verdicts):
+    """Like _factory but the writer returns answers[N] (so a test can force a non-substantive draft)."""
+    state = {"answer_synth": 0, "indepth_synth": 0, "rw": 0}
+
+    async def fake_chat(client, model, messages, *, tools=None, response_format=None,
+                        temperature=None, max_tokens=None, repeat_penalty=None,
+                        dry_multiplier=None, **kwargs):
+        name = (response_format or {}).get("json_schema", {}).get("name")
+        calls.append((model, name))
+        if name == "chart_answer":
+            n = state["answer_synth"]; state["answer_synth"] += 1
+            ans = answers[min(n, len(answers) - 1)]
+            return {"content": json.dumps({"answer": ans, "citations": [], "blocks": []})}
+        if name == "in_depth":
+            n = state["indepth_synth"]; state["indepth_synth"] += 1
+            return {"content": json.dumps({"claims": [f"claim-A-v{n}"]})}
+        if name == "rewrite_verdict":
+            v = rewrite_verdicts[min(state["rw"], len(rewrite_verdicts) - 1)] if rewrite_verdicts else {"answer_ok": True}
+            state["rw"] += 1
+            return {"content": json.dumps(v)}
+        if name == "indepth_verdict":
+            return {"content": json.dumps({"drop": [], "issues": ""})}
+        return {"content": "", "tool_calls": None}
+
+    return fake_chat
+
+
+def test_nonsubstantive_answer_ships_red_not_green():
+    """THE SUBSTANCE GATE: a "." answer the LLM validator can't fault (no claim to contradict) must NOT
+    ship green. After retries that stay non-substantive, the hub ships the fallback with RED confidence."""
+    calls = []
+    # writer always emits "."; validator finds nothing to localize (clean) -> w/o the gate this is green.
+    team._chat = _factory_answers(calls, ["."], [{"answer_ok": True, "errors": [], "corrected_answer": ""}])
+    env = json.loads(asyncio.run(team.run_team(
+        _MESSAGES, response_format=_RF, orchestrator_model="ORCH", synthesizer_model="SYNTH",
+        validator_model="VALIDATOR", validator_prompt="validation-rewrite")))
+    assert env["confidence"]["answer"]["level"] == "red", env["confidence"]
+    assert env["answer"].strip() != ".", env["answer"]
+    assert any(ch.isalnum() for ch in env["answer"]), env["answer"]  # fallback prose, not punctuation
+
+
 def test_clean_pass_is_green_and_untouched():
     """No localized contradiction -> green, the original answer ships, validator runs ONCE, no re-synth."""
     calls, env = _run([{"answer_ok": True, "errors": [], "corrected_answer": ""}])

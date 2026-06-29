@@ -58,7 +58,7 @@ def test_per_lane_knobs_route_to_each_role(monkeypatch):
         validator_model="VAL", validator_max_loops=1, knobs=knobs))
 
     synth = [c for c in seen if c["schema"] in ("chart_answer", "in_depth")]
-    val = [c for c in seen if c["schema"] in ("answer_verdict", "indepth_verdict")]
+    val = [c for c in seen if c["schema"] in ("rewrite_verdict", "indepth_verdict")]
     orch = [c for c in seen if c["schema"] is None]
 
     # Both the Answer synth (chart_answer) and the In-Depth synth (in_depth) fire and carry the knobs.
@@ -67,8 +67,8 @@ def test_per_lane_knobs_route_to_each_role(monkeypatch):
     assert all(c["temperature"] == 0.7 and c["repeat_penalty"] == 1.3 and c["dry"] == 0.5
                for c in synth), seen
 
-    # Both validators (answer + in-depth) fire and carry the validator knobs.
-    assert {c["schema"] for c in val} == {"answer_verdict", "indepth_verdict"}, seen
+    # Both validators (answer rewrite + in-depth) fire and carry the validator knobs.
+    assert {c["schema"] for c in val} == {"rewrite_verdict", "indepth_verdict"}, seen
     assert all(c["model"] == "VAL" for c in val), seen
     assert all(c["temperature"] == 0.9 and c["repeat_penalty"] == 1.1 and c["dry"] == 0.2
                for c in val), seen

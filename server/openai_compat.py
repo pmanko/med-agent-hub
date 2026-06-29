@@ -55,7 +55,11 @@ def _advertised_models() -> List[str]:
     Also advertise the generic two-call legs ``answer:<writer>`` and ``indepth-only:<writer>``
     for every model the router serves, so chartsearchai's exact-match validation accepts the
     dynamic levels get_level() resolves on the fly (no hand-authored per-writer level needed)."""
-    ids = list(level_ids())
+    base_level_ids = list(level_ids())
+    ids = list(base_level_ids)
+    for lid in base_level_ids:
+        ids.append(f"answer-only:{lid}")
+        ids.append(f"indepth-only:{lid}")
     try:
         import httpx
         resp = httpx.get(f"{llm_config.base_url.rstrip('/')}/v1/models", timeout=3.0)
@@ -144,6 +148,7 @@ async def _content_for(req: ChatCompletionRequest) -> str:
         two_call=level.two_call,
         indepth_shared=level.indepth_shared,
         indepth_only=level.indepth_only,
+        answer_only=level.answer_only,
         solo=level.solo,
         context=req.context,
         temporal_gate=level.temporal_gate,
