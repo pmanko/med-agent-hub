@@ -16,6 +16,32 @@ from typing import Any, Dict, List, Optional
 import yaml
 
 _PATH = Path(__file__).parent / "levels.yaml"
+_TEMPORAL_GATE_MODES = {"off", "warn", "enforce"}
+
+
+def _split_dynamic_prompt_level(level_id: str, prefix: str) -> tuple[str, str | None, str | None]:
+    """Parse dynamic prompt-level ids.
+
+    Supported forms:
+      answer:<writer>
+      answer:<writer>@<prompt>
+      answer:<writer>@<prompt>~<temporal_gate>
+      indepth-only:<writer>
+      indepth-only:<writer>@<prompt>
+
+    ``@`` and ``~`` are deliberately not valid in our router model ids or prompt
+    stems, which keeps this parser tiny and makes backend configs easy to read.
+    """
+    rest = level_id[len(prefix):]
+    writer_prompt, sep, gate = rest.partition("~")
+    if sep and gate not in _TEMPORAL_GATE_MODES:
+        raise KeyError(
+            f"dynamic level {level_id!r} has invalid temporal gate {gate!r}; "
+            f"expected one of {sorted(_TEMPORAL_GATE_MODES)}")
+    writer, at, prompt = writer_prompt.partition("@")
+    if not writer:
+        raise KeyError(f"dynamic level {level_id!r} is missing a writer model id")
+    return writer, (prompt if at and prompt else None), (gate if sep else None)
 
 
 @dataclass(frozen=True)
@@ -44,10 +70,20 @@ class Level:
     # indepth_only:true -> the two-call architecture's IN-DEPTH leg: skip answer synthesis entirely
     # and produce only the In-Depth, elaborating the prior answer carried in the message history.
     indepth_only: bool = False
+    # answer_only:true -> staged UX leg: run the normal answer path for a level, including its
+    # validator and temporal gate, but skip the In-Depth leg so the caller can ship the answer
+    # immediately and attach In-Depth later.
+    answer_only: bool = False
+    # solo:true (P1) -> SINGLE scaffolding: one model, no orchestrator/team. run_team skips the tool
+    # loop; the writer answers from the deterministic context. False -> team. Orthogonal to context.
+    solo: bool = False
     # Reference-date anchor (the simulated "now" for recency/series). None -> fall back to the
     # HUB_ANCHOR env (run-wide) then "latest_record" (the max date in the chart). Modes:
     # "latest_record" | an explicit ISO date "YYYY-MM-DD" | "wall_clock".
     anchor: Optional[str] = None
+    # Deterministic temporal gate mode. off preserves existing behavior; warn records gate failures;
+    # enforce replaces high-confidence temporal contradictions before the optional LLM validator.
+    temporal_gate: str = "off"
     # Optional per-role sampling knobs: {role: {temperature, repeat_penalty, dry}}.
     # A role's entry overrides the global default for that role only; unset -> default.
     # Roles: orchestrator / expert / synthesizer / validator.
@@ -82,18 +118,79 @@ def get_level(level_id: str) -> Level:
     """Resolve one level. Fail loud on an unknown id or a missing required field."""
     raw = _load_raw()
     if level_id not in raw:
+        # Staged Answer leg: "answer-only:<level-id>" mirrors an existing level but stops after the
+        # direct answer (+ validator/gates). This preserves the team tier semantics better than
+        # mapping the UI's "AI Team High" choice to a raw solo writer.
+        if level_id.startswith("answer-only:") and level_id.split(":", 1)[1]:
+            _base = get_level(level_id.split(":", 1)[1])
+            return Level(
+                id=level_id,
+                orchestrator=_base.orchestrator,
+                synthesizer=_base.synthesizer,
+                expert=_base.expert,
+                orchestrator_prompt=_base.orchestrator_prompt,
+                expert_prompt=_base.expert_prompt,
+                synthesis_prompt=_base.synthesis_prompt,
+                validator=_base.validator,
+                validator_prompt=_base.validator_prompt,
+                validator_max_loops=_base.validator_max_loops,
+                two_call=_base.two_call,
+                indepth_shared=False,
+                indepth_only=False,
+                answer_only=True,
+                solo=_base.solo,
+                anchor=_base.anchor,
+                temporal_gate=_base.temporal_gate,
+                knobs=_base.knobs,
+            )
         # Generic In-Depth leg: "indepth-only:<writer-model>" resolves dynamically to a single
         # shared-prompt In-Depth pass on ANY router model — no hand-authored level needed — so the
         # two-call In-Depth is available for parity across every arm/run. The orchestrator only
         # carries the prior answer in session history; the writer (synthesizer) does the In-Depth.
         if level_id.startswith("indepth-only:") and level_id.split(":", 1)[1]:
+            _target = level_id.split(":", 1)[1]
+            if _target in raw:
+                _base = get_level(_target)
+                _prompt = _base.synthesis_prompt + "-indepth" if _base.two_call else "synthesis-indepth"
+                return Level(
+                    id=level_id,
+                    orchestrator=_base.synthesizer,
+                    synthesizer=_base.synthesizer,
+                    expert=None,
+                    synthesis_prompt=_prompt,
+                    two_call=False,
+                    indepth_only=True,
+                    solo=True,
+                    anchor=_base.anchor,
+                    temporal_gate=_base.temporal_gate,
+                    knobs=_base.knobs,
+                )
+            _w, _prompt, _gate = _split_dynamic_prompt_level(level_id, "indepth-only:")
             return Level(
                 id=level_id,
-                orchestrator="gemma-e4b-q8",
-                synthesizer=level_id.split(":", 1)[1],
+                orchestrator=_w,
+                synthesizer=_w,
                 expert=None,
+                synthesis_prompt=_prompt or "synthesis-indepth",
                 two_call=False,
                 indepth_only=True,
+                solo=True,  # P1: single-model In-Depth leg — no orchestrator/team
+            )
+        # Generic Answer leg: "answer:<writer>" mirrors indepth-only — a single CONTEXTUAL answer
+        # through the hub (the parity lane: one answer call with the full gathered evidence incl the
+        # temporal block, no In-Depth, no validator), so a two-call arm routes BOTH legs through the
+        # hub with symmetric context. The orchestrator gathers; the writer (synthesizer) answers.
+        if level_id.startswith("answer:") and level_id.split(":", 1)[1]:
+            _w, _prompt, _gate = _split_dynamic_prompt_level(level_id, "answer:")
+            return Level(
+                id=level_id,
+                orchestrator=_w,
+                synthesizer=_w,
+                expert=None,
+                synthesis_prompt=_prompt or "synthesis-chartsearchai",
+                two_call=False,
+                solo=True,  # P1: single-model Answer leg — no orchestrator/team (this is the fix)
+                temporal_gate=_gate or "off",
             )
         raise KeyError(f"unknown level {level_id!r}; levels.yaml defines {list(raw)}")
     spec = raw[level_id] or {}
@@ -112,7 +209,10 @@ def get_level(level_id: str) -> Level:
             two_call=spec.get("two_call", True),
             indepth_shared=spec.get("indepth_shared", False),
             indepth_only=spec.get("indepth_only", False),
+            answer_only=spec.get("answer_only", False),
+            solo=spec.get("solo", False),
             anchor=spec.get("anchor"),
+            temporal_gate=str(spec.get("temporal_gate", "off")).lower(),
             knobs=spec.get("knobs") or {},
         )
     except KeyError as exc:

@@ -137,10 +137,10 @@ def test_parity_indepth_off_stays_bare_envelope():
     assert seen.count("in_depth") == 0
 
 
-def test_single_indepth_suppresses_gathered_on_answer_keeps_it_for_indepth():
-    # R1 answer-identity: a degenerate single (no expert) emitting In-Depth calls the ANSWER synthesis
-    # with gathered="" (its answer prompt == the vanilla single arm), while the In-Depth pass STILL
-    # receives the gathered KB evidence. Forcing a KB hit makes the suppression observable (not a no-op).
+def test_single_indepth_answer_and_indepth_get_the_same_context_no_r1():
+    # P1: R1 (answer-identity suppression) is DELETED — context is symmetric. A degenerate single (no
+    # expert) emitting In-Depth now calls the ANSWER synthesis with the SAME gathered evidence as the
+    # In-Depth pass. Forcing a KB hit makes the shared context observable (not a no-op).
     captured = {}
 
     async def fake_answer(client, synth_model, base_messages=None, answer_instruction=None,
@@ -167,8 +167,8 @@ def test_single_indepth_suppresses_gathered_on_answer_keeps_it_for_indepth():
                           synthesizer_prompt="synthesis-chartsearchai", two_call=False,
                           indepth_shared=True, has_expert=False, validator_model=None))
 
-    assert captured["answer_gathered"] == ""                                       # R1: answer prompt vanilla
-    assert "WHO: start ART promptly" in (captured.get("indepth_gathered") or "")   # In-Depth still grounded
+    assert "WHO: start ART promptly" in (captured.get("answer_gathered") or "")    # P1: Answer gets the same context
+    assert "WHO: start ART promptly" in (captured.get("indepth_gathered") or "")   # In-Depth grounded too (symmetric)
 
 
 def test_indepth_only_skips_answer_and_elaborates_the_prior_answer():
@@ -327,7 +327,12 @@ def test_v1_models_advertises_the_levels():
     r = client.get("/v1/models")
     assert r.status_code == 200
     ids = [m["id"] for m in r.json()["data"]]
-    assert ids == levels_loader.level_ids()
+    # the configured levels are always advertised; _advertised_models() ALSO appends a dynamic
+    # indepth-only:<router-model> leg per router model when the router is reachable. Assert
+    # containment + that any extras are those dynamic legs — env-robust (router up or down).
+    levels = levels_loader.level_ids()
+    assert set(levels) <= set(ids)
+    assert all(i in levels or i.startswith(("indepth-only:", "answer-only:", "answer:")) for i in ids)
 
 
 def test_chat_completions_team_returns_openai_shape_with_the_envelope():

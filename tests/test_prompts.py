@@ -82,10 +82,29 @@ def test_load_prompt_reads_the_file_each_call_so_edits_are_live(tmp_path, monkey
     assert prompt_loader.load_prompt("synthesis") == "SECOND"
 
 
+def test_prompt_names_lists_available_prompt_stems(tmp_path, monkeypatch):
+    monkeypatch.setattr(prompt_loader, "_DIR", tmp_path)
+    (tmp_path / "synthesis-a.txt").write_text("A\n", encoding="utf-8")
+    (tmp_path / "synthesis-b.txt").write_text("B\n", encoding="utf-8")
+    (tmp_path / "notes.md").write_text("ignore\n", encoding="utf-8")
+    assert prompt_loader.prompt_names() == ["synthesis-a", "synthesis-b"]
+
+
 def test_synthesis_low_is_a_distinct_prompt():
     # The low level swaps synthesis -> synthesis-low (a synthesis prompt tuned for the
     # smaller synthesizer). It must be its own file, distinct from the default.
     assert prompt_loader.load_prompt("synthesis-low") != prompt_loader.load_prompt("synthesis")
+
+
+def test_synthesis_prompts_instruct_on_temporal_facts_sidecar():
+    for name in ("synthesis-chartsearchai", "synthesis-coverage", "synthesis-answer",
+                 "synthesis-date-output-contract"):
+        text = prompt_loader.load_prompt(name)
+        assert "temporal_facts.v1" in text
+        assert "reference_date" in text
+        assert "date_ledger" in text
+        assert "DYYYY_MM_DD" in text
+        assert "Do not infer a trend from one point" in text
 
 
 def test_team_sends_the_synthesis_prompts_to_the_model():

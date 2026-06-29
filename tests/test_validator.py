@@ -107,39 +107,10 @@ def test_answer_green_clean_first_pass():
     assert "ans-v0" in env["answer"] and "claim-A-v0" in env["answer"]
 
 
-def test_answer_yellow_fixed_on_retry_shows_message():
-    """Flagged with a reason -> re-synth -> cleared -> yellow, the corrected answer (v1) is shown."""
-    calls, env = _run([{"answer_ok": False, "answer_issues": "wrong dose"},
-                       {"answer_ok": True}], validator_max_loops=1)
-    a_synth, _i, a_val, _iv = _counts(calls)
-    assert a_synth == 2 and a_val == 2, calls
-    assert env["confidence"]["answer"]["level"] == "yellow"
-    assert env["confidence"]["answer"]["note"]             # a clinician-facing note for the tag
-    assert "ans-v1" in env["answer"]                       # the corrected answer is presented
-    assert "confidence" not in env["answer"].lower()       # CLEAN body — confidence is a structured tag, not baked text
-
-
-def test_answer_red_presents_flagged_answer_with_structured_tag():
-    """Flagged + still flagged after re-synth -> RED: the (last) answer is PRESENTED (not hidden) in
-    a CLEAN body; the criticism rides the structured confidence (the tag's note), not baked text."""
-    calls, env = _run([{"answer_ok": False, "answer_issues": "wrong dose"},
-                       {"answer_ok": False, "answer_issues": "still wrong"}], validator_max_loops=1)
-    a_synth, i_synth, a_val, _iv = _counts(calls)
-    assert a_synth == 2 and a_val == 2, calls
-    assert env["confidence"]["answer"]["level"] == "red"
-    assert "still wrong" in env["confidence"]["answer"]["note"]   # criticism in the structured tag note
-    assert "ans-v1" in env["answer"]                              # the answer IS presented (not hidden)
-    assert "confidence" not in env["answer"].lower()             # clean body — no baked confidence text
-    assert i_synth >= 1                                           # In-Depth still generated
-
-
-def test_answer_noise_flag_stays_green():
-    """answer_ok=False with EMPTY answer_issues is reasonless noise -> PASS -> green, no re-synth."""
-    calls, env = _run([{"answer_ok": False, "answer_issues": "", "drop": []}])
-    a_synth, _i, a_val, _iv = _counts(calls)
-    assert a_synth == 1 and a_val == 1, calls
-    assert env["confidence"]["answer"]["level"] == "green"
-    assert "ans-v0" in env["answer"]
+# NOTE: the regenerate-path answer tests (flag -> re-synthesize -> yellow/red, and reasonless-noise ->
+# green) were removed when the answer validator collapsed to rewrite-only. The rewrite validator's
+# flag/adopt/never-regress behavior is covered in test_validator_rewrite.py; the deterministic substance
+# gate (non-substantive answer never ships green) is covered there too.
 
 
 # ---- IN-DEPTH confidence (re-synth before strip) ---------------------------

@@ -21,6 +21,18 @@ from pathlib import Path
 _DIR = Path(__file__).parent / "prompts"
 
 
+def prompt_names() -> list[str]:
+    """Return available prompt stems under ``server/prompts``.
+
+    Read fresh so a newly added prompt file can be selected by a dynamic prompt
+    model id without rebuilding or restarting the hub.
+    """
+    try:
+        return sorted(p.stem for p in _DIR.glob("*.txt") if p.is_file())
+    except FileNotFoundError:
+        return []
+
+
 def load_prompt(name: str) -> str:
     """Return the text of prompt ``name`` from ``prompts/<name>.txt``.
 

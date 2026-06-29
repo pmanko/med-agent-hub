@@ -114,6 +114,131 @@ levels:
     two_call: false
     indepth_shared: true
 
+  # --- Method arms: small-orch + Qwen validator vs the bare single, on the two strong writers (12B, A4B).
+  # The Answer uses the SAME chartsearchai prompt as the single arms + a COMPOSABLE Qwen validator
+  # (validation-strict, two_call=false), so single-vs-team isolates the scaffolding, not the prompt. No
+  # expert; the harness fires the In-Depth as a separate indepth-only leg, so the Answer is the bare envelope.
+  med-agent-team-12b-qwenval:
+    orchestrator: gemma-e4b-q8
+    expert: null
+    synthesizer: gemma-4-12b
+    validator: qwen2.5-14b
+    validator_prompt: validation-rewrite
+    validator_max_loops: 1
+    synthesis_prompt: synthesis-chartsearchai
+    two_call: false
+
+  med-agent-team-a4b-qwenval:        # same scaffolding, the A4B MoE writer
+    orchestrator: gemma-e4b-q8
+    expert: null
+    synthesizer: gemma-26b
+    validator: qwen2.5-14b
+    validator_prompt: validation-rewrite
+    validator_max_loops: 1
+    synthesis_prompt: synthesis-chartsearchai
+    two_call: false
+
+  # --- Dev-set lever arms (solo writer, NO orchestrator distraction — isolate each lever) ---
+  single-12b-coverage:               # completeness lever: bare 12B writer + the coverage synthesis prompt
+    orchestrator: gemma-4-12b
+    expert: null
+    synthesizer: gemma-4-12b
+    synthesis_prompt: synthesis-coverage
+    two_call: false
+    solo: true
+
+  single-12b-rewriteval:             # rewrite validator on the bare writer (NO orchestrator) — isolates the validator
+    orchestrator: gemma-4-12b
+    expert: null
+    synthesizer: gemma-4-12b
+    validator: qwen2.5-14b
+    validator_prompt: validation-rewrite
+    validator_max_loops: 1
+    synthesis_prompt: synthesis-chartsearchai
+    two_call: false
+    solo: true
+
+  single-12b-coverage-rewrite:       # both levers: coverage prompt + rewrite validator, bare writer
+    orchestrator: gemma-4-12b
+    expert: null
+    synthesizer: gemma-4-12b
+    validator: qwen2.5-14b
+    validator_prompt: validation-rewrite
+    validator_max_loops: 1
+    synthesis_prompt: synthesis-coverage
+    two_call: false
+    solo: true
+
+  # --- A4B writer (Gemma 26B-A4B MoE, ~4B active — the on-device candidate) mirror of the lever arms ---
+  single-a4b-coverage:
+    orchestrator: gemma-26b
+    expert: null
+    synthesizer: gemma-26b
+    synthesis_prompt: synthesis-coverage
+    two_call: false
+    solo: true
+
+  single-a4b-rewriteval:             # A4B + rewrite validator, NO orchestrator
+    orchestrator: gemma-26b
+    expert: null
+    synthesizer: gemma-26b
+    validator: qwen2.5-14b
+    validator_prompt: validation-rewrite
+    validator_max_loops: 1
+    synthesis_prompt: synthesis-chartsearchai
+    two_call: false
+    solo: true
+
+  single-a4b-coverage-rewrite:       # A4B + coverage prompt + rewrite validator
+    orchestrator: gemma-26b
+    expert: null
+    synthesizer: gemma-26b
+    validator: qwen2.5-14b
+    validator_prompt: validation-rewrite
+    validator_max_loops: 1
+    synthesis_prompt: synthesis-coverage
+    two_call: false
+    solo: true
+
+  med-agent-team-12b-rewriteval:     # A/B vs -12b-qwenval: SAME team, the validator REWRITES instead of regenerating
+    orchestrator: gemma-e4b-q8
+    expert: null
+    synthesizer: gemma-4-12b
+    validator: qwen2.5-14b
+    validator_prompt: validation-rewrite   # rewrite mode: localize the error + adopt the validator's surgical fix
+    validator_max_loops: 1
+    synthesis_prompt: synthesis-chartsearchai
+    two_call: false
+
+  med-agent-team-12b-date-warn:      # Wider temporal/date run: same 12B team, date contract prompt, gate WARN.
+    orchestrator: gemma-e4b-q8
+    expert: null
+    synthesizer: gemma-4-12b
+    validator: qwen2.5-14b
+    validator_prompt: validation-rewrite
+    validator_max_loops: 1
+    synthesis_prompt: synthesis-date-output-contract
+    temporal_gate: warn
+    two_call: false
+
+  med-agent-team-high-date-warn:     # Wider temporal/date run: high team, date contract prompt, gate WARN.
+    orchestrator: gemma-31b
+    expert: medgemma-27b
+    synthesizer: qwen3.6-35b-q6
+    validator: gemma-31b
+    validator_max_loops: 1
+    synthesis_prompt: synthesis-date-output-contract
+    temporal_gate: warn
+    two_call: false
+
+  single-12b-cite-or-abstain:        # prompt lever: 12B alone, cite-or-abstain Answer prompt, no validator
+    orchestrator: gemma-4-12b        # (solo -> orchestrator unused but a required field)
+    expert: null
+    synthesizer: gemma-4-12b
+    synthesis_prompt: synthesis-cite-or-abstain
+    two_call: false
+    solo: true
+
   # Two-call architecture IN-DEPTH legs (one per writer): no answer synthesis — elaborate the prior
   # answer carried in the session history. The harness fires these as a separate same-session call.
   indepth-only-gemma-4-12b:

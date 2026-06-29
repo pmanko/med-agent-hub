@@ -40,9 +40,11 @@ import httpx
 from . import kb
 from . import temporal
 from .config import (
-    llm_config, SYNTH_REPEAT_PENALTY,
+    llm_config, querystore_config, SYNTH_REPEAT_PENALTY,
     ORCHESTRATOR_DRY_MULTIPLIER, EXPERT_DRY_MULTIPLIER, SYNTH_DRY_MULTIPLIER,
 )
+from .querystore_client import QueryStoreClient
+from .chart_serializer import render_chart
 from .prompt_loader import load_prompt
 
 logger = logging.getLogger(__name__)
@@ -140,6 +142,26 @@ def _chart_context(messages: List[Dict[str, Any]]) -> str:
             content = m.get("content")
             return content if isinstance(content, str) else json.dumps(content)
     return ""
+
+
+async def _retrieve_chart(patient_uuid: str) -> str:
+    """Fetch + render a patient's chart from querystore over REST (ADR Decision 16) — the hub as a
+    direct, non-JVM querystore client. Degrades to an empty chart on any failure (querystore disabled,
+    unavailable, auth, or unknown patient), mirroring the in-process consumer's empty-chart fallback so a
+    retrieval outage never breaks the turn."""
+    if not querystore_config.enabled:
+        logger.warning("patient ref given but QUERYSTORE_BASE_URL is unset — returning empty chart")
+        return ""
+    try:
+        client = QueryStoreClient(
+            querystore_config.base_url, querystore_config.username, querystore_config.password)
+        records = await client.get_patient_chart(patient_uuid)
+        text, _mappings = render_chart(records)
+        return text
+    except Exception as e:
+        logger.warning("querystore retrieval failed for patient=%s — returning empty chart: %s",
+                       patient_uuid, e)
+        return ""
 
 
 def _latest_user_text(messages: List[Dict[str, Any]]) -> str:
@@ -305,9 +327,27 @@ def _gathered_evidence(kb_context: str, expert_notes: List[str]) -> str:
     return "Gathered evidence:\n\n" + "\n\n".join(parts)
 
 
-def _fallback_envelope(answer: str) -> str:
+# The single fallback-answer string. Defined ONCE so the hub and harness/validate/runner.py::_row_is_good
+# reference the same sentinel — the hub must never SHIP what the runner would re-run on --resume.
+FALLBACK_ANSWER = "I could not produce a complete answer for this turn. Please try again."
+
+
+def _fallback_envelope(answer: str = FALLBACK_ANSWER) -> str:
     """A minimal, always-schema-valid chart_answer envelope."""
     return json.dumps({"answer": answer, "citations": [], "blocks": []})
+
+
+def _is_substantive_answer(text: Optional[str]) -> bool:
+    """Deterministic 'is this a real answer?' check — mirrors harness runner._row_is_good's text predicate
+    (non-empty after strip · has an alphanumeric char · not the fallback message). The LLM validator fails
+    open on a "." answer (no concrete error to name), so this cheap check, not the validator, is what
+    guarantees an empty/punctuation-only/fallback answer never ships green."""
+    ans = (text or "").strip()
+    if not ans:
+        return False
+    if not any(ch.isalnum() for ch in ans):
+        return False
+    return "could not produce a complete answer" not in ans
 
 
 def _normalize_envelope(raw: str) -> str:
@@ -367,20 +407,40 @@ _INDEPTH_RF = {
 }
 
 
-_ANSWER_VERDICT_RF = {
+# Rewrite-validator verdict (the "suggest the fix" mode): the validator LOCALIZES each chart
+# contradiction (wrong phrase + grounding record + replacement) AND returns the surgically-corrected
+# answer, so the refine loop ADOPTS the validator's fix instead of asking the writer to regenerate. The
+# research basis: actionable, localized feedback beats a binary verdict, and a surgical edit avoids the
+# over-correction that a from-scratch regenerate inflicts on the already-correct parts of a strong answer.
+_REWRITE_VERDICT_RF = {
     "type": "json_schema",
     "json_schema": {
-        "name": "answer_verdict",
+        "name": "rewrite_verdict",
         "schema": {
             "type": "object",
             "properties": {
                 "answer_ok": {"type": "boolean"},
-                "answer_issues": {"type": "string"},
+                "errors": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "wrong": {"type": "string"},
+                            "chart": {"type": "string"},
+                            "fix": {"type": "string"},
+                        },
+                    },
+                },
+                "corrected_answer": {"type": "string"},
             },
             "required": ["answer_ok"],
         },
     },
 }
+
+# A validator_prompt with this stem selects the rewrite path (loads <stem>-answer.txt + the rewrite
+# schema + the adopt-the-fix loop); the default "validation" keeps the regenerate path unchanged.
+_REWRITE_VALIDATOR_PROMPT = "validation-rewrite"
 
 
 _INDEPTH_VERDICT_RF = {
@@ -442,6 +502,25 @@ def _assemble_envelope(
     return json.dumps(env)
 
 
+def _assemble_answer_only_envelope(
+    answer_text: str, citations: List[int], blocks: List[Any],
+    answer_conf: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Serialize the staged UX Answer leg without an In-Depth placeholder in the markdown body.
+
+    The caller attaches In-Depth as structured/pending UI state, so the answer body remains the
+    direct clinical answer rather than pretending the background section already exists.
+    """
+    env: Dict[str, Any] = {
+        "answer": answer_text or "",
+        "citations": citations or [],
+        "blocks": blocks or [],
+    }
+    if answer_conf:
+        env["confidence"] = {"answer": answer_conf}
+    return json.dumps(env)
+
+
 def _answer_fields(normalized_json_str: str) -> Tuple[str, List[int], List[Any]]:
     """Pull (answer_text, citations, blocks) out of a normalized envelope JSON string. Tolerant:
     returns ("", [], []) on any junk / non-object / missing fields."""
@@ -458,17 +537,111 @@ def _answer_fields(normalized_json_str: str) -> Tuple[str, List[int], List[Any]]
     return answer_text, citations, blocks
 
 
-def _answer_feedback(verdict: Dict[str, Any]) -> str:
-    """Answer-focused re-synthesis guidance from the Answer verdict. The In Depth is generated
-    separately, so this only steers the direct Answer."""
-    parts = ["Your goal is an accurate direct answer, grounded only in the patient chart."]
-    ai = (verdict.get("answer_issues") or "").strip()
-    if ai:
-        parts.append("A reviewer found this problem with the answer: " + ai)
-    parts.append(
-        "Rewrite the direct answer to be correct using only chart-supported facts; where the chart "
-        "lacks the information, say 'not documented'.")
-    return "\n".join(parts)
+def _block_temporal_text_and_refs(blocks: List[Any]) -> Tuple[str, List[int]]:
+    """Flatten table/block cell text so deterministic gates see model-generated dates in
+    structured output, not only dates in the prose answer."""
+    texts: List[str] = []
+    refs: List[int] = []
+
+    def walk(value: Any) -> None:
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if key == "refs" and isinstance(child, list):
+                    refs.extend(i for i in child if isinstance(i, int))
+                else:
+                    walk(child)
+        elif isinstance(value, list):
+            for child in value:
+                walk(child)
+        elif isinstance(value, str):
+            texts.append(value)
+
+    walk(blocks or [])
+    return "\n".join(texts), sorted(set(refs))
+
+
+def _gate_failure_note(gate: Optional[Dict[str, Any]]) -> str:
+    checks = (gate or {}).get("checks") or []
+    for c in checks:
+        if c.get("status") == "fail":
+            return c.get("reason") or "a deterministic temporal check failed."
+    for c in checks:
+        if c.get("status") == "warn":
+            return c.get("reason") or "a deterministic temporal check warned."
+    return ""
+
+
+def _merge_temporal_gate_conf(
+    conf: Optional[Dict[str, Any]], gate: Optional[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """Fold deterministic temporal-gate status into the structured Answer confidence."""
+    base = dict(conf or {"level": "green", "note": ""})
+    if not gate or gate.get("mode") == "off" or gate.get("status") not in {"warn", "fail"}:
+        return base
+    applied = gate.get("applied")
+    target_level = "yellow"
+    if gate.get("status") == "fail" and applied not in {"patch"}:
+        target_level = "red"
+    order = {"green": 0, "yellow": 1, "red": 2}
+    if order.get(target_level, 0) > order.get(base.get("level", "green"), 0):
+        base["level"] = target_level
+    reason = _gate_failure_note(gate)
+    if applied == "patch":
+        note = "Deterministic temporal gate corrected the answer before validation"
+    elif applied == "fallback":
+        note = "Deterministic temporal gate blocked the draft answer"
+    elif gate.get("mode") == "warn":
+        note = "Deterministic temporal gate warning"
+    else:
+        note = "Deterministic temporal gate"
+    if reason:
+        note += ": " + reason
+    note += "."
+    existing = (base.get("note") or "").strip()
+    base["note"] = (existing + " " + note).strip() if existing else note
+    return base
+
+
+def _apply_temporal_gate(
+    *,
+    question: str,
+    answer_text: str,
+    citations: List[int],
+    blocks: List[Any],
+    temporal_facts: Optional[Dict[str, Any]],
+    temporal_gate_mode: str,
+    steps: List[Dict[str, Any]],
+) -> Tuple[str, List[int], List[Any], Dict[str, Any], Optional[str]]:
+    """Run the deterministic temporal gate and optionally replace the answer in enforce mode."""
+    block_text, block_refs = _block_temporal_text_and_refs(blocks)
+    gate_answer_text = answer_text + (("\n" + block_text) if block_text else "")
+    gate_citations = sorted(set(citations or []) | set(block_refs))
+    gate = temporal.run_temporal_gate(
+        question, gate_answer_text, gate_citations, temporal_facts, temporal_gate_mode
+    )
+    original_answer = None
+    gate["applied"] = "none"
+    if gate.get("mode") == "enforce" and gate.get("status") == "fail":
+        original_answer = answer_text
+        patch = (gate.get("patch_answer") or "").strip()
+        patch_citations = [c for c in (gate.get("patch_citations") or []) if isinstance(c, int)]
+        if patch:
+            answer_text, citations, blocks = patch, patch_citations, []
+            gate["applied"] = "patch"
+        else:
+            answer_text, citations, blocks = (
+                "I cannot safely answer this temporal question because deterministic temporal "
+                "validation found a contradiction in the draft answer. Please verify against the chart."
+            ), [], []
+            gate["applied"] = "fallback"
+    steps.append({
+        "role": "temporal_gate",
+        "mode": gate.get("mode"),
+        "status": gate.get("status"),
+        "applied": gate.get("applied"),
+        "n_checks": len(gate.get("checks") or []),
+    })
+    return answer_text, citations, blocks, gate, original_answer
 
 
 async def _synthesize_answer(
@@ -537,7 +710,7 @@ async def _synthesize_indepth(
     return [c.strip() for c in (obj.get("claims") or []) if isinstance(c, str) and c.strip()]
 
 
-async def _validate_answer(
+async def _validate_answer_rewrite(
     client: httpx.AsyncClient,
     validator_model: str,
     *,
@@ -548,10 +721,11 @@ async def _validate_answer(
     temperature: float,
     repeat_penalty: Optional[float],
     dry: Optional[float],
-    validation_prompt: str = "validation",
+    validation_prompt: str = _REWRITE_VALIDATOR_PROMPT,
 ) -> Dict[str, Any]:
-    """Audit the direct Answer for chart-accuracy. Returns {answer_ok, answer_issues}. FAIL-OPEN:
-    {answer_ok: True} on any parse failure so a flaky validator never blocks the run."""
+    """Rewrite-mode audit: localize each chart contradiction AND return the corrected answer. Returns
+    {answer_ok, errors:[{wrong,chart,fix}], corrected_answer}. FAIL-OPEN: {answer_ok: True, errors: []}
+    on any parse failure so a flaky validator never blocks the run."""
     instruction = load_prompt(validation_prompt + "-answer")
     audit_user = (
         instruction
@@ -561,22 +735,24 @@ async def _validate_answer(
     )
     msg = await _chat(
         client, validator_model, [{"role": "user", "content": audit_user}],
-        response_format=_ANSWER_VERDICT_RF, temperature=temperature, max_tokens=max_tokens,
+        response_format=_REWRITE_VERDICT_RF, temperature=temperature, max_tokens=max_tokens,
         repeat_penalty=repeat_penalty, dry_multiplier=dry)
     raw = _message_text(msg)
     try:
         verdict = json.loads(raw)
     except (json.JSONDecodeError, TypeError):
-        logger.warning("answer-validator[%s] verdict UNPARSEABLE -> FAIL-OPEN (pass); raw=%r",
+        logger.warning("rewrite-validator[%s] verdict UNPARSEABLE -> FAIL-OPEN (pass); raw=%r",
                        validator_model, raw[:240])
-        return {"answer_ok": True}
+        return {"answer_ok": True, "errors": []}
     if not isinstance(verdict, dict):
-        logger.warning("answer-validator[%s] verdict not an object -> FAIL-OPEN; raw=%r",
+        logger.warning("rewrite-validator[%s] verdict not an object -> FAIL-OPEN; raw=%r",
                        validator_model, raw[:240])
-        return {"answer_ok": True}
-    logger.info("answer-validator[%s] answer_ok=%s answer_issues=%r",
-                validator_model, verdict.get("answer_ok"), (verdict.get("answer_issues") or "")[:160])
-    return verdict
+        return {"answer_ok": True, "errors": []}
+    errors = [e for e in (verdict.get("errors") or []) if isinstance(e, dict)]
+    logger.info("rewrite-validator[%s] answer_ok=%s n_errors=%d",
+                validator_model, verdict.get("answer_ok"), len(errors))
+    return {"answer_ok": verdict.get("answer_ok", True), "errors": errors,
+            "corrected_answer": (verdict.get("corrected_answer") or "").strip()}
 
 
 async def _validate_indepth_verdict(
@@ -732,12 +908,135 @@ async def _gen_indepth(
     return kept, {"level": "red", "note": _indepth_note("red", len(drop), v.get("issues", ""))}
 
 
+def _extract_citations(text: str) -> List[int]:
+    """The 1-based [N] citation indices a corrected answer cites, in order, deduped — so an adopted
+    rewrite carries its own citations rather than the superseded draft's."""
+    return sorted({int(m) for m in re.findall(r"\[(\d+)\]", text or "")})
+
+
+def _rw_issue(verdict: Optional[Dict[str, Any]]) -> str:
+    """A clinician-facing issue string from a rewrite verdict's first localized error (the chart-correct
+    fact), for the confidence caveat."""
+    errs = (verdict or {}).get("errors") or []
+    if not errs:
+        return ""
+    e = errs[0]
+    return (e.get("chart") or e.get("fix") or "").strip()
+
+
+async def _validate_and_refine_answer(
+    client: httpx.AsyncClient,
+    *,
+    synth_model: str,
+    base_messages: List[Dict[str, Any]],
+    answer_instruction: str,
+    gathered: str,
+    response_format: Optional[Dict[str, Any]],
+    answer_text: str,
+    citations: List[int],
+    blocks: List[Dict[str, Any]],
+    validator_model: Optional[str],
+    validator_prompt: Optional[str],
+    chart: str,
+    synth_temperature: float,
+    synth_repeat_penalty: Optional[float],
+    synth_dry: Optional[float],
+    validator_temperature: float,
+    validator_repeat_penalty: Optional[float],
+    validator_dry: Optional[float],
+    max_tokens: Optional[int],
+    max_loops: int,
+    steps: List[Dict[str, Any]],
+) -> Tuple[str, List[int], List[Dict[str, Any]], Dict[str, Any]]:
+    """Audit the draft Answer against the chart and, on a genuine flag, re-synthesize up to max_loops.
+    A COMPOSABLE post-synthesis step — orthogonal to two_call, so the parity path and the two-call path
+    share ONE validator. Gated by validator_model: unset (or a fail-open outage) -> green, draft unchanged.
+    Returns (answer_text, citations, blocks, answer_conf{level: green|yellow|red, note})."""
+    answer_conf = {"level": "green", "note": ""}
+
+    # --- Deterministic substance gate (always; NO model). A non-substantive draft (empty /
+    # punctuation-only / the fallback string) must NEVER ship green — the LLM validator fails open on a
+    # "." answer. Re-synthesize up to max_loops; if it stays non-substantive, ship the fallback envelope
+    # with RED confidence. Mirrors harness runner._row_is_good so the hub never ships what resume re-runs.
+    if not _is_substantive_answer(answer_text):
+        for i in range(max(1, max_loops)):
+            attempt_text, attempt_cit, attempt_blk = await _synthesize_answer(
+                client, synth_model, base_messages, answer_instruction, gathered,
+                response_format=response_format, temperature=synth_temperature,
+                max_tokens=max_tokens, repeat_penalty=synth_repeat_penalty, dry=synth_dry)
+            steps.append({"role": "answer_resynth", "model": synth_model,
+                          "reason": "non-substantive", "attempt": i + 1, "output": attempt_text})
+            if _is_substantive_answer(attempt_text):
+                answer_text, citations, blocks = attempt_text, attempt_cit, attempt_blk
+                answer_conf = {"level": "yellow",
+                               "note": _answer_note("yellow", "the first draft was not a usable answer", "")}
+                break
+        else:
+            steps.append({"role": "substance_gate", "result": "fallback", "model": synth_model})
+            return (FALLBACK_ANSWER, [], [],
+                    {"level": "red",
+                     "note": "The team could not produce a usable answer this turn. Verify against the chart."})
+
+    if not validator_model:
+        return answer_text, citations, blocks, answer_conf
+
+    # --- Single answer validator: REWRITE mode. The validator localizes each chart contradiction AND
+    # returns the surgically-corrected answer; we ADOPT that fix (re-extracting its [N] citations),
+    # re-audit, and keep the BEST (fewest-errors) version — never regressing below the draft. (The old
+    # regenerate path — re-synthesizing the whole answer from a one-line critique, which could degrade a
+    # strong answer — was removed; rewrite won the A/B.)
+    async def _audit_rw(draft: str, attempt: int) -> Optional[Dict[str, Any]]:
+        try:
+            verdict = await _validate_answer_rewrite(
+                client, validator_model, chart=chart, gathered=gathered, answer_text=draft,
+                max_tokens=max_tokens, temperature=validator_temperature,
+                repeat_penalty=validator_repeat_penalty, dry=validator_dry,
+                validation_prompt=_REWRITE_VALIDATOR_PROMPT)
+        except Exception as e:
+            logger.warning("rewrite-validator call failed: %s", e)
+            verdict = None  # fail-open
+        errs = (verdict or {}).get("errors") or []
+        steps.append({"role": "answer_validator", "mode": "rewrite", "model": validator_model,
+                      "attempt": attempt, "answer_ok": (verdict or {}).get("answer_ok", True),
+                      "n_errors": len(errs), "errors": errs})
+        return verdict
+
+    v = await _audit_rw(answer_text, 0)
+    # fail-open or a clean pass -> keep current conf (green, or yellow if the substance gate re-synthesized).
+    if v is None or v.get("answer_ok", True) or not v.get("errors"):
+        return answer_text, citations, blocks, answer_conf
+    first_issue = _rw_issue(v)
+    best_text, best_cit, best_n = answer_text, citations, len(v.get("errors") or [])
+    cleared = False
+    for i in range(max(1, max_loops)):
+        corrected = (v.get("corrected_answer") or "").strip()
+        if not corrected or corrected == best_text:
+            break  # flagged but no usable rewrite offered -> keep the best so far
+        cand_cit = _extract_citations(corrected) or best_cit
+        v = await _audit_rw(corrected, i + 1)
+        n = len((v or {}).get("errors") or []) if v else 0
+        if v is None or v.get("answer_ok", True) or n == 0:
+            best_text, best_cit, cleared = corrected, cand_cit, True
+            break
+        if n < best_n:  # strictly fewer errors -> adopt, then try to fix the rest
+            best_text, best_cit, best_n = corrected, cand_cit, n
+        else:
+            break  # not better -> stop; keep the previous best (never regress)
+    if cleared:
+        answer_conf = {"level": "yellow", "note": _answer_note("yellow", first_issue, "")}
+    else:
+        answer_conf = {"level": "red", "note": _answer_note("red", first_issue, _rw_issue(v))}
+    return best_text, best_cit, blocks, answer_conf
+
+
 async def _synthesize_and_validate(
     client: httpx.AsyncClient,
     *,
     base_messages: List[Dict[str, Any]],
     gathered: str,
     chart: str,
+    temporal_facts: Optional[Dict[str, Any]],
+    temporal_gate_mode: str,
     synth_model: str,
     answer_instruction: str,
     indepth_instruction: str,
@@ -752,11 +1051,13 @@ async def _synthesize_and_validate(
     validator_dry: Optional[float],
     max_tokens: Optional[int],
     max_loops: int,
-) -> Tuple[str, List[Dict[str, Any]], Dict[str, Any], Dict[str, Any], str, List[str]]:
+    indepth_mode: str = "split",   # "split" (validated two-call In-Depth) | "shared" (single-pass) | "none"
+    bare_envelope: bool = False,   # True -> the bare chartsearchai {answer,citations,blocks} (parity), no **Answer** header
+) -> Tuple[str, List[Dict[str, Any]], Dict[str, Any], Dict[str, Any], str, List[str], Dict[str, Any], Optional[str]]:
     """Two-call generation + two independent validators, combined into one envelope only here.
     Returns (envelope_json, trace_steps, answer_confidence, indepth_confidence, answer_text,
-    in_depth_claims) — the last two are the SHIPPED content (clean), so the trace package can carry
-    the structured pieces a client renders. Each confidence is
+    in_depth_claims, temporal_gate, original_answer_text) — answer_text/in_depth_claims are the
+    SHIPPED content, so the trace package can carry the structured pieces a client renders. Each confidence is
     {level: green|yellow|red, note: <clinician caveat>} from that section's re-synth cycle:
       green  = passed clinical review on the first pass;
       yellow = flagged, re-synthesized, then cleared;
@@ -782,69 +1083,51 @@ async def _synthesize_and_validate(
         conf = {"level": "red", "note": "The team could not produce an answer this turn."}
         return (_fallback_envelope(
             "I could not produce a complete answer for this turn. Please try again."),
-            steps, conf, dict(green), "", [])
+            steps, conf, dict(green), "", [],
+            temporal.run_temporal_gate(_latest_user_text(base_messages), "", [], temporal_facts, temporal_gate_mode),
+            None)
 
-    # --- ANSWER path (confidence: green clean / yellow fixed-on-retry / red still-flagged) ---
-    answer_conf = dict(green)
-    if validator_model:
-        async def _audit(draft: str, attempt: int) -> Optional[Dict[str, Any]]:
-            try:
-                verdict = await _validate_answer(
-                    client, validator_model, chart=chart, gathered=gathered, answer_text=draft,
-                    max_tokens=max_tokens, temperature=validator_temperature,
-                    repeat_penalty=validator_repeat_penalty, dry=validator_dry,
-                    validation_prompt=validator_prompt or "validation")
-            except Exception as e:
-                logger.warning("answer-validator call failed: %s", e)
-                verdict = None  # fail-open
-            steps.append({"role": "answer_validator", "model": validator_model, "attempt": attempt,
-                          "answer_ok": (verdict or {}).get("answer_ok", True),
-                          "answer_issues": (verdict or {}).get("answer_issues", "")})
-            return verdict
+    temporal_gate, original_answer_text = None, None
+    answer_text, citations, blocks, temporal_gate, original_answer_text = _apply_temporal_gate(
+        question=_latest_user_text(base_messages), answer_text=answer_text, citations=citations,
+        blocks=blocks, temporal_facts=temporal_facts, temporal_gate_mode=temporal_gate_mode,
+        steps=steps)
 
-        def _passed(verdict: Optional[Dict[str, Any]]) -> bool:
-            # Pass when: no verdict (fail-open), answer_ok True, OR a reasonless False flag.
-            if verdict is None or verdict.get("answer_ok", True):
-                return True
-            return not (verdict.get("answer_issues") or "").strip()
+    # --- ANSWER path: composable validate-and-refine (shared with the parity path) ---
+    answer_text, citations, blocks, answer_conf = await _validate_and_refine_answer(
+        client, synth_model=synth_model, base_messages=base_messages,
+        answer_instruction=answer_instruction, gathered=gathered, response_format=response_format,
+        answer_text=answer_text, citations=citations, blocks=blocks,
+        validator_model=validator_model, validator_prompt=validator_prompt, chart=chart,
+        synth_temperature=synth_temperature, synth_repeat_penalty=synth_repeat_penalty, synth_dry=synth_dry,
+        validator_temperature=validator_temperature, validator_repeat_penalty=validator_repeat_penalty,
+        validator_dry=validator_dry, max_tokens=max_tokens, max_loops=max_loops, steps=steps)
+    answer_conf = _merge_temporal_gate_conf(answer_conf, temporal_gate)
 
-        v = await _audit(answer_text, 0)
-        if not _passed(v):
-            first_issue = (v.get("answer_issues") or "").strip()
-            fixed = False
-            for i in range(max(0, max_loops)):
-                logger.info("answer-validator: Answer flagged -> re-synthesizing")
-                attempt_text, attempt_cit, attempt_blk = await _synthesize_answer(
-                    client, synth_model, base_messages, answer_instruction, gathered,
-                    response_format=response_format, temperature=synth_temperature,
-                    max_tokens=max_tokens, repeat_penalty=synth_repeat_penalty, dry=synth_dry,
-                    extra_msgs=[
-                        {"role": "assistant",
-                         "content": _assemble_envelope(answer_text, citations, blocks, [])},
-                        {"role": "user", "content": _answer_feedback(v)},
-                    ])
-                steps.append({"role": "answer_resynth", "model": synth_model, "output": attempt_text})
-                if not attempt_text:
-                    break  # re-synth produced nothing; keep the last answer, mark red
-                answer_text, citations, blocks = attempt_text, attempt_cit, attempt_blk
-                v = await _audit(answer_text, i + 1)
-                if _passed(v):
-                    logger.info("answer-validator: revision fixed the Answer -> yellow")
-                    fixed = True
-                    break
-            if fixed:
-                answer_conf = {"level": "yellow", "note": _answer_note("yellow", first_issue, "")}
-            else:
-                # RED: keep the (last) flagged answer + its criticism — never hide it (renderer collapses).
-                last_issue = (v.get("answer_issues") or "").strip()
-                logger.info("answer-validator: Answer still flagged -> red (present + caveat)")
-                answer_conf = {"level": "red", "note": _answer_note("red", first_issue, last_issue)}
+    # --- IN-DEPTH: split (validated two-call) | shared (single-pass, no validator) | none ---
+    claims: List[str] = []
+    indepth_conf: Dict[str, Any] = {}
+    if indepth_mode == "split":
+        claims, indepth_conf = await _gen_indepth(
+            client, synth_model, base_messages, indepth_instruction, gathered, answer_text, **_idkw)
+    elif indepth_mode == "shared":
+        claims = await _synthesize_indepth(
+            client, synth_model, base_messages=base_messages, indepth_instruction=indepth_instruction,
+            gathered=gathered, answer_text=answer_text, temperature=synth_temperature,
+            max_tokens=max_tokens, repeat_penalty=synth_repeat_penalty, dry=synth_dry)
+        indepth_conf = answer_conf  # shared pass has no separate validator -> shares the Answer confidence
 
-    # --- IN-DEPTH path (same green/yellow/red cycle) ---------------------
-    claims, indepth_conf = await _gen_indepth(
-        client, synth_model, base_messages, indepth_instruction, gathered, answer_text, **_idkw)
-    return (_assemble_envelope(answer_text, citations, blocks, claims, answer_conf, indepth_conf),
-            steps, answer_conf, indepth_conf, answer_text, claims)
+    # --- assemble (envelope shape keyed by mode, so each arm's output is byte-exact) ---
+    if indepth_mode in ("split", "shared"):
+        # sectioned **Answer** / **In Depth** body (two-call and parity-shared)
+        content = _assemble_envelope(answer_text, citations, blocks, claims, answer_conf, indepth_conf)
+    elif bare_envelope:
+        # bare chartsearchai envelope, NO header — matches the direct single-LLM arms (parity, no In-Depth)
+        content = json.dumps({"answer": answer_text, "citations": citations or [], "blocks": blocks or []})
+    else:
+        # answer-only leg of a two-call level (In-Depth deferred to the caller's second leg)
+        content = _assemble_answer_only_envelope(answer_text, citations, blocks, answer_conf)
+    return (content, steps, answer_conf, indepth_conf, answer_text, claims, temporal_gate, original_answer_text)
 
 
 # Per-turn reasoning trace: the hub appends one structured line per turn to a writable mount so the
@@ -860,7 +1143,10 @@ def _write_trace(level_id: Optional[str], messages: List[Dict[str, Any]], *, orc
                  steps: List[Dict[str, Any]], answer_confidence: Dict[str, Any],
                  indepth_confidence: Dict[str, Any], answer_text: str = "",
                  in_depth_claims: Optional[List[str]] = None,
-                 reference_date: Optional[str] = None) -> None:
+                 reference_date: Optional[str] = None,
+                 temporal_facts: Optional[Dict[str, Any]] = None,
+                 temporal_gate: Optional[Dict[str, Any]] = None,
+                 original_answer_text: Optional[str] = None) -> None:
     """Append one per-turn reasoning-trace line — the structured package a client renders (the
     SHIPPED answer + in-depth claims + per-section confidence + the ordered call steps). Best-effort:
     never raises (a trace-write failure must never break a turn)."""
@@ -882,6 +1168,12 @@ def _write_trace(level_id: Optional[str], messages: List[Dict[str, Any]], *, orc
             "in_depth_claims": in_depth_claims or [],
             "answer_confidence": answer_confidence,
             "indepth_confidence": indepth_confidence,
+            "temporal_facts_schema_version": (
+                temporal_facts.get("schema_version") if isinstance(temporal_facts, dict) else None
+            ),
+            "temporal_facts_summary": temporal.compact_temporal_facts_summary(temporal_facts),
+            "temporal_gate": temporal_gate,
+            "original_answer_text": original_answer_text,
             "steps": steps,
         }
         os.makedirs(_TRACE_DIR, exist_ok=True)
@@ -910,9 +1202,14 @@ async def run_team(
     two_call: bool = True,
     indepth_shared: bool = False,
     indepth_only: bool = False,
+    answer_only: bool = False,
+    solo: bool = False,
+    context: Optional[Dict[str, Any]] = None,
+    temporal_gate: str = "off",
     anchor: Optional[str] = None,
     knobs: Optional[Dict[str, Any]] = None,
     level_id: Optional[str] = None,
+    patient: Optional[str] = None,
 ) -> str:
     """
     Run the team for one chartsearchai turn.
@@ -925,8 +1222,20 @@ async def run_team(
     model = orchestrator_model or llm_config.orchestrator_model
     synth_model = synthesizer_model or llm_config.synthesizer_model
     expert_model = expert_model or llm_config.med_model
+    # Chart source: a `patient` ref → the hub RETRIEVES + serializes the chart from querystore (the hub
+    # owns context) and injects it as the chartsearchai-shaped user(chart) message BEFORE the question —
+    # the synthesizer reads the chart from base_messages (never the `chart` var), so it must be a message.
+    # Otherwise the chart already in `messages` (the chartsearchai path) is used unchanged.
+    if patient:
+        chart_text = await _retrieve_chart(patient)
+        if chart_text:
+            messages = list(messages)
+            _at = 1 if (messages and messages[0].get("role") == "system") else 0
+            messages.insert(_at, {"role": "user",
+                                  "content": "Patient records (most recent first):\n" + chart_text})
     chart = _chart_context(messages)
     reference_date: Optional[str] = None  # resolved below; recorded in the trace for the judge
+    temporal_facts: Optional[Dict[str, Any]] = None
 
     # Per-role sampling knobs: a level may override any role's temperature / repeat_penalty
     # / dry; unset falls back to today's global default for that role.
@@ -943,6 +1252,16 @@ async def run_team(
     val_rp = _knob(knobs, "validator", "repeat_penalty", None)
     val_dry = _knob(knobs, "validator", "dry", None)
 
+    # Context spec (P1): what evidence to assemble — temporal default on; kb/expert opt-in. Independent
+    # of scaffolding (solo vs team). From the level default or the request's context field.
+    spec = context or {}
+    want_temporal = spec.get("temporal", True)
+    temporal_gate_mode = str(spec.get("temporal_gate", temporal_gate or "off")).strip().lower()
+    want_kb = spec.get("kb", False)
+    want_expert = spec.get("expert", False)
+    trace_orch = None if solo else model  # solo = no orchestrator/team in the trace
+    trace_expert = expert_model if has_expert else None  # only surface an expert that is actually used
+
     # Read the role prompts ONCE per request; thread the expert text into the
     # per-iteration expert call so the tool loop does not re-read it from disk
     # each turn.
@@ -955,10 +1274,15 @@ async def run_team(
     # one call, no in-depth, validator skipped — so the output is the bare chartsearchai envelope.
     _synth_base = synthesizer_prompt or "synthesis"
     if indepth_only:
-        # Two-call IN-DEPTH leg: no answer synthesis at all, only the shared "synthesis-indepth"
-        # prompt (so the answer prompt — which may not exist for this base — is never loaded).
+        # Two-call IN-DEPTH leg: no answer synthesis at all, only the configured in-depth prompt
+        # (default "synthesis-indepth"; dynamic ids can select another prompt file).
         answer_instruction = None
-        indepth_instruction = load_prompt("synthesis-indepth")
+        indepth_instruction = load_prompt(_synth_base)
+    elif answer_only and two_call:
+        # Staged Answer leg for a normal two-call level: keep the level's direct-answer prompt and
+        # validator/gate behavior, but defer In-Depth to the caller's second leg.
+        answer_instruction = load_prompt(_synth_base + "-answer")
+        indepth_instruction = None
     elif two_call:
         answer_instruction = load_prompt(_synth_base + "-answer")
         indepth_instruction = load_prompt(_synth_base + "-indepth")
@@ -981,9 +1305,25 @@ async def run_team(
     orch_steps: List[Dict[str, Any]] = []  # reasoning-trace steps for the orchestrator tool loop
 
     async with httpx.AsyncClient() as client:
-        # --- tool loop (plain: tools, no response_format) -------------------
+        if solo:
+            # SINGLE scaffolding (P1): deterministic, spec-gated context — NO orchestrator LLM. The
+            # writer answers from the assembled context; team vs single is independent of context.
+            _q = _latest_user_text(messages) or ""
+            if want_kb:
+                _obs = _run_kb_search(_q)
+                if _obs.startswith(_KB_BLOCK_HEADER):
+                    kb_context = _obs
+                orch_steps.append({"role": "kb_search", "query": _q[:160],
+                                   "hit": bool(kb_context), "solo": True})
+            if want_expert:
+                _note = await _run_medical_expert(
+                    client, _q, chart, expert_system, kb_context=kb_context, model=expert_model,
+                    temperature=exp_temp, repeat_penalty=exp_rp, dry_multiplier=exp_dry)
+                expert_notes.append(_note)
+                orch_steps.append({"role": "medical_expert", "model": expert_model, "solo": True})
+        # --- tool loop (plain: tools, no response_format) — skipped when solo -----
         try:
-            for _ in range(MAX_TOOL_ITERATIONS):
+            for _ in (range(MAX_TOOL_ITERATIONS) if not solo else ()):
                 msg = await _chat(
                     client, model, loop_messages,
                     tools=_tool_definitions(has_expert), temperature=orch_temp, max_tokens=max_tokens,
@@ -1037,7 +1377,7 @@ async def run_team(
         # KB-retrieval fallback: small orchestrators often skip kb_search (esp. on follow-up
         # turns), leaving the In-Depth with no guidance to ground. If nothing was gathered, do one
         # deterministic kb_search on the question so the synthesis still has reference context.
-        if not kb_context:
+        if not solo and not kb_context:
             q = _latest_user_text(messages)
             if q:
                 obs = _run_kb_search(q)
@@ -1056,11 +1396,14 @@ async def run_team(
         # Deterministic temporal grounding: resolve the reference "now" (level anchor ->
         # HUB_ANCHOR env -> latest record date) and prepend the computed series so the synth +
         # validator REPORT dated facts ("most recent", trend, window) instead of deriving them.
-        anchor_mode = anchor or os.environ.get("HUB_ANCHOR")
-        reference_date = temporal.resolve_anchor(anchor_mode, chart)
-        temporal_block = temporal.build_temporal_block(chart, reference_date)
-        if temporal_block:
-            gathered = temporal_block + ("\n\n" + gathered if gathered else "")
+        if want_temporal:  # P1: context-spec gates temporal (default on); off = the temporal ablation (P3)
+            anchor_mode = anchor or os.environ.get("HUB_ANCHOR")
+            reference_date = temporal.resolve_anchor(anchor_mode, chart)
+            temporal_facts = temporal.build_temporal_facts(
+                chart, reference_date, anchor_mode=anchor_mode or "latest_record")
+            temporal_facts_block = temporal.render_temporal_facts(temporal_facts)
+            if temporal_facts_block:
+                gathered = temporal_facts_block + ("\n\n" + gathered if gathered else "")
 
         if indepth_only:
             # Two-call architecture: produce ONLY the In-Depth, elaborating the prior answer carried
@@ -1072,94 +1415,62 @@ async def run_team(
                 indepth_instruction=indepth_instruction, gathered=gathered, answer_text=prior_answer,
                 temperature=synth_temp, max_tokens=max_tokens, repeat_penalty=synth_rp, dry=synth_dry)
             _io_conf = {"level": "green", "note": "in-depth-only: single pass, no validator"}
-            _write_trace(level_id, messages, orchestrator=model, expert=expert_model,
+            _write_trace(level_id, messages, orchestrator=trace_orch, expert=trace_expert,
                          synthesizer=synth_model, validator=None,
                          steps=orch_steps + [{"role": "synthesizer", "model": synth_model,
                                               "mode": "in-depth-only"}],
                          answer_confidence=_io_conf, indepth_confidence=_io_conf,
                          answer_text=prior_answer, in_depth_claims=claims,
-                         reference_date=reference_date)
+                         reference_date=reference_date, temporal_facts=temporal_facts)
             body = "**In Depth**\n" + "\n".join("- " + c for c in claims) if claims else ""
             return json.dumps({"answer": body, "citations": [], "blocks": []})
 
+        # --- UNIFIED generation: parity / two-call / answer-only all run through ONE path
+        # (_synthesize_and_validate). The envelope shape + In-Depth mode are flags so each arm's output
+        # stays byte-exact, while the substance gate + temporal gate + the single validator live in one
+        # place for every arm:
+        #   parity (not two_call), no shared In-Depth -> bare {answer,citations,blocks} (matches the singles)
+        #   parity + indepth_shared                   -> sectioned Answer/In-Depth (single-pass In-Depth)
+        #   two-call                                  -> sectioned, validated two-call In-Depth
+        #   two-call + answer_only                    -> answer-only leg (In-Depth deferred to the 2nd call)
         if not two_call:
-            # Parity lane: ONE chartsearchai-style synthesis call (answer_instruction is the whole
-            # chartsearchai prompt), NO In-Depth, validator skipped -> the bare chartsearchai
-            # {answer, citations, blocks} envelope, so the output format matches the direct
-            # single-LLM arms. Orchestration (kb_search + expert) + the temporal block still feed it.
-            # R1 (answer identity): for a degenerate single (no expert) that ALSO emits In-Depth,
-            # suppress the gathered evidence on the ANSWER call so the answer prompt stays identical
-            # to the vanilla single arm; the shared In-Depth pass still gets the gathered context.
-            answer_gathered = "" if (indepth_shared and not has_expert) else gathered
-            try:
-                p_answer, p_citations, p_blocks = await _synthesize_answer(
-                    client, synth_model, base_messages=list(messages),
-                    answer_instruction=answer_instruction, gathered=answer_gathered,
-                    response_format=response_format, temperature=synth_temp,
-                    max_tokens=max_tokens, repeat_penalty=synth_rp, dry=synth_dry)
-                if p_answer:
-                    if indepth_shared:
-                        # SHARED single-pass In-Depth (synthesis-indepth prompt, no validator): the
-                        # parity Answer PLUS a combined **Answer**/**In Depth** body, so the arm is
-                        # judged on the background dimension too. Fail-open -> [] on any error.
-                        claims = await _synthesize_indepth(
-                            client, synth_model, base_messages=list(messages),
-                            indepth_instruction=indepth_instruction, gathered=gathered,
-                            answer_text=p_answer, temperature=synth_temp, max_tokens=max_tokens,
-                            repeat_penalty=synth_rp, dry=synth_dry)
-                        _shared_conf = {"level": "green",
-                                        "note": "shared in-depth: single pass, no validator"}
-                        _write_trace(level_id, messages, orchestrator=model, expert=expert_model,
-                                     synthesizer=synth_model, validator=None,
-                                     steps=orch_steps + [{"role": "synthesizer", "model": synth_model,
-                                                          "mode": "parity-answer+shared-indepth"}],
-                                     answer_confidence=_shared_conf, indepth_confidence=_shared_conf,
-                                     answer_text=p_answer, in_depth_claims=claims,
-                                     reference_date=reference_date)
-                        # Combined **Answer** / **In Depth** body; no confidence block (no validator).
-                        return _assemble_envelope(p_answer, p_citations, p_blocks, claims)
-                    _parity_conf = {"level": "green",
-                                    "note": "parity lane: chartsearchai prompt, single call, validator off"}
-                    _write_trace(level_id, messages, orchestrator=model, expert=expert_model,
-                                 synthesizer=synth_model, validator=None,
-                                 steps=orch_steps + [{"role": "synthesizer", "model": synth_model,
-                                                      "mode": "parity-single-call"}],
-                                 answer_confidence=_parity_conf, indepth_confidence=_parity_conf,
-                                 answer_text=p_answer, in_depth_claims=[],
-                                 reference_date=reference_date)
-                    # Bare chartsearchai envelope built directly (NOT _assemble_envelope, which
-                    # forces a "**Answer**" header): no In-Depth, no confidence -> matches direct arms.
-                    return json.dumps({"answer": p_answer,
-                                       "citations": p_citations or [],
-                                       "blocks": p_blocks or []})
-            except Exception as e:
-                logger.error("parity synthesis failed: %s", e, exc_info=True)
+            indepth_mode = "shared" if indepth_shared else "none"
+            bare_envelope = not indepth_shared
         else:
-            try:
-                content, synth_steps, answer_conf, indepth_conf, answer_text, claims = \
-                    await _synthesize_and_validate(
-                        client,
-                        base_messages=list(messages), gathered=gathered, chart=chart,
-                        synth_model=synth_model,
-                        answer_instruction=answer_instruction, indepth_instruction=indepth_instruction,
-                        response_format=response_format, validator_model=validator_model,
-                        validator_prompt=validator_prompt,
-                        synth_temperature=synth_temp, synth_repeat_penalty=synth_rp, synth_dry=synth_dry,
-                        validator_temperature=val_temp, validator_repeat_penalty=val_rp, validator_dry=val_dry,
-                        max_tokens=max_tokens, max_loops=validator_max_loops)
-                _write_trace(level_id, messages, orchestrator=model, expert=expert_model,
-                             synthesizer=synth_model, validator=validator_model,
-                             steps=orch_steps + synth_steps,
-                             answer_confidence=answer_conf, indepth_confidence=indepth_conf,
-                             answer_text=answer_text, in_depth_claims=claims,
-                             reference_date=reference_date)
-                return content
-            except Exception as e:
-                logger.error("synthesis failed: %s", e, exc_info=True)
+            indepth_mode = "none" if answer_only else "split"
+            bare_envelope = False
+        try:
+            content, synth_steps, answer_conf, indepth_conf, answer_text, claims, \
+                _temporal_gate, _original_answer = await _synthesize_and_validate(
+                    client,
+                    base_messages=list(messages), gathered=gathered, chart=chart,
+                    temporal_facts=temporal_facts, temporal_gate_mode=temporal_gate_mode,
+                    synth_model=synth_model,
+                    answer_instruction=answer_instruction, indepth_instruction=indepth_instruction,
+                    response_format=response_format, validator_model=validator_model,
+                    validator_prompt=validator_prompt,
+                    synth_temperature=synth_temp, synth_repeat_penalty=synth_rp, synth_dry=synth_dry,
+                    validator_temperature=val_temp, validator_repeat_penalty=val_rp, validator_dry=val_dry,
+                    max_tokens=max_tokens, max_loops=validator_max_loops,
+                    indepth_mode=indepth_mode, bare_envelope=bare_envelope)
+            # A parity Answer carries NO In-Depth confidence on the trace (its In-Depth is a separate
+            # indepth-only call) — match the direct single-LLM arms.
+            trace_indepth_conf = None if (bare_envelope and indepth_mode == "none") else indepth_conf
+            _write_trace(level_id, messages, orchestrator=trace_orch, expert=trace_expert,
+                         synthesizer=synth_model, validator=validator_model,
+                         steps=orch_steps + synth_steps,
+                         answer_confidence=answer_conf, indepth_confidence=trace_indepth_conf,
+                         answer_text=answer_text, in_depth_claims=claims,
+                         reference_date=reference_date, temporal_facts=temporal_facts,
+                         temporal_gate=_temporal_gate, original_answer_text=_original_answer)
+            return content
+        except Exception as e:
+            logger.error("synthesis failed: %s", e, exc_info=True)
 
-    _write_trace(level_id, messages, orchestrator=model, expert=expert_model,
+    _write_trace(level_id, messages, orchestrator=trace_orch, expert=trace_expert,
                  synthesizer=synth_model, validator=validator_model, steps=orch_steps,
                  answer_confidence={"level": "red", "note": "The team could not produce an answer this turn."},
-                 indepth_confidence={"level": "green", "note": ""}, reference_date=reference_date)
+                 indepth_confidence={"level": "green", "note": ""}, reference_date=reference_date,
+                 temporal_facts=temporal_facts)
     return _fallback_envelope(
         "I could not produce a complete answer for this turn. Please try again.")

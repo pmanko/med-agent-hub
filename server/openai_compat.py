@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field
 from .config import llm_config
 from .team import run_team
 from .levels_loader import level_ids, get_level
+from .prompt_loader import prompt_names
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,8 @@ class ChatCompletionRequest(BaseModel):
     temperature: Optional[float] = None
     max_tokens: Optional[int] = None
     stream: bool = False
+    context: Optional[Dict[str, Any]] = None  # P1: context-spec override (temporal/kb/expert); used in P3
+    patient: Optional[str] = None  # when set, the hub RETRIEVES this patient's chart from querystore (else uses the chart in messages)
 
 
 def _advertised_models() -> List[str]:
@@ -49,20 +52,43 @@ def _advertised_models() -> List[str]:
     — one instance serves any config, no reboot. Raw backends stay callable via
     passthrough but aren't listed.
 
-    Also advertise the generic two-call In-Depth leg ``indepth-only:<writer>`` for every
-    model the router serves, so chartsearchai's exact-match validation accepts the dynamic
-    levels get_level() resolves on the fly (no hand-authored per-writer level needed)."""
-    ids = list(level_ids())
+    Also advertise the generic two-call legs ``answer:<writer>`` and ``indepth-only:<writer>``
+    for every model the router serves, so chartsearchai's exact-match validation accepts the
+    dynamic levels get_level() resolves on the fly (no hand-authored per-writer level needed)."""
+    base_level_ids = list(level_ids())
+    ids = list(base_level_ids)
+    for lid in base_level_ids:
+        ids.append(f"answer-only:{lid}")
+        ids.append(f"indepth-only:{lid}")
     try:
         import httpx
         resp = httpx.get(f"{llm_config.base_url.rstrip('/')}/v1/models", timeout=3.0)
+        prompts = prompt_names()
+        answer_prompts = [
+            p for p in prompts
+            if p.startswith("synthesis-")
+            and p != "synthesis-indepth"
+            and not p.endswith("-indepth")
+            and not p.startswith("synthesis-indepth-")
+        ]
+        indepth_prompts = [
+            p for p in prompts
+            if p == "synthesis-indepth" or p.endswith("-indepth") or p.startswith("synthesis-indepth-")
+        ]
         for m in resp.json().get("data", []):
             mid = m.get("id")
             if mid:
                 ids.append(f"indepth-only:{mid}")
+                ids.append(f"answer:{mid}")
+                for prompt in answer_prompts:
+                    ids.append(f"answer:{mid}@{prompt}")
+                    for gate in ("off", "warn", "enforce"):
+                        ids.append(f"answer:{mid}@{prompt}~{gate}")
+                for prompt in indepth_prompts:
+                    ids.append(f"indepth-only:{mid}@{prompt}")
     except Exception:
         pass  # router unreachable -> advertise levels only; direct-to-hub callers still work
-    return ids
+    return list(dict.fromkeys(ids))
 
 
 @router.get("/v1/models")
@@ -122,6 +148,11 @@ async def _content_for(req: ChatCompletionRequest) -> str:
         two_call=level.two_call,
         indepth_shared=level.indepth_shared,
         indepth_only=level.indepth_only,
+        answer_only=level.answer_only,
+        solo=level.solo,
+        context=req.context,
+        temporal_gate=level.temporal_gate,
+        patient=req.patient,
         anchor=level.anchor,
         knobs=level.knobs,
         level_id=req.model,  # the advertised level id == the harness backend_id (trace correlation key)

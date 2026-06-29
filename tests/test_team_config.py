@@ -79,6 +79,73 @@ def test_generic_indepth_only_resolves_any_writer():
         assert lv.indepth_only is True
         assert lv.two_call is False
         assert lv.has_expert is False
+        assert lv.solo is True  # P1: single scaffolding
+
+
+def test_generic_indepth_only_accepts_prompt_variant():
+    lv = levels_loader.get_level("indepth-only:gemma-4-12b@synthesis-indepth")
+    assert lv.synthesizer == "gemma-4-12b"
+    assert lv.indepth_only is True
+    assert lv.two_call is False
+    assert lv.synthesis_prompt == "synthesis-indepth"
+    assert lv.solo is True
+
+
+def test_generic_answer_resolves_any_writer():
+    # "answer:<writer>" mirrors indepth-only: a single CONTEXTUAL Answer leg through the hub (the
+    # parity lane — one answer call with full gathered incl the temporal block, no In-Depth, no
+    # validator), so a two-call arm routes BOTH legs through the hub with symmetric context (not raw).
+    for writer in ("gemma-4-12b", "qwen2.5-14b"):
+        lv = levels_loader.get_level(f"answer:{writer}")
+        assert lv.synthesizer == writer
+        assert lv.two_call is False
+        assert lv.indepth_only is False and lv.indepth_shared is False
+        assert lv.has_expert is False
+        assert lv.solo is True  # P1: single scaffolding (no orchestrator/team) — the fix
+        assert lv.synthesis_prompt == "synthesis-chartsearchai"  # bare answer (no In-Depth)
+
+
+def test_generic_answer_accepts_prompt_variant_and_temporal_gate():
+    lv = levels_loader.get_level("answer:gemma-e4b-q8@synthesis-date-output-contract~warn")
+    assert lv.synthesizer == "gemma-e4b-q8"
+    assert lv.synthesis_prompt == "synthesis-date-output-contract"
+    assert lv.temporal_gate == "warn"
+    assert lv.two_call is False
+    assert lv.solo is True
+    assert lv.has_expert is False
+
+
+def test_generic_answer_rejects_unknown_temporal_gate():
+    with pytest.raises(KeyError):
+        levels_loader.get_level("answer:gemma-e4b-q8@synthesis-chartsearchai~maybe")
+
+
+def test_temporal_gate_dynamic_answer_levels_use_run_anchor_and_modes():
+    off = levels_loader.get_level("answer:gemma-4-12b@synthesis-chartsearchai~off")
+    warn = levels_loader.get_level("answer:gemma-4-12b@synthesis-chartsearchai~warn")
+    enforce = levels_loader.get_level("answer:gemma-26b@synthesis-chartsearchai~enforce")
+    assert off.temporal_gate == "off"
+    assert warn.temporal_gate == "warn"
+    assert enforce.temporal_gate == "enforce"
+    assert {off.anchor, warn.anchor, enforce.anchor} == {None}
+    assert off.solo is True and warn.solo is True and enforce.solo is True
+
+
+def test_wide_date_team_levels_use_contract_prompt_and_warn_gate():
+    low = levels_loader.get_level("med-agent-team-12b-date-warn")
+    assert low.synthesizer == "gemma-4-12b"
+    assert low.validator == "qwen2.5-14b"
+    assert low.synthesis_prompt == "synthesis-date-output-contract"
+    assert low.temporal_gate == "warn"
+    assert low.two_call is False
+
+    high = levels_loader.get_level("med-agent-team-high-date-warn")
+    assert high.orchestrator == "gemma-31b"
+    assert high.expert == "medgemma-27b"
+    assert high.synthesizer == "qwen3.6-35b-q6"
+    assert high.validator == "gemma-31b"
+    assert high.synthesis_prompt == "synthesis-date-output-contract"
+    assert high.temporal_gate == "warn"
 
 
 def test_unknown_non_indepth_level_still_fails_loud():
@@ -100,9 +167,19 @@ def test_advertised_models_includes_dynamic_indepth_legs(monkeypatch):
             return {"data": [{"id": "mistral-nemo-12b-q8"}, {"id": "qwen3.6-35b"}]}
 
     monkeypatch.setattr(httpx, "get", lambda *a, **k: _Resp())
+    monkeypatch.setattr(openai_compat, "prompt_names", lambda: [
+        "synthesis-chartsearchai",
+        "synthesis-date-output-contract",
+        "synthesis-indepth",
+    ])
     ids = openai_compat._advertised_models()
     assert "indepth-only:mistral-nemo-12b-q8" in ids
     assert "indepth-only:qwen3.6-35b" in ids
+    assert "answer:mistral-nemo-12b-q8" in ids   # the Answer leg advertised too (both legs hub-served)
+    assert "answer:qwen3.6-35b" in ids
+    assert "answer:mistral-nemo-12b-q8@synthesis-date-output-contract~warn" in ids
+    assert "answer:qwen3.6-35b@synthesis-date-output-contract~enforce" in ids
+    assert "indepth-only:qwen3.6-35b@synthesis-indepth" in ids
     assert "med-agent-team-med" in ids  # static levels still advertised alongside
 
 
@@ -142,3 +219,30 @@ def test_run_team_routes_expert_model(monkeypatch):
     assert expert == ["EXPERT"], calls
     # Two-call synthesis (Answer + In-Depth) — both on the synthesizer model.
     assert synth and all(m == "SYNTH" for m in synth), calls
+
+
+def test_validator_runs_on_the_parity_path(monkeypatch):
+    # The answer-validator is a COMPOSABLE post-synthesis step (validator is orthogonal to two_call):
+    # it must run on the two_call=False parity path too, not only two_call=True. Assert the validator
+    # MODEL is actually invoked when a two_call=False team sets a validator. RED before the decoupling
+    # (parity skipped the validator); GREEN after.
+    calls = []
+
+    async def fake_chat(client, model, messages, *, tools=None, response_format=None,
+                        temperature=None, max_tokens=None, repeat_penalty=None, dry_multiplier=None, **kwargs):
+        calls.append(model)
+        if model == "VALIDATOR":                                   # answer-validator audit turn
+            return {"content": json.dumps({"answer_ok": True, "answer_issues": ""})}
+        if response_format is not None:                            # synthesis turn
+            return {"content": json.dumps({"answer": "ok", "citations": [], "blocks": []})}
+        return {"content": "", "tool_calls": None}                 # orchestrator turn -> stop
+
+    monkeypatch.setattr(team, "_chat", fake_chat)
+    asyncio.run(team.run_team(
+        [{"role": "system", "content": "s"}, {"role": "user", "content": "chart"},
+         {"role": "user", "content": "q"}],
+        response_format={"type": "json_schema", "json_schema": {}},
+        orchestrator_model="ORCH", synthesizer_model="SYNTH", expert_model=None, has_expert=False,
+        synthesizer_prompt="synthesis-chartsearchai", two_call=False, validator_model="VALIDATOR",
+    ))
+    assert "VALIDATOR" in calls, f"validator must run on the two_call=False parity path; called: {calls}"
