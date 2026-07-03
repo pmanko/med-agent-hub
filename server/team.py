@@ -502,9 +502,38 @@ def _assemble_envelope(
     return json.dumps(env)
 
 
+_ANSWER_VALIDATION_LABELS = {
+    "validating": "Checking answer",
+    "checked": "Checked",
+    "edited": "Updated after check",
+    "needs_review": "Needs review",
+    "unavailable": "Check unavailable",
+}
+
+
+def _answer_validation_wire(
+    status: str,
+    *,
+    summary: str = "",
+    issues: Optional[List[Any]] = None,
+    original_answer: Optional[str] = None,
+) -> Dict[str, Any]:
+    wire: Dict[str, Any] = {
+        "status": status,
+        "label": _ANSWER_VALIDATION_LABELS.get(status, status.replace("_", " ").title()),
+        "summary": summary or "",
+        "issues": issues or [],
+        "completedAt": datetime.now(timezone.utc).isoformat(),
+    }
+    if original_answer is not None:
+        wire["originalAnswer"] = original_answer
+    return wire
+
+
 def _assemble_answer_only_envelope(
     answer_text: str, citations: List[int], blocks: List[Any],
     answer_conf: Optional[Dict[str, Any]] = None,
+    answer_validation: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Serialize the staged UX Answer leg without an In-Depth placeholder in the markdown body.
 
@@ -518,6 +547,8 @@ def _assemble_answer_only_envelope(
     }
     if answer_conf:
         env["confidence"] = {"answer": answer_conf}
+    if answer_validation:
+        env["answerValidation"] = answer_validation
     return json.dumps(env)
 
 
@@ -535,6 +566,37 @@ def _answer_fields(normalized_json_str: str) -> Tuple[str, List[int], List[Any]]
     citations = [c for c in (env.get("citations") or []) if isinstance(c, int)]
     blocks = env.get("blocks") if isinstance(env.get("blocks"), list) else []
     return answer_text, citations, blocks
+
+
+def _review_payload_from_messages(messages: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Extract the answer_to_review.v1 JSON payload from the latest user message.
+
+    ChartSearchAI sends this as prose plus a fenced JSON object. Be deliberately tolerant so a
+    caller can also send the raw JSON object/string in tests or future integrations.
+    """
+    raw = _latest_user_text(messages)
+    if not raw:
+        return {}
+    candidates: List[str] = []
+    stripped = raw.strip()
+    if stripped.startswith("{") and stripped.endswith("}"):
+        candidates.append(stripped)
+    fence = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", raw, re.S)
+    if fence:
+        candidates.append(fence.group(1))
+    first, last = raw.find("{"), raw.rfind("}")
+    if first >= 0 and last > first:
+        candidates.append(raw[first:last + 1])
+    for candidate in candidates:
+        try:
+            obj = json.loads(candidate)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(obj, dict):
+            payload = obj.get("answer_to_review") if isinstance(obj.get("answer_to_review"), dict) else obj
+            if payload.get("schema_version") == "answer_to_review.v1" or "answer" in payload:
+                return payload
+    return {}
 
 
 def _block_temporal_text_and_refs(blocks: List[Any]) -> Tuple[str, List[int]]:
@@ -814,6 +876,155 @@ def _answer_note(level: str, first_issue: str, last_issue: str) -> str:
     return ""
 
 
+async def _review_existing_answer(
+    client: httpx.AsyncClient,
+    *,
+    messages: List[Dict[str, Any]],
+    gathered: str,
+    chart: str,
+    temporal_facts: Optional[Dict[str, Any]],
+    temporal_gate_mode: str,
+    reviewer_model: str,
+    reviewer_prompt: str,
+    validator_temperature: float,
+    validator_repeat_penalty: Optional[float],
+    validator_dry: Optional[float],
+    max_tokens: Optional[int],
+    steps: List[Dict[str, Any]],
+) -> Tuple[str, Dict[str, Any], str, Dict[str, Any], Optional[Dict[str, Any]], Optional[str]]:
+    """Review an already-visible Answer and return an updated chartsearchai envelope.
+
+    This is the async staged validation leg. It is deliberately conservative: deterministic gates can
+    patch high-confidence temporal/date failures; the LLM reviewer can rewrite prose when it offers a
+    clean correction; otherwise the original answer remains visible with needs_review metadata.
+    """
+    payload = _review_payload_from_messages(messages)
+    original_answer = str(payload.get("answer") or _latest_assistant_text(messages) or "")
+    answer_text = original_answer
+    citations = [c for c in (payload.get("citations") or _extract_citations(answer_text)) if isinstance(c, int)]
+    blocks = payload.get("blocks") if isinstance(payload.get("blocks"), list) else []
+    question = str(payload.get("original_question") or payload.get("question") or _latest_user_text(messages) or "")
+    issues: List[Any] = []
+    status = "checked"
+    summary = "Answer checked against chart and deterministic temporal/date rules."
+    answer_conf = {"level": "green", "note": ""}
+    temporal_gate_result: Optional[Dict[str, Any]] = None
+
+    if not payload:
+        validation = _answer_validation_wire(
+            "unavailable",
+            summary="Answer check could not run because the review payload was missing.",
+            issues=[{"reason": "missing answer_to_review.v1 payload"}],
+        )
+        answer_conf = {"level": "yellow", "note": "Answer check unavailable: missing review payload."}
+        content = _assemble_answer_only_envelope(answer_text, citations, blocks, answer_conf, validation)
+        return content, answer_conf, answer_text, validation, None, None
+
+    if not _is_substantive_answer(answer_text):
+        status = "needs_review"
+        summary = "The answer check found a non-substantive answer and could not safely repair it."
+        issues.append({"id": "substance_gate", "reason": "The answer is empty, punctuation-only, or fallback text."})
+        answer_conf = {"level": "red", "note": "Answer check found no usable answer. Verify against the chart."}
+    else:
+        block_text, block_refs = _block_temporal_text_and_refs(blocks)
+        gate_answer_text = answer_text + (("\n" + block_text) if block_text else "")
+        gate_citations = sorted(set(citations or []) | set(block_refs))
+        temporal_gate_result = temporal.run_temporal_gate(
+            question, gate_answer_text, gate_citations, temporal_facts, temporal_gate_mode
+        )
+        temporal_gate_result["applied"] = "none"
+        if temporal_gate_result.get("status") == "fail":
+            gate_issues = [c for c in (temporal_gate_result.get("checks") or []) if c.get("status") == "fail"]
+            issues.extend(gate_issues)
+            patch = (temporal_gate_result.get("patch_answer") or "").strip()
+            patch_citations = [
+                c for c in (temporal_gate_result.get("patch_citations") or []) if isinstance(c, int)
+            ]
+            if temporal_gate_result.get("mode") == "enforce" and patch:
+                answer_text, citations, blocks = patch, patch_citations, []
+                temporal_gate_result["applied"] = "patch"
+                status = "edited"
+                summary = "The answer was updated after deterministic temporal/date checks."
+                answer_conf = {"level": "yellow", "note": "Deterministic answer check corrected a temporal/date issue."}
+            else:
+                status = "needs_review"
+                summary = "The answer check found a temporal/date issue that needs review."
+                answer_conf = {"level": "red", "note": "Deterministic answer check found a temporal/date issue. Verify against the chart."}
+        elif temporal_gate_result.get("status") == "warn":
+            issues.extend([c for c in (temporal_gate_result.get("checks") or []) if c.get("status") == "warn"])
+
+    if status in {"checked", "edited"} and _is_substantive_answer(answer_text):
+        review_text = answer_text
+        block_text, _block_refs = _block_temporal_text_and_refs(blocks)
+        if block_text:
+            review_text += "\n\n=== STRUCTURED BLOCK TEXT ===\n" + block_text
+        try:
+            verdict = await _validate_answer_rewrite(
+                client, reviewer_model, chart=chart, gathered=gathered, answer_text=review_text,
+                max_tokens=max_tokens, temperature=validator_temperature,
+                repeat_penalty=validator_repeat_penalty, dry=validator_dry,
+                validation_prompt=reviewer_prompt or _REWRITE_VALIDATOR_PROMPT)
+        except Exception as e:
+            logger.warning("answer-review validator call failed: %s", e)
+            validation = _answer_validation_wire(
+                "unavailable",
+                summary="Answer check unavailable; the review model call failed.",
+                issues=[{"reason": str(e)}],
+            )
+            answer_conf = {"level": "yellow", "note": "Answer check unavailable because the review model failed."}
+            content = _assemble_answer_only_envelope(answer_text, citations, blocks, answer_conf, validation)
+            steps.append({"role": "answer_review", "model": reviewer_model, "status": "unavailable"})
+            return content, answer_conf, answer_text, validation, temporal_gate_result, original_answer
+
+        errs = (verdict or {}).get("errors") or []
+        steps.append({"role": "answer_review", "mode": "rewrite", "model": reviewer_model,
+                      "answer_ok": (verdict or {}).get("answer_ok", True), "n_errors": len(errs),
+                      "errors": errs})
+        if verdict and not verdict.get("answer_ok", True) and errs:
+            issues.extend(errs)
+            corrected = (verdict.get("corrected_answer") or "").strip()
+            if blocks:
+                status = "needs_review"
+                summary = "The answer check found an issue in prose or table content that needs review."
+                answer_conf = {"level": "red", "note": _answer_note("red", _rw_issue(verdict), "")}
+            elif corrected and corrected != answer_text:
+                recheck = await _validate_answer_rewrite(
+                    client, reviewer_model, chart=chart, gathered=gathered, answer_text=corrected,
+                    max_tokens=max_tokens, temperature=validator_temperature,
+                    repeat_penalty=validator_repeat_penalty, dry=validator_dry,
+                    validation_prompt=reviewer_prompt or _REWRITE_VALIDATOR_PROMPT)
+                steps.append({"role": "answer_review", "mode": "rewrite", "model": reviewer_model,
+                              "attempt": 1, "answer_ok": recheck.get("answer_ok", True),
+                              "n_errors": len(recheck.get("errors") or []),
+                              "errors": recheck.get("errors") or []})
+                if recheck.get("answer_ok", True) or not recheck.get("errors"):
+                    answer_text = corrected
+                    citations = _extract_citations(corrected) or citations
+                    status = "edited"
+                    summary = "The answer was updated after chart check."
+                    answer_conf = {"level": "yellow", "note": _answer_note("yellow", _rw_issue(verdict), "")}
+                else:
+                    status = "needs_review"
+                    summary = "The answer check found an issue that could not be safely repaired."
+                    answer_conf = {"level": "red", "note": _answer_note("red", _rw_issue(verdict), _rw_issue(recheck))}
+            else:
+                status = "needs_review"
+                summary = "The answer check found an issue that could not be safely repaired."
+                answer_conf = {"level": "red", "note": _answer_note("red", _rw_issue(verdict), "")}
+
+    original_for_wire = original_answer if status == "edited" and original_answer != answer_text else None
+    validation = _answer_validation_wire(
+        status,
+        summary=summary,
+        issues=issues,
+        original_answer=original_for_wire,
+    )
+    content = _assemble_answer_only_envelope(answer_text, citations, blocks, answer_conf, validation)
+    steps.append({"role": "answer_review_result", "model": reviewer_model,
+                  "status": status, "n_issues": len(issues)})
+    return content, answer_conf, answer_text, validation, temporal_gate_result, original_for_wire
+
+
 def _indepth_note(level: str, n_dropped: int, issues: str) -> str:
     """Clinician-facing confidence note for the In-Depth, from the validator verdict."""
     if level == "yellow":
@@ -1079,13 +1290,6 @@ async def _synthesize_and_validate(
         response_format=response_format, temperature=synth_temperature,
         max_tokens=max_tokens, repeat_penalty=synth_repeat_penalty, dry=synth_dry)
     steps.append({"role": "answer_synth", "model": synth_model, "output": answer_text, "citations": citations})
-    if not answer_text:
-        conf = {"level": "red", "note": "The team could not produce an answer this turn."}
-        return (_fallback_envelope(
-            "I could not produce a complete answer for this turn. Please try again."),
-            steps, conf, dict(green), "", [],
-            temporal.run_temporal_gate(_latest_user_text(base_messages), "", [], temporal_facts, temporal_gate_mode),
-            None)
 
     temporal_gate, original_answer_text = None, None
     answer_text, citations, blocks, temporal_gate, original_answer_text = _apply_temporal_gate(
@@ -1146,7 +1350,9 @@ def _write_trace(level_id: Optional[str], messages: List[Dict[str, Any]], *, orc
                  reference_date: Optional[str] = None,
                  temporal_facts: Optional[Dict[str, Any]] = None,
                  temporal_gate: Optional[Dict[str, Any]] = None,
-                 original_answer_text: Optional[str] = None) -> None:
+                 original_answer_text: Optional[str] = None,
+                 answer_validation: Optional[Dict[str, Any]] = None,
+                 sampling: Optional[Dict[str, Any]] = None) -> None:
     """Append one per-turn reasoning-trace line — the structured package a client renders (the
     SHIPPED answer + in-depth claims + per-section confidence + the ordered call steps). Best-effort:
     never raises (a trace-write failure must never break a turn)."""
@@ -1164,6 +1370,7 @@ def _write_trace(level_id: Optional[str], messages: List[Dict[str, Any]], *, orc
             "reference_date": reference_date,
             "models": {"orchestrator": orchestrator, "expert": expert,
                        "synthesizer": synthesizer, "validator": validator},
+            "sampling": sampling or {},
             "answer_text": answer_text,
             "in_depth_claims": in_depth_claims or [],
             "answer_confidence": answer_confidence,
@@ -1174,6 +1381,7 @@ def _write_trace(level_id: Optional[str], messages: List[Dict[str, Any]], *, orc
             "temporal_facts_summary": temporal.compact_temporal_facts_summary(temporal_facts),
             "temporal_gate": temporal_gate,
             "original_answer_text": original_answer_text,
+            "answer_validation": answer_validation,
             "steps": steps,
         }
         os.makedirs(_TRACE_DIR, exist_ok=True)
@@ -1203,6 +1411,7 @@ async def run_team(
     indepth_shared: bool = False,
     indepth_only: bool = False,
     answer_only: bool = False,
+    answer_review: bool = False,
     solo: bool = False,
     context: Optional[Dict[str, Any]] = None,
     temporal_gate: str = "off",
@@ -1245,12 +1454,27 @@ async def run_team(
     exp_temp = _knob(knobs, "expert", "temperature", 0.1)
     exp_rp = _knob(knobs, "expert", "repeat_penalty", None)
     exp_dry = _knob(knobs, "expert", "dry", EXPERT_DRY_MULTIPLIER)
-    synth_temp = _knob(knobs, "synthesizer", "temperature", max(temperature or 0.0, _SYNTH_MIN_TEMPERATURE))
+    synth_knobs = (knobs or {}).get("synthesizer") if isinstance(knobs, dict) else None
+    synth_temp_override = (
+        synth_knobs.get("temperature")
+        if isinstance(synth_knobs, dict) and synth_knobs.get("temperature") is not None
+        else None
+    )
+    synth_default_temp = max(temperature or 0.0, _SYNTH_MIN_TEMPERATURE)
+    synth_temp = _knob(knobs, "synthesizer", "temperature", synth_default_temp)
     synth_rp = _knob(knobs, "synthesizer", "repeat_penalty", SYNTH_REPEAT_PENALTY)
     synth_dry = _knob(knobs, "synthesizer", "dry", SYNTH_DRY_MULTIPLIER)
     val_temp = _knob(knobs, "validator", "temperature", 0.0)
     val_rp = _knob(knobs, "validator", "repeat_penalty", None)
     val_dry = _knob(knobs, "validator", "dry", None)
+    sampling = {
+        "request_temperature": temperature,
+        "synth_temperature": synth_temp,
+        "synth_temperature_floor": (
+            synth_temp_override if synth_temp_override is not None else _SYNTH_MIN_TEMPERATURE
+        ),
+        "synth_temperature_source": "level_knob" if synth_temp_override is not None else "default_floor",
+    }
 
     # Context spec (P1): what evidence to assemble — temporal default on; kb/expert opt-in. Independent
     # of scaffolding (solo vs team). From the level default or the request's context field.
@@ -1273,7 +1497,10 @@ async def run_team(
     # Parity (two_call=False): synthesis_prompt is a WHOLE prompt (no -answer/-indepth split) —
     # one call, no in-depth, validator skipped — so the output is the bare chartsearchai envelope.
     _synth_base = synthesizer_prompt or "synthesis"
-    if indepth_only:
+    if answer_review:
+        answer_instruction = None
+        indepth_instruction = None
+    elif indepth_only:
         # Two-call IN-DEPTH leg: no answer synthesis at all, only the configured in-depth prompt
         # (default "synthesis-indepth"; dynamic ids can select another prompt file).
         answer_instruction = None
@@ -1405,6 +1632,26 @@ async def run_team(
             if temporal_facts_block:
                 gathered = temporal_facts_block + ("\n\n" + gathered if gathered else "")
 
+        if answer_review:
+            review_steps = list(orch_steps)
+            content, answer_conf, answer_text, answer_validation, _temporal_gate, _original_answer = \
+                await _review_existing_answer(
+                    client, messages=list(messages), gathered=gathered, chart=chart,
+                    temporal_facts=temporal_facts, temporal_gate_mode=temporal_gate_mode,
+                    reviewer_model=synth_model, reviewer_prompt=_synth_base,
+                    validator_temperature=val_temp, validator_repeat_penalty=val_rp,
+                    validator_dry=val_dry, max_tokens=max_tokens, steps=review_steps)
+            _write_trace(level_id, messages, orchestrator=trace_orch, expert=trace_expert,
+                         synthesizer=synth_model, validator=synth_model,
+                         steps=review_steps,
+                         answer_confidence=answer_conf, indepth_confidence={},
+                         answer_text=answer_text, in_depth_claims=[],
+                         reference_date=reference_date, temporal_facts=temporal_facts,
+                         temporal_gate=_temporal_gate, original_answer_text=_original_answer,
+                         answer_validation=answer_validation,
+                         sampling=sampling)
+            return content
+
         if indepth_only:
             # Two-call architecture: produce ONLY the In-Depth, elaborating the prior answer carried
             # in the message history (the answer was already returned to the caller by the first call).
@@ -1421,7 +1668,8 @@ async def run_team(
                                               "mode": "in-depth-only"}],
                          answer_confidence=_io_conf, indepth_confidence=_io_conf,
                          answer_text=prior_answer, in_depth_claims=claims,
-                         reference_date=reference_date, temporal_facts=temporal_facts)
+                         reference_date=reference_date, temporal_facts=temporal_facts,
+                         sampling=sampling)
             body = "**In Depth**\n" + "\n".join("- " + c for c in claims) if claims else ""
             return json.dumps({"answer": body, "citations": [], "blocks": []})
 
@@ -1462,7 +1710,8 @@ async def run_team(
                          answer_confidence=answer_conf, indepth_confidence=trace_indepth_conf,
                          answer_text=answer_text, in_depth_claims=claims,
                          reference_date=reference_date, temporal_facts=temporal_facts,
-                         temporal_gate=_temporal_gate, original_answer_text=_original_answer)
+                         temporal_gate=_temporal_gate, original_answer_text=_original_answer,
+                         sampling=sampling)
             return content
         except Exception as e:
             logger.error("synthesis failed: %s", e, exc_info=True)
@@ -1471,6 +1720,6 @@ async def run_team(
                  synthesizer=synth_model, validator=validator_model, steps=orch_steps,
                  answer_confidence={"level": "red", "note": "The team could not produce an answer this turn."},
                  indepth_confidence={"level": "green", "note": ""}, reference_date=reference_date,
-                 temporal_facts=temporal_facts)
+                 temporal_facts=temporal_facts, sampling=sampling)
     return _fallback_envelope(
         "I could not produce a complete answer for this turn. Please try again.")

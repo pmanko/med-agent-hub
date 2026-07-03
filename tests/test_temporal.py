@@ -292,6 +292,29 @@ def test_gate_fails_malformed_date_output_and_can_patch_selected_series():
     assert gate["patch_answer"].startswith("The documented Weight series decreased")
 
 
+def test_gate_fails_pathological_malformed_date_strings():
+    facts = temporal.build_temporal_facts(_CHART, "2006-06-01")
+    answer = "\n".join([
+        "The order date was written as 2025-10-//13.",
+        "The follow-up date was written as 2026-0-[59].",
+        "The month-only date was 2026-02.",
+        "The unicode-hyphen date was 2006\u201105\u201118.",
+    ])
+    gate = temporal.run_temporal_gate(
+        "List any malformed dates.",
+        answer,
+        [],
+        facts,
+        "warn",
+    )
+    assert gate["status"] == "fail"
+    claims = {c["claim"] for c in gate["checks"] if c["id"] == "date_format"}
+    assert "2025-10-//13" in claims
+    assert "2026-0-[59]" in claims
+    assert "2026-02" in claims
+    assert "2006\u201105\u201118" in claims
+
+
 def test_gate_fails_valid_iso_date_that_is_not_in_ledger():
     facts = temporal.build_temporal_facts(_CHART, "2006-06-01")
     gate = temporal.run_temporal_gate(

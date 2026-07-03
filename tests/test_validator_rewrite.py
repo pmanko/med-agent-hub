@@ -71,6 +71,72 @@ def _err(wrong, chart, fix):
     return {"wrong": wrong, "chart": chart, "fix": fix}
 
 
+def _review_messages(answer="The patient is taking aspirin [1].", blocks=None):
+    payload = {
+        "schema_version": "answer_to_review.v1",
+        "original_question": "What medications?",
+        "answer": answer,
+        "citations": [1],
+        "blocks": blocks or [],
+    }
+    return [
+        {"role": "system", "content": "envelope system"},
+        {"role": "user", "content": "[1] Aspirin active"},
+        {"role": "assistant", "content": answer},
+        {"role": "user", "content": "Review this answer:\n```json\n" + json.dumps(payload) + "\n```"},
+    ]
+
+
+def _run_review(rewrite_verdicts, *, answer="The patient is taking aspirin [1].", blocks=None):
+    calls = []
+    team._chat = _factory(calls, rewrite_verdicts)
+    out = asyncio.run(team.run_team(
+        _review_messages(answer=answer, blocks=blocks),
+        response_format=_RF,
+        orchestrator_model="ORCH",
+        synthesizer_model="REVIEWER",
+        validator_model=None,
+        two_call=False,
+        solo=True,
+        answer_review=True,
+        synthesizer_prompt="validation-rewrite",
+        context={"temporal": False},
+    ))
+    return calls, json.loads(out)
+
+
+def test_answer_review_clean_pass_returns_checked_metadata():
+    calls, env = _run_review([{"answer_ok": True, "errors": [], "corrected_answer": ""}])
+    assert env["answer"] == "The patient is taking aspirin [1]."
+    assert env["answerValidation"]["status"] == "checked"
+    assert env["answerValidation"]["label"] == "Checked"
+    assert env["confidence"]["answer"]["level"] == "green"
+    assert [name for _model, name in calls].count("rewrite_verdict") == 1
+
+
+def test_answer_review_adopts_safe_corrected_prose_as_edited():
+    calls, env = _run_review([
+        {"answer_ok": False, "errors": [_err("aspirin", "lisinopril [1]", "lisinopril")],
+         "corrected_answer": "The patient is taking lisinopril [1]."},
+        {"answer_ok": True, "errors": [], "corrected_answer": ""},
+    ])
+    assert env["answer"] == "The patient is taking lisinopril [1]."
+    assert env["answerValidation"]["status"] == "edited"
+    assert env["answerValidation"]["originalAnswer"] == "The patient is taking aspirin [1]."
+    assert env["confidence"]["answer"]["level"] == "yellow"
+    assert [name for _model, name in calls].count("rewrite_verdict") == 2
+
+
+def test_answer_review_preserves_original_when_no_safe_patch():
+    _calls, env = _run_review([
+        {"answer_ok": False, "errors": [_err("aspirin", "no active med", "remove")],
+         "corrected_answer": ""},
+    ])
+    assert env["answer"] == "The patient is taking aspirin [1]."
+    assert env["answerValidation"]["status"] == "needs_review"
+    assert env["confidence"]["answer"]["level"] == "red"
+
+
 def _factory_answers(calls, answers, rewrite_verdicts):
     """Like _factory but the writer returns answers[N] (so a test can force a non-substantive draft)."""
     state = {"answer_synth": 0, "indepth_synth": 0, "rw": 0}

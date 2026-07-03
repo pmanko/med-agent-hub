@@ -115,9 +115,35 @@ def test_generic_answer_accepts_prompt_variant_and_temporal_gate():
     assert lv.has_expert is False
 
 
+def test_generic_answer_accepts_temperature_suffix():
+    lv = levels_loader.get_level("answer:gemma-4-12b@synthesis-date-output-contract~enforce~temp0")
+    assert lv.synthesizer == "gemma-4-12b"
+    assert lv.synthesis_prompt == "synthesis-date-output-contract"
+    assert lv.temporal_gate == "enforce"
+    assert lv.knobs == {"synthesizer": {"temperature": 0.0}}
+
+    warm = levels_loader.get_level("answer:gemma-4-12b@synthesis-date-output-contract~enforce~temp0.5")
+    assert warm.knobs["synthesizer"]["temperature"] == 0.5
+
+
+def test_generic_answer_review_resolves_default_reviewer_lane():
+    lv = levels_loader.get_level("answer-review:qwen2.5-14b")
+    assert lv.synthesizer == "qwen2.5-14b"
+    assert lv.answer_review is True
+    assert lv.two_call is False
+    assert lv.solo is True
+    assert lv.temporal_gate == "enforce"
+    assert lv.synthesis_prompt == "validation-rewrite"
+
+
 def test_generic_answer_rejects_unknown_temporal_gate():
     with pytest.raises(KeyError):
         levels_loader.get_level("answer:gemma-e4b-q8@synthesis-chartsearchai~maybe")
+
+
+def test_generic_answer_rejects_unknown_temperature_suffix():
+    with pytest.raises(KeyError):
+        levels_loader.get_level("answer:gemma-e4b-q8@synthesis-chartsearchai~enforce~temperature0")
 
 
 def test_temporal_gate_dynamic_answer_levels_use_run_anchor_and_modes():
@@ -179,6 +205,8 @@ def test_advertised_models_includes_dynamic_indepth_legs(monkeypatch):
     assert "answer:qwen3.6-35b" in ids
     assert "answer:mistral-nemo-12b-q8@synthesis-date-output-contract~warn" in ids
     assert "answer:qwen3.6-35b@synthesis-date-output-contract~enforce" in ids
+    assert "answer:qwen3.6-35b@synthesis-date-output-contract~enforce~temp0" in ids
+    assert "answer:qwen3.6-35b@synthesis-date-output-contract~enforce~temp0.5" in ids
     assert "indepth-only:qwen3.6-35b@synthesis-indepth" in ids
     assert "med-agent-team-med" in ids  # static levels still advertised alongside
 

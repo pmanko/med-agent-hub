@@ -24,6 +24,11 @@ _DATE_PREFIX_RE = re.compile(r"^\((\d{4}-\d{2}-\d{2})\)\s*(.*)$")
 _DATE_RE = re.compile(r"\((\d{4}-\d{2}-\d{2})\)")
 _ISO_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 _ISO_TOKEN_RE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
+_UNICODE_HYPHEN = "\u2010\u2011\u2012\u2013\u2014\u2015\u2212\ufe58\ufe63\uff0d"
+_NON_ASCII_ISO_TOKEN_RE = re.compile(rf"\b\d{{4}}[{_UNICODE_HYPHEN}]\d{{2}}[{_UNICODE_HYPHEN}]\d{{2}}\b")
+_TRUNCATED_ISO_TOKEN_RE = re.compile(r"\b\d{4}-\d{1,2}\b(?!-)")
+_DOUBLE_SEPARATOR_DATE_RE = re.compile(r"\b\d{4}\s*[-_/]\s*\d{1,2}\s*[-_/]{2,}\s*\d{1,4}\b")
+_BRACKETED_DATE_RE = re.compile(r"\b\d{4}\s*[-_/]\s*\d{1,2}\s*[-_/]\s*\[[^\]\s]{1,8}\]")
 _DATE_LIKE_RE = re.compile(
     r"(?<![\w])[\d\u0660-\u0669\u0966-\u096f]{1,4}\s*[-_/]\s*"
     r"[\d\u0660-\u0669\u0966-\u096f]{1,2}\s*[-_/]\s*"
@@ -544,37 +549,38 @@ def _date_output_failures(answer: str, facts: Dict[str, Any]) -> List[Dict[str, 
         return []
     out: List[Dict[str, Any]] = []
     seen: set = set()
+    def _add(kind: str, raw: str, reason: str) -> None:
+        key = (kind, raw)
+        if key in seen:
+            return
+        seen.add(key)
+        out.append({"kind": kind, "date": raw, "reason": reason})
+
     for raw in _DATE_ID_TOKEN_RE.findall(answer or ""):
-        key = ("date_id_exposed", raw)
-        if key not in seen:
-            seen.add(key)
-            out.append({
-                "kind": "date_id_exposed",
-                "date": raw,
-                "reason": "a date_id meant for internal matching, not a user-facing date",
-            })
+        _add(
+            "date_id_exposed", raw,
+            "a date_id meant for internal matching, not a user-facing date",
+        )
+    extra_patterns = [
+        (_NON_ASCII_ISO_TOKEN_RE, "malformed", "uses non-ASCII hyphens; copy an exact YYYY-MM-DD from date_ledger"),
+        (_DOUBLE_SEPARATOR_DATE_RE, "malformed", "contains repeated date separators, not an exact YYYY-MM-DD string copied from date_ledger"),
+        (_BRACKETED_DATE_RE, "malformed", "contains bracketed characters inside a date, not an exact YYYY-MM-DD string copied from date_ledger"),
+        (_TRUNCATED_ISO_TOKEN_RE, "malformed", "is truncated; copy a complete YYYY-MM-DD string from date_ledger"),
+    ]
+    for pattern, kind, reason in extra_patterns:
+        for m in pattern.finditer(answer or ""):
+            raw = m.group(0)
+            if _ISO_RE.fullmatch(raw):
+                continue
+            _add(kind, raw, reason)
     for m in _DATE_LIKE_RE.finditer(answer or ""):
         raw = m.group(0)
         if _ISO_RE.fullmatch(raw):
             continue
-        key = ("malformed", raw)
-        if key not in seen:
-            seen.add(key)
-            out.append({
-                "kind": "malformed",
-                "date": raw,
-                "reason": "not an exact YYYY-MM-DD string copied from date_ledger",
-            })
+        _add("malformed", raw, "not an exact YYYY-MM-DD string copied from date_ledger")
     for raw in _ISO_TOKEN_RE.findall(answer or ""):
         if _parse_iso_date(raw) and raw not in allowed:
-            key = ("not_in_ledger", raw)
-            if key not in seen:
-                seen.add(key)
-                out.append({
-                "kind": "not_in_ledger",
-                "date": raw,
-                "reason": "valid ISO shape but not present in date_ledger",
-            })
+            _add("not_in_ledger", raw, "valid ISO shape but not present in date_ledger")
     return out
 
 

@@ -19,13 +19,18 @@ _PATH = Path(__file__).parent / "levels.yaml"
 _TEMPORAL_GATE_MODES = {"off", "warn", "enforce"}
 
 
-def _split_dynamic_prompt_level(level_id: str, prefix: str) -> tuple[str, str | None, str | None]:
+def _split_dynamic_prompt_level(
+    level_id: str, prefix: str
+) -> tuple[str, str | None, str | None, float | None]:
     """Parse dynamic prompt-level ids.
 
     Supported forms:
       answer:<writer>
       answer:<writer>@<prompt>
       answer:<writer>@<prompt>~<temporal_gate>
+      answer:<writer>@<prompt>~<temporal_gate>~temp0
+      answer:<writer>@<prompt>~<temporal_gate>~temp0.5
+      answer-review:<reviewer>
       indepth-only:<writer>
       indepth-only:<writer>@<prompt>
 
@@ -33,15 +38,44 @@ def _split_dynamic_prompt_level(level_id: str, prefix: str) -> tuple[str, str | 
     stems, which keeps this parser tiny and makes backend configs easy to read.
     """
     rest = level_id[len(prefix):]
-    writer_prompt, sep, gate = rest.partition("~")
-    if sep and gate not in _TEMPORAL_GATE_MODES:
+    writer_prompt, *options = rest.split("~")
+    gate: str | None = None
+    temp_floor: float | None = None
+    for opt in options:
+        if not opt:
+            raise KeyError(f"dynamic level {level_id!r} has an empty option suffix")
+        if opt in _TEMPORAL_GATE_MODES:
+            if gate is not None:
+                raise KeyError(f"dynamic level {level_id!r} repeats temporal gate suffixes")
+            gate = opt
+            continue
+        if opt.startswith("temp") and opt[4:]:
+            if temp_floor is not None:
+                raise KeyError(f"dynamic level {level_id!r} repeats temperature suffixes")
+            try:
+                temp_floor = float(opt[4:])
+            except ValueError as exc:
+                raise KeyError(
+                    f"dynamic level {level_id!r} has invalid temperature suffix {opt!r}"
+                ) from exc
+            if temp_floor < 0:
+                raise KeyError(
+                    f"dynamic level {level_id!r} has invalid negative temperature suffix {opt!r}"
+                )
+            continue
         raise KeyError(
-            f"dynamic level {level_id!r} has invalid temporal gate {gate!r}; "
-            f"expected one of {sorted(_TEMPORAL_GATE_MODES)}")
+            f"dynamic level {level_id!r} has invalid option {opt!r}; expected temporal gate "
+            f"{sorted(_TEMPORAL_GATE_MODES)} or temp<number>")
     writer, at, prompt = writer_prompt.partition("@")
     if not writer:
         raise KeyError(f"dynamic level {level_id!r} is missing a writer model id")
-    return writer, (prompt if at and prompt else None), (gate if sep else None)
+    return writer, (prompt if at and prompt else None), gate, temp_floor
+
+
+def _dynamic_knobs(temp_floor: float | None) -> Dict[str, Any]:
+    if temp_floor is None:
+        return {}
+    return {"synthesizer": {"temperature": temp_floor}}
 
 
 @dataclass(frozen=True)
@@ -74,6 +108,9 @@ class Level:
     # validator and temporal gate, but skip the In-Depth leg so the caller can ship the answer
     # immediately and attach In-Depth later.
     answer_only: bool = False
+    # answer_review:true -> staged UX validation leg: review an already-visible direct answer and
+    # return a chartsearchai envelope plus answerValidation metadata, without adding In-Depth.
+    answer_review: bool = False
     # solo:true (P1) -> SINGLE scaffolding: one model, no orchestrator/team. run_team skips the tool
     # loop; the writer answers from the deterministic context. False -> team. Orthogonal to context.
     solo: bool = False
@@ -138,6 +175,7 @@ def get_level(level_id: str) -> Level:
                 indepth_shared=False,
                 indepth_only=False,
                 answer_only=True,
+                answer_review=False,
                 solo=_base.solo,
                 anchor=_base.anchor,
                 temporal_gate=_base.temporal_gate,
@@ -160,12 +198,13 @@ def get_level(level_id: str) -> Level:
                     synthesis_prompt=_prompt,
                     two_call=False,
                     indepth_only=True,
+                    answer_review=False,
                     solo=True,
                     anchor=_base.anchor,
                     temporal_gate=_base.temporal_gate,
                     knobs=_base.knobs,
                 )
-            _w, _prompt, _gate = _split_dynamic_prompt_level(level_id, "indepth-only:")
+            _w, _prompt, _gate, _temp = _split_dynamic_prompt_level(level_id, "indepth-only:")
             return Level(
                 id=level_id,
                 orchestrator=_w,
@@ -174,14 +213,17 @@ def get_level(level_id: str) -> Level:
                 synthesis_prompt=_prompt or "synthesis-indepth",
                 two_call=False,
                 indepth_only=True,
+                answer_review=False,
                 solo=True,  # P1: single-model In-Depth leg — no orchestrator/team
+                temporal_gate=_gate or "off",
+                knobs=_dynamic_knobs(_temp),
             )
         # Generic Answer leg: "answer:<writer>" mirrors indepth-only — a single CONTEXTUAL answer
         # through the hub (the parity lane: one answer call with the full gathered evidence incl the
         # temporal block, no In-Depth, no validator), so a two-call arm routes BOTH legs through the
         # hub with symmetric context. The orchestrator gathers; the writer (synthesizer) answers.
         if level_id.startswith("answer:") and level_id.split(":", 1)[1]:
-            _w, _prompt, _gate = _split_dynamic_prompt_level(level_id, "answer:")
+            _w, _prompt, _gate, _temp = _split_dynamic_prompt_level(level_id, "answer:")
             return Level(
                 id=level_id,
                 orchestrator=_w,
@@ -191,6 +233,26 @@ def get_level(level_id: str) -> Level:
                 two_call=False,
                 solo=True,  # P1: single-model Answer leg — no orchestrator/team (this is the fix)
                 temporal_gate=_gate or "off",
+                knobs=_dynamic_knobs(_temp),
+            )
+        # Staged Answer validation leg. The reviewer is a normal router model, but the hub runs a
+        # special path keyed by the answer_to_review.v1 payload rather than synthesizing a fresh answer.
+        if level_id.startswith("answer-review:") and level_id.split(":", 1)[1]:
+            _w, _prompt, _gate, _temp = _split_dynamic_prompt_level(level_id, "answer-review:")
+            return Level(
+                id=level_id,
+                orchestrator=_w,
+                synthesizer=_w,
+                expert=None,
+                synthesis_prompt=_prompt or "validation-rewrite",
+                two_call=False,
+                indepth_shared=False,
+                indepth_only=False,
+                answer_only=False,
+                answer_review=True,
+                solo=True,
+                temporal_gate=_gate or "enforce",
+                knobs=_dynamic_knobs(_temp),
             )
         raise KeyError(f"unknown level {level_id!r}; levels.yaml defines {list(raw)}")
     spec = raw[level_id] or {}
@@ -210,6 +272,7 @@ def get_level(level_id: str) -> Level:
             indepth_shared=spec.get("indepth_shared", False),
             indepth_only=spec.get("indepth_only", False),
             answer_only=spec.get("answer_only", False),
+            answer_review=spec.get("answer_review", False),
             solo=spec.get("solo", False),
             anchor=spec.get("anchor"),
             temporal_gate=str(spec.get("temporal_gate", "off")).lower(),

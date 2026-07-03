@@ -57,6 +57,7 @@ def _advertised_models() -> List[str]:
     dynamic levels get_level() resolves on the fly (no hand-authored per-writer level needed)."""
     base_level_ids = list(level_ids())
     ids = list(base_level_ids)
+    ids.append("answer-review:qwen2.5-14b")
     for lid in base_level_ids:
         ids.append(f"answer-only:{lid}")
         ids.append(f"indepth-only:{lid}")
@@ -78,12 +79,15 @@ def _advertised_models() -> List[str]:
         for m in resp.json().get("data", []):
             mid = m.get("id")
             if mid:
+                ids.append(f"answer-review:{mid}")
                 ids.append(f"indepth-only:{mid}")
                 ids.append(f"answer:{mid}")
                 for prompt in answer_prompts:
                     ids.append(f"answer:{mid}@{prompt}")
                     for gate in ("off", "warn", "enforce"):
                         ids.append(f"answer:{mid}@{prompt}~{gate}")
+                        for temp in ("temp0", "temp0.5"):
+                            ids.append(f"answer:{mid}@{prompt}~{gate}~{temp}")
                 for prompt in indepth_prompts:
                     ids.append(f"indepth-only:{mid}@{prompt}")
     except Exception:
@@ -149,6 +153,7 @@ async def _content_for(req: ChatCompletionRequest) -> str:
         indepth_shared=level.indepth_shared,
         indepth_only=level.indepth_only,
         answer_only=level.answer_only,
+        answer_review=level.answer_review,
         solo=level.solo,
         context=req.context,
         temporal_gate=level.temporal_gate,

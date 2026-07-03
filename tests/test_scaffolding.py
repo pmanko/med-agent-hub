@@ -14,7 +14,7 @@ from server import team
 def _recording_chat(calls):
     async def fake_chat(client, model, messages, *, tools=None, response_format=None, **kwargs):
         calls.append({"model": model, "tools": bool(tools), "rf": response_format is not None,
-                      "messages": messages})
+                      "messages": messages, "kwargs": kwargs})
         if response_format is not None:  # a synthesis turn
             return {"content": json.dumps({"answer": "ok", "citations": [], "blocks": []})}
         return {"content": "", "tool_calls": None}  # orchestrator turn: nothing to gather -> stop
@@ -133,6 +133,59 @@ def test_temporal_gate_warn_records_failure_without_changing_answer(monkeypatch,
     assert gate["status"] == "fail"
     assert gate["applied"] == "none"
     assert trace["original_answer_text"] is None
+
+
+def _non_substantive_then_ok_chat(calls):
+    state = {"n": 0}
+
+    async def fake_chat(client, model, messages, *, tools=None, response_format=None, **kwargs):
+        calls.append({"model": model, "tools": bool(tools), "rf": response_format is not None,
+                      "messages": messages, "kwargs": kwargs})
+        if response_format is not None:
+            state["n"] += 1
+            answer = "..." if state["n"] == 1 else "The last visit was 2026-01-07 [1]."
+            return {"content": json.dumps({"answer": answer, "citations": [1], "blocks": []})}
+        return {"content": "", "tool_calls": None}
+    return fake_chat
+
+
+def test_non_substantive_answer_resynthesizes_and_trace_is_not_green(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(team, "_chat", _non_substantive_then_ok_chat(calls))
+    monkeypatch.setattr(team, "_TRACE_DIR", str(tmp_path))
+
+    out = asyncio.run(team.run_team(
+        _MSGS, response_format=_RF,
+        orchestrator_model="ORCH", synthesizer_model="SYNTH",
+        has_expert=False, two_call=False, solo=True,
+    ))
+    env = json.loads(out)
+    assert env["answer"] == "The last visit was 2026-01-07 [1]."
+    assert sum(1 for c in calls if c["rf"]) == 2
+
+    trace = json.loads((tmp_path / "trace.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+    assert trace["answer_confidence"]["level"] == "yellow"
+    assert any(s.get("reason") == "non-substantive" for s in trace["steps"])
+
+
+def test_synth_temperature_floor_override_is_used_and_traced(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(team, "_chat", _recording_chat(calls))
+    monkeypatch.setattr(team, "_TRACE_DIR", str(tmp_path))
+
+    asyncio.run(team.run_team(
+        _MSGS, response_format=_RF,
+        orchestrator_model="ORCH", synthesizer_model="SYNTH",
+        has_expert=False, two_call=False, solo=True,
+        knobs={"synthesizer": {"temperature": 0.0}},
+        level_id="answer:SYNTH@synthesis-chartsearchai~enforce~temp0",
+    ))
+    synth = next(c for c in calls if c["rf"])
+    assert synth["kwargs"]["temperature"] == 0.0
+    trace = json.loads((tmp_path / "trace.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+    assert trace["sampling"]["synth_temperature"] == 0.0
+    assert trace["sampling"]["synth_temperature_floor"] == 0.0
+    assert trace["sampling"]["synth_temperature_source"] == "level_knob"
 
 
 # ---- envelope-shape equivalence (the unify must NOT change any arm's output shape) ----
