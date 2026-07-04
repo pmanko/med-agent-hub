@@ -19,12 +19,12 @@ import uuid
 from typing import Any, Dict, List, Optional
 
 import httpx
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from .config import llm_config
-from .team import run_team
+from .team import run_team, run_team_stream
 from .levels_loader import level_ids, get_level
 from .prompt_loader import prompt_names
 
@@ -198,8 +198,62 @@ def _sse_stream(model: str, content: str):
     yield "data: [DONE]\n\n"
 
 
+def _named_sse(gen):
+    """Frame the hub's phased ``(event_name, json)`` tuples as SSE the chartsearchai controller relays
+    verbatim: ``event: <name>\\n`` + one ``data:`` line per line of payload + a blank line. On client
+    disconnect the StreamingResponse task is cancelled -> this closes ``gen`` -> the in-flight ``_chat``
+    unwinds and frees the router lock."""
+    async def _stream():
+        try:
+            async for name, data in gen:
+                out = f"event: {name}\n"
+                for line in (data or "").split("\n"):
+                    out += f"data: {line}\n"
+                out += "\n"
+                yield out
+        finally:
+            aclose = getattr(gen, "aclose", None)
+            if aclose is not None:
+                await aclose()
+    return _stream()
+
+
 @router.post("/v1/chat/completions")
-async def chat_completions(req: ChatCompletionRequest):
+async def chat_completions(req: ChatCompletionRequest, request: Request):
+    # Staged phased streaming: the hub OWNS answer -> (optional validation) -> in-depth and emits named
+    # SSE phase events with resolved references; the client relays them. Only for stream=true on a
+    # `staged: true` level. Everything else keeps the existing single-envelope path (harness/non-staged).
+    if req.stream:
+        try:
+            level = get_level(req.model)
+        except KeyError:
+            level = None
+        if level is not None and getattr(level, "staged", False):
+            base = level.synthesis_prompt or "synthesis"
+            gen = run_team_stream(
+                req.messages,
+                response_format=req.response_format,
+                temperature=req.temperature,
+                max_tokens=req.max_tokens,
+                synth_model=level.synthesizer,
+                indepth_model=level.indepth_model or level.synthesizer,
+                answer_prompt=base + "-answer",
+                indepth_prompt=base + "-indepth",
+                validator_model=level.validator,
+                validator_prompt=level.validator_prompt,
+                validator_max_loops=level.validator_max_loops,
+                context=req.context,
+                temporal_gate=level.temporal_gate,
+                anchor=level.anchor,
+                knobs=level.knobs,
+                level_id=req.model,
+                patient=req.patient,
+                model_label=req.model,
+                is_disconnected=request.is_disconnected,
+            )
+            return StreamingResponse(
+                _named_sse(gen), media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
     content = await _content_for(req)
     if req.stream:
         return StreamingResponse(_sse_stream(req.model, content), media_type="text/event-stream")

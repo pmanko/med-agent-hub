@@ -33,7 +33,7 @@ import logging
 import os
 import re
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional, Tuple
 
 import httpx
 
@@ -144,24 +144,44 @@ def _chart_context(messages: List[Dict[str, Any]]) -> str:
     return ""
 
 
-async def _retrieve_chart(patient_uuid: str) -> str:
+async def _retrieve_chart(patient_uuid: str) -> Tuple[str, List[Dict[str, Any]]]:
     """Fetch + render a patient's chart from querystore over REST (ADR Decision 16) — the hub as a
-    direct, non-JVM querystore client. Degrades to an empty chart on any failure (querystore disabled,
-    unavailable, auth, or unknown patient), mirroring the in-process consumer's empty-chart fallback so a
-    retrieval outage never breaks the turn."""
+    direct, non-JVM querystore client. Returns ``(chart_text, mappings)`` where ``mappings[i]`` =
+    ``{index, resourceType, resourceUuid, date, text}`` (the citation-index → record map the hub uses to
+    resolve ``[N]`` markers into rich references). Degrades to ``("", [])`` on any failure (querystore
+    disabled, unavailable, auth, or unknown patient) so a retrieval outage never breaks the turn."""
     if not querystore_config.enabled:
         logger.warning("patient ref given but QUERYSTORE_BASE_URL is unset — returning empty chart")
-        return ""
+        return "", []
     try:
         client = QueryStoreClient(
             querystore_config.base_url, querystore_config.username, querystore_config.password)
         records = await client.get_patient_chart(patient_uuid)
-        text, _mappings = render_chart(records)
-        return text
+        return render_chart(records)
     except Exception as e:
         logger.warning("querystore retrieval failed for patient=%s — returning empty chart: %s",
                        patient_uuid, e)
-        return ""
+        return "", []
+
+
+def _resolve_references(citations: List[int], mappings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Resolve 1-based ``[N]`` citation indices into rich reference objects using the chart mappings —
+    the hub owns this (it built the chart, so it holds the index → record map). Each reference is
+    ``{index, resourceType, resourceUuid, date}``; unknown indices are dropped so a stray citation never
+    ships a null reference. ``grounded`` is attached by a separate grounding step (not here)."""
+    by_index = {m.get("index"): m for m in (mappings or []) if isinstance(m.get("index"), int)}
+    refs: List[Dict[str, Any]] = []
+    for c in citations or []:
+        m = by_index.get(c)
+        if not m:
+            continue
+        refs.append({
+            "index": c,
+            "resourceType": m.get("resourceType"),
+            "resourceUuid": m.get("resourceUuid"),
+            "date": m.get("date"),
+        })
+    return refs
 
 
 def _latest_user_text(messages: List[Dict[str, Any]]) -> str:
@@ -1436,7 +1456,7 @@ async def run_team(
     # the synthesizer reads the chart from base_messages (never the `chart` var), so it must be a message.
     # Otherwise the chart already in `messages` (the chartsearchai path) is used unchanged.
     if patient:
-        chart_text = await _retrieve_chart(patient)
+        chart_text, _mappings = await _retrieve_chart(patient)
         if chart_text:
             messages = list(messages)
             _at = 1 if (messages and messages[0].get("role") == "system") else 0
@@ -1723,3 +1743,193 @@ async def run_team(
                  temporal_facts=temporal_facts, sampling=sampling)
     return _fallback_envelope(
         "I could not produce a complete answer for this turn. Please try again.")
+
+
+def _stream_payload(
+    answer_text: str, citations: List[int], blocks: List[Any], mappings: List[Dict[str, Any]], *,
+    model: Optional[str] = None, answer_conf: Optional[Dict[str, Any]] = None,
+    answer_validation: Optional[Dict[str, Any]] = None, in_depth: Optional[Dict[str, Any]] = None,
+) -> str:
+    """One staged wire event: the direct answer + hub-resolved RICH references (never bare citation
+    indices) + optional confidence / answerValidation / inDepth. `session` and `messageId` are injected
+    by the relaying client — the hub does not own the OpenMRS session/message."""
+    env: Dict[str, Any] = {
+        "answer": answer_text or "",
+        "references": _resolve_references(citations, mappings),
+        "blocks": blocks or [],
+    }
+    if answer_conf:
+        env["confidence"] = {"answer": answer_conf}
+    if answer_validation is not None:
+        env["answerValidation"] = answer_validation
+    if in_depth is not None:
+        env["inDepth"] = in_depth
+    if model:
+        env["model"] = model
+    return json.dumps(env)
+
+
+async def run_team_stream(
+    messages: List[Dict[str, Any]],
+    *,
+    response_format: Optional[Dict[str, Any]] = None,
+    temperature: Optional[float] = None,
+    max_tokens: Optional[int] = None,
+    synth_model: str,
+    indepth_model: Optional[str] = None,
+    answer_prompt: str = "synthesis-answer",
+    indepth_prompt: str = "synthesis-indepth",
+    validator_model: Optional[str] = None,
+    validator_prompt: Optional[str] = None,
+    validator_max_loops: int = 1,
+    context: Optional[Dict[str, Any]] = None,
+    temporal_gate: str = "off",
+    anchor: Optional[str] = None,
+    knobs: Optional[Dict[str, Any]] = None,
+    level_id: Optional[str] = None,
+    patient: Optional[str] = None,
+    model_label: Optional[str] = None,
+    is_disconnected: Optional[Callable[[], Awaitable[bool]]] = None,
+) -> AsyncIterator[Tuple[str, str]]:
+    """Hub-owned PHASED staged streaming for a solo single-writer level: run answer -> (optional
+    validation) -> in-depth and YIELD one ``(event_name, json_data)`` per stage as it completes. The
+    chartsearchai controller relays these verbatim (injecting session/messageId); the frontend renders
+    them. Events: ``answer_done`` -> (``answer_validation`` only when a validator is configured) ->
+    ``indepth_pending`` -> ``indepth_done``|``indepth_error`` -> ``done``. Each structured event carries
+    the hub-resolved rich references — the client resolves nothing. Reuses run_team's stage helpers;
+    the non-streaming run_team is untouched.
+
+    Cancellation: when the client disconnects, the driving task is cancelled -> the in-flight ``_chat``
+    unwinds -> its ``async with _ROUTER_LOCK`` releases -> the single router slot frees immediately.
+    ``is_disconnected`` is polled at phase boundaries for the inter-leg gap.
+    """
+    synth_default_temp = max(temperature or 0.0, _SYNTH_MIN_TEMPERATURE)
+    synth_temp = _knob(knobs, "synthesizer", "temperature", synth_default_temp)
+    synth_rp = _knob(knobs, "synthesizer", "repeat_penalty", SYNTH_REPEAT_PENALTY)
+    synth_dry = _knob(knobs, "synthesizer", "dry", SYNTH_DRY_MULTIPLIER)
+    val_temp = _knob(knobs, "validator", "temperature", 0.0)
+    val_rp = _knob(knobs, "validator", "repeat_penalty", None)
+    val_dry = _knob(knobs, "validator", "dry", None)
+
+    spec = context or {}
+    want_temporal = spec.get("temporal", True)
+    temporal_gate_mode = str(spec.get("temporal_gate", temporal_gate or "off")).strip().lower()
+
+    # Chart: the hub OWNS retrieval. A patient ref -> retrieve + keep the mappings (the index->record map
+    # for reference resolution) and inject the chart as a user message so the writer reads it. Otherwise
+    # use the chart already in messages (mappings unknown -> citations can't resolve to references).
+    mappings: List[Dict[str, Any]] = []
+    base_messages = list(messages)
+    if patient:
+        chart_text, mappings = await _retrieve_chart(patient)
+        if chart_text:
+            _at = 1 if (base_messages and base_messages[0].get("role") == "system") else 0
+            base_messages.insert(_at, {"role": "user",
+                                       "content": "Patient records (most recent first):\n" + chart_text})
+    chart = _chart_context(base_messages)
+
+    answer_instruction = load_prompt(answer_prompt)
+    indepth_instruction = load_prompt(indepth_prompt)
+    steps: List[Dict[str, Any]] = []
+
+    async def _disconnected() -> bool:
+        try:
+            return bool(is_disconnected and await is_disconnected())
+        except Exception:
+            return False
+
+    reference_date: Optional[str] = None
+    temporal_facts: Optional[Dict[str, Any]] = None
+
+    async with httpx.AsyncClient() as client:
+        # Deterministic temporal grounding (same as run_team): resolve the reference "now" and prepend
+        # the computed series so the writer + validator REPORT dated facts instead of deriving them.
+        gathered = ""
+        if want_temporal:
+            anchor_mode = anchor or os.environ.get("HUB_ANCHOR")
+            reference_date = temporal.resolve_anchor(anchor_mode, chart)
+            temporal_facts = temporal.build_temporal_facts(
+                chart, reference_date, anchor_mode=anchor_mode or "latest_record")
+            block = temporal.render_temporal_facts(temporal_facts)
+            if block:
+                gathered = block
+
+        # ---- PHASE 1: ANSWER ----
+        answer_text, citations, blocks = await _synthesize_answer(
+            client, synth_model, base_messages, answer_instruction, gathered,
+            response_format=response_format, temperature=synth_temp, max_tokens=max_tokens,
+            repeat_penalty=synth_rp, dry=synth_dry)
+        steps.append({"role": "answer_synth", "model": synth_model, "output": answer_text,
+                      "citations": citations})
+        answer_text, citations, blocks, temporal_gate_result, original_answer = _apply_temporal_gate(
+            question=_latest_user_text(base_messages), answer_text=answer_text, citations=citations,
+            blocks=blocks, temporal_facts=temporal_facts, temporal_gate_mode=temporal_gate_mode,
+            steps=steps)
+
+        has_validation = bool(validator_model)
+        yield ("answer_done", _stream_payload(
+            answer_text, citations, blocks, mappings, model=model_label,
+            answer_validation=(_answer_validation_wire("validating") if has_validation else None),
+            in_depth={"status": "pending", "answer": ""}))
+        if await _disconnected():
+            return
+
+        # ---- PHASE 2: VALIDATION (only when a validator is configured — else no validation phase) ----
+        answer_conf: Dict[str, Any] = {"level": "green", "note": ""}
+        answer_validation: Optional[Dict[str, Any]] = None
+        if has_validation:
+            new_text, new_cit, new_blocks, answer_conf = await _validate_and_refine_answer(
+                client, synth_model=synth_model, base_messages=base_messages,
+                answer_instruction=answer_instruction, gathered=gathered, response_format=response_format,
+                answer_text=answer_text, citations=citations, blocks=blocks,
+                validator_model=validator_model, validator_prompt=validator_prompt, chart=chart,
+                synth_temperature=synth_temp, synth_repeat_penalty=synth_rp, synth_dry=synth_dry,
+                validator_temperature=val_temp, validator_repeat_penalty=val_rp, validator_dry=val_dry,
+                max_tokens=max_tokens, max_loops=validator_max_loops, steps=steps)
+            answer_conf = _merge_temporal_gate_conf(answer_conf, temporal_gate_result)
+            edited = (new_text or "").strip() != (answer_text or "").strip()
+            status = "edited" if edited else ("needs_review" if answer_conf.get("level") == "red" else "checked")
+            answer_validation = _answer_validation_wire(
+                status, summary=answer_conf.get("note", ""),
+                original_answer=answer_text if edited else None)
+            answer_text, citations, blocks = new_text, new_cit, new_blocks
+            yield ("answer_validation", _stream_payload(
+                answer_text, citations, blocks, mappings, model=model_label,
+                answer_conf=answer_conf, answer_validation=answer_validation,
+                in_depth={"status": "pending", "answer": ""}))
+            if await _disconnected():
+                return
+
+        # ---- PHASE 3: IN-DEPTH ----
+        yield ("indepth_pending",
+               json.dumps({"messageId": None, "inDepth": {"status": "pending", "answer": ""}}))
+        indepth_body = ""
+        claims: List[str] = []
+        indepth_conf: Dict[str, Any] = {}
+        try:
+            claims, indepth_conf = await _gen_indepth(
+                client, indepth_model or synth_model, base_messages, indepth_instruction, gathered, answer_text,
+                validator_model=validator_model, validator_prompt=validator_prompt, chart=chart,
+                synth_temperature=synth_temp, synth_repeat_penalty=synth_rp, synth_dry=synth_dry,
+                validator_temperature=val_temp, validator_repeat_penalty=val_rp, validator_dry=val_dry,
+                max_tokens=max_tokens, max_loops=validator_max_loops, steps=steps)
+            indepth_body = "\n".join("- " + c for c in claims)
+            yield ("indepth_done", json.dumps({"status": "complete", "answer": indepth_body, "error": ""}))
+        except Exception as e:
+            logger.warning("staged in-depth failed: %s", e)
+            yield ("indepth_error", json.dumps({
+                "status": "failed", "answer": "",
+                "error": "In-Depth generation failed. The direct answer is still available."}))
+
+        # ---- DONE ----
+        yield ("done", _stream_payload(
+            answer_text, citations, blocks, mappings, model=model_label,
+            answer_conf=answer_conf, answer_validation=answer_validation,
+            in_depth={"status": "complete", "answer": indepth_body}))
+        _write_trace(level_id, base_messages, orchestrator=None, expert=None,
+                     synthesizer=synth_model, validator=validator_model, steps=steps,
+                     answer_confidence=answer_conf, indepth_confidence=indepth_conf or {},
+                     answer_text=answer_text, in_depth_claims=claims, reference_date=reference_date,
+                     temporal_facts=temporal_facts, temporal_gate=temporal_gate_result,
+                     original_answer_text=original_answer, answer_validation=answer_validation,
+                     sampling={"synth_temperature": synth_temp})

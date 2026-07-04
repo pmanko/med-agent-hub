@@ -114,6 +114,32 @@ levels:
     two_call: false
     indepth_shared: true
 
+  # --- Staged UX tiers (phased streaming: answer -> optional validation -> in-depth, one hub request).
+  # The hub owns the whole flow + resolves references from the chart it retrieves; chartsearchai relays.
+  # A `validator:` line -> the validation phase runs; omit it -> answer + in-depth only (no check phase).
+  med-agent-team-staged-12b:          # single Gemma 12B, answer + in-depth, NO validation phase
+    orchestrator: gemma-4-12b         # solo -> unused, but a required field
+    expert: null
+    synthesizer: gemma-4-12b          # the ANSWER + IN-DEPTH writer (indepth_model defaults to this)
+    synthesis_prompt: synthesis       # -> synthesis-answer / synthesis-indepth
+    temporal_gate: enforce
+    staged: true
+    solo: true
+    knobs: {synthesizer: {temperature: 0}}
+
+  med-agent-team-staged-12b-validated:   # same, WITH a self-check validation phase (same model -> no swap)
+    orchestrator: gemma-4-12b
+    expert: null
+    synthesizer: gemma-4-12b
+    validator: gemma-4-12b             # writer self-validates -> a genuine "answer under review -> checked/updated"
+    validator_prompt: validation-rewrite
+    validator_max_loops: 1
+    synthesis_prompt: synthesis
+    temporal_gate: enforce
+    staged: true
+    solo: true
+    knobs: {synthesizer: {temperature: 0}}
+
   # --- Method arms: small-orch + Qwen validator vs the bare single, on the two strong writers (12B, A4B).
   # The Answer uses the SAME chartsearchai prompt as the single arms + a COMPOSABLE Qwen validator
   # (validation-strict, two_call=false), so single-vs-team isolates the scaffolding, not the prompt. No

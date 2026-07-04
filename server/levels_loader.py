@@ -121,6 +121,13 @@ class Level:
     # Deterministic temporal gate mode. off preserves existing behavior; warn records gate failures;
     # enforce replaces high-confidence temporal contradictions before the optional LLM validator.
     temporal_gate: str = "off"
+    # staged:true -> this level is served by the phased-streaming path (run_team_stream): the hub emits
+    # answer -> (validation, only if a validator is set) -> in-depth as separate SSE events. False -> the
+    # existing single-envelope path. Additive: existing levels are unaffected.
+    staged: bool = False
+    # In-depth writer for the staged path. None -> defaults to `synthesizer` (the answer writer), so the
+    # base staged case is "one model does answer + in-depth". Set it to run in-depth on a different model.
+    indepth_model: Optional[str] = None
     # Optional per-role sampling knobs: {role: {temperature, repeat_penalty, dry}}.
     # A role's entry overrides the global default for that role only; unset -> default.
     # Roles: orchestrator / expert / synthesizer / validator.
@@ -276,6 +283,8 @@ def get_level(level_id: str) -> Level:
             solo=spec.get("solo", False),
             anchor=spec.get("anchor"),
             temporal_gate=str(spec.get("temporal_gate", "off")).lower(),
+            staged=bool(spec.get("staged", False)),
+            indepth_model=spec.get("indepth_model"),
             knobs=spec.get("knobs") or {},
         )
     except KeyError as exc:
