@@ -936,6 +936,36 @@ def _apply_temporal_gate(
     return answer_text, citations, blocks, gate, original_answer
 
 
+def _regate_after_rewrite(
+    *,
+    question: str,
+    answer_text: str,
+    citations: List[int],
+    blocks: List[Any],
+    temporal_facts: Optional[Dict[str, Any]],
+    temporal_gate_mode: str,
+    steps: List[Dict[str, Any]],
+    answer_conf: Dict[str, Any],
+    prior_original_answer: Optional[str],
+) -> Tuple[str, List[int], List[Any], Dict[str, Any], Dict[str, Any], Optional[str]]:
+    """Re-run the deterministic temporal gate on text a validator or LLM reviewer just rewrote.
+
+    The initial gate only sees the first draft; a validator/reviewer rewrite that runs AFTER it
+    (rewrite-mode answer validation, or the async answer-review leg's corrected_answer) can
+    reintroduce a date/temporal contradiction the first check never had a chance to catch. Call
+    this on every answer-mutating step's output before it ships, so the same enforcement the draft
+    got also applies to whatever text actually goes out.
+
+    Returns (answer_text, citations, blocks, answer_conf, temporal_gate, original_answer_text).
+    """
+    answer_text, citations, blocks, gate, patched_from = _apply_temporal_gate(
+        question=question, answer_text=answer_text, citations=citations, blocks=blocks,
+        temporal_facts=temporal_facts, temporal_gate_mode=temporal_gate_mode, steps=steps,
+    )
+    answer_conf = _merge_temporal_gate_conf(answer_conf, gate)
+    return answer_text, citations, blocks, answer_conf, gate, (patched_from or prior_original_answer)
+
+
 async def _synthesize_answer(
     client: httpx.AsyncClient,
     synth_model: str,
@@ -1233,6 +1263,19 @@ async def _review_existing_answer(
                     status = "edited"
                     summary = "The answer was updated after chart check."
                     answer_conf = {"level": "yellow", "note": _answer_note("yellow", _rw_issue(verdict), "")}
+                    # The reviewer's corrected_answer must pass the same deterministic temporal/date
+                    # enforcement the original draft got, or a reviewer-introduced date error would
+                    # ship unchecked. Re-run the gate on the rewrite; discard its own before/after
+                    # tracking (`_`) since `original_answer` here means the pre-review answer, not
+                    # whatever the gate patched from.
+                    answer_text, citations, blocks, answer_conf, temporal_gate_result, _ = _regate_after_rewrite(
+                        question=question, answer_text=answer_text, citations=citations, blocks=blocks,
+                        temporal_facts=temporal_facts, temporal_gate_mode=temporal_gate_mode,
+                        steps=steps, answer_conf=answer_conf, prior_original_answer=None)
+                    if temporal_gate_result.get("status") == "fail" and temporal_gate_result.get("applied") != "patch":
+                        status = "needs_review"
+                        summary = ("The answer check found a temporal/date issue introduced during "
+                                   "review that needs review.")
                 else:
                     status = "needs_review"
                     summary = "The answer check found an issue that could not be safely repaired."
@@ -1530,6 +1573,7 @@ async def _synthesize_and_validate(
         steps=steps)
 
     # --- ANSWER path: composable validate-and-refine (shared with the parity path) ---
+    pre_validate_text = answer_text
     answer_text, citations, blocks, answer_conf = await _validate_and_refine_answer(
         client, synth_model=synth_model, base_messages=base_messages,
         answer_instruction=answer_instruction, gathered=gathered, response_format=response_format,
@@ -1538,7 +1582,17 @@ async def _synthesize_and_validate(
         synth_temperature=synth_temperature, synth_repeat_penalty=synth_repeat_penalty, synth_dry=synth_dry,
         validator_temperature=validator_temperature, validator_repeat_penalty=validator_repeat_penalty,
         validator_dry=validator_dry, max_tokens=max_tokens, max_loops=max_loops, steps=steps)
-    answer_conf = _merge_temporal_gate_conf(answer_conf, temporal_gate)
+    if answer_text.strip() != pre_validate_text.strip():
+        # The validator rewrote the draft (rewrite-mode adoption) — re-run the deterministic gate on
+        # the new text so a validator-introduced date error can't bypass it. Skipped when the text is
+        # unchanged so an unpatched validator pass doesn't overwrite the synthesis-time gate's own
+        # (possibly more informative) fail/patch result with a redundant re-check.
+        answer_text, citations, blocks, answer_conf, temporal_gate, original_answer_text = _regate_after_rewrite(
+            question=_latest_user_text(base_messages), answer_text=answer_text, citations=citations,
+            blocks=blocks, temporal_facts=temporal_facts, temporal_gate_mode=temporal_gate_mode,
+            steps=steps, answer_conf=answer_conf, prior_original_answer=original_answer_text)
+    else:
+        answer_conf = _merge_temporal_gate_conf(answer_conf, temporal_gate)
 
     # --- IN-DEPTH: split (validated two-call) | shared (single-pass, no validator) | none ---
     claims: List[str] = []
@@ -2215,8 +2269,18 @@ async def run_team_stream(
                 synth_temperature=synth_temp, synth_repeat_penalty=synth_rp, synth_dry=synth_dry,
                 validator_temperature=val_temp, validator_repeat_penalty=val_rp, validator_dry=val_dry,
                 max_tokens=max_tokens, max_loops=validator_max_loops, steps=steps)
-            answer_conf = _merge_temporal_gate_conf(answer_conf, temporal_gate_result)
             edited = (new_text or "").strip() != (answer_text or "").strip()
+            if edited:
+                # The validator rewrote the draft (rewrite-mode adoption) — re-run the deterministic
+                # gate on the new text so a validator-introduced date error can't bypass it. Skipped
+                # when unchanged so an unpatched validator pass doesn't overwrite the synthesis-time
+                # gate's own (possibly more informative) fail/patch result with a redundant re-check.
+                new_text, new_cit, new_blocks, answer_conf, temporal_gate_result, original_answer = _regate_after_rewrite(
+                    question=_latest_user_text(base_messages), answer_text=new_text, citations=new_cit,
+                    blocks=new_blocks, temporal_facts=temporal_facts, temporal_gate_mode=temporal_gate_mode,
+                    steps=steps, answer_conf=answer_conf, prior_original_answer=original_answer)
+            else:
+                answer_conf = _merge_temporal_gate_conf(answer_conf, temporal_gate_result)
             status = "edited" if edited else ("needs_review" if answer_conf.get("level") == "red" else "checked")
             answer_validation = _answer_validation_wire(
                 status, summary=answer_conf.get("note", ""),

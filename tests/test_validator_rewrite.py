@@ -137,6 +137,63 @@ def test_answer_review_preserves_original_when_no_safe_patch():
     assert env["confidence"]["answer"]["level"] == "red"
 
 
+def _dated_review_messages(answer):
+    """Like _review_messages, but the chart context carries a dated appointment record so the
+    deterministic temporal gate has something to check the (possibly reviewer-rewritten) answer
+    against — mirrors test_scaffolding.py's _APPT_MSGS fixture."""
+    payload = {
+        "schema_version": "answer_to_review.v1",
+        "original_question": "Does this patient have any upcoming appointments?",
+        "answer": answer,
+        "citations": [2],
+        "blocks": [],
+    }
+    return [
+        {"role": "system", "content": "envelope system"},
+        {"role": "user", "content": "\n".join([
+            "[1] (2026-01-07) Assessment — Scheduled visit: No",
+            "[2] (2026-01-07) Misc — Return visit date: 2026-01-07",
+        ])},
+        {"role": "assistant", "content": answer},
+        {"role": "user", "content": "Review this answer:\n```json\n" + json.dumps(payload) + "\n```"},
+    ]
+
+
+def test_answer_review_rewrite_reintroducing_temporal_error_is_caught():
+    """A malformed/stale date the LLM REVIEWER reintroduces via corrected_answer must be caught by the
+    deterministic temporal gate before shipping — the reviewer approving its own rewrite is not enough.
+
+    The draft answer is temporally CORRECT and passes the gate's first (pre-review) check cleanly.
+    The reviewer then "corrects" it to the exact wrong stale-date claim
+    test_scaffolding.py::test_temporal_gate_enforce_patches_answer_and_trace proves the gate flags and
+    patches on a fresh draft. Without re-gating after the rewrite, that bad claim would ship untouched
+    just because the reviewer's own recheck approved it."""
+    calls = []
+    team._chat = _factory(calls, [
+        {"answer_ok": False, "errors": [_err("wording", "chart", "clarify")],
+         "corrected_answer": "The next upcoming appointment is 2026-01-07 [2]."},
+        {"answer_ok": True, "errors": [], "corrected_answer": ""},
+    ])
+    out = asyncio.run(team.run_team(
+        _dated_review_messages("No upcoming appointment is documented after 2026-06-20 [2]."),
+        response_format=_RF,
+        orchestrator_model="ORCH",
+        synthesizer_model="REVIEWER",
+        validator_model=None,
+        two_call=False,
+        solo=True,
+        answer_review=True,
+        synthesizer_prompt="validation-rewrite",
+        anchor="2026-06-20",
+        context={"temporal_gate": "enforce"},
+    ))
+    env = json.loads(out)
+    # The reviewer's false "upcoming appointment" claim must not ship — the gate's own patch replaces
+    # it with an accurate statement that the date is in the PAST, not silently pass through unchecked.
+    assert "upcoming appointment is 2026-01-07" not in env["answer"], env["answer"]
+    assert env["answer"].startswith("No upcoming appointment is documented after 2026-06-20"), env["answer"]
+
+
 def _factory_answers(calls, answers, rewrite_verdicts):
     """Like _factory but the writer returns answers[N] (so a test can force a non-substantive draft)."""
     state = {"answer_synth": 0, "indepth_synth": 0, "rw": 0}
