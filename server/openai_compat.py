@@ -24,7 +24,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from .config import llm_config
-from .team import run_team, run_team_stream
+from .team import run_team, run_team_stage_drain, run_team_stream
 from .levels_loader import level_ids, get_level
 from .prompt_loader import prompt_names
 
@@ -134,6 +134,28 @@ async def _content_for(req: ChatCompletionRequest) -> str:
         level = get_level(req.model)
     except KeyError:
         return await _passthrough_content(req)
+    if getattr(level, "staged", False):
+        base = level.synthesis_prompt or "synthesis"
+        return await run_team_stage_drain(
+            messages=req.messages,
+            response_format=req.response_format,
+            temperature=req.temperature,
+            max_tokens=req.max_tokens,
+            synth_model=level.synthesizer,
+            indepth_model=level.indepth_model or level.synthesizer,
+            answer_prompt=base + "-answer",
+            indepth_prompt=base + "-indepth",
+            validator_model=level.validator,
+            validator_prompt=level.validator_prompt,
+            validator_max_loops=level.validator_max_loops,
+            context=req.context,
+            temporal_gate=level.temporal_gate,
+            anchor=level.anchor,
+            knobs=level.knobs,
+            level_id=req.model,
+            patient=req.patient,
+            model_label=req.model,
+        )
     return await run_team(
         req.messages,
         response_format=req.response_format,

@@ -9,8 +9,8 @@ import json
 import server.team as team
 
 _MAPPINGS = [
-    {"index": 1, "resourceType": "obs", "resourceUuid": "u1", "date": "2025-01-01", "text": "a"},
-    {"index": 2, "resourceType": "order", "resourceUuid": "u2", "date": "2025-02-02", "text": "b"},
+    {"index": 1, "resourceType": "obs", "resourceUuid": "u1", "date": "2025-01-01", "text": "observed data"},
+    {"index": 2, "resourceType": "order", "resourceUuid": "u2", "date": "2025-02-02", "text": "different order"},
 ]
 
 
@@ -65,18 +65,30 @@ def test_staged_stream_with_validator_emits_full_phase_sequence(monkeypatch):
     # answer_done: fast answer, marked "validating", references RESOLVED by the hub (not indices)
     assert ev["answer_done"]["answerValidation"]["status"] == "validating"
     assert ev["answer_done"]["references"] == [
-        {"index": 1, "resourceType": "obs", "resourceUuid": "u1", "date": "2025-01-01"}
+        {
+            "index": 1, "resourceType": "obs", "resourceUuid": "u1", "date": "2025-01-01",
+            "sourceText": "observed data", "groundingStatus": "checking", "grounded": None,
+        }
     ]
     # answer_validation: the correction is surfaced (edited + original), refs re-resolved for the new citation
     assert ev["answer_validation"]["answerValidation"]["status"] == "edited"
     assert ev["answer_validation"]["answerValidation"]["originalAnswer"] == "Ans [1]."
     assert ev["answer_validation"]["references"] == [
-        {"index": 2, "resourceType": "order", "resourceUuid": "u2", "date": "2025-02-02"}
+        {
+            "index": 2, "resourceType": "order", "resourceUuid": "u2", "date": "2025-02-02",
+            "sourceText": "different order", "groundingStatus": "checking", "grounded": None,
+        }
     ]
     # done: in-depth complete
     assert ev["done"]["inDepth"]["status"] == "complete"
     assert "claim one" in ev["done"]["inDepth"]["answer"]
     assert ev["done"]["model"] == "lvl"
+    assert ev["done"]["references"] == [
+        {
+            "index": 2, "resourceType": "order", "resourceUuid": "u2", "date": "2025-02-02",
+            "sourceText": "different order", "groundingStatus": "unsupported", "grounded": False,
+        }
+    ]
 
 
 def test_staged_stream_without_validator_skips_validation_phase(monkeypatch):
@@ -95,7 +107,61 @@ def test_staged_stream_without_validator_skips_validation_phase(monkeypatch):
     assert names == ["answer_done", "indepth_pending", "indepth_done", "done"]
     # No validation coming -> answer_done carries NO answerValidation (frontend settles immediately).
     assert "answerValidation" not in dict(events)["answer_done"]
+    assert dict(events)["answer_done"]["references"][0]["groundingStatus"] == "checking"
+    assert dict(events)["done"]["references"][0]["groundingStatus"] == "unsupported"
     assert dict(events)["done"]["inDepth"]["status"] == "complete"
+
+
+def test_stage_drain_returns_final_post_review_envelope(monkeypatch):
+    _stub_common(monkeypatch)
+
+    async def fake_answer(*_a, **_k):
+        return ("Ans [1].", [1], [])
+
+    async def fake_validate(_client, **_k):
+        return ("Ans fixed [2].", [2], [], {"level": "yellow", "note": "fixed a claim"})
+
+    monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
+    monkeypatch.setattr(team, "_validate_and_refine_answer", fake_validate)
+
+    async def _run():
+        return await team.run_team_stage_drain(
+            messages=[{"role": "user", "content": "q?"}], patient="p", context={"temporal": False},
+            model_label="single-12b-checked", synth_model="M", validator_model="V",
+        )
+
+    env = json.loads(asyncio.run(_run()))
+    assert env["answer"] == "Ans fixed [2]."
+    assert env["citations"] == [2]
+    assert env["answerValidation"]["status"] == "edited"
+    assert env["inDepth"]["status"] == "complete"
+    assert env["references"][0]["index"] == 2
+    assert env["references"][0]["groundingStatus"] == "unsupported"
+
+
+def test_grounding_uses_record_date_for_cited_visit_claim():
+    refs = [{
+        "index": 4,
+        "resourceType": "encounter",
+        "resourceUuid": "enc-4",
+        "date": "2026-01-26",
+    }]
+    mappings = [{
+        "index": 4,
+        "resourceType": "encounter",
+        "resourceUuid": "enc-4",
+        "date": "2026-01-26",
+        "text": "Encounter: Adult Visit at Unknown Location. Provider: Horatio L Hornblower",
+    }]
+
+    grounded = team._ground_references(
+        "The most recent documented clinical visit occurred on 2026-01-26 [4].",
+        refs,
+        mappings,
+    )
+
+    assert grounded[0]["groundingStatus"] == "verified"
+    assert grounded[0]["grounded"] is True
 
 
 def test_chat_cancel_releases_router_lock():

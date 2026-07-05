@@ -441,16 +441,84 @@ def build_temporal_facts(
     }
 
 
+def _compact_event_summary_for_prompt(
+    summary: Optional[Dict[str, Any]], *, include_classes: bool = False
+) -> Optional[Dict[str, Any]]:
+    """Keep date/order/citation affordances while avoiding repeated class lists in the prompt."""
+    if not isinstance(summary, dict):
+        return summary
+    out: Dict[str, Any] = {
+        "date": summary.get("date"),
+        "date_id": summary.get("date_id"),
+        "record_count": summary.get("record_count"),
+    }
+    indices = summary.get("indices")
+    if indices:
+        out["indices"] = indices
+    if include_classes:
+        classes = summary.get("classes") or []
+        if classes:
+            out["class_count"] = len(classes)
+            out["classes_sample"] = classes[:12]
+    summaries = summary.get("summaries")
+    if summaries:
+        out["summaries"] = summaries[:8]
+    return out
+
+
+def compact_temporal_facts_for_prompt(facts: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the model-visible temporal sidecar.
+
+    The full ``temporal_facts`` object stays in memory for deterministic gate checks and trace/audit
+    metadata. The prompt copy removes repeated per-date class mirrors and duplicate appointment buckets
+    that can push otherwise-small charts over a 12B context window.
+    """
+    if not facts:
+        return {}
+    appt = facts.get("appointment_candidates") or {}
+    past_appts = appt.get("past") or []
+    prompt_facts: Dict[str, Any] = {
+        "schema_version": facts.get("schema_version"),
+        "render_profile": "prompt_compact.v1",
+        "date_output_contract": facts.get("date_output_contract"),
+        "date_ledger": facts.get("date_ledger") or [],
+        "anchor_mode": facts.get("anchor_mode"),
+        "reference_date": facts.get("reference_date"),
+        "reference_date_id": facts.get("reference_date_id"),
+        "last_clinical_encounter": _compact_event_summary_for_prompt(
+            facts.get("last_clinical_encounter"), include_classes=True
+        ),
+        "clinical_dates": [
+            _compact_event_summary_for_prompt(d, include_classes=False)
+            for d in (facts.get("clinical_dates") or [])
+        ],
+        "admin_dates": [
+            _compact_event_summary_for_prompt(d, include_classes=False)
+            for d in (facts.get("admin_dates") or [])
+        ],
+        "numeric_series": facts.get("numeric_series") or [],
+        "return_visit_dates": facts.get("return_visit_dates") or [],
+        "appointment_candidates": {
+            "counts": {k: len(appt.get(k) or []) for k in ("past", "today", "future", "unknown")},
+            "future": appt.get("future") or [],
+            "today": appt.get("today") or [],
+            "latest_past": past_appts[:5],
+        },
+    }
+    return prompt_facts
+
+
 def render_temporal_facts(facts: Dict[str, Any]) -> str:
-    """Render the full JSON sidecar as model-visible evidence."""
+    """Render the compact JSON sidecar as model-visible evidence."""
     if not facts:
         return ""
+    prompt_facts = compact_temporal_facts_for_prompt(facts)
     return (
-        "Structured temporal facts (temporal_facts.v1.1; deterministic JSON from the chart). "
+        "Structured temporal facts (temporal_facts.v1.1; compact deterministic JSON from the chart). "
         "For any date you write, copy an `iso` value from `date_ledger`; do not reformat "
         "or reconstruct dates from memory.\n"
         "```json\n"
-        + json.dumps(facts, separators=(",", ":"))
+        + json.dumps(prompt_facts, separators=(",", ":"))
         + "\n```"
     )
 

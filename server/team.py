@@ -164,24 +164,144 @@ async def _retrieve_chart(patient_uuid: str) -> Tuple[str, List[Dict[str, Any]]]
         return "", []
 
 
-def _resolve_references(citations: List[int], mappings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Resolve 1-based ``[N]`` citation indices into rich reference objects using the chart mappings —
-    the hub owns this (it built the chart, so it holds the index → record map). Each reference is
-    ``{index, resourceType, resourceUuid, date}``; unknown indices are dropped so a stray citation never
-    ships a null reference. ``grounded`` is attached by a separate grounding step (not here)."""
+_INLINE_CITATION_RE = re.compile(r"\[(\d+)\]")
+_WORD_RE = re.compile(r"[A-Za-z0-9]+")
+_GROUNDING_STOPWORDS = {
+    "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "has", "have",
+    "in", "is", "it", "no", "not", "of", "on", "or", "patient", "record", "records",
+    "the", "there", "this", "to", "was", "were", "with",
+}
+
+
+def _citation_indices(citations: List[int], answer: Optional[str] = None) -> List[int]:
+    """Union structured citations with inline ``[N]`` markers, preserving first-seen order."""
+    out: List[int] = []
+    seen: set[int] = set()
+    for raw in citations or []:
+        try:
+            idx = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if idx not in seen:
+            out.append(idx)
+            seen.add(idx)
+    if answer:
+        for match in _INLINE_CITATION_RE.finditer(answer):
+            idx = int(match.group(1))
+            if idx not in seen:
+                out.append(idx)
+                seen.add(idx)
+    return out
+
+
+def _resolve_references(
+    citations: List[int],
+    mappings: List[Dict[str, Any]],
+    *,
+    answer: Optional[str] = None,
+    grounding_status: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Resolve 1-based ``[N]`` citation indices into rich reference objects using chart mappings.
+
+    ``grounding_status`` is a UI lifecycle hint, not a verdict. Product staged profiles use
+    ``checking`` for immediately resolved references; final grounding verdicts are attached by
+    ``_ground_references`` only after optional answer review has produced the final answer.
+    """
     by_index = {m.get("index"): m for m in (mappings or []) if isinstance(m.get("index"), int)}
     refs: List[Dict[str, Any]] = []
-    for c in citations or []:
+    for c in _citation_indices(citations, answer):
         m = by_index.get(c)
         if not m:
             continue
-        refs.append({
+        ref = {
             "index": c,
             "resourceType": m.get("resourceType"),
             "resourceUuid": m.get("resourceUuid"),
             "date": m.get("date"),
-        })
+            "sourceText": m.get("text") or "",
+        }
+        if grounding_status:
+            ref["groundingStatus"] = grounding_status
+            if grounding_status == "checking":
+                ref["grounded"] = None
+        refs.append(ref)
     return refs
+
+
+def _claim_fragments_for_index(answer: str, index: int) -> List[str]:
+    """Return answer fragments whose text explicitly cites ``[index]``."""
+    if not answer:
+        return []
+    marker = f"[{index}]"
+    # Sentence-ish split first; if the model writes dense clauses, the whole cited sentence is still
+    # a conservative claim scope for the lightweight hub grounding pass.
+    pieces = re.split(r"(?<=[.!?])\s+|\n+", answer)
+    fragments = [p for p in pieces if marker in p]
+    if not fragments and marker in answer:
+        fragments = [answer]
+    return fragments
+
+
+def _tokens(text: str) -> set[str]:
+    return {
+        t.lower()
+        for t in _WORD_RE.findall(text or "")
+        if len(t) > 1 and t.lower() not in _GROUNDING_STOPWORDS
+    }
+
+
+def _reference_grounded(answer: str, index: int, source_text: str) -> Optional[bool]:
+    """Lightweight local grounding verdict used by the hub staged product path.
+
+    This intentionally mirrors the Java verifier's fail-soft contract, not its full embedding/LLM
+    machinery. It verifies that the cited claim's meaningful tokens are substantially present in the
+    cited record text. Unknown/empty inputs degrade to ``None``; clear mismatch returns ``False``.
+    """
+    claim_text = " ".join(
+        _INLINE_CITATION_RE.sub("", frag)
+        for frag in _claim_fragments_for_index(answer, index)
+    )
+    claim_tokens = _tokens(claim_text)
+    source_tokens = _tokens(source_text)
+    if not claim_tokens or not source_tokens:
+        return None
+    source_iso = re.search(r"\d{4}-\d{2}-\d{2}", source_text or "")
+    if (
+        source_iso
+        and source_iso.group(0) in claim_text
+        and ({"visit", "encounter"} & claim_tokens)
+        and ({"visit", "encounter"} & source_tokens)
+    ):
+        return True
+    overlap = len(claim_tokens & source_tokens) / max(1, len(claim_tokens))
+    return overlap >= 0.45
+
+
+def _ground_references(
+    answer: str,
+    references: List[Dict[str, Any]],
+    mappings: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Attach final grounding verdicts to references for the final post-review answer."""
+    text_by_index = {
+        m.get("index"): " ".join(
+            str(p) for p in (m.get("date"), m.get("text")) if p
+        )
+        for m in (mappings or [])
+        if isinstance(m.get("index"), int)
+    }
+    grounded_refs: List[Dict[str, Any]] = []
+    for ref in references or []:
+        out = dict(ref)
+        verdict = _reference_grounded(
+            answer or "", int(out.get("index") or 0), str(text_by_index.get(out.get("index")) or "")
+        )
+        out["grounded"] = verdict
+        out["groundingStatus"] = (
+            "verified" if verdict is True else "unsupported" if verdict is False else "unchecked"
+        )
+        grounded_refs.append(out)
+    return grounded_refs
 
 
 def _latest_user_text(messages: List[Dict[str, Any]]) -> str:
@@ -1749,13 +1869,16 @@ def _stream_payload(
     answer_text: str, citations: List[int], blocks: List[Any], mappings: List[Dict[str, Any]], *,
     model: Optional[str] = None, answer_conf: Optional[Dict[str, Any]] = None,
     answer_validation: Optional[Dict[str, Any]] = None, in_depth: Optional[Dict[str, Any]] = None,
+    references: Optional[List[Dict[str, Any]]] = None,
+    grounding_status: Optional[str] = None,
 ) -> str:
     """One staged wire event: the direct answer + hub-resolved RICH references (never bare citation
     indices) + optional confidence / answerValidation / inDepth. `session` and `messageId` are injected
     by the relaying client — the hub does not own the OpenMRS session/message."""
     env: Dict[str, Any] = {
         "answer": answer_text or "",
-        "references": _resolve_references(citations, mappings),
+        "references": references if references is not None else _resolve_references(
+            citations, mappings, answer=answer_text, grounding_status=grounding_status),
         "blocks": blocks or [],
     }
     if answer_conf:
@@ -1865,18 +1988,22 @@ async def run_team_stream(
             question=_latest_user_text(base_messages), answer_text=answer_text, citations=citations,
             blocks=blocks, temporal_facts=temporal_facts, temporal_gate_mode=temporal_gate_mode,
             steps=steps)
+        answer_refs = _resolve_references(
+            citations, mappings, answer=answer_text,
+            grounding_status="checking" if mappings else None)
 
         has_validation = bool(validator_model)
         yield ("answer_done", _stream_payload(
             answer_text, citations, blocks, mappings, model=model_label,
             answer_validation=(_answer_validation_wire("validating") if has_validation else None),
-            in_depth={"status": "pending", "answer": ""}))
+            in_depth={"status": "pending", "answer": ""}, references=answer_refs))
         if await _disconnected():
             return
 
         # ---- PHASE 2: VALIDATION (only when a validator is configured — else no validation phase) ----
         answer_conf: Dict[str, Any] = {"level": "green", "note": ""}
         answer_validation: Optional[Dict[str, Any]] = None
+        final_refs = answer_refs
         if has_validation:
             new_text, new_cit, new_blocks, answer_conf = await _validate_and_refine_answer(
                 client, synth_model=synth_model, base_messages=base_messages,
@@ -1893,12 +2020,16 @@ async def run_team_stream(
                 status, summary=answer_conf.get("note", ""),
                 original_answer=answer_text if edited else None)
             answer_text, citations, blocks = new_text, new_cit, new_blocks
+            final_refs = _resolve_references(
+                citations, mappings, answer=answer_text,
+                grounding_status="checking" if mappings else None)
             yield ("answer_validation", _stream_payload(
                 answer_text, citations, blocks, mappings, model=model_label,
                 answer_conf=answer_conf, answer_validation=answer_validation,
-                in_depth={"status": "pending", "answer": ""}))
+                in_depth={"status": "pending", "answer": ""}, references=final_refs))
             if await _disconnected():
                 return
+        final_refs = _ground_references(answer_text, final_refs, mappings) if mappings else final_refs
 
         # ---- PHASE 3: IN-DEPTH ----
         yield ("indepth_pending",
@@ -1925,7 +2056,7 @@ async def run_team_stream(
         yield ("done", _stream_payload(
             answer_text, citations, blocks, mappings, model=model_label,
             answer_conf=answer_conf, answer_validation=answer_validation,
-            in_depth={"status": "complete", "answer": indepth_body}))
+            in_depth={"status": "complete", "answer": indepth_body}, references=final_refs))
         _write_trace(level_id, base_messages, orchestrator=None, expert=None,
                      synthesizer=synth_model, validator=validator_model, steps=steps,
                      answer_confidence=answer_conf, indepth_confidence=indepth_conf or {},
@@ -1933,3 +2064,33 @@ async def run_team_stream(
                      temporal_facts=temporal_facts, temporal_gate=temporal_gate_result,
                      original_answer_text=original_answer, answer_validation=answer_validation,
                      sampling={"synth_temperature": synth_temp})
+
+
+async def run_team_stage_drain(**kwargs: Any) -> str:
+    """Drain the staged engine to a chart-answer JSON envelope for non-streaming callers.
+
+    Low-level raw legs remain on ``run_team`` for byte compatibility. This adapter is for configured
+    staged profiles so harness runs can exercise the same answer/review/In-Depth path the product
+    streams, with final post-review references and grounding metadata preserved.
+    """
+    final_payload: Optional[Dict[str, Any]] = None
+    async for name, data in run_team_stream(**kwargs):
+        if name == "done":
+            final_payload = json.loads(data or "{}")
+    if final_payload is None:
+        return _fallback_envelope(
+            "I could not produce a complete answer for this turn. Please try again.")
+    references = final_payload.get("references") or []
+    out: Dict[str, Any] = {
+        "answer": final_payload.get("answer") or "",
+        "citations": [
+            ref.get("index") for ref in references
+            if isinstance(ref, dict) and isinstance(ref.get("index"), int)
+        ],
+        "references": references,
+        "blocks": final_payload.get("blocks") or [],
+    }
+    for key in ("confidence", "answerValidation", "inDepth", "model"):
+        if key in final_payload:
+            out[key] = final_payload[key]
+    return json.dumps(out)

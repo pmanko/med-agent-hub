@@ -11,7 +11,7 @@ runs the level with NO medical expert — the orchestrator is offered no
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 
@@ -83,7 +83,7 @@ class Level:
     """One advertised team tier."""
 
     id: str
-    orchestrator: str
+    orchestrator: Optional[str]
     synthesizer: str
     expert: Optional[str] = None  # None -> no medical_expert tool / role
     orchestrator_prompt: str = "orchestrator"
@@ -140,6 +140,56 @@ class Level:
     @property
     def has_validator(self) -> bool:
         return bool(self.validator)
+
+
+@dataclass(frozen=True)
+class StagePlan:
+    """Normalized stage metadata for one runnable hub id.
+
+    This is intentionally lightweight: v1 keeps the existing ``Level`` wire/config shape for backward
+    compatibility, but exposes the stage composition we want the runtime and tests to reason about.
+    """
+
+    id: str
+    stages: Tuple[str, ...]
+    topology: str
+    low_level_leg: bool = False
+
+
+def stage_plan_for_level(level: Level) -> StagePlan:
+    stages: List[str] = ["context"]
+    low_level = level.id.startswith(("answer:", "answer-review:", "indepth-only:"))
+    topology = "single" if level.solo else "team"
+
+    if level.answer_review:
+        return StagePlan(level.id, tuple(stages + ["review"]), topology, low_level_leg=low_level)
+
+    if level.indepth_only:
+        return StagePlan(level.id, tuple(stages + ["indepth"]), topology, low_level_leg=low_level)
+
+    if not level.solo:
+        stages.append("gather")
+
+    stages.extend(["answer", "gate"])
+    if low_level and level.id.startswith("answer:"):
+        return StagePlan(level.id, tuple(stages), topology, low_level_leg=True)
+
+    if level.staged:
+        stages.append("resolve_refs")
+        if level.has_validator:
+            stages.append("review")
+        stages.extend(["final_resolve_refs", "ground_verdicts", "indepth"])
+        return StagePlan(level.id, tuple(stages), topology, low_level_leg=low_level)
+
+    if level.has_validator:
+        stages.append("review")
+    if level.two_call or level.indepth_shared:
+        stages.append("indepth")
+    return StagePlan(level.id, tuple(stages), topology, low_level_leg=low_level)
+
+
+def get_stage_plan(level_id: str) -> StagePlan:
+    return stage_plan_for_level(get_level(level_id))
 
 
 def _load_raw() -> Dict[str, dict]:
@@ -264,10 +314,13 @@ def get_level(level_id: str) -> Level:
         raise KeyError(f"unknown level {level_id!r}; levels.yaml defines {list(raw)}")
     spec = raw[level_id] or {}
     try:
+        synthesizer = spec.get("synthesizer") or spec.get("answer_model")
+        if not synthesizer:
+            raise KeyError("synthesizer")
         return Level(
             id=level_id,
-            orchestrator=spec["orchestrator"],
-            synthesizer=spec["synthesizer"],
+            orchestrator=spec.get("orchestrator") or synthesizer,
+            synthesizer=synthesizer,
             expert=spec.get("expert"),
             orchestrator_prompt=spec.get("orchestrator_prompt", "orchestrator"),
             expert_prompt=spec.get("expert_prompt", "medical_expert"),

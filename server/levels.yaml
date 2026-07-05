@@ -140,6 +140,43 @@ levels:
     solo: true
     knobs: {synthesizer: {temperature: 0}}
 
+  # --- Product profiles (stage-composed; single profiles do not declare a fake orchestrator).
+  single-12b-checked:
+    answer_model: gemma-4-12b
+    expert: null
+    validator: gemma-4-12b
+    validator_prompt: validation-rewrite
+    validator_max_loops: 1
+    synthesis_prompt: synthesis
+    temporal_gate: enforce
+    staged: true
+    solo: true
+    knobs: {synthesizer: {temperature: 0}}
+
+  single-e4b-checked:
+    answer_model: gemma-e4b
+    expert: null
+    validator: gemma-e4b
+    validator_prompt: validation-rewrite
+    validator_max_loops: 1
+    synthesis_prompt: synthesis
+    temporal_gate: enforce
+    staged: true
+    solo: true
+    knobs: {synthesizer: {temperature: 0}}
+
+  single-a4b-checked:
+    answer_model: gemma-26b
+    expert: null
+    validator: gemma-26b
+    validator_prompt: validation-rewrite
+    validator_max_loops: 1
+    synthesis_prompt: synthesis
+    temporal_gate: enforce
+    staged: true
+    solo: true
+    knobs: {synthesizer: {temperature: 0}}
+
   # --- Method arms: small-orch + Qwen validator vs the bare single, on the two strong writers (12B, A4B).
   # The Answer uses the SAME chartsearchai prompt as the single arms + a COMPOSABLE Qwen validator
   # (validation-strict, two_call=false), so single-vs-team isolates the scaffolding, not the prompt. No

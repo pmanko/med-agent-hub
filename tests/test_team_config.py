@@ -136,6 +136,46 @@ def test_generic_answer_review_resolves_default_reviewer_lane():
     assert lv.synthesis_prompt == "validation-rewrite"
 
 
+def test_stage_plan_keeps_raw_answer_leg_minimal():
+    plan = levels_loader.get_stage_plan("answer:gemma-4-12b@synthesis-answer~enforce~temp0")
+    assert plan.low_level_leg is True
+    assert plan.topology == "single"
+    assert plan.stages == ("context", "answer", "gate")
+
+
+def test_stage_plan_grounds_after_review_for_staged_profile():
+    plan = levels_loader.get_stage_plan("med-agent-team-staged-12b-validated")
+    assert plan.topology == "single"
+    assert "review" in plan.stages
+    assert "ground_verdicts" in plan.stages
+    assert plan.stages.index("review") < plan.stages.index("ground_verdicts")
+    assert plan.stages.index("final_resolve_refs") < plan.stages.index("ground_verdicts")
+
+
+def test_stage_plan_no_validator_omits_review():
+    plan = levels_loader.get_stage_plan("med-agent-team-staged-12b")
+    assert "review" not in plan.stages
+    assert plan.stages == (
+        "context", "answer", "gate", "resolve_refs",
+        "final_resolve_refs", "ground_verdicts", "indepth",
+    )
+
+
+def test_product_single_profiles_use_answer_model_without_fake_orchestrator():
+    lv = levels_loader.get_level("single-12b-checked")
+    assert lv.solo is True
+    assert lv.staged is True
+    assert lv.synthesizer == "gemma-4-12b"
+    assert lv.orchestrator == "gemma-4-12b"  # compatibility backfill, not a YAML role
+    assert lv.validator == "gemma-4-12b"
+    plan = levels_loader.get_stage_plan("single-12b-checked")
+    assert plan.topology == "single"
+    assert plan.stages == (
+        "context", "answer", "gate", "resolve_refs", "review",
+        "final_resolve_refs", "ground_verdicts", "indepth",
+    )
+
+
 def test_generic_answer_rejects_unknown_temporal_gate():
     with pytest.raises(KeyError):
         levels_loader.get_level("answer:gemma-e4b-q8@synthesis-chartsearchai~maybe")
