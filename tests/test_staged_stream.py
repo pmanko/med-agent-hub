@@ -350,3 +350,83 @@ def test_chat_cancel_releases_router_lock():
         assert not team._ROUTER_LOCK.locked(), "router lock not released on cancel -> preempt can't free the slot"
 
     asyncio.run(_run())
+
+
+def test_run_team_stream_team_scaffolding_gathers_via_the_tool_loop(monkeypatch):
+    # Gate 13: a team-scaffolded staged profile (solo=False) must gather the SAME way run_team
+    # does — the orchestrator tool loop consulting medical_expert/kb_search — not skip straight to
+    # synthesis the way every solo single-writer staged profile does.
+    _stub_common(monkeypatch)
+    calls = []
+
+    async def fake_chat(_client, model, _messages, *, tools=None, response_format=None, **_kwargs):
+        calls.append(model)
+        if response_format is not None:
+            return {"content": json.dumps({"answer": "Ans.", "citations": [], "blocks": []})}
+        orchestrator_turns = sum(1 for m in calls if m == "orch-model")
+        if tools is not None and orchestrator_turns == 1:
+            return {
+                "role": "assistant", "content": None,
+                "tool_calls": [{"id": "t1", "function": {
+                    "name": "medical_expert", "arguments": json.dumps({"query": "interpret"})}}],
+            }
+        return {"content": "ok", "tool_calls": None}
+
+    monkeypatch.setattr(team, "_chat", fake_chat)
+
+    events = _collect(
+        synth_model="M", validator_model=None,
+        solo=False, orchestrator_model="orch-model", expert_model="expert-model",
+    )
+    names = [n for n, _ in events]
+    assert names == ["answer_done", "indepth_pending", "indepth_done", "done"]
+    assert "orch-model" in calls, "team scaffolding must run the orchestrator tool loop"
+    assert "expert-model" in calls, "the tool-called medical expert must actually be consulted"
+
+
+def test_run_team_stream_solo_profile_never_runs_the_tool_loop(monkeypatch):
+    # The default (solo=True, every existing staged profile) must stay byte-identical: no
+    # orchestrator call at all, gather is a pure no-op.
+    _stub_common(monkeypatch)
+    calls = []
+
+    async def fake_chat(_client, model, _messages, **_kwargs):
+        calls.append(model)
+        return {"content": "unused"}
+
+    monkeypatch.setattr(team, "_chat", fake_chat)
+
+    async def fake_answer(*_a, **_k):
+        return ("Ans.", [], [])
+
+    monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
+
+    _collect(synth_model="M", validator_model=None)  # solo defaults to True
+    assert calls == [], f"solo staged profile must not touch the orchestrator/expert models, got {calls}"
+
+
+def test_run_team_stream_derives_gather_from_the_stage_plan_not_a_trusted_flag(monkeypatch):
+    # Gate 3: the engine must EXECUTE stage_plan_for_level, not just carry it as descriptive test
+    # metadata. Pass level_id="med-agent-team-med-validated" (a real team/staged config) but the
+    # WRONG solo=True kwarg — if the runtime actually consults the plan, it must still gather.
+    _stub_common(monkeypatch)
+    calls = []
+
+    async def fake_chat(_client, model, _messages, *, tools=None, response_format=None, **_kwargs):
+        calls.append(model)
+        if response_format is not None:
+            return {"content": json.dumps({"answer": "Ans.", "citations": [], "blocks": []})}
+        return {"content": "ok", "tool_calls": None}
+
+    monkeypatch.setattr(team, "_chat", fake_chat)
+
+    _collect(
+        synth_model="qwen2.5-14b", validator_model=None,
+        solo=True,  # deliberately wrong — the stage plan (not this kwarg) must win
+        orchestrator_model="gemma-e4b-q8",
+        level_id="med-agent-team-med-validated",
+    )
+    assert "gemma-e4b-q8" in calls, (
+        "the orchestrator was never called — run_team_stream trusted the caller's solo=True kwarg "
+        "instead of executing stage_plan_for_level(level_id), which says this level has a gather stage"
+    )

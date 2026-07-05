@@ -173,6 +173,12 @@ async def _content_for(req: ChatCompletionRequest) -> str:
             model_label=req.model,
             temporal_render=level.temporal_render,
             grounding_model=level.grounding_model,
+            solo=level.solo,
+            orchestrator_model=level.orchestrator,
+            orchestrator_prompt=level.orchestrator_prompt,
+            expert_model=level.expert,
+            expert_prompt=level.expert_prompt,
+            has_expert=level.has_expert,
         )
     return await run_team(
         req.messages,
@@ -326,6 +332,12 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
                 is_disconnected=request.is_disconnected,
                 temporal_render=level.temporal_render,
                 grounding_model=level.grounding_model,
+                solo=level.solo,
+                orchestrator_model=level.orchestrator,
+                orchestrator_prompt=level.orchestrator_prompt,
+                expert_model=level.expert,
+                expert_prompt=level.expert_prompt,
+                has_expert=level.has_expert,
             )
             return StreamingResponse(
                 _named_sse(gen), media_type="text/event-stream",

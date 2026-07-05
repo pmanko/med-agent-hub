@@ -43,6 +43,7 @@ from .config import (
     llm_config, querystore_config, SYNTH_REPEAT_PENALTY,
     ORCHESTRATOR_DRY_MULTIPLIER, EXPERT_DRY_MULTIPLIER, SYNTH_DRY_MULTIPLIER,
 )
+from .levels_loader import get_stage_plan
 from .querystore_client import QueryStoreClient
 from .chart_serializer import render_chart
 from .prompt_loader import load_prompt
@@ -2004,19 +2005,36 @@ async def run_team_stream(
     is_disconnected: Optional[Callable[[], Awaitable[bool]]] = None,
     temporal_render: str = "full",
     grounding_model: Optional[str] = None,
+    solo: bool = True,
+    orchestrator_model: Optional[str] = None,
+    orchestrator_prompt: Optional[str] = None,
+    expert_model: Optional[str] = None,
+    expert_prompt: Optional[str] = None,
+    has_expert: bool = True,
 ) -> AsyncIterator[Tuple[str, str]]:
-    """Hub-owned PHASED staged streaming for a solo single-writer level: run answer -> (optional
-    validation) -> in-depth and YIELD one ``(event_name, json_data)`` per stage as it completes. The
-    chartsearchai controller relays these verbatim (injecting session/messageId); the frontend renders
-    them. Events: ``answer_done`` -> (``answer_validation`` only when a validator is configured) ->
-    ``indepth_pending`` -> ``indepth_done``|``indepth_error`` -> ``done``. Each structured event carries
-    the hub-resolved rich references — the client resolves nothing. Reuses run_team's stage helpers;
-    the non-streaming run_team is untouched.
+    """Hub-owned PHASED staged streaming: run gather -> answer -> (optional validation) -> in-depth
+    and YIELD one ``(event_name, json_data)`` per stage as it completes. The chartsearchai controller
+    relays these verbatim (injecting session/messageId); the frontend renders them. Events:
+    ``answer_done`` -> (``answer_validation`` only when a validator is configured) ->
+    ``indepth_pending`` -> ``indepth_done``|``indepth_error`` -> ``done``. Each structured event
+    carries the hub-resolved rich references — the client resolves nothing.
+
+    ``solo=True`` (the default — every single-writer staged profile) skips gather entirely, matching
+    the original solo-only behavior byte-for-byte. ``solo=False`` (a team-scaffolded staged profile)
+    runs the SAME ``_gather_evidence`` orchestrator tool loop + KB fallback as the batch ``run_team``
+    path, so a team profile streaming through this engine gathers exactly like it would in a batch
+    run — this is the ``gather`` stage in ``levels_loader.stage_plan_for_level``.
 
     Cancellation: when the client disconnects, the driving task is cancelled -> the in-flight ``_chat``
     unwinds -> its ``async with _ROUTER_LOCK`` releases -> the single router slot frees immediately.
     ``is_disconnected`` is polled at phase boundaries for the inter-leg gap.
     """
+    orch_temp = _knob(knobs, "orchestrator", "temperature", temperature)
+    orch_rp = _knob(knobs, "orchestrator", "repeat_penalty", None)
+    orch_dry = _knob(knobs, "orchestrator", "dry", ORCHESTRATOR_DRY_MULTIPLIER)
+    exp_temp = _knob(knobs, "expert", "temperature", 0.1)
+    exp_rp = _knob(knobs, "expert", "repeat_penalty", None)
+    exp_dry = _knob(knobs, "expert", "dry", EXPERT_DRY_MULTIPLIER)
     synth_default_temp = max(temperature or 0.0, _SYNTH_MIN_TEMPERATURE)
     synth_temp = _knob(knobs, "synthesizer", "temperature", synth_default_temp)
     synth_rp = _knob(knobs, "synthesizer", "repeat_penalty", SYNTH_REPEAT_PENALTY)
@@ -2027,7 +2045,19 @@ async def run_team_stream(
 
     spec = context or {}
     want_temporal = spec.get("temporal", True)
+    want_kb = spec.get("kb", False)
+    want_expert = spec.get("expert", False)
     temporal_gate_mode = str(spec.get("temporal_gate", temporal_gate or "off")).strip().lower()
+
+    # The engine EXECUTES stage_plan_for_level rather than re-deciding scaffolding from a raw flag:
+    # when the id resolves, whether to gather is derived from the plan's stage list, not trusted
+    # blindly from the caller's `solo` kwarg (which stays authoritative as a fallback for direct/
+    # test callers with no level_id — e.g. a level_id that no longer resolves after a config edit).
+    if level_id:
+        try:
+            solo = "gather" not in get_stage_plan(level_id).stages
+        except Exception:
+            pass
 
     # Chart: the hub OWNS retrieval. A patient ref -> retrieve + keep the mappings (the index->record map
     # for reference resolution) and inject the chart as a user message so the writer reads it. Otherwise
@@ -2044,6 +2074,8 @@ async def run_team_stream(
 
     answer_instruction = load_prompt(answer_prompt)
     indepth_instruction = load_prompt(indepth_prompt)
+    orchestrator_system = load_prompt(orchestrator_prompt or "orchestrator") if not solo else ""
+    expert_system = load_prompt(expert_prompt or "medical_expert") if (want_expert or not solo) else ""
     steps: List[Dict[str, Any]] = []
 
     async def _disconnected() -> bool:
@@ -2056,9 +2088,21 @@ async def run_team_stream(
     temporal_facts: Optional[Dict[str, Any]] = None
 
     async with httpx.AsyncClient() as client:
+        # Gather (the "gather" stage in stage_plan_for_level): a no-op for every solo single-writer
+        # staged profile (byte-identical to the pre-gather behavior), and the SAME orchestrator tool
+        # loop + KB fallback as the batch run_team path for a team-scaffolded staged profile.
+        kb_context, expert_notes, gather_steps = await _gather_evidence(
+            client, solo=solo, want_kb=want_kb, want_expert=want_expert, has_expert=has_expert,
+            orchestrator_model=orchestrator_model or synth_model, orchestrator_system=orchestrator_system,
+            expert_model=expert_model, expert_system=expert_system,
+            messages=base_messages, chart=chart, max_tokens=max_tokens,
+            orch_temp=orch_temp, orch_rp=orch_rp, orch_dry=orch_dry,
+            exp_temp=exp_temp, exp_rp=exp_rp, exp_dry=exp_dry)
+        steps.extend(gather_steps)
+        gathered = _gathered_evidence(kb_context, expert_notes)
+
         # Deterministic temporal grounding (same as run_team): resolve the reference "now" and prepend
         # the computed series so the writer + validator REPORT dated facts instead of deriving them.
-        gathered = ""
         if want_temporal:
             anchor_mode = anchor or os.environ.get("HUB_ANCHOR")
             reference_date = temporal.resolve_anchor(anchor_mode, chart)
@@ -2066,7 +2110,7 @@ async def run_team_stream(
                 chart, reference_date, anchor_mode=anchor_mode or "latest_record")
             block = temporal.render_temporal_facts(temporal_facts, profile=temporal_render)
             if block:
-                gathered = block
+                gathered = block + ("\n\n" + gathered if gathered else "")
 
         # ---- PHASE 1: ANSWER ----
         answer_text, citations, blocks = await _synthesize_answer(

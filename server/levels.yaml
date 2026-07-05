@@ -30,6 +30,7 @@ levels:
     synthesizer: qwen3-4b
     validator: gemma-4-12b
     validator_max_loops: 1
+    staged: true                      # product picker tier -> streams via the engine's gather stage
 
   med-agent-team-med:
     orchestrator: gemma-e4b-q8     # gemma-4-E4B 8-bit
@@ -66,6 +67,7 @@ levels:
     synthesizer: qwen2.5-14b
     validator: gemma-4-12b         # 12B validator (the floor finding); cross-family vs qwen2.5-14b synth
     validator_max_loops: 1
+    staged: true                    # product picker tier -> streams via the engine's gather stage
 
   med-agent-team-med-liquidwriter-validated:  # 2x2 ablation cell: Liquid WRITER only (non-Liquid gemma coord +
     orchestrator: gemma-e4b-q8                 # medgemma expert + LFM2 writer), validated. Differs from med-validated
@@ -85,6 +87,7 @@ levels:
     synthesizer: qwen3.6-35b-q6
     validator: gemma-31b           # the HIGH orchestrator, cross-family vs qwen3.6 synth (strongest local)
     validator_max_loops: 1
+    staged: true                   # product picker tier -> streams via the engine's gather stage
 
   med-agent-team-12b:
     orchestrator: gemma-4-12b      # gemma-4-12B-it Q8 — strong dense orchestrator
