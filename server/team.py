@@ -1577,6 +1577,133 @@ def _write_trace(level_id: Optional[str], messages: List[Dict[str, Any]], *, orc
         logger.warning("trace write failed (non-fatal): %s", e)
 
 
+async def _gather_evidence(
+    client: httpx.AsyncClient,
+    *,
+    solo: bool,
+    want_kb: bool,
+    want_expert: bool,
+    has_expert: bool,
+    orchestrator_model: str,
+    orchestrator_system: str,
+    expert_model: Optional[str],
+    expert_system: str,
+    messages: List[Dict[str, Any]],
+    chart: str,
+    max_tokens: Optional[int],
+    orch_temp: Optional[float] = None,
+    orch_rp: Optional[float] = None,
+    orch_dry: Optional[float] = None,
+    exp_temp: Optional[float] = None,
+    exp_rp: Optional[float] = None,
+    exp_dry: Optional[float] = None,
+) -> Tuple[str, List[str], List[Dict[str, Any]]]:
+    """Gather orchestrator/expert/KB context for one turn — the SAME logic for both the batch
+    ``run_team`` path and the staged ``run_team_stream`` path (a team-scaffolded staged profile
+    must gather exactly like its batch counterpart, not skip straight to synthesis).
+
+    SOLO levels do deterministic, spec-gated retrieval with NO orchestrator LLM. TEAM levels run
+    the tool loop (a small orchestrator model calling ``medical_expert``/``kb_search``, plain
+    ``tools`` — never mixed with ``response_format``) followed by a KB-retrieval fallback so the
+    In-Depth is never left ungrounded when a small orchestrator skips ``kb_search`` on its own.
+    Returns ``(kb_context, expert_notes, orch_steps)``.
+    """
+    kb_context = ""
+    expert_notes: List[str] = []
+    orch_steps: List[Dict[str, Any]] = []
+
+    # The tool loop runs under the orchestrator's OWN system prompt — not chartsearchai's envelope
+    # prompt, which biases a small model toward answering immediately. The caller's `messages` is
+    # left untouched for the synthesis prefix.
+    loop_messages: List[Dict[str, Any]] = [
+        {"role": "system", "content": orchestrator_system}
+    ] + [m for m in messages if m.get("role") != "system"]
+
+    if solo:
+        # SINGLE scaffolding (P1): deterministic, spec-gated context — NO orchestrator LLM. The
+        # writer answers from the assembled context; team vs single is independent of context.
+        _q = _latest_user_text(messages) or ""
+        if want_kb:
+            _obs = _run_kb_search(_q)
+            if _obs.startswith(_KB_BLOCK_HEADER):
+                kb_context = _obs
+            orch_steps.append({"role": "kb_search", "query": _q[:160],
+                               "hit": bool(kb_context), "solo": True})
+        if want_expert:
+            _note = await _run_medical_expert(
+                client, _q, chart, expert_system, kb_context=kb_context, model=expert_model,
+                temperature=exp_temp, repeat_penalty=exp_rp, dry_multiplier=exp_dry)
+            expert_notes.append(_note)
+            orch_steps.append({"role": "medical_expert", "model": expert_model, "solo": True})
+    # --- tool loop (plain: tools, no response_format) — skipped when solo -----
+    try:
+        for _ in (range(MAX_TOOL_ITERATIONS) if not solo else ()):
+            msg = await _chat(
+                client, orchestrator_model, loop_messages,
+                tools=_tool_definitions(has_expert), temperature=orch_temp, max_tokens=max_tokens,
+                repeat_penalty=orch_rp, dry_multiplier=orch_dry,  # DRY default OFF for tool-calling
+            )
+            tool_calls = msg.get("tool_calls")
+            orch_steps.append({"role": "orchestrator", "model": orchestrator_model,
+                               "tool_calls": [tc.get("function", {}).get("name") for tc in (tool_calls or [])]})
+            if not tool_calls:
+                break  # orchestrator has gathered enough; proceed to synthesis
+            loop_messages.append(msg)
+            seen: set = set()  # dedupe identical calls within this message
+            for tc in tool_calls:
+                name = tc.get("function", {}).get("name")
+                try:
+                    args = json.loads(tc["function"]["arguments"] or "{}")
+                except (json.JSONDecodeError, KeyError, TypeError):
+                    args = {}
+                dedup_key = (name, json.dumps(args, sort_keys=True))
+                if dedup_key in seen:
+                    observation = "(duplicate tool call ignored)"
+                else:
+                    seen.add(dedup_key)
+                    if name == "medical_expert":
+                        observation = await _run_medical_expert(
+                            client, args.get("query", ""), chart, expert_system,
+                            kb_context=kb_context, model=expert_model,
+                            temperature=exp_temp, repeat_penalty=exp_rp, dry_multiplier=exp_dry)
+                        expert_notes.append(observation)
+                        orch_steps.append({"role": "medical_expert", "model": expert_model,
+                                           "query": args.get("query", ""), "note": observation[:400]})
+                    elif name == "kb_search":
+                        observation = _run_kb_search(args.get("query", ""))
+                        hit = observation.startswith(_KB_BLOCK_HEADER)
+                        if hit:
+                            kb_context = (
+                                kb_context + "\n\n" + observation if kb_context else observation
+                            )
+                        orch_steps.append({"role": "kb_search", "query": args.get("query", ""),
+                                           "hit": hit, "chars": len(observation)})
+                    else:
+                        observation = f"(unknown tool: {name})"
+                loop_messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.get("id"),
+                    "content": observation,
+                })
+    except Exception as e:
+        logger.warning("orchestrator tool loop failed, proceeding to synthesis: %s", e)
+
+    # KB-retrieval fallback: small orchestrators often skip kb_search (esp. on follow-up turns),
+    # leaving the In-Depth with no guidance to ground. If nothing was gathered, do one deterministic
+    # kb_search on the question so the synthesis still has reference context.
+    if not solo and not kb_context:
+        q = _latest_user_text(messages)
+        if q:
+            obs = _run_kb_search(q)
+            hit = obs.startswith(_KB_BLOCK_HEADER)
+            if hit:
+                kb_context = obs
+            orch_steps.append({"role": "kb_search", "query": q[:160], "hit": hit,
+                               "chars": len(obs), "fallback": True})
+
+    return kb_context, expert_notes, orch_steps
+
+
 async def run_team(
     messages: List[Dict[str, Any]],
     *,
@@ -1707,99 +1834,14 @@ async def run_team(
         # "<base>-indepth" split (which does not exist for the chartsearchai parity base).
         indepth_instruction = load_prompt("synthesis-indepth") if indepth_shared else None
 
-    # The tool loop runs under the orchestrator's OWN system prompt — not
-    # chartsearchai's envelope prompt, which biases a small model toward answering
-    # immediately. The original `messages` is left untouched for the synthesis prefix.
-    loop_messages: List[Dict[str, Any]] = [
-        {"role": "system", "content": orchestrator_system}
-    ] + [m for m in messages if m.get("role") != "system"]
-
-    kb_context = ""          # accumulated KB snippets, threaded into the expert + synthesis
-    expert_notes: List[str] = []  # accumulated clinical-expert observations
-    orch_steps: List[Dict[str, Any]] = []  # reasoning-trace steps for the orchestrator tool loop
-
     async with httpx.AsyncClient() as client:
-        if solo:
-            # SINGLE scaffolding (P1): deterministic, spec-gated context — NO orchestrator LLM. The
-            # writer answers from the assembled context; team vs single is independent of context.
-            _q = _latest_user_text(messages) or ""
-            if want_kb:
-                _obs = _run_kb_search(_q)
-                if _obs.startswith(_KB_BLOCK_HEADER):
-                    kb_context = _obs
-                orch_steps.append({"role": "kb_search", "query": _q[:160],
-                                   "hit": bool(kb_context), "solo": True})
-            if want_expert:
-                _note = await _run_medical_expert(
-                    client, _q, chart, expert_system, kb_context=kb_context, model=expert_model,
-                    temperature=exp_temp, repeat_penalty=exp_rp, dry_multiplier=exp_dry)
-                expert_notes.append(_note)
-                orch_steps.append({"role": "medical_expert", "model": expert_model, "solo": True})
-        # --- tool loop (plain: tools, no response_format) — skipped when solo -----
-        try:
-            for _ in (range(MAX_TOOL_ITERATIONS) if not solo else ()):
-                msg = await _chat(
-                    client, model, loop_messages,
-                    tools=_tool_definitions(has_expert), temperature=orch_temp, max_tokens=max_tokens,
-                    repeat_penalty=orch_rp, dry_multiplier=orch_dry,  # DRY default OFF for tool-calling
-                )
-                tool_calls = msg.get("tool_calls")
-                orch_steps.append({"role": "orchestrator", "model": model,
-                                   "tool_calls": [tc.get("function", {}).get("name") for tc in (tool_calls or [])]})
-                if not tool_calls:
-                    break  # orchestrator has gathered enough; proceed to synthesis
-                loop_messages.append(msg)
-                seen: set = set()  # dedupe identical calls within this message
-                for tc in tool_calls:
-                    name = tc.get("function", {}).get("name")
-                    try:
-                        args = json.loads(tc["function"]["arguments"] or "{}")
-                    except (json.JSONDecodeError, KeyError, TypeError):
-                        args = {}
-                    dedup_key = (name, json.dumps(args, sort_keys=True))
-                    if dedup_key in seen:
-                        observation = "(duplicate tool call ignored)"
-                    else:
-                        seen.add(dedup_key)
-                        if name == "medical_expert":
-                            observation = await _run_medical_expert(
-                                client, args.get("query", ""), chart, expert_system,
-                                kb_context=kb_context, model=expert_model,
-                                temperature=exp_temp, repeat_penalty=exp_rp, dry_multiplier=exp_dry)
-                            expert_notes.append(observation)
-                            orch_steps.append({"role": "medical_expert", "model": expert_model,
-                                               "query": args.get("query", ""), "note": observation[:400]})
-                        elif name == "kb_search":
-                            observation = _run_kb_search(args.get("query", ""))
-                            hit = observation.startswith(_KB_BLOCK_HEADER)
-                            if hit:
-                                kb_context = (
-                                    kb_context + "\n\n" + observation if kb_context else observation
-                                )
-                            orch_steps.append({"role": "kb_search", "query": args.get("query", ""),
-                                               "hit": hit, "chars": len(observation)})
-                        else:
-                            observation = f"(unknown tool: {name})"
-                    loop_messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc.get("id"),
-                        "content": observation,
-                    })
-        except Exception as e:
-            logger.warning("orchestrator tool loop failed, proceeding to synthesis: %s", e)
-
-        # KB-retrieval fallback: small orchestrators often skip kb_search (esp. on follow-up
-        # turns), leaving the In-Depth with no guidance to ground. If nothing was gathered, do one
-        # deterministic kb_search on the question so the synthesis still has reference context.
-        if not solo and not kb_context:
-            q = _latest_user_text(messages)
-            if q:
-                obs = _run_kb_search(q)
-                hit = obs.startswith(_KB_BLOCK_HEADER)
-                if hit:
-                    kb_context = obs
-                orch_steps.append({"role": "kb_search", "query": q[:160], "hit": hit,
-                                   "chars": len(obs), "fallback": True})
+        kb_context, expert_notes, orch_steps = await _gather_evidence(
+            client, solo=solo, want_kb=want_kb, want_expert=want_expert, has_expert=has_expert,
+            orchestrator_model=model, orchestrator_system=orchestrator_system,
+            expert_model=expert_model, expert_system=expert_system,
+            messages=messages, chart=chart, max_tokens=max_tokens,
+            orch_temp=orch_temp, orch_rp=orch_rp, orch_dry=orch_dry,
+            exp_temp=exp_temp, exp_rp=exp_rp, exp_dry=exp_dry)
 
         # --- generation: two distinct calls (answer + in-depth), each validated,
         # combined into one envelope. The base prefix is the ORIGINAL chartsearchai
