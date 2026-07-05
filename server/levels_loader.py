@@ -135,6 +135,12 @@ class Level:
     # "compact" is an explicit per-level opt-in for small-context product profiles; it must never become
     # the implicit default for any level that isn't set here.
     temporal_render: str = "full"
+    # Deterministic post-answer drug-safety check (dosing/interaction/contraindication warnings) +
+    # pre-answer drug-reference chart injection, ported from chartsearchai's Java DrugSafetyValidator/
+    # DrugReferenceInjector (H7). False (default) is byte-identical to every existing level — no
+    # `safetyWarnings` key, no injected chart lines. Mirrors the Java feature's master GP, which also
+    # defaults off.
+    drug_safety: bool = False
     # Optional per-role sampling knobs: {role: {temperature, repeat_penalty, dry}}.
     # A role's entry overrides the global default for that role only; unset -> default.
     # Roles: orchestrator / expert / synthesizer / validator.
@@ -347,6 +353,7 @@ def get_level(level_id: str) -> Level:
             indepth_model=spec.get("indepth_model"),
             grounding_model=spec.get("grounding_model"),
             temporal_render=str(spec.get("temporal_render", "full")).lower(),
+            drug_safety=bool(spec.get("drug_safety", False)),
             knobs=spec.get("knobs") or {},
         )
     except KeyError as exc:

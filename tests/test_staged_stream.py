@@ -17,7 +17,7 @@ _MAPPINGS = [
 
 def _stub_common(monkeypatch):
     async def fake_retrieve(_patient):
-        return "[1] obs\n[2] order\n", _MAPPINGS
+        return "[1] obs\n[2] order\n", _MAPPINGS, []
 
     def fake_gate(**k):
         return k["answer_text"], k["citations"], k["blocks"], {"mode": "off", "status": "ok", "applied": "none"}, None

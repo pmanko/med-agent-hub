@@ -37,6 +37,7 @@ from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional
 
 import httpx
 
+from . import drug_safety
 from . import kb
 from . import temporal
 from .config import (
@@ -145,24 +146,60 @@ def _chart_context(messages: List[Dict[str, Any]]) -> str:
     return ""
 
 
-async def _retrieve_chart(patient_uuid: str) -> Tuple[str, List[Dict[str, Any]]]:
+async def _retrieve_chart(patient_uuid: str) -> Tuple[str, List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Fetch + render a patient's chart from querystore over REST (ADR Decision 16) — the hub as a
-    direct, non-JVM querystore client. Returns ``(chart_text, mappings)`` where ``mappings[i]`` =
-    ``{index, resourceType, resourceUuid, date, text}`` (the citation-index → record map the hub uses to
-    resolve ``[N]`` markers into rich references). Degrades to ``("", [])`` on any failure (querystore
-    disabled, unavailable, auth, or unknown patient) so a retrieval outage never breaks the turn."""
+    direct, non-JVM querystore client. Returns ``(chart_text, mappings, records)`` where
+    ``mappings[i]`` = ``{index, resourceType, resourceUuid, date, text}`` (the citation-index →
+    record map the hub uses to resolve ``[N]`` markers into rich references) and ``records`` is the
+    RAW querystore response (every resourceType, with structured ``metadata``) — kept around for
+    consumers that need more than rendered text, e.g. drug_safety's patient-context builder.
+    Degrades to ``("", [], [])`` on any failure (querystore disabled, unavailable, auth, or unknown
+    patient) so a retrieval outage never breaks the turn."""
     if not querystore_config.enabled:
         logger.warning("patient ref given but QUERYSTORE_BASE_URL is unset — returning empty chart")
-        return "", []
+        return "", [], []
     try:
         client = QueryStoreClient(
             querystore_config.base_url, querystore_config.username, querystore_config.password)
         records = await client.get_patient_chart(patient_uuid)
-        return render_chart(records)
+        chart_text, mappings = render_chart(records)
+        return chart_text, mappings, records
     except Exception as e:
         logger.warning("querystore retrieval failed for patient=%s — returning empty chart: %s",
                        patient_uuid, e)
-        return "", []
+        return "", [], []
+
+
+def _prepare_drug_safety(
+    chart_text: str, mappings: List[Dict[str, Any]], records: List[Dict[str, Any]],
+    question: str, anchor: Optional[str], enabled: bool,
+) -> Tuple[str, List[Dict[str, Any]], Optional["drug_safety.PatientClinicalContext"]]:
+    """Shared by run_team/run_team_stream: when drug_safety is on for this level, builds the
+    patient's clinical context from the RAW querystore records (reference_date resolved the same
+    way temporal grounding resolves "now" — a demo dataset has no real wall-clock activity), then
+    injects matching drug-reference records into the chart. No-op (unchanged inputs, None context)
+    when disabled or there is no chart to inject into."""
+    if not enabled or not chart_text:
+        return chart_text, mappings, None
+    reference_date = temporal.resolve_anchor(anchor or os.environ.get("HUB_ANCHOR"), chart_text)
+    dataset = drug_safety.load_dataset()
+    patient_context = drug_safety.build_patient_context(records, reference_date, dataset)
+    new_text, new_mappings = drug_safety.inject_drug_references(
+        chart_text, mappings, question, patient_context.age_years, dataset,
+        active_order_atc_codes=patient_context.active_drug_atc_codes)
+    return new_text, new_mappings, patient_context
+
+
+def _compute_safety_warnings(
+    patient_context: Optional["drug_safety.PatientClinicalContext"], answer_text: str, question: str,
+    enabled: bool,
+) -> List[Dict[str, str]]:
+    """Post-answer drug-safety check (deterministic, no LLM). Returns [] when disabled, there is no
+    patient context (no patient ref, or querystore retrieval failed), or nothing is flagged."""
+    if not enabled or patient_context is None:
+        return []
+    warnings = drug_safety.validate_answer(answer_text, question, patient_context, drug_safety.load_dataset())
+    return [w.to_dict() for w in warnings]
 
 
 _INLINE_CITATION_RE = re.compile(r"\[(\d+)\]")
@@ -673,6 +710,7 @@ def _answer_body(answer_text: str, claims: List[str]) -> str:
 def _assemble_envelope(
     answer_text: str, citations: List[int], blocks: List[Any], claims: List[str],
     answer_conf: Optional[Dict[str, Any]] = None, indepth_conf: Optional[Dict[str, Any]] = None,
+    safety_warnings: Optional[List[Dict[str, str]]] = None,
 ) -> str:
     """Serialize the chartsearchai {answer, citations, blocks} envelope, where `answer` is the CLEAN
     combined Answer + In-Depth markdown body. Carries a `confidence` block (per-section {level, note})
@@ -686,6 +724,8 @@ def _assemble_envelope(
     if answer_conf or indepth_conf:
         env["confidence"] = {"answer": answer_conf or {"level": "green", "note": ""},
                              "in_depth": indepth_conf or {"level": "green", "note": ""}}
+    if safety_warnings:
+        env["safetyWarnings"] = safety_warnings
     return json.dumps(env)
 
 
@@ -721,6 +761,7 @@ def _assemble_answer_only_envelope(
     answer_text: str, citations: List[int], blocks: List[Any],
     answer_conf: Optional[Dict[str, Any]] = None,
     answer_validation: Optional[Dict[str, Any]] = None,
+    safety_warnings: Optional[List[Dict[str, str]]] = None,
 ) -> str:
     """Serialize the staged UX Answer leg without an In-Depth placeholder in the markdown body.
 
@@ -736,6 +777,8 @@ def _assemble_answer_only_envelope(
         env["confidence"] = {"answer": answer_conf}
     if answer_validation:
         env["answerValidation"] = answer_validation
+    if safety_warnings:
+        env["safetyWarnings"] = safety_warnings
     return json.dumps(env)
 
 
@@ -1451,6 +1494,8 @@ async def _synthesize_and_validate(
     max_loops: int,
     indepth_mode: str = "split",   # "split" (validated two-call In-Depth) | "shared" (single-pass) | "none"
     bare_envelope: bool = False,   # True -> the bare chartsearchai {answer,citations,blocks} (parity), no **Answer** header
+    drug_safety_context: Optional["drug_safety.PatientClinicalContext"] = None,
+    drug_safety_enabled: bool = False,
 ) -> Tuple[str, List[Dict[str, Any]], Dict[str, Any], Dict[str, Any], str, List[str], Dict[str, Any], Optional[str]]:
     """Two-call generation + two independent validators, combined into one envelope only here.
     Returns (envelope_json, trace_steps, answer_confidence, indepth_confidence, answer_text,
@@ -1508,16 +1553,24 @@ async def _synthesize_and_validate(
             max_tokens=max_tokens, repeat_penalty=synth_repeat_penalty, dry=synth_dry)
         indepth_conf = answer_conf  # shared pass has no separate validator -> shares the Answer confidence
 
+    safety_warnings = _compute_safety_warnings(
+        drug_safety_context, answer_text, _latest_user_text(base_messages), drug_safety_enabled)
+
     # --- assemble (envelope shape keyed by mode, so each arm's output is byte-exact) ---
     if indepth_mode in ("split", "shared"):
         # sectioned **Answer** / **In Depth** body (two-call and parity-shared)
-        content = _assemble_envelope(answer_text, citations, blocks, claims, answer_conf, indepth_conf)
+        content = _assemble_envelope(answer_text, citations, blocks, claims, answer_conf, indepth_conf,
+                                      safety_warnings)
     elif bare_envelope:
         # bare chartsearchai envelope, NO header — matches the direct single-LLM arms (parity, no In-Depth)
-        content = json.dumps({"answer": answer_text, "citations": citations or [], "blocks": blocks or []})
+        bare: Dict[str, Any] = {"answer": answer_text, "citations": citations or [], "blocks": blocks or []}
+        if safety_warnings:
+            bare["safetyWarnings"] = safety_warnings
+        content = json.dumps(bare)
     else:
         # answer-only leg of a two-call level (In-Depth deferred to the caller's second leg)
-        content = _assemble_answer_only_envelope(answer_text, citations, blocks, answer_conf)
+        content = _assemble_answer_only_envelope(answer_text, citations, blocks, answer_conf,
+                                                  safety_warnings=safety_warnings)
     return (content, steps, answer_conf, indepth_conf, answer_text, claims, temporal_gate, original_answer_text)
 
 
@@ -1734,6 +1787,7 @@ async def run_team(
     level_id: Optional[str] = None,
     patient: Optional[str] = None,
     temporal_render: str = "full",
+    drug_safety: bool = False,
 ) -> str:
     """
     Run the team for one chartsearchai turn.
@@ -1750,8 +1804,12 @@ async def run_team(
     # owns context) and injects it as the chartsearchai-shaped user(chart) message BEFORE the question —
     # the synthesizer reads the chart from base_messages (never the `chart` var), so it must be a message.
     # Otherwise the chart already in `messages` (the chartsearchai path) is used unchanged.
+    drug_safety_context = None
     if patient:
-        chart_text, _mappings = await _retrieve_chart(patient)
+        chart_text, _mappings, _records = await _retrieve_chart(patient)
+        if drug_safety and chart_text:
+            chart_text, _mappings, drug_safety_context = _prepare_drug_safety(
+                chart_text, _mappings, _records, _latest_user_text(messages), anchor, True)
         if chart_text:
             messages = list(messages)
             _at = 1 if (messages and messages[0].get("role") == "system") else 0
@@ -1930,7 +1988,8 @@ async def run_team(
                     synth_temperature=synth_temp, synth_repeat_penalty=synth_rp, synth_dry=synth_dry,
                     validator_temperature=val_temp, validator_repeat_penalty=val_rp, validator_dry=val_dry,
                     max_tokens=max_tokens, max_loops=validator_max_loops,
-                    indepth_mode=indepth_mode, bare_envelope=bare_envelope)
+                    indepth_mode=indepth_mode, bare_envelope=bare_envelope,
+                    drug_safety_context=drug_safety_context, drug_safety_enabled=drug_safety)
             # A parity Answer carries NO In-Depth confidence on the trace (its In-Depth is a separate
             # indepth-only call) — match the direct single-LLM arms.
             trace_indepth_conf = None if (bare_envelope and indepth_mode == "none") else indepth_conf
@@ -1961,6 +2020,7 @@ def _stream_payload(
     answer_validation: Optional[Dict[str, Any]] = None, in_depth: Optional[Dict[str, Any]] = None,
     references: Optional[List[Dict[str, Any]]] = None,
     grounding_status: Optional[str] = None,
+    safety_warnings: Optional[List[Dict[str, str]]] = None,
 ) -> str:
     """One staged wire event: the direct answer + hub-resolved RICH references (never bare citation
     indices) + optional confidence / answerValidation / inDepth. `session` and `messageId` are injected
@@ -1979,6 +2039,8 @@ def _stream_payload(
         env["inDepth"] = in_depth
     if model:
         env["model"] = model
+    if safety_warnings:
+        env["safetyWarnings"] = safety_warnings
     return json.dumps(env)
 
 
@@ -2011,6 +2073,7 @@ async def run_team_stream(
     expert_model: Optional[str] = None,
     expert_prompt: Optional[str] = None,
     has_expert: bool = True,
+    drug_safety: bool = False,
 ) -> AsyncIterator[Tuple[str, str]]:
     """Hub-owned PHASED staged streaming: run gather -> answer -> (optional validation) -> in-depth
     and YIELD one ``(event_name, json_data)`` per stage as it completes. The chartsearchai controller
@@ -2064,8 +2127,12 @@ async def run_team_stream(
     # use the chart already in messages (mappings unknown -> citations can't resolve to references).
     mappings: List[Dict[str, Any]] = []
     base_messages = list(messages)
+    drug_safety_context = None
     if patient:
-        chart_text, mappings = await _retrieve_chart(patient)
+        chart_text, mappings, records = await _retrieve_chart(patient)
+        if drug_safety and chart_text:
+            chart_text, mappings, drug_safety_context = _prepare_drug_safety(
+                chart_text, mappings, records, _latest_user_text(base_messages), anchor, True)
         if chart_text:
             _at = 1 if (base_messages and base_messages[0].get("role") == "system") else 0
             base_messages.insert(_at, {"role": "user",
@@ -2168,6 +2235,12 @@ async def run_team_stream(
             final_refs = await _ground_references(
                 client, grounding_model or synth_model, answer_text, final_refs, mappings)
 
+        # Post-answer drug-safety check runs here, after the answer is fully finalized (post-review,
+        # post-grounding) — the same point batch's _synthesize_and_validate checks. It rides only the
+        # `done` event: answer_done/answer_validation already fired before this point.
+        safety_warnings = _compute_safety_warnings(
+            drug_safety_context, answer_text, _latest_user_text(base_messages), drug_safety)
+
         # ---- PHASE 3: IN-DEPTH ----
         yield ("indepth_pending",
                json.dumps({"messageId": None, "inDepth": {"status": "pending", "answer": ""}}))
@@ -2193,7 +2266,8 @@ async def run_team_stream(
         yield ("done", _stream_payload(
             answer_text, citations, blocks, mappings, model=model_label,
             answer_conf=answer_conf, answer_validation=answer_validation,
-            in_depth={"status": "complete", "answer": indepth_body}, references=final_refs))
+            in_depth={"status": "complete", "answer": indepth_body}, references=final_refs,
+            safety_warnings=safety_warnings))
         _write_trace(level_id, base_messages, orchestrator=None, expert=None,
                      synthesizer=synth_model, validator=validator_model, steps=steps,
                      answer_confidence=answer_conf, indepth_confidence=indepth_conf or {},
@@ -2227,7 +2301,7 @@ async def run_team_stage_drain(**kwargs: Any) -> str:
         "references": references,
         "blocks": final_payload.get("blocks") or [],
     }
-    for key in ("confidence", "answerValidation", "inDepth", "model"):
+    for key in ("confidence", "answerValidation", "inDepth", "model", "safetyWarnings"):
         if key in final_payload:
             out[key] = final_payload[key]
     return json.dumps(out)

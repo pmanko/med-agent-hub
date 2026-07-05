@@ -173,6 +173,7 @@ async def _content_for(req: ChatCompletionRequest) -> str:
             model_label=req.model,
             temporal_render=level.temporal_render,
             grounding_model=level.grounding_model,
+            drug_safety=level.drug_safety,
             solo=level.solo,
             orchestrator_model=level.orchestrator,
             orchestrator_prompt=level.orchestrator_prompt,
@@ -208,6 +209,7 @@ async def _content_for(req: ChatCompletionRequest) -> str:
         knobs=level.knobs,
         level_id=req.model,  # the advertised level id == the harness backend_id (trace correlation key)
         temporal_render=level.temporal_render,
+        drug_safety=level.drug_safety,
     )
 
 
@@ -332,6 +334,7 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
                 is_disconnected=request.is_disconnected,
                 temporal_render=level.temporal_render,
                 grounding_model=level.grounding_model,
+                drug_safety=level.drug_safety,
                 solo=level.solo,
                 orchestrator_model=level.orchestrator,
                 orchestrator_prompt=level.orchestrator_prompt,
