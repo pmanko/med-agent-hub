@@ -6,6 +6,8 @@ Grounded in the real Aloice chart format (chartsearchai PatientChartSerializer):
 Run: pytest tests/test_temporal.py
 """
 
+import json
+
 from server import temporal
 
 # A realistic slice of the serialized chart (most-recent-first, like the real snapshot).
@@ -182,6 +184,12 @@ def test_temporal_facts_captures_return_visit_dates_and_classifies_against_ancho
     assert wt["window"]["start_date_id"] == "D2006_03_03"
 
 
+def _rendered_json_payload(rendered: str) -> dict:
+    start = rendered.index("```json\n") + len("```json\n")
+    end = rendered.index("\n```", start)
+    return json.loads(rendered[start:end])
+
+
 def test_render_temporal_facts_includes_full_json_sidecar_marker():
     facts = temporal.build_temporal_facts(_CHART, "2006-05-18")
     rendered = temporal.render_temporal_facts(facts)
@@ -189,6 +197,28 @@ def test_render_temporal_facts_includes_full_json_sidecar_marker():
     assert '"date_ledger"' in rendered
     assert '"return_visit_dates"' in rendered
     assert '"numeric_series"' in rendered
+
+
+def test_render_temporal_facts_default_profile_is_the_uncompacted_sidecar_verbatim():
+    # Gate 8: temporal prompt content is a config knob, not an unconditional compaction — the
+    # DEFAULT profile ("full") must ship the exact facts dict, byte-identical to a raw dump, so
+    # every research/batch arm keeps seeing what it saw before H2. Concretely: each
+    # clinical_dates entry keeps its full "classes" list (compact drops it entirely).
+    facts = temporal.build_temporal_facts(_CHART, "2006-05-18")
+    rendered = temporal.render_temporal_facts(facts)
+    payload = _rendered_json_payload(rendered)
+    assert payload == facts
+    assert "classes" in facts["clinical_dates"][0]
+    assert "classes" in payload["clinical_dates"][0]
+
+
+def test_render_temporal_facts_compact_profile_is_explicit_opt_in():
+    facts = temporal.build_temporal_facts(_CHART, "2006-05-18")
+    rendered = temporal.render_temporal_facts(facts, profile="compact")
+    payload = _rendered_json_payload(rendered)
+    assert payload == temporal.compact_temporal_facts_for_prompt(facts)
+    assert "classes" not in payload["clinical_dates"][0]
+    assert payload != facts
 
 
 # ---- temporal gate ----------------------------------------------------------

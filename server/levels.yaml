@@ -151,6 +151,9 @@ levels:
     temporal_gate: enforce
     staged: true
     solo: true
+    # Explicit opt-in (Gate 8): only THIS product profile's context-window pressure justifies the
+    # compacted temporal sidecar. Every research/batch level keeps the "full" default untouched.
+    temporal_render: compact
     knobs: {synthesizer: {temperature: 0}}
 
   single-e4b-checked:
@@ -163,6 +166,7 @@ levels:
     temporal_gate: enforce
     staged: true
     solo: true
+    temporal_render: compact
     knobs: {synthesizer: {temperature: 0}}
 
   single-a4b-checked:
@@ -175,6 +179,7 @@ levels:
     temporal_gate: enforce
     staged: true
     solo: true
+    temporal_render: compact
     knobs: {synthesizer: {temperature: 0}}
 
   # --- Method arms: small-orch + Qwen validator vs the bare single, on the two strong writers (12B, A4B).

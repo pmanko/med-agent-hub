@@ -176,6 +176,15 @@ def test_product_single_profiles_use_answer_model_without_fake_orchestrator():
     )
 
 
+def test_temporal_render_defaults_to_full_and_is_an_explicit_per_level_opt_in():
+    # Gate 8: every level that doesn't say otherwise keeps the pre-compaction "full" behavior;
+    # only the checked product profiles (small-context, latency-sensitive) opt into "compact".
+    assert levels_loader.get_level("med-agent-team-med-validated").temporal_render == "full"
+    assert levels_loader.get_level("single-12b-checked").temporal_render == "compact"
+    assert levels_loader.get_level("single-e4b-checked").temporal_render == "compact"
+    assert levels_loader.get_level("single-a4b-checked").temporal_render == "compact"
+
+
 def test_generic_answer_rejects_unknown_temporal_gate():
     with pytest.raises(KeyError):
         levels_loader.get_level("answer:gemma-e4b-q8@synthesis-chartsearchai~maybe")

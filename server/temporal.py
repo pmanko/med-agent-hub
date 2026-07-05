@@ -508,13 +508,24 @@ def compact_temporal_facts_for_prompt(facts: Dict[str, Any]) -> Dict[str, Any]:
     return prompt_facts
 
 
-def render_temporal_facts(facts: Dict[str, Any]) -> str:
-    """Render the compact JSON sidecar as model-visible evidence."""
+def render_temporal_facts(facts: Dict[str, Any], profile: str = "full") -> str:
+    """Render the JSON sidecar as model-visible evidence.
+
+    ``profile`` is a config knob (``Level.temporal_render``), never an implicit default change:
+    ``"full"`` (the default, and the only behavior every research/batch arm has ever seen) ships
+    the ``facts`` dict verbatim; ``"compact"`` is an explicit per-level opt-in for context-window
+    pressure on small product profiles and drops repeated per-date class mirrors.
+    """
     if not facts:
         return ""
-    prompt_facts = compact_temporal_facts_for_prompt(facts)
+    if profile == "compact":
+        prompt_facts = compact_temporal_facts_for_prompt(facts)
+        marker = "compact deterministic JSON from the chart"
+    else:
+        prompt_facts = facts
+        marker = "deterministic JSON from the chart"
     return (
-        "Structured temporal facts (temporal_facts.v1.1; compact deterministic JSON from the chart). "
+        f"Structured temporal facts (temporal_facts.v1.1; {marker}). "
         "For any date you write, copy an `iso` value from `date_ledger`; do not reformat "
         "or reconstruct dates from memory.\n"
         "```json\n"

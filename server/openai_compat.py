@@ -155,6 +155,7 @@ async def _content_for(req: ChatCompletionRequest) -> str:
             level_id=req.model,
             patient=req.patient,
             model_label=req.model,
+            temporal_render=level.temporal_render,
         )
     return await run_team(
         req.messages,
@@ -183,6 +184,7 @@ async def _content_for(req: ChatCompletionRequest) -> str:
         anchor=level.anchor,
         knobs=level.knobs,
         level_id=req.model,  # the advertised level id == the harness backend_id (trace correlation key)
+        temporal_render=level.temporal_render,
     )
 
 
@@ -272,6 +274,7 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
                 patient=req.patient,
                 model_label=req.model,
                 is_disconnected=request.is_disconnected,
+                temporal_render=level.temporal_render,
             )
             return StreamingResponse(
                 _named_sse(gen), media_type="text/event-stream",

@@ -1559,6 +1559,7 @@ async def run_team(
     knobs: Optional[Dict[str, Any]] = None,
     level_id: Optional[str] = None,
     patient: Optional[str] = None,
+    temporal_render: str = "full",
 ) -> str:
     """
     Run the team for one chartsearchai turn.
@@ -1768,7 +1769,7 @@ async def run_team(
             reference_date = temporal.resolve_anchor(anchor_mode, chart)
             temporal_facts = temporal.build_temporal_facts(
                 chart, reference_date, anchor_mode=anchor_mode or "latest_record")
-            temporal_facts_block = temporal.render_temporal_facts(temporal_facts)
+            temporal_facts_block = temporal.render_temporal_facts(temporal_facts, profile=temporal_render)
             if temporal_facts_block:
                 gathered = temporal_facts_block + ("\n\n" + gathered if gathered else "")
 
@@ -1913,6 +1914,7 @@ async def run_team_stream(
     patient: Optional[str] = None,
     model_label: Optional[str] = None,
     is_disconnected: Optional[Callable[[], Awaitable[bool]]] = None,
+    temporal_render: str = "full",
 ) -> AsyncIterator[Tuple[str, str]]:
     """Hub-owned PHASED staged streaming for a solo single-writer level: run answer -> (optional
     validation) -> in-depth and YIELD one ``(event_name, json_data)`` per stage as it completes. The
@@ -1973,7 +1975,7 @@ async def run_team_stream(
             reference_date = temporal.resolve_anchor(anchor_mode, chart)
             temporal_facts = temporal.build_temporal_facts(
                 chart, reference_date, anchor_mode=anchor_mode or "latest_record")
-            block = temporal.render_temporal_facts(temporal_facts)
+            block = temporal.render_temporal_facts(temporal_facts, profile=temporal_render)
             if block:
                 gathered = block
 
