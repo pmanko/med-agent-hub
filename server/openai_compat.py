@@ -95,13 +95,28 @@ def _advertised_models() -> List[str]:
     return list(dict.fromkeys(ids))
 
 
+def _staged_capability(level_id: str) -> bool:
+    """Whether this id is served by the phased-streaming engine. Clients (Java/ESM) use this to
+    decide whether to request the staged SSE contract — never by pattern-matching the id string."""
+    try:
+        return bool(get_level(level_id).staged)
+    except Exception:
+        return False  # raw/passthrough ids and unresolvable dynamic legs are never staged
+
+
 @router.get("/v1/models")
 def list_models() -> Dict[str, Any]:
     created = int(time.time())
     return {
         "object": "list",
         "data": [
-            {"id": mid, "object": "model", "created": created, "owned_by": "med-agent-hub"}
+            {
+                "id": mid,
+                "object": "model",
+                "created": created,
+                "owned_by": "med-agent-hub",
+                "staged": _staged_capability(mid),
+            }
             for mid in _advertised_models()
         ],
     }

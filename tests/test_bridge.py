@@ -338,6 +338,18 @@ def test_v1_models_advertises_the_levels():
     )
 
 
+def test_v1_models_advertises_staged_capability_not_just_id_prefix():
+    # Gate 10: clients must route by this field, never by pattern-matching the id string.
+    client = TestClient(app)
+    r = client.get("/v1/models")
+    by_id = {m["id"]: m for m in r.json()["data"]}
+    assert by_id["single-12b-checked"]["staged"] is True
+    # parity is explicitly a single-shot (non-staged) relay target, never the phased engine
+    assert by_id["med-agent-team-parity"]["staged"] is False
+    # a dynamic low-level leg (never staged) and an unresolvable/raw id both fail soft to False
+    assert by_id["answer-review:qwen2.5-14b"]["staged"] is False
+
+
 def test_chat_completions_team_returns_openai_shape_with_the_envelope():
     async def fake_run_team(messages, **kw):
         # Assert the bridge forwards the chart messages + response_format.
