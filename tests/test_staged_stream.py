@@ -6,6 +6,7 @@ not the LLM. A separate test pins the cancellation invariant (a cancelled _chat 
 import asyncio
 import json
 
+import server.openai_compat as openai_compat
 import server.team as team
 
 _MAPPINGS = [
@@ -162,6 +163,53 @@ def test_grounding_uses_record_date_for_cited_visit_claim():
 
     assert grounded[0]["groundingStatus"] == "verified"
     assert grounded[0]["grounded"] is True
+
+
+def test_named_sse_emits_heartbeats_while_a_leg_stalls():
+    # Gate 6: without heartbeats, an intermediary/browser sees a dead-looking connection during a
+    # long leg and there is nothing for an abort to interrupt until the NEXT event finally arrives.
+    async def slow_gen():
+        await asyncio.sleep(0.05)
+        yield ("answer_done", '{"answer":"hi"}')
+
+    async def _run():
+        return [chunk async for chunk in openai_compat._named_sse(slow_gen(), interval_s=0.01)]
+
+    chunks = asyncio.run(_run())
+    heartbeats = [c for c in chunks if c == ": hb\n\n"]
+    assert len(heartbeats) >= 2, f"expected repeated heartbeats while stalled, got {chunks}"
+    assert chunks[-1] == 'event: answer_done\ndata: {"answer":"hi"}\n\n'
+
+
+def test_named_sse_cancel_mid_heartbeat_still_frees_router_lock():
+    # The heartbeat wait must not weaken the existing cancel-frees-the-lock invariant: cancelling
+    # while parked on a heartbeat still has to unwind whatever the hub is doing underneath.
+    async def _run():
+        started = asyncio.Event()
+
+        class Hanging:
+            async def post(self, *_a, **_k):
+                started.set()
+                await asyncio.sleep(3600)
+
+        async def hanging_gen():
+            await team._chat(Hanging(), "m", [{"role": "user", "content": "x"}])
+            yield ("done", "{}")  # unreachable; _chat never returns
+
+        stream = openai_compat._named_sse(hanging_gen(), interval_s=0.01)
+        agen = stream.__aiter__()
+        first = asyncio.ensure_future(agen.__anext__())
+        await started.wait()
+        assert team._ROUTER_LOCK.locked()
+        first.cancel()
+        try:
+            await first
+        except asyncio.CancelledError:
+            pass
+        await agen.aclose()
+        assert not team._ROUTER_LOCK.locked(), "cancelling mid-heartbeat must still free the router lock"
+
+    asyncio.run(_run())
 
 
 def test_chat_cancel_releases_router_lock():

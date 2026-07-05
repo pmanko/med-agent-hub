@@ -12,6 +12,7 @@ native `/api/v1/models`; letting it 404 tags this endpoint as
 `generic-openai-compat` to the consumer's model-switch probe.
 """
 
+import asyncio
 import json
 import logging
 import time
@@ -237,20 +238,53 @@ def _sse_stream(model: str, content: str):
     yield "data: [DONE]\n\n"
 
 
-def _named_sse(gen):
+_SSE_HEARTBEAT_INTERVAL_S = 10.0
+
+
+def _named_sse(gen, interval_s: float = _SSE_HEARTBEAT_INTERVAL_S):
     """Frame the hub's phased ``(event_name, json)`` tuples as SSE the chartsearchai controller relays
-    verbatim: ``event: <name>\\n`` + one ``data:`` line per line of payload + a blank line. On client
-    disconnect the StreamingResponse task is cancelled -> this closes ``gen`` -> the in-flight ``_chat``
-    unwinds and frees the router lock."""
+    verbatim: ``event: <name>\\n`` + one ``data:`` line per line of payload + a blank line.
+
+    While waiting on a leg that runs longer than ``interval_s`` (answer/review/in-depth generation),
+    emits an SSE comment line (``: hb\\n\\n``) so the connection never looks idle to an intermediary
+    and there's something for a mid-leg abort to interrupt — the ESM parser already ignores any line
+    that isn't ``event:``/``data:``.
+
+    On client disconnect, Starlette cancels the task driving this generator. Because the wait on the
+    next upstream event is now split across repeated heartbeat timeouts (not one bare ``await``), the
+    pending ``gen.__anext__()`` is tracked as its own task and explicitly cancelled in ``finally`` —
+    that propagates into whatever the hub is awaiting underneath (e.g. the in-flight LLM call) and
+    frees ``_ROUTER_LOCK`` via its ``async with`` unwind, then ``gen`` is closed."""
     async def _stream():
+        it = gen.__aiter__()
+        pending: Optional["asyncio.Task"] = None
         try:
-            async for name, data in gen:
+            while True:
+                pending = asyncio.ensure_future(it.__anext__())
+                try:
+                    while not pending.done():
+                        try:
+                            await asyncio.wait_for(asyncio.shield(pending), timeout=interval_s)
+                        except asyncio.TimeoutError:
+                            yield ": hb\n\n"
+                except StopAsyncIteration:
+                    pending = None
+                    return
+                name, data = pending.result()
+                pending = None
                 out = f"event: {name}\n"
                 for line in (data or "").split("\n"):
                     out += f"data: {line}\n"
                 out += "\n"
                 yield out
         finally:
+            if pending is not None and not pending.done():
+                pending.cancel()
+            if pending is not None:
+                try:
+                    await pending
+                except BaseException:
+                    pass
             aclose = getattr(gen, "aclose", None)
             if aclose is not None:
                 await aclose()
