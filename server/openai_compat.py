@@ -172,6 +172,7 @@ async def _content_for(req: ChatCompletionRequest) -> str:
             patient=req.patient,
             model_label=req.model,
             temporal_render=level.temporal_render,
+            grounding_model=level.grounding_model,
         )
     return await run_team(
         req.messages,
@@ -324,6 +325,7 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
                 model_label=req.model,
                 is_disconnected=request.is_disconnected,
                 temporal_render=level.temporal_render,
+                grounding_model=level.grounding_model,
             )
             return StreamingResponse(
                 _named_sse(gen), media_type="text/event-stream",

@@ -128,6 +128,8 @@ class Level:
     # In-depth writer for the staged path. None -> defaults to `synthesizer` (the answer writer), so the
     # base staged case is "one model does answer + in-depth". Set it to run in-depth on a different model.
     indepth_model: Optional[str] = None
+    # Citation-entailment grounding model for the staged path. None -> defaults to `synthesizer`.
+    grounding_model: Optional[str] = None
     # Temporal sidecar render profile passed to temporal.render_temporal_facts. "full" (default) is the
     # exact behavior every existing research/batch arm has always seen (byte-identical prompt input).
     # "compact" is an explicit per-level opt-in for small-context product profiles; it must never become
@@ -343,6 +345,7 @@ def get_level(level_id: str) -> Level:
             temporal_gate=str(spec.get("temporal_gate", "off")).lower(),
             staged=bool(spec.get("staged", False)),
             indepth_model=spec.get("indepth_model"),
+            grounding_model=spec.get("grounding_model"),
             temporal_render=str(spec.get("temporal_render", "full")).lower(),
             knobs=spec.get("knobs") or {},
         )

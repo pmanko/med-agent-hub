@@ -25,11 +25,24 @@ def _stub_common(monkeypatch):
     async def fake_indepth(*_a, **_k):
         return (["claim one", "claim two"], {"level": "green", "note": ""})
 
+    async def fake_ground(_client, _model, _answer, references, _mappings):
+        # Deterministic stand-in for the real entailment call: these sequencing/wiring tests care
+        # that grounding runs exactly once, after review, on the FINAL references — not what a real
+        # LLM would verdict. The entailment call itself has its own dedicated tests below.
+        out = []
+        for ref in references:
+            r = dict(ref)
+            r["grounded"] = True
+            r["groundingStatus"] = "verified"
+            out.append(r)
+        return out
+
     monkeypatch.setattr(team, "_retrieve_chart", fake_retrieve)
     monkeypatch.setattr(team, "_apply_temporal_gate", fake_gate)
     monkeypatch.setattr(team, "_gen_indepth", fake_indepth)
     monkeypatch.setattr(team, "_merge_temporal_gate_conf", lambda conf, _gate: conf)
     monkeypatch.setattr(team, "_write_trace", lambda *_a, **_k: None)
+    monkeypatch.setattr(team, "_ground_references", fake_ground)
 
 
 def _collect(**kwargs):
@@ -87,7 +100,7 @@ def test_staged_stream_with_validator_emits_full_phase_sequence(monkeypatch):
     assert ev["done"]["references"] == [
         {
             "index": 2, "resourceType": "order", "resourceUuid": "u2", "date": "2025-02-02",
-            "sourceText": "different order", "groundingStatus": "unsupported", "grounded": False,
+            "sourceText": "different order", "groundingStatus": "verified", "grounded": True,
         }
     ]
 
@@ -109,7 +122,7 @@ def test_staged_stream_without_validator_skips_validation_phase(monkeypatch):
     # No validation coming -> answer_done carries NO answerValidation (frontend settles immediately).
     assert "answerValidation" not in dict(events)["answer_done"]
     assert dict(events)["answer_done"]["references"][0]["groundingStatus"] == "checking"
-    assert dict(events)["done"]["references"][0]["groundingStatus"] == "unsupported"
+    assert dict(events)["done"]["references"][0]["groundingStatus"] == "verified"
     assert dict(events)["done"]["inDepth"]["status"] == "complete"
 
 
@@ -137,32 +150,134 @@ def test_stage_drain_returns_final_post_review_envelope(monkeypatch):
     assert env["answerValidation"]["status"] == "edited"
     assert env["inDepth"]["status"] == "complete"
     assert env["references"][0]["index"] == 2
-    assert env["references"][0]["groundingStatus"] == "unsupported"
+    assert env["references"][0]["groundingStatus"] == "verified"
 
 
-def test_grounding_uses_record_date_for_cited_visit_claim():
-    refs = [{
-        "index": 4,
-        "resourceType": "encounter",
-        "resourceUuid": "enc-4",
-        "date": "2026-01-26",
-    }]
+def _fake_chat_returning_verdicts(verdicts_by_call):
+    """Stub for team._chat that returns the next queued verdicts list as an entailment response."""
+    calls = []
+
+    async def fake_chat(_client, model, messages, **kwargs):
+        calls.append({"model": model, "messages": messages, **kwargs})
+        verdicts = verdicts_by_call[len(calls) - 1]
+        return {"content": json.dumps({"verdicts": verdicts})}
+
+    return fake_chat, calls
+
+
+def test_entailment_verdicts_maps_yes_no_positionally(monkeypatch):
+    fake_chat, calls = _fake_chat_returning_verdicts([["YES", "NO"]])
+    monkeypatch.setattr(team, "_chat", fake_chat)
+
+    async def _run():
+        return await team._entailment_verdicts(
+            client=None, model="M",
+            pairs=[("source A", "claim A"), ("source B", "claim B")],
+        )
+
+    verdicts = asyncio.run(_run())
+    assert verdicts == [True, False]
+    assert len(calls) == 1  # ONE batched call for both pairs, not one per pair
+    assert calls[0]["response_format"]["json_schema"]["name"] == "entailment_verdicts"
+
+
+def test_entailment_verdicts_fails_open_to_unchecked_on_call_error(monkeypatch):
+    async def broken_chat(*_a, **_k):
+        raise RuntimeError("router unreachable")
+
+    monkeypatch.setattr(team, "_chat", broken_chat)
+
+    async def _run():
+        return await team._entailment_verdicts(client=None, model="M", pairs=[("s", "c")])
+
+    assert asyncio.run(_run()) == [None]
+
+
+def test_entailment_verdicts_fails_open_on_malformed_response(monkeypatch):
+    async def malformed_chat(*_a, **_k):
+        return {"content": "not json"}
+
+    monkeypatch.setattr(team, "_chat", malformed_chat)
+
+    async def _run():
+        return await team._entailment_verdicts(client=None, model="M", pairs=[("s", "c")])
+
+    assert asyncio.run(_run()) == [None]
+
+
+def test_ground_references_verified_for_an_entailed_paraphrase_despite_low_word_overlap(monkeypatch):
+    # The old lexical heuristic required ~45% token overlap; a clean paraphrase like this would have
+    # scored well below that and come back unsupported/unchecked. Entailment must verify it anyway.
+    fake_chat, calls = _fake_chat_returning_verdicts([["YES"]])
+    monkeypatch.setattr(team, "_chat", fake_chat)
+    refs = [{"index": 4, "resourceType": "encounter", "resourceUuid": "enc-4", "date": "2026-01-26"}]
     mappings = [{
-        "index": 4,
-        "resourceType": "encounter",
-        "resourceUuid": "enc-4",
-        "date": "2026-01-26",
-        "text": "Encounter: Adult Visit at Unknown Location. Provider: Horatio L Hornblower",
+        "index": 4, "resourceType": "encounter", "resourceUuid": "enc-4", "date": "2026-01-26",
+        "text": "Pt seen today for a routine checkup; no acute concerns raised.",
     }]
 
-    grounded = team._ground_references(
-        "The most recent documented clinical visit occurred on 2026-01-26 [4].",
-        refs,
-        mappings,
-    )
+    async def _run():
+        return await team._ground_references(
+            client=None, model="M",
+            answer="The patient had a well visit on 2026-01-26 [4].",
+            references=refs, mappings=mappings,
+        )
 
+    grounded = asyncio.run(_run())
     assert grounded[0]["groundingStatus"] == "verified"
     assert grounded[0]["grounded"] is True
+    assert len(calls) == 1
+
+
+def test_ground_references_unsupported_for_high_overlap_but_negated_statement(monkeypatch):
+    # High lexical overlap (shares "diabetes", "family history") but describes a RELATIVE, not the
+    # patient — the failure mode the token-overlap heuristic could not catch.
+    fake_chat, calls = _fake_chat_returning_verdicts([["NO"]])
+    monkeypatch.setattr(team, "_chat", fake_chat)
+    refs = [{"index": 7, "resourceType": "obs", "resourceUuid": "obs-7", "date": "2026-01-01"}]
+    mappings = [{
+        "index": 7, "resourceType": "obs", "resourceUuid": "obs-7", "date": "2026-01-01",
+        "text": "Family history of diabetes (mother). Patient's own glucose panel is normal.",
+    }]
+
+    async def _run():
+        return await team._ground_references(
+            client=None, model="M",
+            answer="The patient has a diagnosis of diabetes [7].",
+            references=refs, mappings=mappings,
+        )
+
+    grounded = asyncio.run(_run())
+    assert grounded[0]["groundingStatus"] == "unsupported"
+    assert grounded[0]["grounded"] is False
+    assert len(calls) == 1
+
+
+def test_ground_references_caps_pairs_and_unchecks_the_rest(monkeypatch):
+    n = team._ENTAILMENT_MAX_PAIRS + 3
+    fake_chat, calls = _fake_chat_returning_verdicts([["YES"] * team._ENTAILMENT_MAX_PAIRS])
+    monkeypatch.setattr(team, "_chat", fake_chat)
+    refs = [
+        {"index": i, "resourceType": "obs", "resourceUuid": f"u{i}", "date": "2026-01-01"}
+        for i in range(1, n + 1)
+    ]
+    mappings = [
+        {"index": i, "resourceType": "obs", "resourceUuid": f"u{i}", "date": "2026-01-01",
+         "text": f"finding number {i}"}
+        for i in range(1, n + 1)
+    ]
+    answer = " ".join(f"Claim about finding {i} [{i}]." for i in range(1, n + 1))
+
+    async def _run():
+        return await team._ground_references(
+            client=None, model="M", answer=answer, references=refs, mappings=mappings)
+
+    grounded = asyncio.run(_run())
+    assert len(calls) == 1  # still exactly one batched call, capped, never unbounded
+    verified = [r for r in grounded if r["groundingStatus"] == "verified"]
+    unchecked = [r for r in grounded if r["groundingStatus"] == "unchecked"]
+    assert len(verified) == team._ENTAILMENT_MAX_PAIRS
+    assert len(unchecked) == 3
 
 
 def test_named_sse_emits_heartbeats_while_a_leg_stalls():

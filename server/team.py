@@ -165,12 +165,6 @@ async def _retrieve_chart(patient_uuid: str) -> Tuple[str, List[Dict[str, Any]]]
 
 
 _INLINE_CITATION_RE = re.compile(r"\[(\d+)\]")
-_WORD_RE = re.compile(r"[A-Za-z0-9]+")
-_GROUNDING_STOPWORDS = {
-    "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "has", "have",
-    "in", "is", "it", "no", "not", "of", "on", "or", "patient", "record", "records",
-    "the", "there", "this", "to", "was", "were", "with",
-}
 
 
 def _citation_indices(citations: List[int], answer: Optional[str] = None) -> List[int]:
@@ -242,60 +236,112 @@ def _claim_fragments_for_index(answer: str, index: int) -> List[str]:
     return fragments
 
 
-def _tokens(text: str) -> set[str]:
-    return {
-        t.lower()
-        for t in _WORD_RE.findall(text or "")
-        if len(t) > 1 and t.lower() not in _GROUNDING_STOPWORDS
-    }
+_ENTAILMENT_MAX_PAIRS = 16  # beyond this, references keep an "unchecked" verdict rather than an
+                            # unbounded batch call — mirrors the Java verifier's cap.
+
+_ENTAILMENT_SYSTEM_PROMPT = (
+    "You are a strict clinical fact-checker. For each PAIR, decide whether the SOURCE record "
+    "supports the STATEMENT. Answer NO if: the statement is about a different person or describes "
+    "family/social history rather than the patient's own record; the statement is negated, denied, "
+    "ruled out, or described as only suspected/possible when the source does not confirm it; the "
+    "source does not state the specific fact claimed; or you are not fully certain from the source "
+    "text alone. Never use outside medical knowledge — judge only what the SOURCE text says. Return "
+    "exactly one verdict per pair, in the same order, as JSON: {\"verdicts\": [\"YES\"|\"NO\", ...]}."
+)
+
+_ENTAILMENT_RF = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "entailment_verdicts",
+        "schema": {
+            "type": "object",
+            "properties": {
+                "verdicts": {"type": "array", "items": {"type": "string", "enum": ["YES", "NO"]}},
+            },
+            "required": ["verdicts"],
+        },
+    },
+}
 
 
-def _reference_grounded(answer: str, index: int, source_text: str) -> Optional[bool]:
-    """Lightweight local grounding verdict used by the hub staged product path.
-
-    This intentionally mirrors the Java verifier's fail-soft contract, not its full embedding/LLM
-    machinery. It verifies that the cited claim's meaningful tokens are substantially present in the
-    cited record text. Unknown/empty inputs degrade to ``None``; clear mismatch returns ``False``.
-    """
-    claim_text = " ".join(
-        _INLINE_CITATION_RE.sub("", frag)
-        for frag in _claim_fragments_for_index(answer, index)
+async def _entailment_verdicts(
+    client: httpx.AsyncClient,
+    model: str,
+    pairs: List[Tuple[str, str]],
+) -> List[Optional[bool]]:
+    """Batched LLM entailment check for citation grounding — mirrors the validator call shape
+    (fresh one-shot message list, dedicated json_schema response_format, one call for the whole
+    batch since the hub's single-slot router makes per-pair fan-out no faster). ``pairs`` are
+    ``(source_text, statement)``. FAIL-OPEN to ``None`` (unchecked) for every pair on any call or
+    parse failure, or if the model returns fewer verdicts than pairs — a flaky grounding check must
+    never fabricate a verdict."""
+    if not pairs:
+        return []
+    body = "\n\n".join(
+        f"PAIR {i + 1}:\nSOURCE: {source or '(none)'}\nSTATEMENT: {statement or '(none)'}"
+        for i, (source, statement) in enumerate(pairs)
     )
-    claim_tokens = _tokens(claim_text)
-    source_tokens = _tokens(source_text)
-    if not claim_tokens or not source_tokens:
-        return None
-    source_iso = re.search(r"\d{4}-\d{2}-\d{2}", source_text or "")
-    if (
-        source_iso
-        and source_iso.group(0) in claim_text
-        and ({"visit", "encounter"} & claim_tokens)
-        and ({"visit", "encounter"} & source_tokens)
-    ):
-        return True
-    overlap = len(claim_tokens & source_tokens) / max(1, len(claim_tokens))
-    return overlap >= 0.45
+    user = _ENTAILMENT_SYSTEM_PROMPT + "\n\n" + body
+    try:
+        msg = await _chat(client, model, [{"role": "user", "content": user}], response_format=_ENTAILMENT_RF)
+        obj = json.loads(_message_text(msg))
+        verdicts = obj.get("verdicts") if isinstance(obj, dict) else None
+        if not isinstance(verdicts, list):
+            raise ValueError("entailment response missing a 'verdicts' array")
+    except Exception:
+        logger.warning("entailment grounding[%s] call failed/unparseable -> all %d pair(s) unchecked",
+                       model, len(pairs))
+        return [None] * len(pairs)
+    out: List[Optional[bool]] = []
+    for i in range(len(pairs)):
+        v = verdicts[i] if i < len(verdicts) else None
+        if isinstance(v, str) and v.strip().upper() == "YES":
+            out.append(True)
+        elif isinstance(v, str) and v.strip().upper() == "NO":
+            out.append(False)
+        else:
+            out.append(None)
+    return out
 
 
-def _ground_references(
+async def _ground_references(
+    client: httpx.AsyncClient,
+    model: str,
     answer: str,
     references: List[Dict[str, Any]],
     mappings: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
-    """Attach final grounding verdicts to references for the final post-review answer."""
+    """Attach final grounding verdicts to references for the final post-review answer, via ONE
+    batched LLM entailment call (replaces the earlier lexical token-overlap heuristic, which could
+    both miss paraphrases and pass negated/different-person statements that merely share words with
+    the source)."""
     text_by_index = {
-        m.get("index"): " ".join(
-            str(p) for p in (m.get("date"), m.get("text")) if p
-        )
+        m.get("index"): " ".join(str(p) for p in (m.get("date"), m.get("text")) if p)
         for m in (mappings or [])
         if isinstance(m.get("index"), int)
     }
-    grounded_refs: List[Dict[str, Any]] = []
+
+    claim_source: List[Tuple[str, str]] = []  # (claim, source) per reference, in order
     for ref in references or []:
+        idx = ref.get("index")
+        idx = idx if isinstance(idx, int) else -1
+        claim = " ".join(
+            _INLINE_CITATION_RE.sub("", frag) for frag in _claim_fragments_for_index(answer or "", idx)
+        ).strip()
+        source = str(text_by_index.get(idx) or "").strip()
+        claim_source.append((claim, source))
+
+    checkable_positions = [
+        i for i, (claim, source) in enumerate(claim_source) if claim and source
+    ][:_ENTAILMENT_MAX_PAIRS]
+    pairs = [(claim_source[i][1], claim_source[i][0]) for i in checkable_positions]  # (source, statement)
+    verdicts = await _entailment_verdicts(client, model, pairs) if pairs else []
+    verdict_by_position = dict(zip(checkable_positions, verdicts))
+
+    grounded_refs: List[Dict[str, Any]] = []
+    for i, ref in enumerate(references or []):
         out = dict(ref)
-        verdict = _reference_grounded(
-            answer or "", int(out.get("index") or 0), str(text_by_index.get(out.get("index")) or "")
-        )
+        verdict = verdict_by_position.get(i)
         out["grounded"] = verdict
         out["groundingStatus"] = (
             "verified" if verdict is True else "unsupported" if verdict is False else "unchecked"
@@ -1915,6 +1961,7 @@ async def run_team_stream(
     model_label: Optional[str] = None,
     is_disconnected: Optional[Callable[[], Awaitable[bool]]] = None,
     temporal_render: str = "full",
+    grounding_model: Optional[str] = None,
 ) -> AsyncIterator[Tuple[str, str]]:
     """Hub-owned PHASED staged streaming for a solo single-writer level: run answer -> (optional
     validation) -> in-depth and YIELD one ``(event_name, json_data)`` per stage as it completes. The
@@ -2031,7 +2078,9 @@ async def run_team_stream(
                 in_depth={"status": "pending", "answer": ""}, references=final_refs))
             if await _disconnected():
                 return
-        final_refs = _ground_references(answer_text, final_refs, mappings) if mappings else final_refs
+        if mappings:
+            final_refs = await _ground_references(
+                client, grounding_model or synth_model, answer_text, final_refs, mappings)
 
         # ---- PHASE 3: IN-DEPTH ----
         yield ("indepth_pending",
