@@ -352,6 +352,74 @@ def test_chat_cancel_releases_router_lock():
     asyncio.run(_run())
 
 
+def test_run_team_stream_client_disconnect_mid_indepth_frees_router_lock(monkeypatch):
+    """Gate 6, at the layer that owns it: a client disconnect WHILE THE IN-DEPTH LEG IS GENERATING
+    inside run_team_stream must unwind the in-flight _chat, free the single _ROUTER_LOCK, and let the
+    next request (the preempting question) acquire the slot. This is the timing invariant the e2e
+    preempt spec deliberately does NOT assert (real model latency swamps the signal); a fake _chat
+    makes it deterministic here. Stronger than test_chat_cancel_releases_router_lock: it drives the
+    WHOLE staged generator to the in-depth phase, not just _chat in isolation."""
+    _stub_common(monkeypatch)
+
+    async def fake_synth(*_a, **_k):
+        # Bypass the answer leg's real _chat so the ONLY router-lock holder under test is in-depth.
+        return ("Answer.", [], [])
+
+    monkeypatch.setattr(team, "_synthesize_answer", fake_synth)
+
+    indepth_running = asyncio.Event()
+
+    class HangingChat:
+        async def post(self, *_a, **_k):
+            indepth_running.set()
+            await asyncio.sleep(3600)  # hang until cancelled
+
+    async def hanging_indepth(*_a, **_k):
+        # The in-depth leg does REAL router work: acquire the single slot via _chat, then hang —
+        # exactly the state a mid-in-depth disconnect must be able to interrupt.
+        await team._chat(HangingChat(), "indepth-model", [{"role": "user", "content": "deep dive"}])
+        return (["claim"], {"level": "green", "note": ""})
+
+    monkeypatch.setattr(team, "_gen_indepth", hanging_indepth)
+
+    async def _run():
+        agen = team.run_team_stream(
+            [{"role": "user", "content": "q?"}], patient="p", context={"temporal": False},
+            model_label="lvl", synth_model="m", validator_model=None,
+        ).__aiter__()
+
+        # Drive the generator to the in-depth phase. validator=None → no answer_validation event;
+        # sequence is answer_done -> indepth_pending -> (in-depth runs) -> indepth_done.
+        seen = []
+        while True:
+            name, _ = await agen.__anext__()
+            seen.append(name)
+            if name == "indepth_pending":
+                break
+        assert seen == ["answer_done", "indepth_pending"], seen
+
+        # The next step runs the (hanging) in-depth leg, which grabs the single router slot.
+        step = asyncio.ensure_future(agen.__anext__())
+        await indepth_running.wait()
+        assert team._ROUTER_LOCK.locked(), "the in-depth leg must hold the router slot while generating"
+
+        # Client disconnects → the driving task is cancelled mid-in-depth.
+        step.cancel()
+        try:
+            await step
+        except asyncio.CancelledError:
+            pass
+        await agen.aclose()
+
+        assert not team._ROUTER_LOCK.locked(), "a disconnect mid-in-depth must free the router slot"
+
+        # The preempting request now acquires the single slot immediately (would hang if still held).
+        await asyncio.wait_for(team._ROUTER_LOCK.acquire(), timeout=1.0)
+        team._ROUTER_LOCK.release()
+
+    asyncio.run(_run())
+
+
 def test_run_team_stream_team_scaffolding_gathers_via_the_tool_loop(monkeypatch):
     # Gate 13: a team-scaffolded staged profile (solo=False) must gather the SAME way run_team
     # does — the orchestrator tool loop consulting medical_expert/kb_search — not skip straight to
