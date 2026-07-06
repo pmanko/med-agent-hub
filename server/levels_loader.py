@@ -1,12 +1,11 @@
 """
-File-backed team levels — the advertised /v1/models groupings.
+File-backed hub profiles — the advertised /v1/models groupings.
 
-Each level in ``server/levels.yaml`` fixes the per-role models (orchestrator,
-expert, synthesizer) and optional per-level prompt names. Read PER REQUEST (like
-``prompt_loader``) so editing the bind-mounted file changes behaviour with no
-rebuild; the file is the single source of truth. ``expert: null`` (or omitting it)
-runs the level with NO medical expert — the orchestrator is offered no
-``medical_expert`` tool and the expert role is skipped.
+Each level in ``server/levels.yaml`` fixes either a product profile or a
+low-level leg: single-writer profiles use answer/review/in-depth stages, while
+team profiles add the optional gather/orchestrator/expert stage. Read PER
+REQUEST (like ``prompt_loader``) so editing the bind-mounted file changes
+behaviour with no rebuild.
 """
 
 from dataclasses import dataclass, field
@@ -80,7 +79,7 @@ def _dynamic_knobs(temp_floor: float | None) -> Dict[str, Any]:
 
 @dataclass(frozen=True)
 class Level:
-    """One advertised team tier."""
+    """One advertised hub profile or low-level leg."""
 
     id: str
     orchestrator: Optional[str]

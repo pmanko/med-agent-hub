@@ -1,48 +1,45 @@
-# med-agent-hub — in-process Med Agent Team with an OpenAI-compat bridge
+# med-agent-hub — staged clinical answer service with an OpenAI-compat bridge
 
-A small team of LLMs that answers a clinician's question about ONE patient's chart, fronted by an **OpenAI-compatible `POST /v1/chat/completions`** endpoint. External consumers (e.g. OpenMRS chartsearchai, the clinical-ai-validation-harness) treat med-agent-hub as a drop-in LLM endpoint; each request runs an **orchestrator → tools → synthesis → validation** loop entirely in this process.
+Clinical answer service for one patient's chart, fronted by an **OpenAI-compatible `POST /v1/chat/completions`** endpoint. External consumers such as OpenMRS ChartSearchAI and the validation harness treat med-agent-hub as the LLM endpoint; the requested model id selects a stage-composed profile or a low-level leg.
 
 ## Architecture
 
 ```
-client (e.g. chartsearchai)
+client (e.g. ChartSearchAI)
   │  POST /v1/chat/completions   (OpenAI shape: messages[], response_format?, stream?)
   ▼
 med-agent-hub   (one FastAPI / uvicorn process, port 8080)
-  │  temporal grounding — deterministic chart parse: reference-date anchor +
-  │     per-concept value/date series, so the synth reports dates/trends instead
-  │     of deriving them (server/temporal.py, no LLM)
-  │  orchestrator  — decides which teammates to consult, then stops
-  │     ├─ kb_search       tool — external reference guidance (WHO / essential-meds)
-  │     └─ medical_expert  tool — interprets THIS chart against the question
-  │  synthesis     — writes the Answer + In-Depth claims
-  │  validation    — on *-validated levels: one validator pass per section drops
-  │     unsupported claims and grades each section {level: green|yellow|red, note}
+  │  context       — retrieves chart/mappings when a patient is supplied
+  │  gather        — optional team/orchestrator/expert stage
+  │  answer        — writer produces answer/citations/blocks
+  │  gate          — deterministic temporal/date/substance checks
+  │  review        — optional answer rewrite/review stage
+  │  grounding     — final citation verdicts for the final answer
+  │  in-depth      — generated after the checked/edited answer
   ▼
 OpenAI-compat LLM backend (LLM_BASE_URL) — one model call per role/step
 ```
 
-The response is the `{answer, citations, blocks}` JSON envelope; on validated levels it carries a `confidence` block (per-section `{level, note}`) that clients render as a tag — the OpenMRS chat, the harness dashboard, and the report all use it.
+The response is the `{answer, citations, blocks}` JSON envelope, optionally carrying `answerValidation`, `confidence`, `inDepth`, `references`, temporal-gate metadata, and safety warnings. Staged profiles stream phase events (`answer_done`, optional `answer_validation`, `indepth_pending`, `indepth_done`/`indepth_error`, `done`) so ChartSearchAI can show the fast answer before the slower tail finishes.
 
-Every system prompt (orchestrator, medical_expert, the synthesis variants, the validation prompts) is a plain file under `server/prompts/`, read per request — edit a (mounted) `.txt` and the next request picks it up, no rebuild.
+Every system prompt is a plain file under `server/prompts/`, read per request — edit a mounted `.txt` and the next request picks it up, no rebuild.
 
 Each turn also appends one structured package (shipped answer, in-depth claims, per-section confidence, ordered call steps) to `$TEAM_TRACE_DIR/trace.jsonl` (default `/app/trace`) — the reasoning-trace artifact the validation harness's dashboard and report correlate against.
 
 ## Endpoints
 
-- `POST /v1/chat/completions` — OpenAI-compat, sync + stream. Runs the team when `model` is a level id from `server/levels.yaml`; forwards any other `model` straight to a single backend model (a raw team-vs-single baseline).
-- `GET /v1/models` — advertises every level defined in `server/levels.yaml`.
+- `POST /v1/chat/completions` — OpenAI-compat, sync + stream. Runs the selected profile/leg when `model` is a configured or dynamic hub id; forwards unknown raw model ids to the backend.
+- `GET /v1/models` — advertises configured profiles and dynamic answer/in-depth legs.
 - `GET /` — root status (uptime + the active per-role models).
 - `GET /health` — uptime + process memory.
 
-## Team levels (declarative — `server/levels.yaml`)
+## Profiles and low-level legs (declarative — `server/levels.yaml`)
 
-One running instance serves every level — the request's `model` id picks the level, and the level declares its per-role models (`orchestrator`, `expert`, `synthesizer`, optional `validator` + `validator_max_loops`). Levels today:
+One running instance serves every profile. The request's `model` id picks a configured profile from `server/levels.yaml` or a dynamic low-level id such as `answer:<writer>@<prompt>~enforce~temp0` / `indepth-only:<writer>`. Configured profiles declare stage inputs such as `answer_model` or role models, optional `validator`, `temporal_gate`, `staged`, and prompt names.
 
-- `med-agent-team-low` / `-med` / `-high` — step the synthesizer and expert up in capability; LOW also swaps to a synthesis prompt tuned for its smaller synthesizer (`prompts/synthesis-low.txt`).
-- `…-validated` variants — add the per-section validator pass (LOW/MED use a fixed competent-floor validator; HIGH scales the validator to the tier).
-- `med-agent-team-12b` — single-tier baseline team.
-- `med-agent-team-parity` — chartsearchai-parity lane: hub orchestration + temporal grounding, bare envelope (the controlled comparison arm).
+- Product profiles such as `single-12b-checked`, `single-e4b-checked`, and `single-a4b-checked` run a single writer with temporal enforcement, optional review, final grounding, and In-Depth.
+- Team profiles keep the optional `gather` stage for orchestrator/expert experiments.
+- Raw legs (`answer:...`, `answer-review:...`, `indepth-only:...`) stay minimal for harness/debug use and do not add product grounding verdicts.
 
 Adding or retuning a level is a `levels.yaml` edit — no code change. (If the file is bind-mounted into a running container, recreate the service after editing; an in-place edit on macOS detaches the mount.)
 
@@ -85,8 +82,8 @@ The image runs `uvicorn server.main:app` (a single process — the team is in-pr
 server/
 ├── main.py            # FastAPI app (observability + bridge mount) — the entrypoint
 ├── openai_compat.py   # /v1/chat/completions, /v1/models
-├── team.py            # the in-process team: orchestrator → kb_search/medical_expert → synthesis → validation; writes trace.jsonl
-├── levels.yaml        # declarative team levels: per-role models, validator, knobs
+├── team.py            # stage engine: context/gather/answer/gate/review/grounding/in-depth; writes trace.jsonl
+├── levels.yaml        # declarative profiles/legs: models, validator, temporal gate, knobs
 ├── levels_loader.py   # parses/validates levels.yaml, serves level ids to /v1/models
 ├── temporal.py        # deterministic temporal grounding (anchor + per-concept series; no LLM)
 ├── prompt_loader.py   # file-backed prompts (prompts/*.txt, read per request)
