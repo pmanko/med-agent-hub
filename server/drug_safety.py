@@ -18,7 +18,18 @@ _DATASET_PATH = os.environ.get(
     "DRUG_SAFETY_DATASET_PATH",
     os.path.join(os.path.dirname(__file__), "drug_data", "drug-reference.json"))
 
+# Which dataset FORMAT the configured path holds: "json" (curated rules, bundled default) or "atc"
+# (a WHO ATC classification export the operator supplies). One-or-the-other, deployment-wide — the
+# same source-format selection the ported Java drug-reference layer offered (ADR Decision 24).
+_SOURCE_FORMAT = os.environ.get("DRUG_SAFETY_SOURCE_FORMAT", "json").strip().lower()
+
 _ATC_SUBGROUP_PREFIX_LENGTH = 5
+
+# A level-5 ATC substance code is 7 chars: one letter, two digits, two letters, two digits
+# (e.g. M01AE01). Guards against a non-ATC/malformed file turning any 7-char token into a drug.
+_ATC_LEVEL5 = re.compile(r"[A-Z]\d{2}[A-Z]{2}\d{2}")
+# Parent-group code lengths to try for a substance's drug_class, longest first: level 4, 3, 2.
+_ATC_PARENT_LENGTHS = (5, 4, 3)
 
 _DOSE_MG = re.compile(r"(\d+(?:\.\d+)?)\s*mg\b")
 _EVERY_N_HOURS = re.compile(r"(?:every\s+(\d+)\s*(?:hours|hrs|hr|h)\b|q(\d+)h\b|(\d+)\s*hourly\b)")
@@ -185,16 +196,72 @@ def _load_entries(path: str) -> List[DrugReferenceEntry]:
     return [_entry_from_dict(e) for e in raw.get("entries", [])]
 
 
-def load_dataset(path: Optional[str] = None) -> DrugReferenceDataset:
-    """Lazy singleton for the default path; an explicit path always loads fresh (test seam)."""
+def _load_atc_entries(path: str) -> List[DrugReferenceEntry]:
+    """Parse a WHO ATC classification export into classification entries — the Python port of Java
+    AtcDrugReferenceSource. Each non-blank, non-``#``-comment line is ``<atcCode><whitespace><name>``
+    for ALL levels; one entry is emitted per level-5 substance (a 7-char valid ATC code), carrying
+    its name, code, a lowercase alias for matching, and a ``drug_class`` derived from the nearest
+    parent group PRESENT IN THE SAME DATASET (level 4 -> 3 -> 2). ATC is a classification, not a
+    rulebook, so entries carry no dosing/interaction/contraindication rules — safety comes from
+    ATC-class reasoning. Fail-safe: a missing/unreadable dataset degrades to [] (never raises), so
+    the drug-reference feature stays an additive net that cannot break the answer path."""
+    if not path or not os.path.exists(path):
+        return []
+    # code -> name for ALL levels, preserving file order so substances emit in dataset order and a
+    # substance's class can be resolved from its parent-group names. Codes are upper-cased because
+    # ATC/RxNorm crosswalk exports are not all upper case and the rest of the pipeline compares upper.
+    names: Dict[str, str] = {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                trimmed = line.strip()
+                if not trimmed or trimmed.startswith("#"):
+                    continue
+                parts = re.split(r"\s+", trimmed, maxsplit=1)
+                if len(parts) < 2:
+                    continue
+                code = parts[0].strip().upper()
+                name = parts[1].strip()
+                if code and name:
+                    names[code] = name
+    except OSError:
+        return []
+
+    def _nearest_group(code: str) -> Optional[str]:
+        for length in _ATC_PARENT_LENGTHS:
+            if len(code) > length:
+                parent = names.get(code[:length])
+                if parent is not None:
+                    return parent
+        return None
+
+    out: List[DrugReferenceEntry] = []
+    for code, name in names.items():
+        if len(code) == 7 and _ATC_LEVEL5.fullmatch(code):
+            out.append(DrugReferenceEntry(
+                id=code, name=name, drug_class=_nearest_group(code),
+                aliases=[name.lower()], atc_codes=[code], source="atc"))
+    return out
+
+
+def _load_source(path: str, source_format: str) -> List[DrugReferenceEntry]:
+    if source_format == "atc":
+        return _load_atc_entries(path)
+    return _load_entries(path)
+
+
+def load_dataset(path: Optional[str] = None, source_format: Optional[str] = None) -> DrugReferenceDataset:
+    """Lazy singleton for the default path+format; an explicit path always loads fresh (test seam).
+    ``source_format`` selects the adapter (``json``|``atc``); defaults to the DRUG_SAFETY_SOURCE_FORMAT env."""
+    fmt = (source_format or _SOURCE_FORMAT or "json").strip().lower()
     global _dataset
     if path is not None:
-        return DrugReferenceDataset(_load_entries(path))
+        return DrugReferenceDataset(_load_source(path, fmt))
     if _dataset is not None:
         return _dataset
     with _lock:
         if _dataset is None:
-            _dataset = DrugReferenceDataset(_load_entries(_DATASET_PATH))
+            _dataset = DrugReferenceDataset(_load_source(_DATASET_PATH, fmt))
     return _dataset
 
 
