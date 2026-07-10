@@ -176,6 +176,7 @@ profiles:
     policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true}
     capabilities: {staged: true, validation: true}
     visibility: product
+    selection_priority: 30
     context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true}
     knobs: {answer: {temperature: 0}}
 
@@ -189,6 +190,7 @@ profiles:
     capabilities: {staged: true, validation: true}
     visibility: product
     default: true
+    selection_priority: 10
     context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true}
     knobs: {answer: {temperature: 0}}
 
@@ -201,6 +203,7 @@ profiles:
     policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true}
     capabilities: {staged: true, validation: true}
     visibility: product
+    selection_priority: 20
     context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true}
     knobs: {answer: {temperature: 0}}
 
@@ -213,6 +216,7 @@ profiles:
     policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true}
     capabilities: {staged: true, validation: true}
     visibility: product
+    selection_priority: 100
     context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true}
 
   med-agent-team-12b-qwenval:

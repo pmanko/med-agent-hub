@@ -57,6 +57,7 @@ class Profile:
     knobs: Mapping[str, Any] = field(default_factory=dict)
     visibility: str = "experimental"
     default: bool = False
+    selection_priority: int = 1000
     context_window: int = 0
     reserved_output_tokens: int = 0
     exact_tokenizer: bool = False
@@ -192,6 +193,7 @@ def _from_spec(profile_id: str, spec: Mapping[str, Any]) -> Profile:
         knobs=dict(spec.get("knobs") or {}),
         visibility=str(spec.get("visibility") or "experimental"),
         default=bool(spec.get("default", False)),
+        selection_priority=int(spec.get("selection_priority", 1000)),
         context_window=int(context.get("window") or 0),
         reserved_output_tokens=int(context.get("reserved_output_tokens") or 0),
         exact_tokenizer=bool(context.get("exact_tokenizer", False)),
@@ -348,6 +350,7 @@ def compile_profile(profile: Profile) -> Profile:
         knobs=_freeze_mapping(profile.knobs),
         visibility=profile.visibility,
         default=profile.default,
+        selection_priority=profile.selection_priority,
         context_window=profile.context_window,
         reserved_output_tokens=profile.reserved_output_tokens,
         exact_tokenizer=profile.exact_tokenizer,
@@ -423,7 +426,7 @@ def get_stage_plan(profile_id: str) -> StagePlan:
 def resolve_temporal_policy(
     profile: Profile, request_context: Optional[Mapping[str, Any]]
 ) -> tuple[bool, str]:
-    if profile.visibility == "product":
+    if profile.output_mode == "product":
         return True, "enforce"
     context = request_context or {}
     enabled = bool(context.get("temporal", True))
@@ -440,6 +443,7 @@ def profile_metadata(
     *,
     available: bool,
     unavailable_reasons: Tuple[str, ...] = (),
+    effective_default: Optional[bool] = None,
 ) -> Dict[str, Any]:
     return {
         "id": profile.id,
@@ -448,7 +452,8 @@ def profile_metadata(
         "validation": bool(profile.capabilities.get("validation")),
         "temporal_enforcement": str(profile.policies.get("temporal_gate", "off")),
         "available": bool(available),
-        "default": profile.default,
+        "default": profile.default if effective_default is None else bool(effective_default),
+        "selection_priority": profile.selection_priority,
         "topology": profile.topology,
         "visibility": profile.visibility,
         "stages": list(profile.stages),

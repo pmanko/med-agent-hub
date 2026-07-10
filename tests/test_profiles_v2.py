@@ -49,6 +49,16 @@ def test_product_profiles_temporal_cannot_weaken_enforce():
     ) == (True, "enforce")
 
 
+def test_non_advertised_product_envelope_temporal_cannot_weaken_enforce():
+    profile = get_profile("med-agent-team-low-validated-12b")
+
+    assert profile.visibility != "product"
+    assert profile.output_mode == "product"
+    assert resolve_temporal_policy(
+        profile, {"temporal": False, "temporal_gate": "off"}
+    ) == (True, "enforce")
+
+
 def test_product_envelope_requires_exact_budget_even_when_not_advertised():
     profile = get_profile("single-e4b-checked")
     experimental = replace(
@@ -165,6 +175,7 @@ def test_discovery_metadata_is_authoritative_and_dynamic_legs_are_not_advertised
         "temporal_enforcement": "enforce",
         "available": True,
         "default": True,
+        "selection_priority": 10,
         "topology": "single",
         "visibility": "product",
         "stages": list(get_profile("single-e4b-checked").stages),

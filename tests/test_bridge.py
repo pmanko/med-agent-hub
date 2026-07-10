@@ -615,14 +615,28 @@ def test_backend_model_discovery_omits_auth_when_api_key_is_blank():
 
 def test_v1_models_advertises_staged_capability_not_just_id_prefix():
     # Gate 10: clients must route by this field, never by pattern-matching the id string.
-    client = TestClient(app)
-    r = client.get("/v1/models")
+    with patch.object(openai_compat, "_served_backend_models", return_value={"gemma-e4b"}):
+        client = TestClient(app)
+        r = client.get("/v1/models")
     by_id = {m["id"]: m for m in r.json()["data"]}
     assert by_id["single-12b-checked"]["staged"] is True
     # parity is explicitly a single-shot (non-staged) relay target, never the phased engine
     assert by_id["med-agent-team-parity"]["staged"] is False
     assert by_id["single-e4b-checked"]["default"] is True
     assert "answer-review:qwen2.5-14b" not in by_id
+
+
+def test_v1_models_selects_available_fallback_default_in_the_hub():
+    with patch.object(openai_compat, "_served_backend_models", return_value={"gemma-26b"}):
+        client = TestClient(app)
+        r = client.get("/v1/models")
+
+    product = [item for item in r.json()["data"] if item["visibility"] == "product"]
+    defaults = [item for item in product if item["default"]]
+    assert [(item["id"], item["available"]) for item in defaults] == [
+        ("single-a4b-checked", True)
+    ]
+    assert next(item for item in product if item["id"] == "single-e4b-checked")["default"] is False
 
 
 def test_chat_completions_profile_returns_openai_shape_with_the_envelope():

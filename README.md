@@ -23,7 +23,7 @@ Streaming and blocking requests execute the same asynchronous engine in `server/
 
 ## Profiles
 
-Configured profiles live in `server/levels.yaml` and declare a human label, topology, ordered stages, role models, prompts, validation policies, and context budget. The default product profile is `single-e4b-checked`. Product profiles always enforce deterministic temporal validation and require exact tokenizer-backed context counting.
+Configured profiles live in `server/levels.yaml` and declare a human label, topology, ordered stages, role models, prompts, validation policies, and context budget. The preferred product profile is `single-e4b-checked`; discovery marks it as the effective default only when it is available, otherwise the hub marks the available product profile with the lowest explicit `selection_priority`. Product envelopes always enforce deterministic temporal validation, regardless of discovery visibility, and require exact tokenizer-backed context counting.
 
 Low-level experiment legs use these ids:
 
@@ -64,7 +64,7 @@ Weight-aware dose checks read the newest fresh numeric Querystore `obs` matching
 ## Endpoints
 
 - `POST /v1/chat/completions`: blocking or staged streaming profile execution.
-- `GET /v1/models`: configured profile metadata, availability, validation capability, exact context requirements, and the default marker.
+- `GET /v1/models`: configured profile metadata, availability, validation capability, exact context requirements, and at most one hub-selected available default marker.
 - `GET /health`: service health, uptime, and process memory.
 - `GET /`: concise service status.
 

@@ -64,7 +64,7 @@ def list_models() -> Dict[str, Any]:
     created = int(time.time())
     served = _served_backend_models()
     profiles = [get_profile(profile_id) for profile_id in profile_ids()]
-    data = []
+    readiness = []
     for profile in profiles:
         missing = [
             model
@@ -76,12 +76,34 @@ def list_models() -> Dict[str, Any]:
             if not served
             else tuple(f"model_not_loaded:{model}" for model in missing)
         )
+        readiness.append((profile, not missing, unavailable_reasons))
+
+    available_products = [
+        profile
+        for profile, available, _reasons in readiness
+        if available and profile.visibility == "product"
+    ]
+    configured_default = next(
+        (profile for profile in available_products if profile.default), None
+    )
+    effective_default = configured_default or min(
+        available_products,
+        key=lambda profile: (profile.selection_priority, profile.id),
+        default=None,
+    )
+
+    data = []
+    for profile, available, unavailable_reasons in readiness:
         data.append(
             {
                 **profile_metadata(
                     profile,
-                    available=not missing,
+                    available=available,
                     unavailable_reasons=unavailable_reasons,
+                    effective_default=(
+                        effective_default is not None
+                        and profile.id == effective_default.id
+                    ),
                 ),
                 "object": "model",
                 "created": created,
