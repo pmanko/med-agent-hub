@@ -1,11 +1,8 @@
 """
 med-agent-hub web facade.
 
-Exposes a small observability surface (`/`, `/health`) and the OpenAI-compat
-bridge (`/v1/chat/completions`, `/v1/models`) so external consumers (e.g.
-OpenMRS chartsearchai) can treat med-agent-hub as a drop-in LLM endpoint while
-the request runs through the in-process Med Agent Team. The OpenAI-compat
-surface is the only consumer contract.
+Exposes observability and an OpenAI-compatible profile execution API for
+ChartSearchAI, the validation harness, and direct clients.
 """
 
 import logging
@@ -15,25 +12,27 @@ import psutil
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from .config import llm_config
+from .config import llm_config, validate_config
+from .levels_loader import validate_profiles
 from .openai_compat import router as openai_router
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 server_start_time = time.time()
+validate_config()
+_PROFILES = validate_profiles()
+_DEFAULT_PROFILE = next(profile for profile in _PROFILES if profile.default)
 
 app = FastAPI(
     title="med-agent-hub",
     description=(
-        "In-process Med Agent Team behind an OpenAI-compat /v1/chat/completions "
-        "+ /v1/models surface; one request runs the orchestrator → tools → "
-        "synthesis loop in this process."
+        "Profile-driven clinical answer stages behind an OpenAI-compatible "
+        "/v1/chat/completions and /v1/models surface."
     ),
 )
 
-# Server-to-server only (the chartsearchai backend calls the hub); no browser
-# credentials, so wildcard origins with credentials disabled is the valid combo.
+# Direct clients may call the hub; browser credentials remain disabled.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -48,11 +47,11 @@ def read_root():
     return {
         "status": "Server is running",
         "uptime_seconds": round(time.time() - server_start_time, 2),
-        "team_models": {
-            "orchestrator": llm_config.orchestrator_model,
-            "synthesizer": llm_config.synthesizer_model,
-            "medical": llm_config.med_model,
+        "default_profile": {
+            "id": _DEFAULT_PROFILE.id,
+            "label": _DEFAULT_PROFILE.label,
         },
+        "model_backend": llm_config.base_url,
     }
 
 
@@ -62,7 +61,9 @@ def health_check():
     memory_info = {}
     try:
         process = psutil.Process()
-        memory_info["process_memory_gb"] = round(process.memory_info().rss / 1024 ** 3, 2)
+        memory_info["process_memory_gb"] = round(
+            process.memory_info().rss / 1024**3, 2
+        )
         memory_info["process_memory_percent"] = round(process.memory_percent(), 1)
     except Exception:  # pragma: no cover — defensive against psutil failures
         pass

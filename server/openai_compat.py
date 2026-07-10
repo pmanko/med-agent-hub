@@ -1,131 +1,114 @@
-"""
-OpenAI-compatible bridge: the only consumer contract for med-agent-hub.
+"""OpenAI-compatible profile discovery and execution surface."""
 
-`POST /v1/chat/completions` accepts a standard OpenAI chat request from a
-consumer (OpenMRS chartsearchai). If `model` is one of the advertised team
-presets it runs the in-process Med Agent Team for that level; any other `model`
-is forwarded straight to a single LM Studio model (a raw team-vs-single baseline).
+from __future__ import annotations
 
-`GET /v1/models` advertises the three team presets (`med-agent-team-low/med/high`),
-which is what the consumer's model picker lists. We do NOT implement LM Studio's
-native `/api/v1/models`; letting it 404 tags this endpoint as
-`generic-openai-compat` to the consumer's model-switch probe.
-"""
-
+import asyncio
 import json
-import logging
 import time
 import uuid
+from dataclasses import replace
 from typing import Any, Dict, List, Optional
 
 import httpx
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from .config import llm_config
-from .team import run_team
-from .levels_loader import level_ids, get_level
-
-logger = logging.getLogger(__name__)
+from .context_sources import ContextSourceError
+from .engine import ExecutionRequest, drain_profile, execute_profile
+from .levels_loader import (
+    ModelNotFoundError,
+    Profile,
+    get_profile,
+    profile_ids,
+    profile_metadata,
+)
 
 router = APIRouter()
 
 
 class ChatCompletionRequest(BaseModel):
-    """The subset of the OpenAI chat-completions request we honor."""
     model: str
     messages: List[Dict[str, Any]] = Field(..., min_length=1)
     response_format: Optional[Dict[str, Any]] = None
     temperature: Optional[float] = None
     max_tokens: Optional[int] = None
     stream: bool = False
+    context: Optional[Dict[str, Any]] = None
+    patient: Optional[str] = None
 
 
-def _advertised_models() -> List[str]:
-    """Advertise the team levels (server/levels.yaml keys) so the UI picker and
-    chartsearchai's exact-match served-model validation both accept them. Each id
-    selects which model runs each role (orchestrator/synthesizer/expert) per request
-    — one instance serves any config, no reboot. Raw backends stay callable via
-    passthrough but aren't listed.
-
-    Also advertise the generic two-call In-Depth leg ``indepth-only:<writer>`` for every
-    model the router serves, so chartsearchai's exact-match validation accepts the dynamic
-    levels get_level() resolves on the fly (no hand-authored per-writer level needed)."""
-    ids = list(level_ids())
+def _served_backend_models() -> set[str]:
+    headers = {}
+    if llm_config.api_key:
+        headers["Authorization"] = f"Bearer {llm_config.api_key}"
     try:
-        import httpx
-        resp = httpx.get(f"{llm_config.base_url.rstrip('/')}/v1/models", timeout=3.0)
-        for m in resp.json().get("data", []):
-            mid = m.get("id")
-            if mid:
-                ids.append(f"indepth-only:{mid}")
+        response = httpx.get(
+            f"{llm_config.base_url.rstrip('/')}/v1/models",
+            headers=headers,
+            timeout=3.0,
+        )
+        response.raise_for_status()
+        return {
+            str(item.get("id"))
+            for item in (response.json().get("data") or [])
+            if item.get("id")
+        }
     except Exception:
-        pass  # router unreachable -> advertise levels only; direct-to-hub callers still work
-    return ids
+        return set()
 
 
 @router.get("/v1/models")
 def list_models() -> Dict[str, Any]:
     created = int(time.time())
+    served = _served_backend_models()
+    profiles = [get_profile(profile_id) for profile_id in profile_ids()]
+    data = []
+    for profile in profiles:
+        missing = [
+            model
+            for model in sorted(set(profile.models.values()))
+            if model not in served
+        ]
+        unavailable_reasons = (
+            ("model_backend_unreachable",)
+            if not served
+            else tuple(f"model_not_loaded:{model}" for model in missing)
+        )
+        data.append(
+            {
+                **profile_metadata(
+                    profile,
+                    available=not missing,
+                    unavailable_reasons=unavailable_reasons,
+                ),
+                "object": "model",
+                "created": created,
+                "owned_by": "med-agent-hub",
+            }
+        )
     return {
         "object": "list",
-        "data": [
-            {"id": mid, "object": "model", "created": created, "owned_by": "med-agent-hub"}
-            for mid in _advertised_models()
-        ],
+        "data": data,
     }
 
 
-async def _passthrough_content(req: ChatCompletionRequest) -> str:
-    """Forward the request to a single LM Studio model and return its content."""
-    payload: Dict[str, Any] = {
-        "model": req.model,
-        "messages": req.messages,
-        "temperature": req.temperature if req.temperature is not None else llm_config.temperature,
-    }
-    if req.max_tokens is not None:
-        payload["max_tokens"] = req.max_tokens
-    if req.response_format is not None:
-        payload["response_format"] = req.response_format
-    headers = {"Content-Type": "application/json"}
-    if llm_config.api_key:
-        headers["Authorization"] = f"Bearer {llm_config.api_key}"
-    url = f"{llm_config.base_url.rstrip('/')}/v1/chat/completions"
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(url, json=payload, headers=headers, timeout=180.0)
-        resp.raise_for_status()
-        return resp.json()["choices"][0]["message"]["content"]
-
-
-async def _content_for(req: ChatCompletionRequest) -> str:
-    """Run the team for an advertised level id; raw passthrough for any other model."""
-    try:
-        level = get_level(req.model)
-    except KeyError:
-        return await _passthrough_content(req)
-    return await run_team(
-        req.messages,
+def _request_for(req: ChatCompletionRequest, profile: Profile) -> ExecutionRequest:
+    return ExecutionRequest(
+        profile=profile,
+        messages=req.messages,
         response_format=req.response_format,
         temperature=req.temperature,
         max_tokens=req.max_tokens,
-        orchestrator_model=level.orchestrator,
-        synthesizer_model=level.synthesizer,
-        expert_model=level.expert,
-        orchestrator_prompt=level.orchestrator_prompt,
-        synthesizer_prompt=level.synthesis_prompt,
-        expert_prompt=level.expert_prompt,
-        has_expert=level.has_expert,
-        validator_model=level.validator,
-        validator_prompt=level.validator_prompt,
-        validator_max_loops=level.validator_max_loops,
-        two_call=level.two_call,
-        indepth_shared=level.indepth_shared,
-        indepth_only=level.indepth_only,
-        anchor=level.anchor,
-        knobs=level.knobs,
-        level_id=req.model,  # the advertised level id == the harness backend_id (trace correlation key)
+        context=req.context,
+        patient=req.patient,
+        model_label=req.model,
     )
+
+
+async def _content_for(req: ChatCompletionRequest) -> str:
+    return await drain_profile(_request_for(req, get_profile(req.model)))
 
 
 def _completion_envelope(model: str, content: str) -> Dict[str, Any]:
@@ -134,24 +117,28 @@ def _completion_envelope(model: str, content: str) -> Dict[str, Any]:
         "object": "chat.completion",
         "created": int(time.time()),
         "model": model,
-        "choices": [{
-            "index": 0,
-            "message": {"role": "assistant", "content": content},
-            "finish_reason": "stop",
-        }],
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": content},
+                "finish_reason": "stop",
+            }
+        ],
         "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
     }
 
 
 def _sse_stream(model: str, content: str):
-    """Buffer-then-emit: the structured envelope is parsed whole by the consumer,
-    so we emit it as a single content delta rather than true token streaming."""
-    cid = f"chatcmpl-{uuid.uuid4().hex}"
+    """Emit one buffered OpenAI-compatible content delta."""
+    completion_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
 
     def chunk(delta: Dict[str, Any], finish: Optional[str]) -> str:
         body = {
-            "id": cid, "object": "chat.completion.chunk", "created": created, "model": model,
+            "id": completion_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model,
             "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
         }
         return f"data: {json.dumps(body)}\n\n"
@@ -162,9 +149,118 @@ def _sse_stream(model: str, content: str):
     yield "data: [DONE]\n\n"
 
 
+_SSE_HEARTBEAT_INTERVAL_S = 10.0
+
+
+def _named_sse(gen, interval_s: float = _SSE_HEARTBEAT_INTERVAL_S):
+    """Frame stage events as SSE and propagate cancellation into the engine."""
+
+    async def _stream():
+        queue: asyncio.Queue = asyncio.Queue()
+
+        async def _produce() -> None:
+            try:
+                async for item in gen:
+                    await queue.put(("item", item))
+            except ContextSourceError as error:
+                await queue.put(("context_error", error))
+            except BaseException as error:
+                await queue.put(("error", error))
+            finally:
+                await queue.put(("done", None))
+
+        producer = asyncio.create_task(_produce())
+        try:
+            while True:
+                try:
+                    kind, value = await asyncio.wait_for(
+                        queue.get(), timeout=interval_s
+                    )
+                except asyncio.TimeoutError:
+                    yield ": hb\n\n"
+                    continue
+                if kind == "context_error":
+                    error = value
+                    payload = json.dumps(
+                        {
+                            "code": error.code,
+                            "source": error.source,
+                            "message": str(error),
+                        }
+                    )
+                    yield f"event: error\ndata: {payload}\n\n"
+                    return
+                if kind == "error":
+                    raise value
+                if kind == "done":
+                    return
+                name, data = value
+                output = f"event: {name}\n"
+                for line in (data or "").split("\n"):
+                    output += f"data: {line}\n"
+                output += "\n"
+                yield output
+        finally:
+            if not producer.done():
+                producer.cancel()
+            try:
+                await producer
+            except BaseException:
+                pass
+            close = getattr(gen, "aclose", None)
+            if close is not None:
+                await close()
+
+    return _stream()
+
+
+def _model_error(error: ModelNotFoundError) -> HTTPException:
+    return HTTPException(
+        status_code=404,
+        detail={
+            "code": error.code,
+            "model": error.model_id,
+            "message": str(error),
+            "configured_profiles": list(error.configured),
+        },
+    )
+
+
+def _context_error(error: ContextSourceError) -> HTTPException:
+    status = 422 if error.code == "insufficient_context" else 503
+    return HTTPException(
+        status_code=status,
+        detail={
+            "code": error.code,
+            "source": error.source,
+            "message": str(error),
+        },
+    )
+
+
 @router.post("/v1/chat/completions")
-async def chat_completions(req: ChatCompletionRequest):
-    content = await _content_for(req)
+async def chat_completions(req: ChatCompletionRequest, request: Request):
+    try:
+        profile = get_profile(req.model)
+    except ModelNotFoundError as error:
+        raise _model_error(error) from error
+
+    execution = _request_for(req, profile)
+    if req.stream and profile.staged:
+        execution = replace(execution, is_disconnected=request.is_disconnected)
+        return StreamingResponse(
+            _named_sse(execute_profile(execution)),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    try:
+        content = await drain_profile(execution)
+    except ContextSourceError as error:
+        raise _context_error(error) from error
     if req.stream:
-        return StreamingResponse(_sse_stream(req.model, content), media_type="text/event-stream")
+        return StreamingResponse(
+            _sse_stream(req.model, content),
+            media_type="text/event-stream",
+        )
     return _completion_envelope(req.model, content)

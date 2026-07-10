@@ -7,18 +7,29 @@ rebuild or restart. The files are the single source of truth; git is the version
 history.
 
 The names the team uses are ``orchestrator``, ``medical_expert``, ``synthesis``,
-and ``synthesis-low`` (the low level swaps synthesis for the last via its
-``TEAM_PRESET``). A name with no file is a configuration error, raised loudly
+and ``synthesis-low``. A name with no file is a configuration error, raised loudly
 rather than silently substituted.
 
 To trial an alternative prompt concurrently, add another file (e.g.
-``synthesis-experimental.txt``) and point a ``TEAM_PRESET``/env override at it;
+``synthesis-experimental.txt``) and reference it from a configured profile;
 the committed file stays the default. Config + git, no runtime variant overlay.
 """
 
 from pathlib import Path
 
 _DIR = Path(__file__).parent / "prompts"
+
+
+def prompt_names() -> list[str]:
+    """Return available prompt stems under ``server/prompts``.
+
+    Read fresh so a newly added prompt file can be selected by a dynamic prompt
+    model id without rebuilding or restarting the hub.
+    """
+    try:
+        return sorted(p.stem for p in _DIR.glob("*.txt") if p.is_file())
+    except FileNotFoundError:
+        return []
 
 
 def load_prompt(name: str) -> str:
@@ -35,6 +46,6 @@ def load_prompt(name: str) -> str:
         return path.read_text(encoding="utf-8").rstrip("\n")
     except FileNotFoundError as exc:
         raise FileNotFoundError(
-            f"prompt {name!r} not found at {path} — every prompt a TEAM_PRESET "
+            f"prompt {name!r} not found at {path} — every configured profile "
             f"references must have a file in {_DIR}"
         ) from exc

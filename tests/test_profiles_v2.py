@@ -1,0 +1,195 @@
+from __future__ import annotations
+
+from dataclasses import replace
+
+import pytest
+
+from server.levels_loader import (
+    ModelNotFoundError,
+    compile_profile,
+    get_profile,
+    profile_ids,
+    profile_metadata,
+    resolve_temporal_policy,
+    validate_profiles,
+)
+
+
+def test_default_product_profile_is_human_readable_single_e4b():
+    profile = get_profile("single-e4b-checked")
+
+    assert profile.label == "Fast checked answer (E4B)"
+    assert profile.default is True
+    assert profile.topology == "single"
+    assert "orchestrator" not in profile.models
+    assert profile.models["answer"] == "gemma-e4b"
+    assert profile.stages == (
+        "context",
+        "answer",
+        "gate",
+        "resolve_refs",
+        "review",
+        "gate",
+        "final_resolve_refs",
+        "ground_verdicts",
+        "indepth",
+        "indepth_gate",
+    )
+
+
+def test_product_profiles_temporal_cannot_weaken_enforce():
+    profile = get_profile("single-e4b-checked")
+
+    assert profile.context_window > profile.reserved_output_tokens > 0
+    assert profile.exact_tokenizer is True
+    assert profile.policies["temporal_gate"] == "enforce"
+    assert profile.policies["temporal_render"] == "full"
+    assert resolve_temporal_policy(
+        profile, {"temporal": False, "temporal_gate": "off"}
+    ) == (True, "enforce")
+
+
+def test_product_envelope_requires_exact_budget_even_when_not_advertised():
+    profile = get_profile("single-e4b-checked")
+    experimental = replace(
+        profile,
+        visibility="experimental",
+        exact_tokenizer=False,
+        context_window=0,
+        reserved_output_tokens=0,
+    )
+
+    with pytest.raises(ValueError, match="product-envelope.*exact context budget"):
+        compile_profile(experimental)
+
+
+def test_low_level_answer_leg_remains_minimal_and_experimental():
+    profile = get_profile(
+        "answer:gemma-4-12b@synthesis-date-output-contract~warn~temp0"
+    )
+
+    assert profile.low_level_leg is True
+    assert profile.stages == ("context", "answer", "gate")
+    assert profile.policies["temporal_gate"] == "warn"
+    assert profile.knobs["answer"]["temperature"] == 0.0
+    assert resolve_temporal_policy(
+        profile, {"temporal": False, "temporal_gate": "off"}
+    ) == (False, "off")
+
+
+def test_invalid_grounding_order_is_rejected_at_compile_time():
+    profile = get_profile("single-e4b-checked")
+    bad = replace(
+        profile,
+        stages=(
+            "context",
+            "answer",
+            "gate",
+            "resolve_refs",
+            "final_resolve_refs",
+            "ground_verdicts",
+            "review",
+            "gate",
+            "indepth",
+            "indepth_gate",
+        ),
+    )
+
+    with pytest.raises(ValueError, match="ground_verdicts.*review"):
+        compile_profile(bad)
+
+
+def test_final_reference_resolution_before_review_is_rejected_at_compile_time():
+    profile = get_profile("single-e4b-checked")
+    bad = replace(
+        profile,
+        stages=(
+            "context",
+            "answer",
+            "gate",
+            "resolve_refs",
+            "final_resolve_refs",
+            "review",
+            "gate",
+            "ground_verdicts",
+            "indepth",
+            "indepth_gate",
+        ),
+    )
+
+    with pytest.raises(ValueError, match="final_resolve_refs.*review"):
+        compile_profile(bad)
+
+
+def test_answer_without_immediate_gate_is_rejected_at_compile_time():
+    profile = get_profile("single-e4b-checked")
+    bad = replace(
+        profile,
+        stages=(
+            "context",
+            "answer",
+            "resolve_refs",
+            "gate",
+            "review",
+            "gate",
+            "final_resolve_refs",
+            "ground_verdicts",
+            "indepth",
+            "indepth_gate",
+        ),
+    )
+
+    with pytest.raises(ValueError, match="answer must be followed by gate"):
+        compile_profile(bad)
+
+
+def test_unknown_model_is_a_structured_error_not_backend_passthrough():
+    with pytest.raises(ModelNotFoundError) as caught:
+        get_profile("definitely-not-configured")
+
+    assert caught.value.code == "model_not_found"
+    assert "definitely-not-configured" in str(caught.value)
+
+
+def test_discovery_metadata_is_authoritative_and_dynamic_legs_are_not_advertised():
+    ids = profile_ids()
+    assert "single-e4b-checked" in ids
+    assert all(not model_id.startswith("answer:") for model_id in ids)
+
+    metadata = profile_metadata(get_profile("single-e4b-checked"), available=True)
+    assert metadata == {
+        "id": "single-e4b-checked",
+        "label": "Fast checked answer (E4B)",
+        "staged": True,
+        "validation": True,
+        "temporal_enforcement": "enforce",
+        "available": True,
+        "default": True,
+        "topology": "single",
+        "visibility": "product",
+        "stages": list(get_profile("single-e4b-checked").stages),
+        "required_models": ["gemma-e4b"],
+        "context_window": 24576,
+        "exact_tokenizer": True,
+        "unavailable_reasons": [],
+    }
+
+
+def test_only_one_configured_profile_is_default():
+    defaults = [
+        profile_id for profile_id in profile_ids() if get_profile(profile_id).default
+    ]
+    assert defaults == ["single-e4b-checked"]
+
+
+def test_all_configured_profiles_and_prompts_validate_at_startup():
+    profiles = validate_profiles()
+    assert len(profiles) == len(profile_ids())
+
+
+def test_compiled_profile_configuration_is_immutable():
+    profile = get_profile("single-e4b-checked")
+    with pytest.raises(TypeError):
+        profile.models["answer"] = "different"
+    with pytest.raises(TypeError):
+        profile.knobs["answer"]["temperature"] = 0.5
