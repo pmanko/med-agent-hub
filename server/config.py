@@ -30,16 +30,17 @@ class QueryStoreConfig:
     """Optional patient-record source; inline context works without it."""
 
     base_url: str = os.getenv("QUERYSTORE_BASE_URL", "")
-    username: str = os.getenv(
-        "QUERYSTORE_USERNAME", "admin" if os.getenv("QUERYSTORE_BASE_URL") else ""
-    )
-    password: str = os.getenv(
-        "QUERYSTORE_PASSWORD", "Admin123" if os.getenv("QUERYSTORE_BASE_URL") else ""
-    )
+    username: str = os.getenv("QUERYSTORE_USERNAME", "")
+    password: str = os.getenv("QUERYSTORE_PASSWORD", "")
 
     @property
     def enabled(self) -> bool:
-        return bool(self.base_url)
+        return all((self.base_url.strip(), self.username.strip(), self.password))
+
+    @property
+    def partially_configured(self) -> bool:
+        values = (self.base_url.strip(), self.username.strip(), self.password)
+        return any(values) and not all(values)
 
 
 llm_config = LLMConfig()
@@ -56,4 +57,9 @@ def validate_config() -> None:
     if not llm_config.base_url:
         raise ValueError(
             "LLM_BASE_URL must identify the OpenAI-compatible model router."
+        )
+    if querystore_config.partially_configured:
+        raise ValueError(
+            "QUERYSTORE_BASE_URL, QUERYSTORE_USERNAME, and QUERYSTORE_PASSWORD "
+            "must be set together; leave all three empty to disable Querystore."
         )

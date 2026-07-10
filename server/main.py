@@ -12,7 +12,7 @@ import psutil
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from .config import llm_config
+from .config import llm_config, validate_config
 from .levels_loader import validate_profiles
 from .openai_compat import router as openai_router
 
@@ -20,6 +20,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 server_start_time = time.time()
+validate_config()
 _PROFILES = validate_profiles()
 _DEFAULT_PROFILE = next(profile for profile in _PROFILES if profile.default)
 

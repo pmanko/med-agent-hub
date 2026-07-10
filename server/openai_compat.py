@@ -40,9 +40,13 @@ class ChatCompletionRequest(BaseModel):
 
 
 def _served_backend_models() -> set[str]:
+    headers = {}
+    if llm_config.api_key:
+        headers["Authorization"] = f"Bearer {llm_config.api_key}"
     try:
         response = httpx.get(
             f"{llm_config.base_url.rstrip('/')}/v1/models",
+            headers=headers,
             timeout=3.0,
         )
         response.raise_for_status()

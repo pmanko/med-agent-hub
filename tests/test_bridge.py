@@ -8,11 +8,12 @@ the external model call (`team._chat`): no real HTTP or model is required.
 
 import asyncio
 import json
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from server import levels_loader, team
+from server import levels_loader, openai_compat, team
 from server.main import app
 from tests.factories import make_profile, run_profile
 
@@ -578,6 +579,38 @@ def test_v1_models_advertises_the_levels():
     # Discovery is authoritative product/config metadata. Low-level dynamic legs remain
     # callable but are intentionally not advertised in the product model picker.
     assert ids == levels_loader.profile_ids()
+
+
+def test_backend_model_discovery_uses_configured_bearer_auth():
+    backend = SimpleNamespace(base_url="https://router.example", api_key="secret")
+    with patch.object(openai_compat, "llm_config", backend), patch.object(
+        openai_compat.httpx, "get"
+    ) as get:
+        get.return_value.json.return_value = {"data": [{"id": "gemma-e4b"}]}
+
+        assert openai_compat._served_backend_models() == {"gemma-e4b"}
+
+    get.assert_called_once_with(
+        "https://router.example/v1/models",
+        headers={"Authorization": "Bearer secret"},
+        timeout=3.0,
+    )
+
+
+def test_backend_model_discovery_omits_auth_when_api_key_is_blank():
+    backend = SimpleNamespace(base_url="http://router", api_key="")
+    with patch.object(openai_compat, "llm_config", backend), patch.object(
+        openai_compat.httpx, "get"
+    ) as get:
+        get.return_value.json.return_value = {"data": []}
+
+        assert openai_compat._served_backend_models() == set()
+
+    get.assert_called_once_with(
+        "http://router/v1/models",
+        headers={},
+        timeout=3.0,
+    )
 
 
 def test_v1_models_advertises_staged_capability_not_just_id_prefix():

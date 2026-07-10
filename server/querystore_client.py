@@ -26,7 +26,7 @@ class QueryStoreClient:
 
         Pages until the server's ``totalCount`` is reached (or a short page signals the end). Raises
         ``httpx.HTTPStatusError`` on a non-2xx (e.g. 404 for an unknown patient, 401/403 on auth) — the
-        caller degrades to an empty chart, mirroring the in-process consumer's behaviour.
+        source adapter translates the failure into an explicit ``context_source_failed`` response.
         """
         records: list[dict[str, Any]] = []
         start = 0
