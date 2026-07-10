@@ -17,6 +17,7 @@ from unittest.mock import patch
 import pytest
 
 from server import prompt_loader, team
+from tests.factories import run_profile, team_profile
 
 PROMPTS_DIR = Path(team.__file__).parent / "prompts"
 
@@ -24,8 +25,13 @@ PROMPTS_DIR = Path(team.__file__).parent / "prompts"
 # used to prove BOTH synthesis prompts actually reach the model.
 SYNTH_MARKERS = ("FALSE PREMISE", "DIRECT ANSWER ONLY", "IN-DEPTH elaboration")
 
-ENVELOPE = json.dumps({"answer": "Lisinopril 10 mg [1]", "citations": [1], "blocks": []})
-RESP_FORMAT = {"type": "json_schema", "json_schema": {"name": "chart_answer", "schema": {}}}
+ENVELOPE = json.dumps(
+    {"answer": "Lisinopril 10 mg [1]", "citations": [1], "blocks": []}
+)
+RESP_FORMAT = {
+    "type": "json_schema",
+    "json_schema": {"name": "chart_answer", "schema": {}},
+}
 MESSAGES = [
     {"role": "system", "content": "You are a clinical assistant."},
     {"role": "user", "content": "[1] Lisinopril 10 mg"},
@@ -33,23 +39,46 @@ MESSAGES = [
 ]
 
 
-def _run_team_capturing_synth():
-    """Run the team and return the JSON-serialized message arrays sent to the constrained
+def _profile():
+    return team_profile(
+        orchestrator=team.llm_config.orchestrator_model,
+        expert=team.llm_config.med_model,
+        answer=team.llm_config.synthesizer_model,
+        indepth=team.llm_config.synthesizer_model,
+        output="combined",
+    )
+
+
+def _run_profile_capturing_synth():
+    """Run the profile and return the JSON-serialized message arrays sent to the constrained
     synthesis calls — the two turns (Answer + In-Depth) that carry the synthesis prompts.
     `team._chat` is seamed; no model, no HTTP."""
     import asyncio
 
     captured = {"synths": []}
 
-    async def fake_chat(client, model, messages, *, tools=None, response_format=None,
-                        temperature=None, max_tokens=None, **kwargs):
+    async def fake_chat(
+        client,
+        model,
+        messages,
+        *,
+        tools=None,
+        response_format=None,
+        temperature=None,
+        max_tokens=None,
+        **kwargs,
+    ):
         if response_format is not None:
             captured["synths"].append(messages)
             return {"content": ENVELOPE}
         return {"content": "ok", "tool_calls": None}
 
     with patch.object(team, "_chat", side_effect=fake_chat):
-        asyncio.run(team.run_team(MESSAGES, response_format=RESP_FORMAT, temperature=0.0))
+        asyncio.run(
+            run_profile(
+                _profile(), MESSAGES, response_format=RESP_FORMAT, temperature=0.0
+            )
+        )
     return json.dumps(captured["synths"])
 
 
@@ -93,12 +122,18 @@ def test_prompt_names_lists_available_prompt_stems(tmp_path, monkeypatch):
 def test_synthesis_low_is_a_distinct_prompt():
     # The low level swaps synthesis -> synthesis-low (a synthesis prompt tuned for the
     # smaller synthesizer). It must be its own file, distinct from the default.
-    assert prompt_loader.load_prompt("synthesis-low") != prompt_loader.load_prompt("synthesis")
+    assert prompt_loader.load_prompt("synthesis-low") != prompt_loader.load_prompt(
+        "synthesis"
+    )
 
 
 def test_synthesis_prompts_instruct_on_temporal_facts_sidecar():
-    for name in ("synthesis-chartsearchai", "synthesis-coverage", "synthesis-answer",
-                 "synthesis-date-output-contract"):
+    for name in (
+        "synthesis-chartsearchai",
+        "synthesis-coverage",
+        "synthesis-answer",
+        "synthesis-date-output-contract",
+    ):
         text = prompt_loader.load_prompt(name)
         assert "temporal_facts.v1" in text
         assert "reference_date" in text
@@ -112,7 +147,7 @@ def test_team_sends_the_synthesis_prompts_to_the_model():
     # committed synthesis instructions — the Answer prompt (FALSE PREMISE, DIRECT ANSWER ONLY)
     # and the In-Depth prompt (IN-DEPTH elaboration). Asserts on what the team SENDS (the
     # seam), not the mocked return.
-    blob = _run_team_capturing_synth()
+    blob = _run_profile_capturing_synth()
     for marker in SYNTH_MARKERS:
         assert marker in blob, f"synthesis marker {marker!r} not sent to the model"
 
@@ -124,40 +159,67 @@ def test_team_passes_through_a_schema_valid_two_section_table_envelope():
     # chartsearchai consumer. The synthesis call is seamed to return a realistic envelope.
     import asyncio
 
-    envelope = json.dumps({
-        "answer": "**Answer**\nShe is on lamivudine, nevirapine, and stavudine [29], [30], [31].\n\n"
-                  "**In Depth**\nThe regimen is stavudine-based [31]; per WHO HIV guidelines "
-                  "stavudine is no longer a preferred backbone.",
-        "citations": [29, 30, 31],
-        "blocks": [{
-            "kind": "table",
-            "title": "Medications Ordered",
-            "columns": [
-                {"key": "medication", "label": "Medication"},
-                {"key": "action", "label": "Action"},
+    envelope = json.dumps(
+        {
+            "answer": "**Answer**\nShe is on lamivudine, nevirapine, and stavudine [29], [30], [31].\n\n"
+            "**In Depth**\nThe regimen is stavudine-based [31]; per WHO HIV guidelines "
+            "stavudine is no longer a preferred backbone.",
+            "citations": [29, 30, 31],
+            "blocks": [
+                {
+                    "kind": "table",
+                    "title": "Medications Ordered",
+                    "columns": [
+                        {"key": "medication", "label": "Medication"},
+                        {"key": "action", "label": "Action"},
+                    ],
+                    "rows": [
+                        {
+                            "cells": {
+                                "medication": {"text": "Lamivudine", "refs": [29]},
+                                "action": {"text": "Continue", "refs": []},
+                            }
+                        },
+                        {
+                            "cells": {
+                                "medication": {"text": "Stavudine", "refs": [31]},
+                                "action": {"text": "Review", "refs": [31]},
+                            }
+                        },
+                    ],
+                }
             ],
-            "rows": [
-                {"cells": {"medication": {"text": "Lamivudine", "refs": [29]},
-                           "action": {"text": "Continue", "refs": []}}},
-                {"cells": {"medication": {"text": "Stavudine", "refs": [31]},
-                           "action": {"text": "Review", "refs": [31]}}},
-            ],
-        }],
-    })
+        }
+    )
 
-    async def fake_chat(client, model, messages, *, tools=None, response_format=None,
-                        temperature=None, max_tokens=None, **kwargs):
+    async def fake_chat(
+        client,
+        model,
+        messages,
+        *,
+        tools=None,
+        response_format=None,
+        temperature=None,
+        max_tokens=None,
+        **kwargs,
+    ):
         if response_format is not None:
             return {"content": envelope}
         return {"content": "ok", "tool_calls": None}
 
     with patch.object(team, "_chat", side_effect=fake_chat):
-        out = asyncio.run(team.run_team(MESSAGES, response_format=RESP_FORMAT, temperature=0.0))
+        out = asyncio.run(
+            run_profile(
+                _profile(), MESSAGES, response_format=RESP_FORMAT, temperature=0.0
+            )
+        )
 
     env_obj = json.loads(out)
     # Structural envelope contract the chartsearchai consumer parses.
     assert set(env_obj.keys()) >= {"answer", "citations", "blocks"}
-    assert isinstance(env_obj["citations"], list) and all(isinstance(i, int) for i in env_obj["citations"])
+    assert isinstance(env_obj["citations"], list) and all(
+        isinstance(i, int) for i in env_obj["citations"]
+    )
     assert isinstance(env_obj["blocks"], list)
     # The two-section answer survived intact.
     assert "**Answer**" in env_obj["answer"] and "**In Depth**" in env_obj["answer"]

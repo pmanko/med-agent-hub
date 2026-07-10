@@ -1,5 +1,4 @@
-# Single-image build. The OpenAI-compat bridge runs the Med Agent Team
-# in-process (no A2A subagent processes), so one uvicorn is the whole server.
+# One uvicorn process hosts profile discovery and the stage engine.
 
 # Stage 1: resolve + install dependencies with Poetry
 FROM python:3.11-slim AS builder
@@ -18,7 +17,6 @@ RUN python -m venv $POETRY_VENV \
 ENV PATH="${PATH}:${POETRY_VENV}/bin"
 
 COPY pyproject.toml poetry.lock ./
-# Bridge runtime needs only the base deps (no spark/duckdb extras).
 RUN poetry export -f requirements.txt --output requirements.txt --without-hashes \
     && pip install --user --no-cache-dir -r requirements.txt
 
@@ -33,9 +31,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl \
 COPY --from=builder /root/.local /usr/local
 COPY server/ ./server/
 
-# Logs go to stdout (docker logs); reach the host's LM Studio by default.
+# Logs go to stdout; reach the host-native llama.cpp router by default.
 ENV PYTHONUNBUFFERED=1 \
-    LLM_BASE_URL=http://host.docker.internal:1234 \
+    LLM_BASE_URL=http://host.docker.internal:8077 \
     LLM_TEMPERATURE=0.0
 
 EXPOSE 8080

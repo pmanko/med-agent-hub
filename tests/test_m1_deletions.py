@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
-
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -35,13 +35,10 @@ def test_old_topology_flag_matrix_is_absent_from_active_profile_runtime():
         (ROOT / path).read_text(encoding="utf-8")
         for path in ("server/levels_loader.py", "server/levels.yaml", "server/team.py")
     )
-    legacy_flags = (
-        "two_call",
-        "indepth_shared",
-        "indepth_only",
-        "answer_only",
-        "answer_review",
-        "solo",
+    legacy_field = re.compile(
+        r"\b(two_call|indepth_shared|indepth_only|answer_only|answer_review|solo)\s*[:=]"
     )
-
-    assert [flag for flag in legacy_flags if flag in active] == []
+    assert legacy_field.findall(active) == []
+    assert not (ROOT / "tests/profile_runner.py").exists()
+    factories = (ROOT / "tests/factories.py").read_text(encoding="utf-8")
+    assert legacy_field.findall(factories) == []

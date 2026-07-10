@@ -8,6 +8,8 @@ Run: pytest tests/test_temporal.py
 
 import json
 
+import pytest
+
 from server import temporal
 
 # A realistic slice of the serialized chart (most-recent-first, like the real snapshot).
@@ -29,9 +31,12 @@ Patient: 41-year-old Male
 
 # ---- resolve_anchor ---------------------------------------------------------
 
+
 def test_resolve_anchor_latest_record_picks_max_date():
     assert temporal.resolve_anchor("latest_record", _CHART) == "2006-05-18"
-    assert temporal.resolve_anchor(None, _CHART) == "2006-05-18"  # default = latest_record
+    assert (
+        temporal.resolve_anchor(None, _CHART) == "2006-05-18"
+    )  # default = latest_record
 
 
 def test_resolve_anchor_explicit_date_passthrough():
@@ -44,19 +49,32 @@ def test_resolve_anchor_latest_record_no_dates_is_none():
 
 # ---- parse_dated_observations ----------------------------------------------
 
+
 def test_parse_extracts_numeric_obs_only():
     obs = temporal.parse_dated_observations(_CHART)
     concepts = {o["concept"] for o in obs}
     # numeric series present; non-numeric (drug order, Yes/No assessment) excluded
-    assert "Weight" in concepts and "Haemoglobin" in concepts and "CD4 count" in concepts
+    assert (
+        "Weight" in concepts and "Haemoglobin" in concepts and "CD4 count" in concepts
+    )
     assert not any("Scheduled visit" in c or "Lamivudine" in c for c in concepts)
-    assert "Return visit date" not in concepts  # date-valued obs is not a numeric series
-    weights = sorted((o for o in obs if o["concept"] == "Weight"), key=lambda o: o["date"])
-    assert [w["value"] for w in weights] == [52.0, 48.0, 42.0, 41.0]  # sorted ascending, deduped per date
+    assert (
+        "Return visit date" not in concepts
+    )  # date-valued obs is not a numeric series
+    weights = sorted(
+        (o for o in obs if o["concept"] == "Weight"), key=lambda o: o["date"]
+    )
+    assert [w["value"] for w in weights] == [
+        52.0,
+        48.0,
+        42.0,
+        41.0,
+    ]  # sorted ascending, deduped per date
     assert weights[0]["unit"] == "kg"
 
 
 # ---- build_temporal_block ---------------------------------------------------
+
 
 def test_block_carries_anchor_and_correct_recency_and_trend():
     block = temporal.build_temporal_block(_CHART, "2006-05-18")
@@ -66,7 +84,9 @@ def test_block_carries_anchor_and_correct_recency_and_trend():
     # haemoglobin most-recent is 3.9 (2006-04-24), NOT the older 9.1 (the ordering bug P1 fixes)
     hgb_line = next(l for l in block.splitlines() if "Haemoglobin" in l)
     assert "3.9" in hgb_line
-    assert hgb_line.index("3.9") < (hgb_line.index("9.1") if "9.1" in hgb_line else len(hgb_line))
+    assert hgb_line.index("3.9") < (
+        hgb_line.index("9.1") if "9.1" in hgb_line else len(hgb_line)
+    )
     # weight is a real downward trend 52 -> 41
     wt_line = next(l for l in block.splitlines() if "Weight" in l)
     assert "52" in wt_line and "41.0" in wt_line
@@ -77,7 +97,9 @@ def test_block_single_point_makes_no_trend_claim():
     cd4_line = next(l for l in block.splitlines() if "CD4 count" in l)
     # one CD4 point -> report the value, never a trend/direction (the <2-points guard)
     assert "72" in cd4_line
-    assert "↑" not in cd4_line and "↓" not in cd4_line and "trend" not in cd4_line.lower()
+    assert (
+        "↑" not in cd4_line and "↓" not in cd4_line and "trend" not in cd4_line.lower()
+    )
 
 
 def test_block_empty_without_anchor_or_series():
@@ -112,9 +134,16 @@ def test_parse_carries_date_forward_across_run_length_compression():
 def test_block_states_most_recent_record_date_for_last_visit():
     # "When was the last visit?" needs the most-recent RECORD date stated explicitly, so the model
     # REPORTS it instead of fabricating (the am-last-visit failure). Distinct from the anchor/now.
-    block = temporal.build_temporal_block(_CHART, "2006-06-01")  # anchor (now) != latest record
-    line = next((l for l in block.splitlines() if l.startswith("Most recent clinical visit")), None)
-    assert line is not None and "2006-05-18" in line  # the chart's max CLINICAL date = the last visit
+    block = temporal.build_temporal_block(
+        _CHART, "2006-06-01"
+    )  # anchor (now) != latest record
+    line = next(
+        (l for l in block.splitlines() if l.startswith("Most recent clinical visit")),
+        None,
+    )
+    assert (
+        line is not None and "2006-05-18" in line
+    )  # the chart's max CLINICAL date = the last visit
 
 
 # ---- typed event timeline: an administrative record (e.g. a Program enrollment) must NOT be reported
@@ -138,11 +167,22 @@ _WEIGHT_WITH_HOSPITALIZATION = """Patient records (most recent first):
 
 def test_event_timeline_excludes_program_enrollment_from_last_visit():
     block = temporal.build_temporal_block(_PROGRAM_CONFOUND, anchor="2026-06-20")
-    visit_line = next((l for l in block.splitlines() if l.startswith("Most recent clinical visit")), None)
+    visit_line = next(
+        (l for l in block.splitlines() if l.startswith("Most recent clinical visit")),
+        None,
+    )
     assert visit_line is not None, block
-    assert "2026-01-07" in visit_line and "2026-05-20" not in visit_line  # the visit, not the enrollment
-    admin_line = next((l for l in block.splitlines() if "Administrative record" in l), None)
-    assert admin_line is not None and "2026-05-20" in admin_line and "Tuberculosis" in admin_line
+    assert (
+        "2026-01-07" in visit_line and "2026-05-20" not in visit_line
+    )  # the visit, not the enrollment
+    admin_line = next(
+        (l for l in block.splitlines() if "Administrative record" in l), None
+    )
+    assert (
+        admin_line is not None
+        and "2026-05-20" in admin_line
+        and "Tuberculosis" in admin_line
+    )
 
 
 def test_resolve_anchor_latest_record_ignores_program_enrollment():
@@ -151,6 +191,7 @@ def test_resolve_anchor_latest_record_ignores_program_enrollment():
 
 
 # ---- temporal_facts.v1.1 sidecar -------------------------------------------
+
 
 def test_temporal_facts_captures_return_visit_dates_and_classifies_against_anchor():
     facts = temporal.build_temporal_facts(_CHART, "2006-06-01")
@@ -223,6 +264,7 @@ def test_render_temporal_facts_compact_profile_is_explicit_opt_in():
 
 # ---- temporal gate ----------------------------------------------------------
 
+
 def test_gate_off_is_noop_metadata_only():
     facts = temporal.build_temporal_facts(_CHART, "2006-06-01")
     gate = temporal.run_temporal_gate(
@@ -247,8 +289,12 @@ def test_gate_fails_past_return_visit_called_upcoming_and_offers_patch():
         "enforce",
     )
     assert gate["status"] == "fail"
-    assert any(c["id"] == "upcoming_date" and c["status"] == "fail" for c in gate["checks"])
-    assert "No upcoming appointment is documented after 2006-06-01" in gate["patch_answer"]
+    assert any(
+        c["id"] == "upcoming_date" and c["status"] == "fail" for c in gate["checks"]
+    )
+    assert (
+        "No upcoming appointment is documented after 2006-06-01" in gate["patch_answer"]
+    )
     assert gate["patch_citations"] == [5]
 
 
@@ -263,7 +309,9 @@ def test_gate_warn_mode_reports_but_does_not_patch_by_itself():
     )
     assert gate["mode"] == "warn"
     assert gate["status"] == "fail"
-    assert gate["patch_answer"]  # patch is advisory; callers apply it only in enforce mode
+    assert gate[
+        "patch_answer"
+    ]  # patch is advisory; callers apply it only in enforce mode
 
 
 def test_gate_fails_wrong_last_visit_date():
@@ -324,12 +372,14 @@ def test_gate_fails_malformed_date_output_and_can_patch_selected_series():
 
 def test_gate_fails_pathological_malformed_date_strings():
     facts = temporal.build_temporal_facts(_CHART, "2006-06-01")
-    answer = "\n".join([
-        "The order date was written as 2025-10-//13.",
-        "The follow-up date was written as 2026-0-[59].",
-        "The month-only date was 2026-02.",
-        "The unicode-hyphen date was 2006\u201105\u201118.",
-    ])
+    answer = "\n".join(
+        [
+            "The order date was written as 2025-10-//13.",
+            "The follow-up date was written as 2026-0-[59].",
+            "The month-only date was 2026-02.",
+            "The unicode-hyphen date was 2006\u201105\u201118.",
+        ]
+    )
     gate = temporal.run_temporal_gate(
         "List any malformed dates.",
         answer,
@@ -343,6 +393,22 @@ def test_gate_fails_pathological_malformed_date_strings():
     assert "2026-0-[59]" in claims
     assert "2026-02" in claims
     assert "2006\u201105\u201118" in claims
+
+
+@pytest.mark.parametrize("answer", ["Seen on 2025-10-//13.", "Seen on 2026-01-09."])
+def test_gate_rejects_malformed_and_nonledger_dates_when_ledger_is_empty(answer):
+    facts = {
+        "schema_version": "temporal_facts.v1.1",
+        "date_output_contract": {},
+        "date_ledger": [],
+        "numeric_series": [],
+        "appointment_candidates": {},
+    }
+
+    result = temporal.run_temporal_gate("When?", answer, [], facts, "enforce")
+
+    assert result["status"] == "fail"
+    assert any(check["id"] == "date_format" for check in result["checks"])
 
 
 def test_gate_fails_valid_iso_date_that_is_not_in_ledger():

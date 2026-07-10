@@ -1,342 +1,357 @@
-# Advertised hub profiles and low-level legs — the /v1/models groupings the
-# consumer's picker lists.
+# Declarative execution profiles for med-agent-hub.
 #
-# Each key is a level id; each value fixes the per-role models (served by
-# LLM_BASE_URL) plus optional per-level prompt files. Read PER REQUEST, so editing
-# this (bind-mounted) file changes behaviour with no rebuild. This file is the
-# single source of truth for configured profiles.
-#
-#   add / remove a level     -> add / remove a block
-#   change a model           -> edit one line
-#   per-level prompt         -> set orchestrator_prompt / expert_prompt / synthesis_prompt
-#   run a level with NO expert -> `expert: null` (drops the medical_expert tool + role)
-#
-# Model ids are the LLM backend's served ids (the llama-router section names).
-levels:
+# Every configured id declares an ordered stage plan and the model assigned to
+# each role. Dynamic answer:, answer-review:, and indepth-only: legs are parsed
+# by levels_loader.py and intentionally are not advertised here.
+
+stage_sets:
+  team_combined: &team_combined [context, gather, answer, gate, indepth]
+  team_reviewed: &team_reviewed [context, gather, answer, gate, review, gate, indepth]
+  team_bare: &team_bare [context, gather, answer, gate]
+  team_bare_reviewed: &team_bare_reviewed [context, gather, answer, gate, review, gate]
+  single_bare: &single_bare [context, answer, gate]
+  single_bare_reviewed: &single_bare_reviewed [context, answer, gate, review, gate]
+  single_combined: &single_combined [context, answer, gate, indepth]
+  product: &product [context, answer, gate, resolve_refs, review, gate, final_resolve_refs, ground_verdicts, indepth, indepth_gate]
+  product_no_review: &product_no_review [context, answer, gate, resolve_refs, final_resolve_refs, ground_verdicts, indepth, indepth_gate]
+  team_product: &team_product [context, gather, answer, gate, resolve_refs, review, gate, final_resolve_refs, ground_verdicts, indepth, indepth_gate]
+
+profiles:
   med-agent-team-low:
-    orchestrator: gemma-e2b-q2     # gemma-4-E2B 2-bit (deliberately tiny orchestrator)
-    expert: medgemma-1.5-4b        # small expert (~3GB); set to null to drop the expert
-    synthesizer: qwen3-4b
+    label: Low team
+    topology: team
+    stages: *team_combined
+    models: {orchestrator: gemma-e2b-q2, expert: medgemma-1.5-4b, answer: qwen3-4b, indepth: qwen3-4b}
+    policies: {output: combined, temporal_gate: "off"}
 
-  med-agent-team-low-validated:    # LOW + a validator at a competent FLOOR (not tier-scaled)
-    orchestrator: gemma-e2b-q2
-    expert: medgemma-1.5-4b
-    synthesizer: qwen3-4b
-    validator: gemma-e4b-q8        # floor candidate — try e4b first (2-bit e2b over-flagged); compare vs 12b
-    validator_max_loops: 1
+  med-agent-team-low-validated:
+    label: Low team with E4B review
+    topology: team
+    stages: *team_reviewed
+    models: {orchestrator: gemma-e2b-q2, expert: medgemma-1.5-4b, answer: qwen3-4b, review: gemma-e4b-q8, indepth: qwen3-4b}
+    policies: {output: combined, temporal_gate: "off"}
+    capabilities: {validation: true}
 
-  med-agent-team-low-validated-12b:   # same LOW tier, 12B validator — the floor comparison vs e4b
-    orchestrator: gemma-e2b-q2
-    expert: medgemma-1.5-4b
-    synthesizer: qwen3-4b
-    validator: gemma-4-12b
-    validator_max_loops: 1
-    staged: true                      # product picker tier -> streams via the engine's gather stage
+  med-agent-team-low-validated-12b:
+    label: Low team with 12B review
+    topology: team
+    stages: *team_product
+    models: {orchestrator: gemma-e2b-q2, expert: medgemma-1.5-4b, answer: qwen3-4b, review: gemma-4-12b, grounding: qwen3-4b, indepth: qwen3-4b}
+    prompts: {review: validation}
+    policies: {output: product, temporal_gate: enforce, temporal_render: full}
+    capabilities: {staged: true, validation: true}
+    context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true}
 
   med-agent-team-med:
-    orchestrator: gemma-e4b-q8     # gemma-4-E4B 8-bit
-    expert: medgemma-1.5-4b-q8     # medgemma-1.5-4b 8-bit
-    synthesizer: qwen2.5-14b
+    label: Medium team
+    topology: team
+    stages: *team_combined
+    models: {orchestrator: gemma-e4b-q8, expert: medgemma-1.5-4b-q8, answer: qwen2.5-14b, indepth: qwen2.5-14b}
+    policies: {output: combined, temporal_gate: "off"}
 
-  med-agent-team-liquid:           # all-Liquid: LFM2 orchestrator + LFM2 expert (NO medical training — the
-    orchestrator: lfm2-2.6b        # handicap being measured) + LFM2 writer. No validator (matches med baseline).
-    expert: lfm2-8b-a1b
-    synthesizer: lfm2-24b-a2b
+  med-agent-team-liquid:
+    label: Liquid team
+    topology: team
+    stages: *team_combined
+    models: {orchestrator: lfm2-2.6b, expert: lfm2-8b-a1b, answer: lfm2-24b-a2b, indepth: lfm2-24b-a2b}
+    policies: {output: combined, temporal_gate: "off"}
 
-  med-agent-team-med-liquid:       # Liquid-swapped, medgemma expert KEPT: isolates Liquid in the non-medical
-    orchestrator: lfm2-2.6b        # (coordinator + writer) roles. Differs from med ONLY in those two roles.
-    expert: medgemma-1.5-4b-q8
-    synthesizer: lfm2-24b-a2b
+  med-agent-team-med-liquid:
+    label: Liquid coordinator and writer
+    topology: team
+    stages: *team_combined
+    models: {orchestrator: lfm2-2.6b, expert: medgemma-1.5-4b-q8, answer: lfm2-24b-a2b, indepth: lfm2-24b-a2b}
+    policies: {output: combined, temporal_gate: "off"}
 
-  med-agent-team-med-liquid-validated:  # med-liquid + a NON-Liquid 12B validator: does a strong cross-check catch
-    orchestrator: lfm2-2.6b             # the Liquid fabrications (hidden CD4, reversed weight trend, fabricated drugs)?
-    expert: medgemma-1.5-4b-q8
-    synthesizer: lfm2-24b-a2b
-    validator: gemma-4-12b              # non-Liquid 12B validator (the competent-floor finding from med-validated)
-    validator_max_loops: 1
+  med-agent-team-med-liquid-validated:
+    label: Liquid team with 12B review
+    topology: team
+    stages: *team_reviewed
+    models: {orchestrator: lfm2-2.6b, expert: medgemma-1.5-4b-q8, answer: lfm2-24b-a2b, review: gemma-4-12b, indepth: lfm2-24b-a2b}
+    policies: {output: combined, temporal_gate: "off"}
+    capabilities: {validation: true}
 
-  med-agent-team-med-liquid-qwensynth:  # Liquid COORDINATOR ONLY: non-Liquid writer (qwen) + medgemma expert,
-    orchestrator: lfm2-2.6b             # WITH a validator (load-bearing: drives the re-synth cycle + the answer
-    expert: medgemma-1.5-4b-q8          # confidence). Does removing the Liquid writer fix safety?
-    synthesizer: qwen2.5-14b
-    validator: gemma-4-12b
-    validator_max_loops: 1
+  med-agent-team-med-liquid-qwensynth:
+    label: Liquid coordinator with Qwen writer
+    topology: team
+    stages: *team_reviewed
+    models: {orchestrator: lfm2-2.6b, expert: medgemma-1.5-4b-q8, answer: qwen2.5-14b, review: gemma-4-12b, indepth: qwen2.5-14b}
+    policies: {output: combined, temporal_gate: "off"}
+    capabilities: {validation: true}
 
-  med-agent-team-med-validated:    # MED + a competent validator (12B — e4b is below the floor)
-    orchestrator: gemma-e4b-q8
-    expert: medgemma-1.5-4b-q8
-    synthesizer: qwen2.5-14b
-    validator: gemma-4-12b         # 12B validator (the floor finding); cross-family vs qwen2.5-14b synth
-    validator_max_loops: 1
-    staged: true                    # product picker tier -> streams via the engine's gather stage
+  med-agent-team-med-validated:
+    label: Medium checked team
+    topology: team
+    stages: *team_product
+    models: {orchestrator: gemma-e4b-q8, expert: medgemma-1.5-4b-q8, answer: qwen2.5-14b, review: gemma-4-12b, grounding: qwen2.5-14b, indepth: qwen2.5-14b}
+    prompts: {review: validation}
+    policies: {output: product, temporal_gate: enforce, temporal_render: full}
+    capabilities: {staged: true, validation: true}
+    context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true}
 
-  med-agent-team-med-liquidwriter-validated:  # 2x2 ablation cell: Liquid WRITER only (non-Liquid gemma coord +
-    orchestrator: gemma-e4b-q8                 # medgemma expert + LFM2 writer), validated. Differs from med-validated
-    expert: medgemma-1.5-4b-q8                 # ONLY in the writer -> isolates the Liquid writer's effect.
-    synthesizer: lfm2-24b-a2b
-    validator: gemma-4-12b
-    validator_max_loops: 1
+  med-agent-team-med-liquidwriter-validated:
+    label: Liquid writer with 12B review
+    topology: team
+    stages: *team_reviewed
+    models: {orchestrator: gemma-e4b-q8, expert: medgemma-1.5-4b-q8, answer: lfm2-24b-a2b, review: gemma-4-12b, indepth: lfm2-24b-a2b}
+    policies: {output: combined, temporal_gate: "off"}
+    capabilities: {validation: true}
 
   med-agent-team-high:
-    orchestrator: gemma-31b        # gemma-4-31B-it
-    expert: medgemma-27b
-    synthesizer: qwen3.6-35b-q6    # Qwen3.6-35B-A3B 6-bit (thinking synth)
+    label: High team
+    topology: team
+    stages: *team_combined
+    models: {orchestrator: gemma-31b, expert: medgemma-27b, answer: qwen3.6-35b-q6, indepth: qwen3.6-35b-q6}
+    policies: {output: combined, temporal_gate: "off"}
 
-  med-agent-team-high-validated:   # HIGH + orchestrator-as-validator (scaled to the tier)
-    orchestrator: gemma-31b
-    expert: medgemma-27b
-    synthesizer: qwen3.6-35b-q6
-    validator: gemma-31b           # the HIGH orchestrator, cross-family vs qwen3.6 synth (strongest local)
-    validator_max_loops: 1
-    staged: true                   # product picker tier -> streams via the engine's gather stage
+  med-agent-team-high-validated:
+    label: High checked team
+    topology: team
+    stages: *team_product
+    models: {orchestrator: gemma-31b, expert: medgemma-27b, answer: qwen3.6-35b-q6, review: gemma-31b, grounding: qwen3.6-35b-q6, indepth: qwen3.6-35b-q6}
+    prompts: {review: validation}
+    policies: {output: product, temporal_gate: enforce, temporal_render: full}
+    capabilities: {staged: true, validation: true}
+    context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true}
 
   med-agent-team-12b:
-    orchestrator: gemma-4-12b      # gemma-4-12B-it Q8 — strong dense orchestrator
-    expert: medgemma-1.5-4b-q8     # same expert as MED — isolates the orchestrator variable
-    synthesizer: qwen2.5-14b       # same synth as MED
+    label: 12B orchestrated team
+    topology: team
+    stages: *team_combined
+    models: {orchestrator: gemma-4-12b, expert: medgemma-1.5-4b-q8, answer: qwen2.5-14b, indepth: qwen2.5-14b}
+    policies: {output: combined, temporal_gate: "off"}
 
-  med-agent-team-parity:           # chartsearchai-PARITY: hub orchestration + temporal block, but
-    orchestrator: gemma-e4b-q8     # the MED-tier roles, chartsearchai's DEFAULT_SYSTEM_PROMPT, and a
-    expert: medgemma-1.5-4b-q8     # SINGLE synthesis call with the validator OFF -> the bare
-    synthesizer: qwen2.5-14b       # {answer,citations,blocks} envelope, matching the direct arms.
-    synthesis_prompt: synthesis-chartsearchai   # whole chartsearchai prompt (NOT the -answer/-indepth split)
-    two_call: false                # isolates "does orchestration help, holding prompt+format = chartsearchai default"
+  med-agent-team-parity:
+    label: Team parity answer
+    topology: team
+    stages: *team_bare
+    models: {orchestrator: gemma-e4b-q8, expert: medgemma-1.5-4b-q8, answer: qwen2.5-14b}
+    prompts: {answer: synthesis-chartsearchai}
+    policies: {output: bare, temporal_gate: "off"}
 
-  med-agent-team-parity-indepth:   # PARITY team + a SHARED single-pass In-Depth (no validator): the
-    orchestrator: gemma-e4b-q8     # parity Answer PLUS one synthesis-indepth pass, so the parity team is
-    expert: medgemma-1.5-4b-q8     # judged on the background dimension too (vs the single arm below).
-    synthesizer: qwen2.5-14b
-    synthesis_prompt: synthesis-chartsearchai
-    two_call: false
-    indepth_shared: true
+  med-agent-team-parity-indepth:
+    label: Team parity with In-Depth
+    topology: team
+    stages: [context, gather, answer, gate, indepth]
+    models: {orchestrator: gemma-e4b-q8, expert: medgemma-1.5-4b-q8, answer: qwen2.5-14b, indepth: qwen2.5-14b}
+    prompts: {answer: synthesis-chartsearchai, indepth: synthesis-indepth}
+    policies: {output: combined, temporal_gate: "off"}
 
-  single-12b-indepth:              # SINGLE-model In-Depth parity: the 12B writer alone (no expert) does
-    orchestrator: gemma-e4b-q8     # the chartsearchai-prompt Answer (gathered suppressed on the answer ->
-    expert: null                   # matches the vanilla 12b-baseline) PLUS the shared single-pass In-Depth,
-    synthesizer: gemma-4-12b       # so a single model is judged on background head-to-head with the team.
-    synthesis_prompt: synthesis-chartsearchai
-    two_call: false
-    indepth_shared: true
+  single-12b-indepth:
+    label: Single 12B with In-Depth
+    topology: single
+    stages: *single_combined
+    models: {answer: gemma-4-12b, indepth: gemma-4-12b}
+    prompts: {answer: synthesis-chartsearchai, indepth: synthesis-indepth}
+    policies: {output: combined, temporal_gate: "off"}
 
-  # --- Staged UX tiers (phased streaming: answer -> optional validation -> in-depth, one hub request).
-  # The hub owns the whole flow + resolves references from the chart it retrieves; chartsearchai relays.
-  # A `validator:` line -> the validation phase runs; omit it -> answer + in-depth only (no check phase).
-  med-agent-team-staged-12b:          # single Gemma 12B, answer + in-depth, NO validation phase
-    orchestrator: gemma-4-12b         # solo -> unused, but a required field
-    expert: null
-    synthesizer: gemma-4-12b          # the ANSWER + IN-DEPTH writer (indepth_model defaults to this)
-    synthesis_prompt: synthesis       # -> synthesis-answer / synthesis-indepth
-    temporal_gate: enforce
-    staged: true
-    solo: true
-    knobs: {synthesizer: {temperature: 0}}
+  med-agent-team-staged-12b:
+    label: Legacy staged 12B
+    topology: single
+    stages: *product_no_review
+    models: {answer: gemma-4-12b, grounding: gemma-4-12b, indepth: gemma-4-12b}
+    prompts: {answer: synthesis-answer, indepth: synthesis-indepth}
+    policies: {output: product, temporal_gate: enforce, temporal_render: full}
+    capabilities: {staged: true, validation: false}
+    context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true}
+    knobs: {answer: {temperature: 0}}
 
-  med-agent-team-staged-12b-validated:   # same, WITH a self-check validation phase (same model -> no swap)
-    orchestrator: gemma-4-12b
-    expert: null
-    synthesizer: gemma-4-12b
-    validator: gemma-4-12b             # writer self-validates -> a genuine "answer under review -> checked/updated"
-    validator_prompt: validation-rewrite
-    validator_max_loops: 1
-    synthesis_prompt: synthesis
-    temporal_gate: enforce
-    staged: true
-    solo: true
-    knobs: {synthesizer: {temperature: 0}}
+  med-agent-team-staged-12b-validated:
+    label: Legacy staged checked 12B
+    topology: single
+    stages: *product
+    models: {answer: gemma-4-12b, review: gemma-4-12b, grounding: gemma-4-12b, indepth: gemma-4-12b}
+    prompts: {answer: synthesis-answer, review: validation-rewrite, indepth: synthesis-indepth}
+    policies: {output: product, temporal_gate: enforce, temporal_render: full}
+    capabilities: {staged: true, validation: true}
+    context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true}
+    knobs: {answer: {temperature: 0}}
 
-  # --- Product profiles (stage-composed; single profiles do not declare a fake orchestrator).
   single-12b-checked:
-    answer_model: gemma-4-12b
-    expert: null
-    validator: gemma-4-12b
-    validator_prompt: validation-rewrite
-    validator_max_loops: 1
-    synthesis_prompt: synthesis
-    temporal_gate: enforce
-    staged: true
-    solo: true
-    # Explicit opt-in (Gate 8): only THIS product profile's context-window pressure justifies the
-    # compacted temporal sidecar. Every research/batch level keeps the "full" default untouched.
-    temporal_render: compact
-    knobs: {synthesizer: {temperature: 0}}
+    label: Checked answer (12B)
+    topology: single
+    stages: *product
+    models: {answer: gemma-4-12b, review: gemma-4-12b, grounding: gemma-4-12b, indepth: gemma-4-12b}
+    prompts: {answer: synthesis-answer, review: validation-rewrite, indepth: synthesis-indepth}
+    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true}
+    capabilities: {staged: true, validation: true}
+    visibility: product
+    context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true}
+    knobs: {answer: {temperature: 0}}
 
   single-e4b-checked:
-    answer_model: gemma-e4b
-    expert: null
-    validator: gemma-e4b
-    validator_prompt: validation-rewrite
-    validator_max_loops: 1
-    synthesis_prompt: synthesis
-    temporal_gate: enforce
-    staged: true
-    solo: true
-    temporal_render: compact
-    knobs: {synthesizer: {temperature: 0}}
+    label: Fast checked answer (E4B)
+    topology: single
+    stages: *product
+    models: {answer: gemma-e4b, review: gemma-e4b, grounding: gemma-e4b, indepth: gemma-e4b}
+    prompts: {answer: synthesis-answer, review: validation-rewrite, indepth: synthesis-indepth}
+    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true}
+    capabilities: {staged: true, validation: true}
+    visibility: product
+    default: true
+    context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true}
+    knobs: {answer: {temperature: 0}}
 
   single-a4b-checked:
-    answer_model: gemma-26b
-    expert: null
-    validator: gemma-26b
-    validator_prompt: validation-rewrite
-    validator_max_loops: 1
-    synthesis_prompt: synthesis
-    temporal_gate: enforce
-    staged: true
-    solo: true
-    temporal_render: compact
-    knobs: {synthesizer: {temperature: 0}}
+    label: Efficient checked answer (A4B)
+    topology: single
+    stages: *product
+    models: {answer: gemma-26b, review: gemma-26b, grounding: gemma-26b, indepth: gemma-26b}
+    prompts: {answer: synthesis-answer, review: validation-rewrite, indepth: synthesis-indepth}
+    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true}
+    capabilities: {staged: true, validation: true}
+    visibility: product
+    context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true}
+    knobs: {answer: {temperature: 0}}
 
-  # --- Method arms: small-orch + Qwen validator vs the bare single, on the two strong writers (12B, A4B).
-  # The Answer uses the SAME chartsearchai prompt as the single arms + a COMPOSABLE Qwen validator
-  # (validation-strict, two_call=false), so single-vs-team isolates the scaffolding, not the prompt. No
-  # expert; the harness fires the In-Depth as a separate indepth-only leg, so the Answer is the bare envelope.
+  team-med-checked:
+    label: Checked medical team
+    topology: team
+    stages: *team_product
+    models: {orchestrator: gemma-e4b-q8, expert: medgemma-1.5-4b-q8, answer: qwen2.5-14b, review: gemma-4-12b, grounding: qwen2.5-14b, indepth: qwen2.5-14b}
+    prompts: {answer: synthesis-answer, review: validation-rewrite, indepth: synthesis-indepth, orchestrator: orchestrator, expert: medical_expert}
+    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true}
+    capabilities: {staged: true, validation: true}
+    visibility: product
+    context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true}
+
   med-agent-team-12b-qwenval:
-    orchestrator: gemma-e4b-q8
-    expert: null
-    synthesizer: gemma-4-12b
-    validator: qwen2.5-14b
-    validator_prompt: validation-rewrite
-    validator_max_loops: 1
-    synthesis_prompt: synthesis-chartsearchai
-    two_call: false
+    label: 12B team with Qwen review
+    topology: team
+    stages: *team_bare_reviewed
+    models: {orchestrator: gemma-e4b-q8, answer: gemma-4-12b, review: qwen2.5-14b}
+    prompts: {answer: synthesis-chartsearchai, review: validation-rewrite}
+    policies: {output: bare, temporal_gate: "off"}
+    capabilities: {validation: true}
 
-  med-agent-team-a4b-qwenval:        # same scaffolding, the A4B MoE writer
-    orchestrator: gemma-e4b-q8
-    expert: null
-    synthesizer: gemma-26b
-    validator: qwen2.5-14b
-    validator_prompt: validation-rewrite
-    validator_max_loops: 1
-    synthesis_prompt: synthesis-chartsearchai
-    two_call: false
+  med-agent-team-a4b-qwenval:
+    label: A4B team with Qwen review
+    topology: team
+    stages: *team_bare_reviewed
+    models: {orchestrator: gemma-e4b-q8, answer: gemma-26b, review: qwen2.5-14b}
+    prompts: {answer: synthesis-chartsearchai, review: validation-rewrite}
+    policies: {output: bare, temporal_gate: "off"}
+    capabilities: {validation: true}
 
-  # --- Dev-set lever arms (solo writer, NO orchestrator distraction — isolate each lever) ---
-  single-12b-coverage:               # completeness lever: bare 12B writer + the coverage synthesis prompt
-    orchestrator: gemma-4-12b
-    expert: null
-    synthesizer: gemma-4-12b
-    synthesis_prompt: synthesis-coverage
-    two_call: false
-    solo: true
+  single-12b-coverage:
+    label: Single 12B coverage prompt
+    topology: single
+    stages: *single_bare
+    models: {answer: gemma-4-12b}
+    prompts: {answer: synthesis-coverage}
+    policies: {output: bare, temporal_gate: "off"}
 
-  single-12b-rewriteval:             # rewrite validator on the bare writer (NO orchestrator) — isolates the validator
-    orchestrator: gemma-4-12b
-    expert: null
-    synthesizer: gemma-4-12b
-    validator: qwen2.5-14b
-    validator_prompt: validation-rewrite
-    validator_max_loops: 1
-    synthesis_prompt: synthesis-chartsearchai
-    two_call: false
-    solo: true
+  single-12b-rewriteval:
+    label: Single 12B with Qwen review
+    topology: single
+    stages: *single_bare_reviewed
+    models: {answer: gemma-4-12b, review: qwen2.5-14b}
+    prompts: {answer: synthesis-chartsearchai, review: validation-rewrite}
+    policies: {output: bare, temporal_gate: "off"}
+    capabilities: {validation: true}
 
-  single-12b-coverage-rewrite:       # both levers: coverage prompt + rewrite validator, bare writer
-    orchestrator: gemma-4-12b
-    expert: null
-    synthesizer: gemma-4-12b
-    validator: qwen2.5-14b
-    validator_prompt: validation-rewrite
-    validator_max_loops: 1
-    synthesis_prompt: synthesis-coverage
-    two_call: false
-    solo: true
+  single-12b-coverage-rewrite:
+    label: Single 12B coverage and review
+    topology: single
+    stages: *single_bare_reviewed
+    models: {answer: gemma-4-12b, review: qwen2.5-14b}
+    prompts: {answer: synthesis-coverage, review: validation-rewrite}
+    policies: {output: bare, temporal_gate: "off"}
+    capabilities: {validation: true}
 
-  # --- A4B writer (Gemma 26B-A4B MoE, ~4B active — the on-device candidate) mirror of the lever arms ---
   single-a4b-coverage:
-    orchestrator: gemma-26b
-    expert: null
-    synthesizer: gemma-26b
-    synthesis_prompt: synthesis-coverage
-    two_call: false
-    solo: true
+    label: Single A4B coverage prompt
+    topology: single
+    stages: *single_bare
+    models: {answer: gemma-26b}
+    prompts: {answer: synthesis-coverage}
+    policies: {output: bare, temporal_gate: "off"}
 
-  single-a4b-rewriteval:             # A4B + rewrite validator, NO orchestrator
-    orchestrator: gemma-26b
-    expert: null
-    synthesizer: gemma-26b
-    validator: qwen2.5-14b
-    validator_prompt: validation-rewrite
-    validator_max_loops: 1
-    synthesis_prompt: synthesis-chartsearchai
-    two_call: false
-    solo: true
+  single-a4b-rewriteval:
+    label: Single A4B with Qwen review
+    topology: single
+    stages: *single_bare_reviewed
+    models: {answer: gemma-26b, review: qwen2.5-14b}
+    prompts: {answer: synthesis-chartsearchai, review: validation-rewrite}
+    policies: {output: bare, temporal_gate: "off"}
+    capabilities: {validation: true}
 
-  single-a4b-coverage-rewrite:       # A4B + coverage prompt + rewrite validator
-    orchestrator: gemma-26b
-    expert: null
-    synthesizer: gemma-26b
-    validator: qwen2.5-14b
-    validator_prompt: validation-rewrite
-    validator_max_loops: 1
-    synthesis_prompt: synthesis-coverage
-    two_call: false
-    solo: true
+  single-a4b-coverage-rewrite:
+    label: Single A4B coverage and review
+    topology: single
+    stages: *single_bare_reviewed
+    models: {answer: gemma-26b, review: qwen2.5-14b}
+    prompts: {answer: synthesis-coverage, review: validation-rewrite}
+    policies: {output: bare, temporal_gate: "off"}
+    capabilities: {validation: true}
 
-  med-agent-team-12b-rewriteval:     # A/B vs -12b-qwenval: SAME team, the validator REWRITES instead of regenerating
-    orchestrator: gemma-e4b-q8
-    expert: null
-    synthesizer: gemma-4-12b
-    validator: qwen2.5-14b
-    validator_prompt: validation-rewrite   # rewrite mode: localize the error + adopt the validator's surgical fix
-    validator_max_loops: 1
-    synthesis_prompt: synthesis-chartsearchai
-    two_call: false
+  med-agent-team-12b-rewriteval:
+    label: 12B team rewrite review
+    topology: team
+    stages: *team_bare_reviewed
+    models: {orchestrator: gemma-e4b-q8, answer: gemma-4-12b, review: qwen2.5-14b}
+    prompts: {answer: synthesis-chartsearchai, review: validation-rewrite}
+    policies: {output: bare, temporal_gate: "off"}
+    capabilities: {validation: true}
 
-  med-agent-team-12b-date-warn:      # Wider temporal/date run: same 12B team, date contract prompt, gate WARN.
-    orchestrator: gemma-e4b-q8
-    expert: null
-    synthesizer: gemma-4-12b
-    validator: qwen2.5-14b
-    validator_prompt: validation-rewrite
-    validator_max_loops: 1
-    synthesis_prompt: synthesis-date-output-contract
-    temporal_gate: warn
-    two_call: false
+  med-agent-team-12b-date-warn:
+    label: 12B team date warning
+    topology: team
+    stages: *team_bare_reviewed
+    models: {orchestrator: gemma-e4b-q8, answer: gemma-4-12b, review: qwen2.5-14b}
+    prompts: {answer: synthesis-date-output-contract, review: validation-rewrite}
+    policies: {output: bare, temporal_gate: warn}
+    capabilities: {validation: true}
 
-  med-agent-team-high-date-warn:     # Wider temporal/date run: high team, date contract prompt, gate WARN.
-    orchestrator: gemma-31b
-    expert: medgemma-27b
-    synthesizer: qwen3.6-35b-q6
-    validator: gemma-31b
-    validator_max_loops: 1
-    synthesis_prompt: synthesis-date-output-contract
-    temporal_gate: warn
-    two_call: false
+  med-agent-team-high-date-warn:
+    label: High team date warning
+    topology: team
+    stages: *team_bare_reviewed
+    models: {orchestrator: gemma-31b, expert: medgemma-27b, answer: qwen3.6-35b-q6, review: gemma-31b}
+    prompts: {answer: synthesis-date-output-contract, review: validation}
+    policies: {output: bare, temporal_gate: warn}
+    capabilities: {validation: true}
 
-  single-12b-cite-or-abstain:        # prompt lever: 12B alone, cite-or-abstain Answer prompt, no validator
-    orchestrator: gemma-4-12b        # (solo -> orchestrator unused but a required field)
-    expert: null
-    synthesizer: gemma-4-12b
-    synthesis_prompt: synthesis-cite-or-abstain
-    two_call: false
-    solo: true
+  single-12b-cite-or-abstain:
+    label: Single 12B cite or abstain
+    topology: single
+    stages: *single_bare
+    models: {answer: gemma-4-12b}
+    prompts: {answer: synthesis-cite-or-abstain}
+    policies: {output: bare, temporal_gate: "off"}
 
-  # Two-call architecture IN-DEPTH legs (one per writer): no answer synthesis — elaborate the prior
-  # answer carried in the session history. The harness fires these as a separate same-session call.
   indepth-only-gemma-4-12b:
-    orchestrator: gemma-e4b-q8
-    expert: null
-    synthesizer: gemma-4-12b
-    two_call: false
-    indepth_only: true
+    label: In-Depth only 12B
+    topology: leg
+    stages: [context, indepth]
+    models: {indepth: gemma-4-12b}
+    prompts: {indepth: synthesis-indepth}
+    policies: {output: indepth, temporal_gate: "off"}
+    visibility: internal
 
   indepth-only-qwen2.5-14b:
-    orchestrator: gemma-e4b-q8
-    expert: null
-    synthesizer: qwen2.5-14b
-    two_call: false
-    indepth_only: true
+    label: In-Depth only Qwen 14B
+    topology: leg
+    stages: [context, indepth]
+    models: {indepth: qwen2.5-14b}
+    prompts: {indepth: synthesis-indepth}
+    policies: {output: indepth, temporal_gate: "off"}
+    visibility: internal
 
   indepth-only-medgemma-27b:
-    orchestrator: gemma-e4b-q8
-    expert: null
-    synthesizer: medgemma-27b
-    two_call: false
-    indepth_only: true
+    label: In-Depth only MedGemma 27B
+    topology: leg
+    stages: [context, indepth]
+    models: {indepth: medgemma-27b}
+    prompts: {indepth: synthesis-indepth}
+    policies: {output: indepth, temporal_gate: "off"}
+    visibility: internal
 
   indepth-only-lfm2-24b-a2b:
-    orchestrator: gemma-e4b-q8
-    expert: null
-    synthesizer: lfm2-24b-a2b
-    two_call: false
-    indepth_only: true
+    label: In-Depth only LFM2 24B
+    topology: leg
+    stages: [context, indepth]
+    models: {indepth: lfm2-24b-a2b}
+    prompts: {indepth: synthesis-indepth}
+    policies: {output: indepth, temporal_gate: "off"}
+    visibility: internal
