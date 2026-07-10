@@ -55,6 +55,12 @@ Small charts retain their original chart text. Oversized charts use stable manda
 
 Trace packages are appended to `$TEAM_TRACE_DIR/trace.jsonl` (default `/app/trace`) and include the final answer, original draft when applicable, context selection, temporal facts summary, Answer and In-Depth gate results, final references, model roles, sampling settings, and ordered stage steps.
 
+### Drug-safety data
+
+The deterministic drug-safety layer accepts either the bundled curated JSON source or an operator-provided WHO-ATC export through `DRUG_SAFETY_SOURCE_FORMAT` and `DRUG_SAFETY_DATASET_PATH`. Curated cross-reactivity groups load independently through `DRUG_SAFETY_CROSS_REACTIVITY_PATH`, so cross-branch rules work with either entry source. The bundled seed group covers the NSAID branches `M01AE` and `N02BA`; deployments remain responsible for reviewing and extending this clinical data.
+
+Weight-aware dose checks read the newest fresh numeric Querystore `obs` matching `DRUG_SAFETY_WEIGHT_CONCEPT_UUID` (CIEL weight `5089...` by default). `DRUG_SAFETY_WEIGHT_MAX_AGE_DAYS` defaults to 90. Set the concept value to `none` to disable only the weight-aware arm. Missing, stale, malformed, or unavailable optional safety data degrades to no additional warning and never interrupts an answer.
+
 ## Endpoints
 
 - `POST /v1/chat/completions`: blocking or staged streaming profile execution.
@@ -101,7 +107,7 @@ server/
   context_sources.py   sources, ledger, exact budgets, deterministic selector
   temporal.py          temporal facts and deterministic gates
   team.py              reusable answer/review/gather/grounding stage helpers
-  drug_safety.py       deterministic curated JSON and WHO-ATC safety checks
+  drug_safety.py       deterministic dosing, interaction, and contraindication checks
   kb.py                provenance-bearing static clinical knowledge search
   prompts/             file-backed stage prompts
 ```

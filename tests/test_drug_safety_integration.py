@@ -54,6 +54,44 @@ _PATIENT_SOURCE = patient_source_registry(
     _WARFARIN_RECORDS,
 )
 
+_WEIGHT_SOURCE = patient_source_registry(
+    "Patient: 40-year-old Female\n\n[1] Patient demographics\n[2] (2026-06-20) Weight: 50 kg\n",
+    [
+        {
+            "index": 1,
+            "resourceType": "patient",
+            "resourceUuid": "patient-1",
+            "date": None,
+            "text": "Patient demographics",
+        },
+        {
+            "index": 2,
+            "resourceType": "obs",
+            "resourceUuid": "weight-1",
+            "date": "2026-06-20",
+            "text": "Weight: 50 kg",
+        }
+    ],
+    [
+        {
+            "resourceType": "patient",
+            "resourceUuid": "patient-1",
+            "date": None,
+            "metadata": {"age_years": 40},
+        },
+        {
+            "resourceType": "obs",
+            "resourceUuid": "weight-1",
+            "date": "2026-06-20",
+            "metadata": {
+                "concept_uuid": "5089AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                "value_numeric": 50.0,
+                "units": "kg",
+            },
+        }
+    ],
+)
+
 
 async def _fake_chat_ibuprofen_answer(
     client,
@@ -124,6 +162,36 @@ def test_profile_drain_attaches_safety_warnings_when_enabled():
             "detail": "interacts with active order warfarin — increased risk of GI bleeding",
         },
     ]
+
+
+def test_profile_drain_uses_fresh_querystore_weight_for_per_dose_limit():
+    async def fake_weighted_answer(*_args, **_kwargs):
+        return {
+            "content": json.dumps({
+                "answer": "Ibuprofen 600 mg every 8 hours can be given.",
+                "citations": [],
+                "blocks": [],
+            })
+        }
+
+    with patch.object(team, "_chat", side_effect=fake_weighted_answer):
+        out = run(
+            run_profile(
+                _answer_profile(drug_safety=True),
+                QUESTION_MESSAGES,
+                response_format={"type": "json_schema"},
+                temperature=0.0,
+                max_tokens=1024,
+                patient="patient-1",
+                source_registry=_WEIGHT_SOURCE,
+            )
+        )
+
+    warnings = json.loads(out)["safetyWarnings"]
+    assert len(warnings) == 1
+    assert warnings[0]["type"] == "overdose"
+    assert "10 mg/kg" in warnings[0]["detail"]
+    assert "50 kg" in warnings[0]["detail"]
 
 
 def test_profile_drain_omits_safety_warnings_key_when_disabled_default():
