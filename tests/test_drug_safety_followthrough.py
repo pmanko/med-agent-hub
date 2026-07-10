@@ -97,6 +97,17 @@ def test_latest_fresh_weight_is_read_from_querystore_obs_records():
     assert context.weight_kg == 50.0
 
 
+def test_weight_observation_without_explicit_kilogram_units_is_ignored():
+    records = [
+        {"resourceType": "obs", "date": "2026-06-19", "metadata": {
+            "concept_uuid": ds.DEFAULT_WEIGHT_CONCEPT_UUID, "value_numeric": 110.0, "units": "lb"}},
+        {"resourceType": "obs", "date": "2026-06-20", "metadata": {
+            "concept_uuid": ds.DEFAULT_WEIGHT_CONCEPT_UUID, "value_numeric": 50.0}},
+    ]
+    context = ds.build_patient_context(records, "2026-06-20", _atc_dataset())
+    assert context.weight_kg is None
+
+
 def test_stale_weight_and_none_sentinel_do_not_drive_dose_check():
     record = {"resourceType": "obs", "date": "2025-01-01", "metadata": {
         "concept_uuid": ds.DEFAULT_WEIGHT_CONCEPT_UUID, "value_numeric": 50.0, "units": "kg"}}

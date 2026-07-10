@@ -33,6 +33,7 @@ _CROSS_REACTIVITY_PATH = os.environ.get(
 DEFAULT_WEIGHT_CONCEPT_UUID = "5089AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 DEFAULT_WEIGHT_MAX_AGE_DAYS = 90
 _DISABLED_SENTINEL = "none"
+_KILOGRAM_UNITS = {"kg", "kilogram", "kilograms"}
 
 _ATC_SUBGROUP_PREFIX_LENGTH = 5
 
@@ -486,6 +487,9 @@ def build_patient_context(records: List[Dict[str, Any]], reference_date: Optiona
                     condition_tokens.add(meta[key])
 
         elif rtype == "obs" and weight_enabled and meta.get("concept_uuid") == configured_weight_concept:
+            units = _clean_text(meta.get("units"))
+            if units is None or units.casefold() not in _KILOGRAM_UNITS:
+                continue
             try:
                 value = float(meta.get("value_numeric"))
                 observed = date.fromisoformat(str(rec.get("date") or "")[:10])
@@ -519,7 +523,7 @@ def _related_to_any(order: DrugReferenceEntry, question_drugs: List[DrugReferenc
                     dataset: DrugReferenceDataset) -> bool:
     order_subgroups = order.atc_subgroups()
     return any(
-        (order_subgroups and order_subgroups & question_drug.atc_subgroups())
+        bool(order_subgroups & question_drug.atc_subgroups())
         or dataset.shared_group(order, question_drug) is not None
         for question_drug in question_drugs
     )
