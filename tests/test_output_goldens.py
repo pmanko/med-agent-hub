@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -24,6 +25,9 @@ IN_DEPTH = json.dumps(
         ]
     }
 )
+REVIEW_VERDICT = json.dumps(
+    {"answer_ok": True, "errors": [], "corrected_answer": ""}
+)
 RESPONSE_FORMAT = {
     "type": "json_schema",
     "json_schema": {"name": "chart_answer", "schema": {}},
@@ -33,6 +37,31 @@ MESSAGES = [
     {"role": "user", "content": "[1] Lisinopril 10 mg"},
     {"role": "user", "content": "What meds is the patient on?"},
 ]
+REVIEW_MESSAGES = [
+    {"role": "system", "content": "You are a clinical assistant."},
+    {"role": "user", "content": "[1] Aspirin active"},
+    {"role": "assistant", "content": "The patient is taking aspirin [1]."},
+    {
+        "role": "user",
+        "content": "Review this answer:\n```json\n"
+        + json.dumps(
+            {
+                "schema_version": "answer_to_review.v1",
+                "original_question": "What medications?",
+                "answer": "The patient is taking aspirin [1].",
+                "citations": [1],
+                "blocks": [],
+            }
+        )
+        + "\n```",
+    },
+]
+
+
+class _FixedDateTime(datetime):
+    @classmethod
+    def now(cls, tz=None):
+        return cls(2026, 7, 9, 12, 0, 0, tzinfo=tz)
 
 
 async def _fake_chat(
@@ -47,13 +76,15 @@ async def _fake_chat(
     if response_format is None:
         return {"content": "ok", "tool_calls": None}
     schema = (response_format.get("json_schema") or {}).get("name")
+    if schema == "rewrite_verdict":
+        return {"content": REVIEW_VERDICT}
     return {"content": IN_DEPTH if schema == "in_depth" else ANSWER}
 
 
 def _run(**kwargs) -> str:
     with patch.object(team, "_chat", side_effect=_fake_chat), patch.object(
         team, "_write_trace"
-    ):
+    ), patch.object(team, "datetime", _FixedDateTime):
         return asyncio.run(
             team.run_team(
                 kwargs.pop("messages", MESSAGES),
@@ -86,6 +117,16 @@ def _run(**kwargs) -> str:
                 "synthesizer_prompt": "synthesis-indepth",
                 "indepth_only": True,
                 "solo": True,
+            },
+        ),
+        (
+            "raw-answer-review.json",
+            {
+                "messages": REVIEW_MESSAGES,
+                "synthesizer_prompt": "validation-rewrite",
+                "two_call": False,
+                "solo": True,
+                "answer_review": True,
             },
         ),
         (

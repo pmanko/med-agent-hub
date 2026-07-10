@@ -1,0 +1,1 @@
+{"answer": "The patient is taking aspirin [1].", "citations": [1], "blocks": [], "confidence": {"answer": {"level": "green", "note": ""}}, "answerValidation": {"status": "checked", "label": "Checked", "summary": "Answer checked against chart and deterministic temporal/date rules.", "issues": [], "completedAt": "2026-07-09T12:00:00+00:00"}}
