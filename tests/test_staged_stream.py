@@ -295,6 +295,76 @@ def test_staged_stream_without_validator_skips_validation_phase(monkeypatch):
     assert dict(events)["done"]["inDepth"]["status"] == "complete"
 
 
+def test_answer_done_timing_separates_answer_work_from_pipeline_overhead(monkeypatch):
+    _stub_common(monkeypatch)
+    traces = []
+
+    async def fake_answer(*_args, **_kwargs):
+        return ("Ans [1].", [1], [])
+
+    async def fake_validate(_client, **kwargs):
+        return (
+            kwargs["answer_text"],
+            kwargs["citations"],
+            kwargs["blocks"],
+            {"level": "green", "note": ""},
+        )
+
+    monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
+    monkeypatch.setattr(team, "_validate_and_refine_answer", fake_validate)
+    monkeypatch.setattr(
+        team, "_write_trace", lambda *_args, **kwargs: traces.append(kwargs)
+    )
+
+    _collect(_product_profile())
+
+    timing = next(
+        step for step in traces[0]["steps"] if step["role"] == "answer_timing"
+    )
+    assert timing["answer_stage_ms"] >= 0
+    assert timing["answer_to_done_ms"] >= timing["answer_stage_ms"]
+    assert timing["pipeline_overhead_ms"] == (
+        timing["answer_to_done_ms"] - timing["answer_stage_ms"]
+    )
+    assert 0 <= timing["pipeline_overhead_ratio"] <= 1
+
+
+def test_non_substantive_product_answer_withholds_indepth(monkeypatch):
+    _stub_common(monkeypatch)
+
+    async def fallback_answer(*_args, **_kwargs):
+        return (team.FALLBACK_ANSWER, [], [])
+
+    async def fallback_validate(_client, **kwargs):
+        return (
+            kwargs["answer_text"],
+            kwargs["citations"],
+            kwargs["blocks"],
+            {"level": "red", "note": "The Answer is not substantive."},
+        )
+
+    async def indepth_must_not_run(*_args, **_kwargs):
+        raise AssertionError("In-Depth must not run from a non-substantive Answer")
+
+    monkeypatch.setattr(team, "_synthesize_answer", fallback_answer)
+    monkeypatch.setattr(team, "_validate_and_refine_answer", fallback_validate)
+    monkeypatch.setattr(team, "_gen_indepth", indepth_must_not_run)
+    monkeypatch.setattr(team, "_synthesize_indepth", indepth_must_not_run)
+
+    events = _collect(_product_profile())
+    assert [name for name, _payload in events] == [
+        "answer_done",
+        "indepth_pending",
+        "indepth_error",
+        "done",
+    ]
+    final = dict(events)["done"]
+    assert final["answer"] == team.FALLBACK_ANSWER
+    assert final["inDepth"]["status"] == "needs_review"
+    assert final["inDepth"]["answer"] == ""
+    assert "not substantive" in final["inDepth"]["error"]
+
+
 def test_stage_drain_returns_final_post_review_envelope(monkeypatch):
     _stub_common(monkeypatch)
 
@@ -443,6 +513,76 @@ def test_ground_references_verified_for_an_entailed_paraphrase_despite_low_word_
     assert len(calls) == 1
 
 
+def test_ground_references_checks_a_multi_citation_claim_against_combined_sources(
+    monkeypatch,
+):
+    fake_chat, calls = _fake_chat_returning_verdicts([["YES"]])
+    monkeypatch.setattr(team, "_chat", fake_chat)
+    statement = "Weight decreased from 74 kg on 2006-03-16 to 71 kg on 2006-06-06 [1][2]."
+    refs = [
+        {
+            "index": 1,
+            "resourceType": "obs",
+            "resourceUuid": "weight-1",
+            "date": "2006-03-16",
+            "usage": [{"location": "answer", "text": statement}],
+        },
+        {
+            "index": 2,
+            "resourceType": "obs",
+            "resourceUuid": "weight-2",
+            "date": "2006-06-06",
+            "usage": [{"location": "answer", "text": statement}],
+        },
+    ]
+    mappings = [
+        {"index": 1, "date": "2006-03-16", "text": "Weight (kg): 74 kg"},
+        {"index": 2, "date": "2006-06-06", "text": "Weight (kg): 71 kg"},
+    ]
+
+    async def _run():
+        return await team._ground_references(None, "M", statement, refs, mappings)
+
+    grounded = asyncio.run(_run())
+    assert [item["groundingStatus"] for item in grounded] == ["verified", "verified"]
+    assert [item["groundingScope"] for item in grounded] == ["source_set", "source_set"]
+    assert [item["groundingGroup"] for item in grounded] == [[1, 2], [1, 2]]
+    prompt = calls[0]["messages"][0]["content"]
+    assert prompt.count("PAIR ") == 1
+    assert "[1] 2006-03-16 Weight (kg): 74 kg" in prompt
+    assert "[2] 2006-06-06 Weight (kg): 71 kg" in prompt
+
+
+def test_ground_references_caps_sources_within_one_claim(monkeypatch):
+    fake_chat, _calls = _fake_chat_returning_verdicts([["YES"]])
+    monkeypatch.setattr(team, "_chat", fake_chat)
+    total = team._ENTAILMENT_MAX_SOURCES_PER_CLAIM + 3
+    statement = "A collectively supported claim " + "".join(
+        f"[{index}]" for index in range(1, total + 1)
+    )
+    refs = [
+        {
+            "index": index,
+            "usage": [{"location": "answer", "text": statement}],
+            "resolutionStatus": "resolved",
+        }
+        for index in range(1, total + 1)
+    ]
+    mappings = [
+        {"index": index, "date": "2026-01-01", "text": f"source {index}"}
+        for index in range(1, total + 1)
+    ]
+
+    async def _run():
+        return await team._ground_references(None, "M", statement, refs, mappings)
+
+    grounded = asyncio.run(_run())
+    assert [item["groundingStatus"] for item in grounded].count("verified") == (
+        team._ENTAILMENT_MAX_SOURCES_PER_CLAIM
+    )
+    assert [item["groundingStatus"] for item in grounded].count("unchecked") == 3
+
+
 def test_ground_references_unsupported_for_high_overlap_but_negated_statement(
     monkeypatch,
 ):
@@ -575,6 +715,31 @@ def test_final_unsupported_grounding_marks_answer_needs_review(monkeypatch):
     final = dict(_collect(_product_profile()))["done"]
     assert final["answerValidation"]["status"] == "needs_review"
     assert final["answerValidation"]["issues"][-1]["id"] == "citation_grounding"
+
+
+def test_final_unchecked_grounding_cannot_leave_answer_checked(monkeypatch):
+    _stub_common(monkeypatch)
+
+    async def fake_answer(*_args, **_kwargs):
+        return "Claim with unavailable support [1].", [1], []
+
+    async def unchecked(_client, _model, _answer, references, _mappings):
+        output = []
+        for reference in references:
+            item = dict(reference)
+            item["grounded"] = None
+            item["groundingStatus"] = "unchecked"
+            output.append(item)
+        return output
+
+    monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
+    monkeypatch.setattr(team, "_ground_references", unchecked)
+
+    final = dict(_collect(_product_profile()))["done"]
+    assert final["answerValidation"]["status"] == "unavailable"
+    assert final["answerValidation"]["issues"][-1]["id"] == (
+        "citation_grounding_unavailable"
+    )
 
 
 def test_indepth_citation_cannot_inherit_answer_verified_verdict(monkeypatch):
@@ -832,7 +997,7 @@ def test_team_profile_stream_gathers_via_the_tool_loop(monkeypatch):
         _client, model, _messages, *, tools=None, response_format=None, **_kwargs
     ):
         calls.append(model)
-        if response_format is not None:
+        if response_format is not None or model == "M":
             return {
                 "content": json.dumps({"answer": "Ans.", "citations": [], "blocks": []})
             }

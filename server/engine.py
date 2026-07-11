@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 from dataclasses import dataclass, field
 from typing import (
     Any,
@@ -550,6 +551,8 @@ async def _execute_stages(
         request.profile, request.context
     )
     gate_count = 0
+    execution_started = time.perf_counter()
+    answer_stage_ms: Optional[int] = None
     product = request.profile.output_mode == "product"
     budget_policy: Optional[stages.ChatBudgetPolicy] = None
     budget_token = None
@@ -618,6 +621,7 @@ async def _execute_stages(
                     continue
 
                 if stage == "answer":
+                    answer_started = time.perf_counter()
                     (
                         state.answer_text,
                         state.citations,
@@ -674,6 +678,7 @@ async def _execute_stages(
                         max_loops=int(request.profile.policies.get("review_loops", 1)),
                         steps=state.steps,
                     )
+                    answer_stage_ms = round((time.perf_counter() - answer_started) * 1000)
                     continue
 
                 if stage == "gate":
@@ -774,6 +779,25 @@ async def _execute_stages(
                     )
                     prior_validation = state.answer_validation
                     state.answer_validation = fast_validation
+                    answer_to_done_ms = round(
+                        (time.perf_counter() - execution_started) * 1000
+                    )
+                    pipeline_overhead_ms = max(
+                        0, answer_to_done_ms - (answer_stage_ms or 0)
+                    )
+                    state.steps.append(
+                        {
+                            "role": "answer_timing",
+                            "answer_stage_ms": answer_stage_ms,
+                            "answer_to_done_ms": answer_to_done_ms,
+                            "pipeline_overhead_ms": pipeline_overhead_ms,
+                            "pipeline_overhead_ratio": round(
+                                pipeline_overhead_ms / answer_to_done_ms, 4
+                            )
+                            if answer_to_done_ms
+                            else 0.0,
+                        }
+                    )
                     yield (
                         "answer_done",
                         _stream_payload(
@@ -932,6 +956,12 @@ async def _execute_stages(
                         for reference in state.references
                         if reference.get("groundingStatus") == "unsupported"
                     ]
+                    unchecked = [
+                        reference
+                        for reference in state.references
+                        if reference.get("resolutionStatus") == "resolved"
+                        and reference.get("groundingStatus") == "unchecked"
+                    ]
                     if unsupported:
                         prior = state.answer_validation or {}
                         state.answer_validation = stages._answer_validation_wire(
@@ -950,6 +980,25 @@ async def _execute_stages(
                             ],
                             original_answer=prior.get("originalAnswer"),
                         )
+                    elif unchecked:
+                        prior = state.answer_validation or {}
+                        if prior.get("status") != "needs_review":
+                            state.answer_validation = stages._answer_validation_wire(
+                                "unavailable",
+                                summary="Citation support checking was unavailable for one or more sources.",
+                                issues=list(prior.get("issues") or [])
+                                + [
+                                    {
+                                        "id": "citation_grounding_unavailable",
+                                        "status": "warn",
+                                        "severity": "warn",
+                                        "reason": "Citation support could not be checked.",
+                                        "source_indices": [reference.get("index")],
+                                    }
+                                    for reference in unchecked
+                                ],
+                                original_answer=prior.get("originalAnswer"),
+                            )
                     continue
 
                 if stage == "indepth":
@@ -963,6 +1012,17 @@ async def _execute_stages(
                                 }
                             ),
                         )
+                    if product and not stages._is_substantive_answer(state.answer_text):
+                        state.indepth_error = (
+                            "In-Depth was withheld because the final Answer was not substantive."
+                        )
+                        state.steps.append(
+                            {
+                                "role": "indepth_withheld",
+                                "reason": "non-substantive-answer",
+                            }
+                        )
+                        continue
                     prior_answer = (
                         stages._latest_assistant_text(state.messages)
                         if request.profile.output_mode == "indepth"
@@ -1152,7 +1212,10 @@ async def _execute_stages(
                         else:
                             existing["grounded"] = True
                             existing["groundingStatus"] = "verified"
-                    if state.indepth_gate["status"] == "needs_review":
+                    if (
+                        state.indepth_gate["status"] == "needs_review"
+                        and not state.indepth_error
+                    ):
                         state.indepth_error = (
                             "In-Depth was withheld because deterministic temporal checks "
                             "rejected every claim."

@@ -297,6 +297,9 @@ def _claim_fragments_for_index(answer: str, index: int) -> List[str]:
 
 _ENTAILMENT_MAX_PAIRS = 16  # beyond this, references keep an "unchecked" verdict rather than an
                             # unbounded batch call — mirrors the Java verifier's cap.
+_ENTAILMENT_MAX_SOURCES_PER_CLAIM = 8
+_ENTAILMENT_SOURCE_CHARS = 3000
+_ENTAILMENT_MAX_SOURCE_SET_CHARS = 12000
 
 _ENTAILMENT_SYSTEM_PROMPT = (
     "You are a strict clinical fact-checker. For each PAIR, decide whether the SOURCE record "
@@ -381,40 +384,73 @@ async def _ground_references(
     references: List[Dict[str, Any]],
     mappings: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
-    """Attach final grounding verdicts to references for the final post-review answer, via ONE
-    batched LLM entailment call (replaces the earlier lexical token-overlap heuristic, which could
-    both miss paraphrases and pass negated/different-person statements that merely share words with
-    the source)."""
+    """Ground final claims against their cited source sets in one bounded entailment call.
+
+    A sentence may rely on multiple citations collectively (for example, two dated weights support
+    a change claim). Grouping identical usage text prevents each source from being incorrectly asked
+    to support the entire multi-source sentence by itself.
+    """
     text_by_index = {
         m.get("index"): " ".join(str(p) for p in (m.get("date"), m.get("text")) if p)
         for m in (mappings or [])
         if isinstance(m.get("index"), int)
     }
 
-    claim_source: List[Tuple[str, str]] = []  # (claim, source) per reference, in order
-    for ref in references or []:
+    groups: List[Dict[str, Any]] = []
+    group_by_key: Dict[Tuple[str, str, str], int] = {}
+    groups_by_reference: List[List[int]] = [[] for _ in (references or [])]
+    for ref_position, ref in enumerate(references or []):
         idx = ref.get("index")
         idx = idx if isinstance(idx, int) else -1
-        usage_text = [
-            str(usage.get("text") or "")
+        source = str(text_by_index.get(idx) or "").strip()
+        usages = [
+            usage
             for usage in (ref.get("usage") or [])
             if isinstance(usage, dict)
         ]
-        claim = " ".join(
-            _INLINE_CITATION_RE.sub("", fragment)
-            for fragment in (
-                usage_text or _claim_fragments_for_index(answer or "", idx)
+        if not usages:
+            usages = [
+                {"location": "answer", "text": fragment}
+                for fragment in _claim_fragments_for_index(answer or "", idx)
+            ]
+        for usage in usages:
+            claim = _INLINE_CITATION_RE.sub("", str(usage.get("text") or "")).strip()
+            if not claim or not source:
+                continue
+            key = (
+                str(usage.get("location") or "answer"),
+                str(usage.get("path") or ""),
+                claim,
             )
-        ).strip()
-        source = str(text_by_index.get(idx) or "").strip()
-        claim_source.append((claim, source))
+            group_position = group_by_key.get(key)
+            if group_position is None:
+                group_position = len(groups)
+                group_by_key[key] = group_position
+                groups.append({"claim": claim, "sources": [], "references": []})
+            group = groups[group_position]
+            if (
+                ref_position not in group["references"]
+                and len(group["references"]) < _ENTAILMENT_MAX_SOURCES_PER_CLAIM
+            ):
+                remaining = _ENTAILMENT_MAX_SOURCE_SET_CHARS - sum(
+                    len(item) for item in group["sources"]
+                )
+                if remaining <= 0:
+                    continue
+                source_item = f"[{idx}] {source}"[: min(remaining, _ENTAILMENT_SOURCE_CHARS)]
+                group["references"].append(ref_position)
+                group["sources"].append(source_item)
+            if (
+                ref_position in group["references"]
+                and group_position not in groups_by_reference[ref_position]
+            ):
+                groups_by_reference[ref_position].append(group_position)
 
-    checkable_positions = [
-        i for i, (claim, source) in enumerate(claim_source) if claim and source
-    ][:_ENTAILMENT_MAX_PAIRS]
+    checkable_positions = list(range(min(len(groups), _ENTAILMENT_MAX_PAIRS)))
     pairs = [
-        (claim_source[i][1], claim_source[i][0]) for i in checkable_positions
-    ]  # (source, statement)
+        ("\n".join(groups[i]["sources"]), groups[i]["claim"])
+        for i in checkable_positions
+    ]
     verdicts = await _entailment_verdicts(client, model, pairs) if pairs else []
     verdict_by_position = dict(zip(checkable_positions, verdicts))
 
@@ -424,7 +460,16 @@ async def _ground_references(
         if out.get("resolutionStatus") == "unresolved":
             grounded_refs.append(out)
             continue
-        verdict = verdict_by_position.get(i)
+        reference_verdicts = [
+            verdict_by_position.get(group_position)
+            for group_position in groups_by_reference[i]
+        ]
+        if not reference_verdicts or any(v is None for v in reference_verdicts):
+            verdict = None
+        elif any(v is False for v in reference_verdicts):
+            verdict = False
+        else:
+            verdict = True
         out["grounded"] = verdict
         out["groundingStatus"] = (
             "verified"
@@ -433,6 +478,19 @@ async def _ground_references(
             if verdict is False
             else "unchecked"
         )
+        source_set = sorted(
+            {
+                references[position].get("index")
+                for group_position in groups_by_reference[i]
+                for position in groups[group_position]["references"]
+                if isinstance(references[position].get("index"), int)
+            }
+        )
+        if len(source_set) > 1:
+            out["groundingScope"] = "source_set"
+            out["groundingGroup"] = source_set
+        elif source_set:
+            out["groundingScope"] = "record"
         grounded_refs.append(out)
     return grounded_refs
 

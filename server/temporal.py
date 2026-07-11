@@ -91,6 +91,8 @@ _CONCEPT_STOP_TOKENS = {
     "time",
     "times",
     "number",
+    "count",
+    "counts",
     "value",
     "values",
     "measurement",
@@ -1186,7 +1188,11 @@ def gate_indepth_claims(
             kept.append(claim)
             continue
         patch = str(gate.get("patch_answer") or "").strip()
-        if patch:
+        patch_citations = {
+            value for value in gate.get("patch_citations") or [] if isinstance(value, int)
+        }
+        original_citations = set(citations)
+        if patch and patch_citations and patch_citations <= original_citations:
             kept.append(patch)
         else:
             removed.append(index)
