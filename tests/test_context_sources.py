@@ -19,6 +19,7 @@ from server.context_sources import (
     SourceRegistry,
     StaticKnowledgeSource,
     fit_message_history,
+    _ranked_records,
     select_context,
 )
 
@@ -361,8 +362,40 @@ def test_oversized_selection_is_stable_and_records_reasons():
     assert first == second
     assert first.mode == "selected"
     assert first.included_ids[:2] == ("safety", "exact")
+    assert [(item.stable_id, item.reason) for item in first.included[:2]] == [
+        ("safety", "mandatory"),
+        ("exact", "exact_match"),
+    ]
     assert first.excluded
     assert all(item.reason for item in first.excluded)
+
+
+def test_exact_identifier_matching_does_not_use_numeric_substrings():
+    records = (
+        EvidenceRecord("wrong", "inline", 1, "Obs", "w", "2026-01-02", "Code 312 unrelated"),
+        EvidenceRecord("right", "inline", 1, "Obs", "r", "2026-01-01", "Code 12 relevant"),
+    )
+
+    ranked = _ranked_records(records, "What happened for code 12?")
+
+    assert [(record.stable_id, reason) for record, reason in ranked] == [
+        ("right", "exact_match"),
+        ("wrong", "ranked"),
+    ]
+
+
+def test_exact_quoted_phrase_matching_uses_token_boundaries():
+    records = (
+        EvidenceRecord("wrong", "inline", 1, "Obs", "w", "2026-01-02", "Code 123 unrelated"),
+        EvidenceRecord("right", "inline", 1, "Obs", "r", "2026-01-01", "Code 12 relevant"),
+    )
+
+    ranked = _ranked_records(records, 'What happened for "code 12"?')
+
+    assert [(record.stable_id, reason) for record, reason in ranked] == [
+        ("right", "exact_match"),
+        ("wrong", "ranked"),
+    ]
 
 
 def test_mandatory_context_overflow_abstains_instead_of_truncating():

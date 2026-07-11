@@ -17,6 +17,8 @@ Run: pytest tests/test_validator.py
 import asyncio
 import json
 
+import pytest
+
 from server import team
 from tests.factories import run_profile, team_profile
 
@@ -26,6 +28,15 @@ _MESSAGES = [
     {"role": "user", "content": "the question"},
 ]
 _RF = {"type": "json_schema", "json_schema": {"name": "chart_answer"}}
+
+
+@pytest.fixture(autouse=True)
+def _restore_chat_after_test():
+    original_chat = team._chat
+    try:
+        yield
+    finally:
+        team._chat = original_chat
 
 
 def _factory(calls, verdicts, iv_drops=None):

@@ -47,10 +47,10 @@ def _stub_common(monkeypatch):
         )
 
     async def fake_indepth(*_a, **_k):
-        return (["claim one", "claim two"], {"level": "green", "note": ""})
+        return (["claim one [1]", "claim two [2]"], {"level": "green", "note": ""})
 
     async def fake_unreviewed_indepth(*_a, **_k):
-        return ["claim one", "claim two"]
+        return ["claim one [1]", "claim two [2]"]
 
     async def fake_ground(_client, _model, _answer, references, _mappings):
         # Deterministic stand-in for the real entailment call: these sequencing/wiring tests care
@@ -181,14 +181,14 @@ def test_staged_stream_with_validator_emits_full_phase_sequence(monkeypatch):
     assert fast_ref["resolutionStatus"] == "resolved"
     assert fast_ref["groundingStatus"] == "checking"
     assert fast_ref["usage"] == [{"location": "answer", "text": "Ans [1]."}]
-    # answer_validation: the correction is surfaced (edited + original), refs re-resolved for the new citation
+    # answer_validation: correction and final grounding land atomically for the post-review answer.
     assert ev["answer_validation"]["answerValidation"]["status"] == "edited"
     assert ev["answer_validation"]["answerValidation"]["originalAnswer"] == "Ans [1]."
     checked_ref = ev["answer_validation"]["references"][0]
     assert checked_ref["index"] == 2
     assert checked_ref["resourceUuid"] == "u2"
     assert checked_ref["resolutionStatus"] == "resolved"
-    assert checked_ref["groundingStatus"] == "checking"
+    assert checked_ref["groundingStatus"] == "verified"
     # done: in-depth complete
     assert ev["done"]["inDepth"]["status"] == "complete"
     assert "claim one" in ev["done"]["inDepth"]["answer"]
@@ -232,6 +232,37 @@ def test_post_review_punctuation_rewrite_preserves_usable_answer_and_needs_revie
     assert events["done"]["answer"] == "Useful answer [1]."
     assert events["done"]["answerValidation"]["status"] == "needs_review"
     assert events["done"]["confidence"]["answer"]["level"] == "red"
+
+
+def test_preliminary_problem_stays_validating_until_configured_review_finishes(
+    monkeypatch,
+):
+    _stub_common(monkeypatch)
+
+    async def fake_answer(*_args, **_kwargs):
+        return "Claim with a missing source [99].", [99], []
+
+    async def fake_validate(_client, **kwargs):
+        return (
+            kwargs["answer_text"],
+            kwargs["citations"],
+            kwargs["blocks"],
+            {"level": "green", "note": ""},
+        )
+
+    async def clean_review(*_args, **_kwargs):
+        return {"answer_ok": True, "errors": []}
+
+    monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
+    monkeypatch.setattr(team, "_ensure_substantive_answer", fake_validate)
+    monkeypatch.setattr(team, "_validate_answer_rewrite", clean_review)
+
+    events = dict(_collect(_product_profile(review_model="V")))
+
+    fast_validation = events["answer_done"]["answerValidation"]
+    assert fast_validation["status"] == "validating"
+    assert any(issue["id"] == "citation_resolution" for issue in fast_validation["issues"])
+    assert events["answer_validation"]["answerValidation"]["status"] == "needs_review"
 
 
 def test_indepth_unresolved_citation_is_not_displayed(monkeypatch):
@@ -288,9 +319,11 @@ def test_staged_stream_without_validator_skips_validation_phase(monkeypatch):
     events = _collect(_product_profile())
     names = [n for n, _ in events]
     assert names == ["answer_done", "indepth_pending", "indepth_done", "done"]
-    # No LLM review event, but the deterministic answer check still settles immediately.
-    assert dict(events)["answer_done"]["answerValidation"]["status"] == "checked"
+    # No LLM review event, but final grounding still completes before the answer settles.
+    assert dict(events)["answer_done"]["answerValidation"]["status"] == "validating"
     assert dict(events)["answer_done"]["references"][0]["groundingStatus"] == "checking"
+    assert dict(events)["indepth_pending"]["answerValidation"]["status"] == "checked"
+    assert dict(events)["indepth_pending"]["references"][0]["groundingStatus"] == "verified"
     assert dict(events)["done"]["references"][0]["groundingStatus"] == "verified"
     assert dict(events)["done"]["inDepth"]["status"] == "complete"
 
@@ -397,6 +430,11 @@ def test_stage_drain_returns_final_post_review_envelope(monkeypatch):
     monkeypatch.setattr(team, "_ensure_substantive_answer", fake_validate)
     monkeypatch.setattr(team, "_validate_answer_rewrite", fake_rewrite)
 
+    async def fake_indepth(*_args, **_kwargs):
+        return ["In-Depth-only support [1]."], {"level": "green", "note": ""}
+
+    monkeypatch.setattr(team, "_gen_indepth", fake_indepth)
+
     async def _run():
         return await run_profile(
             _product_profile(review_model="V"),
@@ -410,6 +448,7 @@ def test_stage_drain_returns_final_post_review_envelope(monkeypatch):
     env = json.loads(asyncio.run(_run()))
     assert env["answer"] == "Ans fixed [2]."
     assert env["citations"] == [2]
+    assert {reference["index"] for reference in env["references"]} == {1, 2}
     assert env["answerValidation"]["status"] == "edited"
     assert env["inDepth"]["status"] == "complete"
     assert env["references"][0]["index"] == 2
@@ -739,6 +778,36 @@ def test_nested_references_resolve_against_current_source_ledger():
     assert references[1]["groundingStatus"] == "unchecked"
 
 
+def test_temporal_block_rendering_keeps_each_table_date_with_its_row_values():
+    blocks = [
+        {
+            "kind": "table",
+            "rows": [
+                {
+                    "cells": {
+                        "date": {"text": "2006-03-03", "refs": [1]},
+                        "weight": {"text": "52 kg", "refs": [1]},
+                    }
+                },
+                {
+                    "cells": {
+                        "date": {"text": "2006-05-18", "refs": [2]},
+                        "weight": {"text": "41 kg", "refs": [2]},
+                    }
+                },
+            ],
+        }
+    ]
+
+    text, refs = team._block_temporal_text_and_refs(blocks)
+
+    assert text.splitlines()[:2] == [
+        "2006-03-03 | 52 kg",
+        "2006-05-18 | 41 kg",
+    ]
+    assert refs == [1, 2]
+
+
 def test_final_unsupported_grounding_marks_answer_needs_review(monkeypatch):
     _stub_common(monkeypatch)
 
@@ -991,6 +1060,27 @@ def test_unchecked_indepth_citation_is_omitted_and_cannot_report_complete(monkey
     check = final["inDepth"]["validation"]["citation_checks"][0]
     assert check["status"] == "fail"
     assert "could not be checked" in check["reason"]
+
+
+def test_uncited_indepth_claim_is_withheld_and_cannot_report_complete(monkeypatch):
+    _stub_common(monkeypatch)
+
+    async def fake_answer(*_args, **_kwargs):
+        return "Supported answer [1].", [1], []
+
+    async def fake_indepth(*_args, **_kwargs):
+        return ["Uncited clinical interpretation."]
+
+    monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
+    monkeypatch.setattr(team, "_synthesize_indepth", fake_indepth)
+
+    final = dict(_collect(_product_profile()))["done"]
+
+    assert final["inDepth"]["status"] == "needs_review"
+    assert final["inDepth"]["answer"] == ""
+    check = final["inDepth"]["validation"]["citation_checks"][0]
+    assert check["status"] == "fail"
+    assert "no source citation" in check["reason"]
 
 
 def test_named_sse_emits_heartbeats_while_a_leg_stalls():

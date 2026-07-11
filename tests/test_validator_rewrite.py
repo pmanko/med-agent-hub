@@ -12,6 +12,8 @@ Run: pytest tests/test_validator_rewrite.py
 import asyncio
 import json
 
+import pytest
+
 from server import team
 from tests.factories import make_profile, run_profile, team_profile
 
@@ -21,6 +23,15 @@ _MESSAGES = [
     {"role": "user", "content": "the question"},
 ]
 _RF = {"type": "json_schema", "json_schema": {"name": "chart_answer"}}
+
+
+@pytest.fixture(autouse=True)
+def _restore_chat_after_test():
+    original_chat = team._chat
+    try:
+        yield
+    finally:
+        team._chat = original_chat
 
 
 def _factory(calls, rewrite_verdicts):
@@ -83,18 +94,22 @@ def _counts(calls):
 
 def _run(rewrite_verdicts, **kw):
     calls = []
-    team._chat = _factory(calls, rewrite_verdicts)
-    profile = team_profile(
-        orchestrator="ORCH",
-        answer="SYNTH",
-        review="VALIDATOR",
-        indepth="SYNTH",
-        output="combined",
-        review_prompt="validation-rewrite",
-        policies={"review_loops": int(kw.get("validator_max_loops", 1))},
-    )
-    out = asyncio.run(run_profile(profile, _MESSAGES, response_format=_RF))
-    return calls, json.loads(out)
+    original_chat = team._chat
+    try:
+        team._chat = _factory(calls, rewrite_verdicts)
+        profile = team_profile(
+            orchestrator="ORCH",
+            answer="SYNTH",
+            review="VALIDATOR",
+            indepth="SYNTH",
+            output="combined",
+            review_prompt="validation-rewrite",
+            policies={"review_loops": int(kw.get("validator_max_loops", 1))},
+        )
+        out = asyncio.run(run_profile(profile, _MESSAGES, response_format=_RF))
+        return calls, json.loads(out)
+    finally:
+        team._chat = original_chat
 
 
 def _err(wrong, chart, fix):
@@ -124,24 +139,28 @@ def _run_review(
     rewrite_verdicts, *, answer="The patient is taking aspirin [1].", blocks=None
 ):
     calls = []
-    team._chat = _factory(calls, rewrite_verdicts)
-    profile = make_profile(
-        topology="leg",
-        stages=("context", "review"),
-        models={"review": "REVIEWER"},
-        prompts={"review": "validation-rewrite"},
-        output="review",
-        capabilities={"validation": True},
-    )
-    out = asyncio.run(
-        run_profile(
-            profile,
-            _review_messages(answer=answer, blocks=blocks),
-            response_format=_RF,
-            context={"temporal": False},
+    original_chat = team._chat
+    try:
+        team._chat = _factory(calls, rewrite_verdicts)
+        profile = make_profile(
+            topology="leg",
+            stages=("context", "review"),
+            models={"review": "REVIEWER"},
+            prompts={"review": "validation-rewrite"},
+            output="review",
+            capabilities={"validation": True},
         )
-    )
-    return calls, json.loads(out)
+        out = asyncio.run(
+            run_profile(
+                profile,
+                _review_messages(answer=answer, blocks=blocks),
+                response_format=_RF,
+                context={"temporal": False},
+            )
+        )
+        return calls, json.loads(out)
+    finally:
+        team._chat = original_chat
 
 
 def test_answer_review_clean_pass_returns_checked_metadata():

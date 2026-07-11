@@ -104,15 +104,6 @@ def _tool_definitions(
     return tools
 
 
-def _chart_context(messages: List[Dict[str, Any]]) -> str:
-    """The chart snapshot is chartsearchai's first user message (after system)."""
-    for m in messages:
-        if m.get("role") == "user":
-            content = m.get("content")
-            return content if isinstance(content, str) else json.dumps(content)
-    return ""
-
-
 def _prepare_drug_safety(
     chart_text: str,
     mappings: List[Dict[str, Any]],
@@ -1063,18 +1054,41 @@ def _review_payload_from_messages(messages: List[Dict[str, Any]]) -> Dict[str, A
 
 
 def _block_temporal_text_and_refs(blocks: List[Any]) -> Tuple[str, List[int]]:
-    """Flatten table/block cell text so deterministic gates see model-generated dates in
-    structured output, not only dates in the prose answer."""
+    """Render structured rows as lines so dates stay bound to their row values."""
     texts: List[str] = []
     refs: List[int] = []
 
-    def walk(value: Any) -> None:
+    def collect_strings(value: Any) -> List[str]:
+        found: List[str] = []
         if isinstance(value, dict):
             for key, child in value.items():
                 if key == "refs" and isinstance(child, list):
                     refs.extend(i for i in child if isinstance(i, int))
                 else:
-                    walk(child)
+                    found.extend(collect_strings(child))
+        elif isinstance(value, list):
+            for child in value:
+                found.extend(collect_strings(child))
+        elif isinstance(value, str):
+            found.append(value)
+        return found
+
+    def walk(value: Any) -> None:
+        if isinstance(value, dict):
+            rows = value.get("rows")
+            if isinstance(rows, list):
+                for row in rows:
+                    cells = row.get("cells") if isinstance(row, dict) else None
+                    row_text = collect_strings(cells if isinstance(cells, dict) else row)
+                    if row_text:
+                        texts.append(" | ".join(row_text))
+                for key, child in value.items():
+                    if key not in {"rows", "refs"}:
+                        walk(child)
+                if isinstance(value.get("refs"), list):
+                    refs.extend(i for i in value["refs"] if isinstance(i, int))
+                return
+            texts.extend(collect_strings(value))
         elif isinstance(value, list):
             for child in value:
                 walk(child)

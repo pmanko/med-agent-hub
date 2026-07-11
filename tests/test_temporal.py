@@ -376,6 +376,106 @@ def test_gate_fails_contradictory_weight_direction_and_wrong_date_value_binding(
     assert {"trend_direction", "date_value_binding"} <= ids
 
 
+def test_gate_fails_swapped_values_when_two_dates_share_one_sentence():
+    facts = temporal.build_temporal_facts(_CHART, "2006-06-01")
+    gate = temporal.run_temporal_gate(
+        "How has this patient's weight changed?",
+        "The weight decreased from 41 kg on 2006-03-03 to 52 kg on 2006-05-18 [15].",
+        [15],
+        facts,
+        "enforce",
+    )
+
+    assert gate["status"] == "fail"
+    assert any(c["id"] == "date_value_binding" for c in gate["checks"])
+
+
+def test_gate_fails_invented_value_bound_to_a_ledger_date():
+    facts = temporal.build_temporal_facts(_CHART, "2006-06-01")
+    gate = temporal.run_temporal_gate(
+        "How has this patient's weight changed?",
+        "The weight was 53 kg on 2006-03-03 [1].",
+        [1],
+        facts,
+        "enforce",
+    )
+
+    assert gate["status"] == "fail"
+    assert any(c["id"] == "date_value_binding" for c in gate["checks"])
+
+
+def test_gate_fails_series_value_on_date_without_that_measurement():
+    facts = temporal.build_temporal_facts(_CHART, "2006-06-01")
+    gate = temporal.run_temporal_gate(
+        "How has this patient's weight changed?",
+        "The weight was 53 kg on 2006-04-24 [97].",
+        [97],
+        facts,
+        "enforce",
+    )
+
+    assert gate["status"] == "fail"
+    assert any(c["id"] == "date_value_binding" for c in gate["checks"])
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "The weight was 53 kg, with 52 kg recorded on 2006-03-03 [202].",
+        "The weight ranged from 53 to 52 kg on 2006-03-03 [202].",
+        "The weight ranged from 53-52 kg on 2006-03-03 [202].",
+        "The weight ranged from 53–52 kg on 2006-03-03 [202].",
+    ],
+)
+def test_gate_checks_every_weight_value_in_a_dated_sentence(answer):
+    facts = temporal.build_temporal_facts(_CHART, "2006-06-01")
+    gate = temporal.run_temporal_gate(
+        "How has this patient's weight changed?", answer, [202], facts, "enforce"
+    )
+
+    assert gate["status"] == "fail"
+    assert any(c["id"] == "date_value_binding" for c in gate["checks"])
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "The weight was 52 kg (BMI 18) on 2006-03-03 [202].",
+        "The weight was 52 kg (BMI 18 kg/m2) on 2006-03-03 [202].",
+        "The weight was 52 kg (BMI 18 kg / m2) on 2006-03-03 [202].",
+        "The weight was 52 kg (BMI 18 kg m-2) on 2006-03-03 [202].",
+        "The weight was 52 kg (BMI 18 kg m−2) on 2006-03-03 [202].",
+        "The weight was 52 kg (BMI 18 kg m^-2) on 2006-03-03 [202].",
+        "The weight was 52 kg (BMI 18 kg·m−2) on 2006-03-03 [202].",
+        "The weight was 52 kg (BMI 18 kg·m⁻²) on 2006-03-03 [202].",
+        "The weight was 52 kg (BMI 18 kg⁄m²) on 2006-03-03 [202].",
+        "The weight was 52 kg (BMI 18 kg∕m²) on 2006-03-03 [202].",
+        "The weight was 52 kg (BMI 18 kg m²) on 2006-03-03 [202].",
+        "Weight 52 kg and height 150 cm were recorded on 2006-03-03 [202].",
+    ],
+)
+def test_gate_ignores_values_from_other_measurements(answer):
+    facts = temporal.build_temporal_facts(_CHART, "2006-06-01")
+    gate = temporal.run_temporal_gate(
+        "What was the patient's weight?", answer, [202], facts, "enforce"
+    )
+
+    assert not any(c["id"] == "date_value_binding" for c in gate["checks"])
+
+
+def test_gate_preserves_ordinal_date_value_pairs_with_respectively():
+    facts = temporal.build_temporal_facts(_CHART, "2006-06-01")
+    gate = temporal.run_temporal_gate(
+        "How has this patient's weight changed?",
+        "The weights on 2006-03-03 and 2006-05-18 were 52 kg and 41 kg, respectively [1][15].",
+        [1, 15],
+        facts,
+        "enforce",
+    )
+
+    assert not any(c["id"] == "date_value_binding" for c in gate["checks"])
+
+
 def test_gate_fails_malformed_date_output_and_can_patch_selected_series():
     facts = temporal.build_temporal_facts(_CHART, "2006-06-01")
     gate = temporal.run_temporal_gate(

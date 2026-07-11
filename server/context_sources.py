@@ -158,16 +158,26 @@ class ExcludedRecord:
 
 
 @dataclass(frozen=True)
+class IncludedRecord:
+    stable_id: str
+    reason: str
+
+
+@dataclass(frozen=True)
 class ContextView:
     records: Tuple[EvidenceRecord, ...]
     record_indices: Tuple[int, ...]
     mode: str
-    included_ids: Tuple[str, ...]
+    included: Tuple[IncludedRecord, ...]
     excluded: Tuple[ExcludedRecord, ...]
     input_tokens: int
     input_limit: int
     original_text: str = field(default="", compare=False)
     preamble: str = field(default="", compare=False)
+
+    @property
+    def included_ids(self) -> Tuple[str, ...]:
+        return tuple(item.stable_id for item in self.included)
 
     def render(self) -> str:
         if self.mode == "full" and self.original_text:
@@ -686,10 +696,23 @@ def _ranked_records(
 
     def features(record: EvidenceRecord) -> tuple[int, int]:
         text = record.text.lower()
-        exact = int(any(term in text for term in exact_terms))
-        overlap = len(
-            query_tokens & {token.lower() for token in _QUERY_TOKEN.findall(text)}
+        ordered_record_tokens = [token.lower() for token in _QUERY_TOKEN.findall(text)]
+        record_tokens = set(ordered_record_tokens)
+
+        def exact_match(term: str) -> bool:
+            term_tokens = [token.lower() for token in _QUERY_TOKEN.findall(term)]
+            if not term_tokens:
+                return False
+            width = len(term_tokens)
+            return any(
+                ordered_record_tokens[index : index + width] == term_tokens
+                for index in range(len(ordered_record_tokens) - width + 1)
+            )
+
+        exact = int(
+            any(exact_match(term) for term in exact_terms)
         )
+        overlap = len(query_tokens & record_tokens)
         return exact, overlap
 
     def recency(record: EvidenceRecord) -> int:
@@ -756,7 +779,10 @@ async def select_context(
             records=ledger.records,
             record_indices=tuple(range(1, len(ledger.records) + 1)),
             mode="full",
-            included_ids=tuple(record.stable_id for record in ledger.records),
+            included=tuple(
+                IncludedRecord(record.stable_id, "full_context")
+                for record in ledger.records
+            ),
             excluded=(),
             input_tokens=full_tokens,
             input_limit=budget.input_limit,
@@ -765,6 +791,7 @@ async def select_context(
         )
 
     ranked = _ranked_records(ledger.records, question)
+    ranked_reasons = {record.stable_id: reason for record, reason in ranked}
     source_indices = {
         id(record): index for index, record in enumerate(ledger.records, 1)
     }
@@ -820,7 +847,10 @@ async def select_context(
         records=tuple(selected),
         record_indices=tuple(source_indices[id(record)] for record in selected),
         mode="selected",
-        included_ids=tuple(record.stable_id for record in selected),
+        included=tuple(
+            IncludedRecord(record.stable_id, ranked_reasons[record.stable_id])
+            for record in selected
+        ),
         excluded=tuple(excluded),
         input_tokens=current_tokens,
         input_limit=budget.input_limit,

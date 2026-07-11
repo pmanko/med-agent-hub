@@ -38,6 +38,7 @@ from .context_sources import (
     EvidenceLedger,
     EvidenceRecord,
     HistoryView,
+    IncludedRecord,
     RouterTokenCounter,
     SourceRegistry,
     TokenCounter,
@@ -127,7 +128,6 @@ class _State:
     ledger: EvidenceLedger = field(default_factory=lambda: EvidenceLedger(()))
     view: Optional[ContextView] = None
     chart: str = ""
-    full_chart: str = ""
     mappings: List[Dict[str, Any]] = field(default_factory=list)
     gathered: str = ""
     derived_context: str = ""
@@ -149,7 +149,6 @@ class _State:
     review_draft_citations: List[int] = field(default_factory=list)
     review_draft_blocks: List[Any] = field(default_factory=list)
     review_edited: bool = False
-    review_rejected: bool = False
     references: List[Dict[str, Any]] = field(default_factory=list)
     claims: List[str] = field(default_factory=list)
     indepth_conf: Dict[str, Any] = field(
@@ -187,6 +186,10 @@ def _context_summary(state: _State) -> Dict[str, Any]:
         "ledger_records": len(state.ledger.records),
         "selection_mode": view.mode if view else "none",
         "included_ids": list(view.included_ids) if view else [],
+        "included": [
+            {"source_id": item.stable_id, "reason": item.reason}
+            for item in (view.included if view else ())
+        ],
         "excluded": [
             {"source_id": item.stable_id, "reason": item.reason}
             for item in (view.excluded if view else ())
@@ -482,7 +485,6 @@ async def _prepare_context(request: ExecutionRequest, state: _State) -> None:
         ledger = _ledger_after_drug_injection(ledger, full_chart, mappings)
         state.ledger = ledger
 
-    state.full_chart = full_chart
     temporal_block = ""
     if temporal_enabled:
         state.reference_date = resolved_reference_date
@@ -528,7 +530,10 @@ async def _prepare_context(request: ExecutionRequest, state: _State) -> None:
             records=ledger.records,
             record_indices=tuple(range(1, len(ledger.records) + 1)),
             mode="full",
-            included_ids=tuple(record.stable_id for record in ledger.records),
+            included=tuple(
+                IncludedRecord(record.stable_id, "full_context")
+                for record in ledger.records
+            ),
             excluded=(),
             input_tokens=0,
             input_limit=0,
@@ -860,6 +865,7 @@ async def _execute_stages(
                         grounding_status="checking" if state.mappings else None,
                     )
                     has_review = "review" in request.profile.stages
+                    has_final_grounding = "ground_verdicts" in request.profile.stages
                     gate_issues = [
                         check
                         for check in (state.answer_gate or {}).get("checks", [])
@@ -880,12 +886,14 @@ async def _execute_stages(
                         }
                         for reference in unresolved
                     )
-                    fast_status = "validating" if has_review else "checked"
+                    fast_status = (
+                        "validating" if has_review or has_final_grounding else "checked"
+                    )
                     if (
                         state.answer_conf.get("level") == "red"
                         or (state.answer_gate or {}).get("applied") == "fallback"
                         or unresolved
-                    ):
+                    ) and not (has_review or has_final_grounding):
                         fast_status = "needs_review"
                     fast_validation = stages._answer_validation_wire(
                         fast_status,
@@ -1047,16 +1055,6 @@ async def _execute_stages(
                                 or (state.review_draft if state.review_edited else None)
                             ),
                         )
-                        yield (
-                            "answer_validation",
-                            _stream_payload(
-                                state,
-                                request,
-                                in_depth={"status": "pending", "answer": ""},
-                            ),
-                        )
-                        if await _disconnected(request):
-                            return
                     continue
 
                 if stage == "ground_verdicts":
@@ -1117,6 +1115,35 @@ async def _execute_stages(
                                 ],
                                 original_answer=prior.get("originalAnswer"),
                             )
+                    elif "review" not in request.profile.stages:
+                        prior = state.answer_validation or {}
+                        unresolved = any(
+                            reference.get("resolutionStatus") == "unresolved"
+                            for reference in state.references
+                        )
+                        status = (
+                            "needs_review"
+                            if unresolved or state.answer_conf.get("level") == "red"
+                            else "checked"
+                        )
+                        state.answer_validation = stages._answer_validation_wire(
+                            status,
+                            summary=prior.get("summary")
+                            or state.answer_conf.get("note", ""),
+                            issues=list(prior.get("issues") or []),
+                            original_answer=prior.get("originalAnswer"),
+                        )
+                    if "review" in request.profile.stages:
+                        yield (
+                            "answer_validation",
+                            _stream_payload(
+                                state,
+                                request,
+                                in_depth={"status": "pending", "answer": ""},
+                            ),
+                        )
+                        if await _disconnected(request):
+                            return
                     continue
 
                 if stage == "indepth":
@@ -1226,6 +1253,17 @@ async def _execute_stages(
                     candidates: list[tuple[int, str, list[dict[str, Any]]]] = []
                     for claim_index, claim in enumerate(state.claims, 1):
                         claim_citations = stages._extract_citations(claim)
+                        if not claim_citations:
+                            citation_checks.append(
+                                {
+                                    "claim_index": claim_index,
+                                    "claim": claim,
+                                    "status": "fail",
+                                    "reason": "In-Depth claim has no source citation.",
+                                    "source_indices": [],
+                                }
+                            )
+                            continue
                         claim_references = stages._resolve_references(
                             claim_citations,
                             state.mappings,
@@ -1553,14 +1591,20 @@ class StageEngine:
             return result
         final_payload = json.loads(result or "{}")
         references = final_payload.get("references") or []
+        answer_citations = [
+            reference.get("index")
+            for reference in references
+            if isinstance(reference, dict)
+            and isinstance(reference.get("index"), int)
+            and any(
+                isinstance(usage, dict)
+                and usage.get("location") in {"answer", "block"}
+                for usage in (reference.get("usage") or [])
+            )
+        ]
         output: Dict[str, Any] = {
             "answer": final_payload.get("answer") or "",
-            "citations": [
-                reference.get("index")
-                for reference in references
-                if isinstance(reference, dict)
-                and isinstance(reference.get("index"), int)
-            ],
+            "citations": answer_citations,
             "references": references,
             "blocks": final_payload.get("blocks") or [],
         }

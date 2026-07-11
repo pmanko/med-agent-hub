@@ -14,6 +14,7 @@ import calendar
 import datetime as _dt
 import json
 import re
+import unicodedata
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
@@ -887,6 +888,87 @@ def _series_patch(series: Dict[str, Any]) -> tuple[str, List[int]]:
     )
 
 
+def _series_value_candidates(
+    text: str, series: Dict[str, Any]
+) -> List[tuple[re.Match, float]]:
+    """Return numeric claims that belong to this series, excluding nearby other measures."""
+    # The generic tokenizer excludes hyphen-adjacent digits to avoid treating ISO dates as
+    # measurements. Dates have already been blanked by the caller, so normalize a remaining
+    # numeric range separator without changing string offsets.
+    text = re.sub(r"(?<=\d)-(?=\d)", "–", text)
+    values: List[tuple[re.Match, float]] = []
+    all_numbers: List[tuple[re.Match, float]] = []
+    for match in _NUMBER_TOKEN_RE.finditer(text):
+        try:
+            all_numbers.append((match, float(match.group())))
+        except ValueError:
+            continue
+
+    units = {
+        str(point.get("unit") or "").strip().lower()
+        for point in (series.get("points") or [])
+        if str(point.get("unit") or "").strip()
+    }
+    concept_tokens = {
+        token
+        for token in re.split(
+            r"[^a-z0-9%]+", str(series.get("concept") or "").lower()
+        )
+        if len(token) >= 2 and token not in _CONCEPT_STOP_TOKENS
+    }
+    concept = str(series.get("concept") or "").lower()
+    if "haemoglobin" in concept:
+        concept_tokens.update({"hemoglobin", "hgb"})
+    if "weight" in concept:
+        concept_tokens.update({"weight", "wt"})
+    if "height" in concept:
+        concept_tokens.update({"height", "ht"})
+    if "cd4" in concept:
+        concept_tokens.add("cd4")
+
+    def has_exact_unit(suffix: str, unit: str) -> bool:
+        match = re.match(re.escape(unit) + r"(?![a-z0-9])", suffix, re.I)
+        if not match:
+            return False
+        continuation = suffix[match.end() :]
+        normalized = unicodedata.normalize("NFKC", continuation).translate(
+            str.maketrans({"⁄": "/", "∕": "/", "−": "-"})
+        )
+        return not re.match(
+            r"\s*(?:/|per\b|(?:[·*]\s*)?m\s*(?:\^\s*)?(?:\{\s*)?"
+            r"(?:-\s*)?[23](?:\s*\})?)",
+            normalized,
+            re.I,
+        )
+
+    explicit: set[int] = set()
+    for index, (match, _value) in enumerate(all_numbers):
+        suffix = text[match.end() : match.end() + 24].lstrip().lower()
+        if any(has_exact_unit(suffix, unit) for unit in units):
+            explicit.add(index)
+
+    # In ranges such as "53 to 52 kg", the trailing unit applies to both values.
+    for index in tuple(explicit):
+        if index == 0:
+            continue
+        previous = all_numbers[index - 1][0]
+        current = all_numbers[index][0]
+        between = text[previous.end() : current.start()]
+        if re.fullmatch(r"\s*(?:to|through|[-–—])\s*", between, re.I):
+            explicit.add(index - 1)
+
+    for index, item in enumerate(all_numbers):
+        match, _value = item
+        if index in explicit:
+            values.append(item)
+            continue
+        prefix = text[max(0, match.start() - 40) : match.start()].lower()
+        words = re.findall(r"[a-z][a-z0-9%]*", prefix)
+        if words and any(word in concept_tokens for word in words[-3:]):
+            values.append(item)
+    return values
+
+
 def _date_value_failures(answer: str, series: Dict[str, Any]) -> List[Dict[str, Any]]:
     points = series.get("points") or []
     by_date: Dict[str, set] = {}
@@ -900,38 +982,92 @@ def _date_value_failures(answer: str, series: Dict[str, Any]) -> List[Dict[str, 
         value_dates.setdefault(val, set()).add(str(p.get("date")))
     out = []
     for sentence in _SENTENCE_RE.split(answer or ""):
-        dates = _ISO_TOKEN_RE.findall(sentence)
-        if not dates:
-            continue
-        if len(dates) != 1:
-            continue
-        nums = []
         clean_sentence = re.sub(r"\[\d+\]", "", sentence)
-        for n in _NUMBER_TOKEN_RE.findall(clean_sentence):
-            try:
-                nums.append(float(n))
-            except ValueError:
-                pass
-        for date in dates:
-            for val in nums:
-                if val in value_dates and date not in value_dates[val]:
-                    out.append(
-                        {
-                            "date": date,
-                            "value": val,
-                            "expected_dates": sorted(value_dates[val]),
-                        }
-                    )
-                elif (
-                    date in by_date and val not in by_date[date] and val in value_dates
-                ):
-                    out.append(
-                        {
-                            "date": date,
-                            "value": val,
-                            "expected_values": sorted(by_date[date]),
-                        }
-                    )
+        date_matches = list(_ISO_TOKEN_RE.finditer(clean_sentence))
+        if not date_matches:
+            continue
+        value_sentence = list(clean_sentence)
+        for date_match in date_matches:
+            value_sentence[date_match.start() : date_match.end()] = " " * len(
+                date_match.group()
+            )
+        value_text = "".join(value_sentence)
+        values = _series_value_candidates(value_text, series)
+        if not values:
+            continue
+        all_expected_values = sorted(value_dates)
+        for _match, val in values:
+            if val not in value_dates:
+                failure = {
+                    "date": date_matches[0].group() if len(date_matches) == 1 else None,
+                    "value": val,
+                    "expected_values": all_expected_values,
+                }
+                if failure not in out:
+                    out.append(failure)
+        separators = list(
+            re.finditer(
+                r"\b(?:to|and|versus|vs\.?)\b|[;,]", clean_sentence, re.I
+            )
+        )
+        if re.search(r"\brespectively\b", clean_sentence, re.I) and len(
+            date_matches
+        ) == len(values):
+            bindings = list(zip(date_matches, values))
+        elif len(date_matches) == 1:
+            bindings = [(date_matches[0], value) for value in values]
+        else:
+            bindings = []
+            for date_match in date_matches:
+                segment_start = max(
+                    (
+                        match.end()
+                        for match in separators
+                        if match.end() <= date_match.start()
+                    ),
+                    default=0,
+                )
+                segment_end = min(
+                    (
+                        match.start()
+                        for match in separators
+                        if match.start() >= date_match.end()
+                    ),
+                    default=len(clean_sentence),
+                )
+                local_values = [
+                    item
+                    for item in values
+                    if segment_start <= item[0].start()
+                    and item[0].end() <= segment_end
+                ]
+                nearest = min(
+                    local_values or values,
+                    key=lambda item: min(
+                        abs(date_match.start() - item[0].end()),
+                        abs(item[0].start() - date_match.end()),
+                    ),
+                )
+                bindings.append((date_match, nearest))
+        for date_match, (_nearest_match, val) in bindings:
+            date = date_match.group()
+            failure = None
+            if val not in value_dates:
+                continue
+            if date in by_date and val not in by_date[date]:
+                failure = {
+                    "date": date,
+                    "value": val,
+                    "expected_values": sorted(by_date[date]),
+                }
+            elif val in value_dates and date not in value_dates[val]:
+                failure = {
+                    "date": date,
+                    "value": val,
+                    "expected_dates": sorted(value_dates[val]),
+                }
+            if failure and failure not in out:
+                out.append(failure)
     return out
 
 
@@ -1134,13 +1270,19 @@ def run_temporal_gate(
 
     for s in selected:
         for failure in _date_value_failures(a, s)[:3]:
+            bound_date = failure.get("date")
+            claim = (
+                f"value {failure['value']} to {bound_date}"
+                if bound_date
+                else f"value {failure['value']}"
+            )
             _add_check(
                 checks,
                 "date_value_binding",
                 "fail",
                 "block",
                 a[:240],
-                f"The answer binds value {failure['value']} to {failure['date']}, but temporal_facts bind it to {failure.get('expected_dates') or failure.get('expected_values')}.",
+                f"The answer binds {claim}, but temporal_facts bind it to {failure.get('expected_dates') or failure.get('expected_values')}.",
                 [
                     p.get("index")
                     for p in (s.get("points") or [])

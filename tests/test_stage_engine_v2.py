@@ -236,6 +236,9 @@ def test_prompt_selection_does_not_shrink_temporal_gate_evidence():
     assert state.view is not None and state.view.mode == "selected"
     assert len(state.view.records) == 2
     assert "test:Observation:obs-1" in state.view.included_ids
+    summary = engine._context_summary(state)
+    assert len(summary["included"]) == len(summary["included_ids"])
+    assert all(item["reason"] for item in summary["included"])
     assert state.view.record_indices == (1, 3)
     assert "[1]" in state.chart and "[3]" in state.chart and "[2]" not in state.chart
     assert [mapping["index"] for mapping in state.mappings] == [1, 2, 3]
