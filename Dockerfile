@@ -27,10 +27,6 @@ WORKDIR /app
 ARG HUB_BUILD_REVISION=unknown
 LABEL org.opencontainers.image.revision=${HUB_BUILD_REVISION}
 
-RUN apt-get update && apt-get install -y --no-install-recommends curl \
-    && rm -rf /var/lib/apt/lists/* \
-    && groupadd -r appuser && useradd -r -g appuser appuser
-
 COPY --from=builder /root/.local /usr/local
 COPY server/ ./server/
 
@@ -42,7 +38,8 @@ ENV PYTHONUNBUFFERED=1 \
 
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-    CMD curl -fsS http://localhost:8080/health || exit 1
+    CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health', timeout=3).read()"]
 
-USER appuser
+# A numeric unprivileged identity needs no /etc/passwd mutation or runtime package install.
+USER 65532:65532
 CMD ["python", "-m", "uvicorn", "server.main:app", "--host", "0.0.0.0", "--port", "8080"]
