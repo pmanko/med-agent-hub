@@ -160,7 +160,7 @@ def test_temporal_gate_enforce_patches_answer_and_trace(monkeypatch, tmp_path):
         trace["original_answer_text"]
         == "The next upcoming appointment is 2026-01-07 [2]."
     )
-    assert trace["temporal_facts_schema_version"] == "temporal_facts.v1.1"
+    assert trace["temporal_facts_schema_version"] == "temporal_facts.v1.2"
 
 
 def test_temporal_gate_warn_records_failure_without_changing_answer(

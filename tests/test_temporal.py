@@ -26,6 +26,7 @@ Patient: 41-year-old Male
 [26] (2006-05-18) Drug order: Lamivudine / zidovudine. Action: NEW. Urgency: ROUTINE
 [1] (2006-05-18) Assessment — Scheduled visit: No
 [5] (2006-05-11) Assessment — Return visit date: 2006-05-18
+[300] (2006-05-18) Encounter: Adult Visit at Clinic A
 """
 
 
@@ -175,13 +176,33 @@ _PROGRAM_CONFOUND = """Patient records (most recent first):
 [1] (2026-05-20) Program: Tuberculosis treatment program. Status: Active. Current state: GROUP TB
 [2] (2026-01-07) Assessment — Scheduled visit: No
 [3] (2026-01-07) Finding — Weight (kg): 41.0 kg
+[5] (2026-01-07) Encounter: Adult Visit at Clinic A
 [4] (2025-12-31) Finding — Weight (kg): 42.0 kg
+"""
+
+_SPARSE_ACTIVITY_ONLY = """Patient records (most recent first):
+[1] (2026-05-20) Program: Tuberculosis treatment program. Status: Active
+[2] (2026-01-07) Assessment — Scheduled visit: No
+[3] Finding — Weight (kg): 41.0 kg
 """
 
 _WEIGHT_WITH_HOSPITALIZATION = """Patient records (most recent first):
 [1] (2026-01-07) Finding — Weight (kg): 41.0 kg
 [2] (2025-12-31) Finding — Weight (kg): 42.0 kg
 [3] (2025-10-22) Finding — Number of hospitalizations in past year: 27 # hospitalizations
+"""
+
+_EXPLICIT_ENCOUNTER_WITH_SAME_DAY_RECORDS = """Patient records (most recent first):
+[1] (2026-06-06) Drug order: Nevirapine. Action: NEW
+[2] Encounter: Adult Visit at Unknown Location. Provider: Horatio L Hornblower
+[3] Finding — Weight (kg): 71.0 kg
+[4] Assessment — Scheduled visit: No
+[5] (2026-05-20) Encounter: Follow-up Visit at Clinic A. Provider: Jane Doe
+"""
+
+_EXPLICIT_ENCOUNTER_BEFORE_LATER_OBSERVATION = """Patient records (most recent first):
+[1] (2026-06-10) Finding — Weight (kg): 72.0 kg
+[2] (2026-06-06) Encounter: Adult Visit at Unknown Location. Provider: Horatio L Hornblower
 """
 
 
@@ -210,12 +231,45 @@ def test_resolve_anchor_latest_record_ignores_program_enrollment():
     assert temporal.resolve_anchor("latest_record", _PROGRAM_CONFOUND) == "2026-01-07"
 
 
-# ---- temporal_facts.v1.1 sidecar -------------------------------------------
+def test_last_clinical_encounter_prefers_explicit_encounter_records_only():
+    facts = temporal.build_temporal_facts(
+        _EXPLICIT_ENCOUNTER_WITH_SAME_DAY_RECORDS, "2026-06-20"
+    )
+
+    assert facts["last_clinical_encounter"]["date"] == "2026-06-06"
+    assert facts["last_clinical_encounter"]["indices"] == [2]
+    assert facts["last_clinical_encounter"]["classes"] == ["Encounter"]
+    assert facts["last_clinical_encounter"]["summaries"] == [
+        "Encounter: Adult Visit at Unknown Location. Provider: Horatio L Hornblower"
+    ]
+
+
+def test_last_clinical_encounter_ignores_later_non_encounter_record():
+    facts = temporal.build_temporal_facts(
+        _EXPLICIT_ENCOUNTER_BEFORE_LATER_OBSERVATION, "2026-06-20"
+    )
+
+    assert facts["last_clinical_encounter"]["date"] == "2026-06-06"
+    assert facts["last_clinical_encounter"]["indices"] == [2]
+
+
+def test_activity_only_chart_does_not_fabricate_a_clinical_encounter():
+    facts = temporal.build_temporal_facts(_SPARSE_ACTIVITY_ONLY, "2026-06-20")
+
+    assert facts["last_clinical_encounter"] is None
+    assert facts["latest_clinical_activity"]["date"] == "2026-01-07"
+    assert facts["latest_clinical_activity"]["indices"] == [2, 3]
+    block = temporal.build_temporal_block(_SPARSE_ACTIVITY_ONLY, "2026-06-20")
+    assert "No explicit visit/encounter record is present" in block
+    assert "Do NOT report this activity date as a visit date" in block
+
+
+# ---- temporal_facts.v1.2 sidecar -------------------------------------------
 
 
 def test_temporal_facts_captures_return_visit_dates_and_classifies_against_anchor():
     facts = temporal.build_temporal_facts(_CHART, "2006-06-01")
-    assert facts["schema_version"] == "temporal_facts.v1.1"
+    assert facts["schema_version"] == "temporal_facts.v1.2"
     assert facts["reference_date"] == "2006-06-01"
     assert facts["reference_date_id"] == "D2006_06_01"
     assert facts["last_clinical_encounter"]["date"] == "2006-05-18"
@@ -254,7 +308,7 @@ def _rendered_json_payload(rendered: str) -> dict:
 def test_render_temporal_facts_includes_full_json_sidecar_marker():
     facts = temporal.build_temporal_facts(_CHART, "2006-05-18")
     rendered = temporal.render_temporal_facts(facts)
-    assert "temporal_facts.v1.1" in rendered
+    assert "temporal_facts.v1.2" in rendered
     assert '"date_ledger"' in rendered
     assert '"return_visit_dates"' in rendered
     assert '"numeric_series"' in rendered

@@ -8,11 +8,13 @@ FALSE PREMISE — if the question assumes a fact the chart and the labeled refer
 Example (false premise): The chart does not show [drug]; the listed regimen is lamivudine, nevirapine, and stavudine [29], [30], [31].
 
 TEMPORAL FACTS:
+The current sidecar schema is `temporal_facts.v1.2`; the rules below also apply to earlier v1 sidecars.
 When a `temporal_facts.v1` / `temporal_facts.v1.1` JSON block is present in gathered evidence, use it for date ordering and temporal inference. Treat `reference_date` as the current date. For date parsing, use `date_ledger`: each entry gives the exact `iso` date plus labeled `year`, `month`, and `day` parts. When writing a date, copy the exact `iso` string from `date_ledger`; do not reconstruct, shorten, translate, underscore, slash, or otherwise reformat dates. Use `*_date_id` fields internally to match measurements/events to ledger dates, but never write a `DYYYY_MM_DD` date_id in the answer. Do not call a date upcoming/future/next unless it is after `reference_date`. Do not infer a trend from one point. Bind numeric values to the dates shown in `numeric_series` or the chart records. If prose and `temporal_facts.v1` appear to conflict, cite the underlying chart record and prefer `temporal_facts.v1` for ordering.
 
 CITATIONS — read carefully:
 - The integers in "citations" and the [N] markers are RECORD INDICES from the numbered patient chart ONLY. A claim gets an integer ONLY if you can point to the numbered chart record that states it.
 - Every [N] in the answer must also appear in "citations". For table/list answers, "citations" is the de-duplicated union of records used in answer prose and table refs; do not repeat every table citation inline in the answer summary.
+- For prose-only answers (`blocks` is `[]`), "citations" must contain exactly the distinct [N] markers written in the answer. Use the smallest set of records that directly states the claim. Do not include every record from the same date or encounter merely because it is nearby.
 - Knowledge-base / guideline facts, the medical expert's notes, and your own medical knowledge are NOT chart records — name them inline in prose (e.g. "per WHO HIV guidelines") and NEVER wrap them in brackets and NEVER place them in "citations". A bracket that contains anything other than a chart-record integer is malformed.
 - Never invent a record, dose, source name, guideline title, threshold, or chart-record index. If neither the chart nor a reference snippet supports the answer, say the information is not available rather than guessing.
 

@@ -180,6 +180,48 @@ def _citation_indices(citations: List[int], answer: Optional[str] = None) -> Lis
     return out
 
 
+def _enforce_product_citation_contract(
+    answer: str, citations: List[int], blocks: List[Any]
+) -> Tuple[str, List[int], List[Dict[str, Any]]]:
+    """Canonicalize explicit citation usage for product envelopes.
+
+    Inline markers and cell refs are unambiguous usage declarations, so they are authoritative over
+    a conflicting top-level array. A single unscoped citation can be attached to the prose claim and
+    then semantically grounded. Multiple unscoped citations cannot be mapped to claims safely; keep
+    them visible for inspection but prevent the answer from reporting a checked lifecycle state.
+    Low-level legs do not call this helper and retain byte-exact behavior.
+    """
+    declared = _citation_indices(citations)
+    inline = _citation_indices([], answer)
+    block_refs = _block_temporal_text_and_refs(blocks or [])[1]
+    explicit = _citation_indices(inline + block_refs)
+    if explicit:
+        return answer, explicit, []
+    if len(declared) == 1 and answer.strip():
+        marker = f"[{declared[0]}]"
+        stripped = answer.rstrip()
+        match = re.search(r"([.!?])$", stripped)
+        if match:
+            stripped = stripped[: match.start()] + f" {marker}" + match.group(1)
+        else:
+            stripped += f" {marker}"
+        return stripped, declared, []
+    if len(declared) > 1:
+        return answer, declared, [
+            {
+                "id": "citation_scope",
+                "status": "fail",
+                "severity": "block",
+                "reason": (
+                    "Multiple top-level citations were declared without inline claim markers or "
+                    "structured cell refs, so their usage cannot be mapped safely."
+                ),
+                "source_indices": declared,
+            }
+        ]
+    return answer, declared, []
+
+
 def _resolve_references(
     citations: List[int],
     mappings: List[Dict[str, Any]],

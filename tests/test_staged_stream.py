@@ -860,6 +860,48 @@ def test_final_unchecked_grounding_cannot_leave_answer_checked(monkeypatch):
     )
 
 
+def test_product_overdeclared_unscoped_citations_cannot_leave_answer_checked(
+    monkeypatch,
+):
+    _stub_common(monkeypatch)
+
+    async def fake_answer(*_args, **_kwargs):
+        return "The documented visit was on 2025-01-01.", [1, 2], []
+
+    monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
+
+    final = dict(_collect(_product_profile()))["done"]
+    assert final["answerValidation"]["status"] == "needs_review"
+    assert any(
+        issue["id"] == "citation_scope"
+        for issue in final["answerValidation"]["issues"]
+    )
+
+
+def test_product_single_unscoped_citation_is_scoped_and_grounded(monkeypatch):
+    _stub_common(monkeypatch)
+
+    async def fake_answer(*_args, **_kwargs):
+        return "The documented visit was on 2025-01-01.", [1], []
+
+    monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
+
+    events = dict(_collect(_product_profile()))
+    final = events["done"]
+    assert final["answer"] == "The documented visit was on 2025-01-01 [1]."
+    answer_references = [
+        reference
+        for reference in final["references"]
+        if any(
+            usage.get("location") == "answer"
+            for usage in reference.get("usage") or []
+        )
+    ]
+    assert [reference["index"] for reference in answer_references] == [1]
+    assert answer_references[0]["groundingStatus"] == "verified"
+    assert final["answerValidation"]["status"] == "checked"
+
+
 def test_final_mixed_grounding_cannot_leave_answer_checked(monkeypatch):
     _stub_common(monkeypatch)
 

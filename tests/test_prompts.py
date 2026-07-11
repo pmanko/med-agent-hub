@@ -136,10 +136,19 @@ def test_synthesis_prompts_instruct_on_temporal_facts_sidecar():
     ):
         text = prompt_loader.load_prompt(name)
         assert "temporal_facts.v1" in text
+        assert "temporal_facts.v1.2" in text
         assert "reference_date" in text
         assert "date_ledger" in text
         assert "DYYYY_MM_DD" in text
         assert "Do not infer a trend from one point" in text
+
+
+def test_direct_answer_prompt_requires_minimal_explicit_prose_citations():
+    text = prompt_loader.load_prompt("synthesis-answer")
+
+    assert '"citations" must contain exactly the distinct [N] markers' in text
+    assert "smallest set of records that directly states the claim" in text
+    assert "Do not include every record from the same date or encounter" in text
 
 
 def test_team_sends_the_synthesis_prompts_to_the_model():

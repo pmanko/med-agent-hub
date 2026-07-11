@@ -138,6 +138,7 @@ class _State:
     steps: List[Dict[str, Any]] = field(default_factory=list)
     answer_text: str = ""
     citations: List[int] = field(default_factory=list)
+    citation_issues: List[Dict[str, Any]] = field(default_factory=list)
     blocks: List[Any] = field(default_factory=list)
     answer_conf: Dict[str, Any] = field(
         default_factory=lambda: {"level": "green", "note": ""}
@@ -798,6 +799,31 @@ async def _execute_stages(
                         max_loops=int(request.profile.policies.get("review_loops", 1)),
                         steps=state.steps,
                     )
+                    if request.profile.output_mode == "product":
+                        before_answer = state.answer_text
+                        before_citations = list(state.citations)
+                        (
+                            state.answer_text,
+                            state.citations,
+                            state.citation_issues,
+                        ) = stages._enforce_product_citation_contract(
+                            state.answer_text, state.citations, state.blocks
+                        )
+                        if (
+                            state.answer_text != before_answer
+                            or state.citations != before_citations
+                            or state.citation_issues
+                        ):
+                            state.steps.append(
+                                {
+                                    "role": "citation_contract",
+                                    "status": (
+                                        "fail" if state.citation_issues else "canonicalized"
+                                    ),
+                                    "before": before_citations,
+                                    "after": list(state.citations),
+                                }
+                            )
                     answer_stage_ms = round((time.perf_counter() - answer_started) * 1000)
                     continue
 
@@ -871,6 +897,7 @@ async def _execute_stages(
                         for check in (state.answer_gate or {}).get("checks", [])
                         if check.get("status") in {"warn", "fail"}
                     ]
+                    gate_issues.extend(state.citation_issues)
                     unresolved = [
                         reference
                         for reference in state.references
@@ -998,6 +1025,21 @@ async def _execute_stages(
                             or state.citations != state.review_draft_citations
                             or state.blocks != state.review_draft_blocks
                         )
+                    if request.profile.output_mode == "product":
+                        before_answer = state.answer_text
+                        before_citations = list(state.citations)
+                        (
+                            state.answer_text,
+                            state.citations,
+                            state.citation_issues,
+                        ) = stages._enforce_product_citation_contract(
+                            state.answer_text, state.citations, state.blocks
+                        )
+                        if (
+                            state.answer_text != before_answer
+                            or state.citations != before_citations
+                        ):
+                            state.review_edited = True
                     continue
 
                 if stage == "final_resolve_refs":
@@ -1018,6 +1060,7 @@ async def _execute_stages(
                         if (
                             state.answer_conf.get("level") == "red"
                             or unresolved_final
+                            or state.citation_issues
                             or prior_status == "needs_review"
                         ):
                             status = "needs_review"
@@ -1034,6 +1077,7 @@ async def _execute_stages(
                                 or state.answer_conf.get("note", "")
                             ),
                             issues=list(prior_validation.get("issues") or [])
+                            + list(state.citation_issues)
                             + [
                                 check
                                 for check in (state.answer_gate or {}).get("checks", [])
@@ -1123,14 +1167,17 @@ async def _execute_stages(
                         )
                         status = (
                             "needs_review"
-                            if unresolved or state.answer_conf.get("level") == "red"
+                            if unresolved
+                            or state.citation_issues
+                            or state.answer_conf.get("level") == "red"
                             else "checked"
                         )
                         state.answer_validation = stages._answer_validation_wire(
                             status,
                             summary=prior.get("summary")
                             or state.answer_conf.get("note", ""),
-                            issues=list(prior.get("issues") or []),
+                            issues=list(prior.get("issues") or [])
+                            + list(state.citation_issues),
                             original_answer=prior.get("originalAnswer"),
                         )
                     if "review" in request.profile.stages:

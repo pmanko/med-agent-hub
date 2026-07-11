@@ -109,6 +109,7 @@ _CONCEPT_STOP_TOKENS = {
 # its enrollment date, which can post-date the last actual visit (Aloice's TB Program "enrolled"
 # 2026-05-20 when the last clinical visit was 2026-01-07). These are labeled, never reported as a visit.
 _ADMIN_CLASSES = {"Program"}
+_ENCOUNTER_CLASSES = {"encounter", "visit"}
 
 
 def _parse_iso_date(value: Optional[str]) -> Optional[_dt.date]:
@@ -391,6 +392,15 @@ def _summarize_events(
     return out
 
 
+def _clinical_encounter_events(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Return only records that explicitly represent an encounter or visit."""
+    return [
+        event
+        for event in events
+        if str(event.get("cls") or "").strip().lower() in _ENCOUNTER_CLASSES
+    ]
+
+
 def build_temporal_facts(
     chart: str, anchor: Optional[str], *, anchor_mode: Optional[str] = None
 ) -> Dict[str, Any]:
@@ -405,8 +415,11 @@ def build_temporal_facts(
     mode = anchor_mode or anchor or "latest_record"
 
     events = parse_events(chart)
+    encounter_events = _clinical_encounter_events(events)
+    encounter_dates = sorted({e["date"] for e in encounter_events}, reverse=True)
+    clinical_events = [e for e in events if e["cls"] not in _ADMIN_CLASSES]
     clinical_dates = sorted(
-        {e["date"] for e in events if e["cls"] not in _ADMIN_CLASSES}, reverse=True
+        {e["date"] for e in clinical_events}, reverse=True
     )
     admin_dates = sorted(
         {e["date"] for e in events if e["cls"] in _ADMIN_CLASSES}, reverse=True
@@ -527,7 +540,7 @@ def build_temporal_facts(
     ledger = _date_ledger(date_roles, reference_date)
 
     return {
-        "schema_version": "temporal_facts.v1.1",
+        "schema_version": "temporal_facts.v1.2",
         "date_output_contract": {
             "copy_dates_verbatim_from_date_ledger": True,
             "date_id_format": "DYYYY_MM_DD",
@@ -538,7 +551,14 @@ def build_temporal_facts(
         "reference_date": reference_date,
         "reference_date_id": _date_id(reference_date),
         "last_clinical_encounter": (
-            _summarize_events(events, clinical_dates[0]) if clinical_dates else None
+            _summarize_events(encounter_events, encounter_dates[0])
+            if encounter_dates
+            else None
+        ),
+        "latest_clinical_activity": (
+            _summarize_events(clinical_events, clinical_dates[0])
+            if clinical_dates
+            else None
         ),
         "clinical_dates": [
             _summarize_events(events, d, include_summaries=False)
@@ -605,6 +625,9 @@ def compact_temporal_facts_for_prompt(facts: Dict[str, Any]) -> Dict[str, Any]:
         "last_clinical_encounter": _compact_event_summary_for_prompt(
             facts.get("last_clinical_encounter"), include_classes=True
         ),
+        "latest_clinical_activity": _compact_event_summary_for_prompt(
+            facts.get("latest_clinical_activity"), include_classes=True
+        ),
         "clinical_dates": [
             _compact_event_summary_for_prompt(d, include_classes=False)
             for d in (facts.get("clinical_dates") or [])
@@ -645,7 +668,7 @@ def render_temporal_facts(facts: Dict[str, Any], profile: str = "full") -> str:
         prompt_facts = facts
         marker = "deterministic JSON from the chart"
     return (
-        f"Structured temporal facts (temporal_facts.v1.1; {marker}). "
+        f"Structured temporal facts ({facts.get('schema_version')}; {marker}). "
         "For any date you write, copy an `iso` value from `date_ledger`; do not reformat "
         "or reconstruct dates from memory.\n"
         "```json\n" + json.dumps(prompt_facts, separators=(",", ":")) + "\n```"
@@ -661,6 +684,7 @@ def _compact_facts_summary(facts: Optional[Dict[str, Any]]) -> Optional[Dict[str
         "reference_date_id": facts.get("reference_date_id"),
         "date_ledger_count": len(facts.get("date_ledger") or []),
         "last_clinical_encounter": facts.get("last_clinical_encounter"),
+        "latest_clinical_activity": facts.get("latest_clinical_activity"),
         "appointment_candidate_counts": {
             k: len(appt.get(k) or []) for k in ("past", "today", "future")
         },
@@ -1382,9 +1406,7 @@ def build_temporal_block(chart: str, anchor: Optional[str]) -> str:
     # last visit). Type each record by class; report the most-recent CLINICAL date + the visit dates,
     # and list administrative records separately so they are never mistaken for a visit.
     events = parse_events(chart)
-    visit_dates = sorted(
-        {e["date"] for e in events if e["cls"] not in _ADMIN_CLASSES}, reverse=True
-    )
+    visit_dates = sorted({e["date"] for e in _clinical_encounter_events(events)}, reverse=True)
     if visit_dates:
         lines.append(
             f'Most recent clinical visit/encounter: {visit_dates[0]}. Answer "last visit" / '
@@ -1398,6 +1420,15 @@ def build_temporal_block(chart: str, anchor: Optional[str]) -> str:
             + more
             + "."
         )
+    elif events:
+        clinical_dates = sorted(
+            {e["date"] for e in events if e["cls"] not in _ADMIN_CLASSES}, reverse=True
+        )
+        if clinical_dates:
+            lines.append(
+                "No explicit visit/encounter record is present. Latest dated clinical activity: "
+                f"{clinical_dates[0]}. Do NOT report this activity date as a visit date."
+            )
     seen_admin: set = set()
     for e in sorted(
         (e for e in events if e["cls"] in _ADMIN_CLASSES),

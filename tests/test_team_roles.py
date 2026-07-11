@@ -237,3 +237,36 @@ def test_normalize_envelope_strips_backslash_run_artifacts():
     assert "**In Depth**" in out["answer"]
     assert "The patient is on lamivudine" in out["answer"]  # content preserved
     assert out["citations"] == [3]  # inline [N] reconcile still works
+
+
+def test_product_citation_contract_uses_explicit_markers_over_declared_extras():
+    answer, citations, issues = team._enforce_product_citation_contract(
+        "The documented visit was on 2006-06-06 [4].",
+        [4, 1, 2, 3, 5],
+        [],
+    )
+
+    assert answer == "The documented visit was on 2006-06-06 [4]."
+    assert citations == [4]
+    assert issues == []
+
+
+def test_product_citation_contract_scopes_one_declared_source_to_prose():
+    answer, citations, issues = team._enforce_product_citation_contract(
+        "The documented visit was on 2006-06-06.", [4], []
+    )
+
+    assert answer == "The documented visit was on 2006-06-06 [4]."
+    assert citations == [4]
+    assert issues == []
+
+
+def test_product_citation_contract_blocks_unscoped_multi_source_set():
+    answer, citations, issues = team._enforce_product_citation_contract(
+        "The documented visit was on 2006-06-06.", [4, 1, 2], []
+    )
+
+    assert answer == "The documented visit was on 2006-06-06."
+    assert citations == [4, 1, 2]
+    assert issues[0]["id"] == "citation_scope"
+    assert issues[0]["severity"] == "block"
