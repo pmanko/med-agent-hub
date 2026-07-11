@@ -898,6 +898,23 @@ def test_unavailable_indepth_reviewer_is_withheld_in_product_envelope(monkeypatc
     assert final["inDepth"]["validation"]["review_status"] == "unavailable"
 
 
+def test_non_substantive_review_preserves_answer_temporal_gate(monkeypatch):
+    _stub_common(monkeypatch)
+
+    async def empty_answer(*_args, **_kwargs):
+        return "", [], []
+
+    monkeypatch.setattr(team, "_synthesize_answer", empty_answer)
+
+    final = dict(_collect(_product_profile(review_model="review")))["done"]
+    assert final["answerValidation"]["status"] == "needs_review"
+    assert final["temporalGate"] == {
+        "mode": "off",
+        "status": "ok",
+        "applied": "none",
+    }
+
+
 def test_indepth_citation_cannot_inherit_answer_verified_verdict(monkeypatch):
     _stub_common(monkeypatch)
     calls = []

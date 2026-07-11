@@ -903,7 +903,7 @@ async def _execute_stages(
                         state.answer_conf,
                         state.answer_text,
                         state.answer_validation,
-                        state.answer_gate,
+                        reviewed_gate,
                         state.original_answer,
                     ) = await stages._review_existing_answer(
                         client,
@@ -926,6 +926,8 @@ async def _execute_stages(
                         steps=state.steps,
                         payload_override=payload_override,
                     )
+                    if reviewed_gate is not None:
+                        state.answer_gate = reviewed_gate
                     reviewed = json.loads(state.raw_review_content or "{}")
                     state.citations = [
                         value
