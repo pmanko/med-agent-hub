@@ -24,6 +24,9 @@ RUN poetry export -f requirements.txt --output requirements.txt --without-hashes
 FROM python:3.11-slim
 WORKDIR /app
 
+ARG HUB_BUILD_REVISION=unknown
+LABEL org.opencontainers.image.revision=${HUB_BUILD_REVISION}
+
 RUN apt-get update && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd -r appuser && useradd -r -g appuser appuser
@@ -33,6 +36,7 @@ COPY server/ ./server/
 
 # Logs go to stdout; reach the host-native llama.cpp router by default.
 ENV PYTHONUNBUFFERED=1 \
+    HUB_BUILD_REVISION=${HUB_BUILD_REVISION} \
     LLM_BASE_URL=http://host.docker.internal:8077 \
     LLM_TEMPERATURE=0.0
 

@@ -1878,12 +1878,17 @@ async def _gen_indepth(
             )
         except Exception as e:
             logger.warning("indepth-validator call failed: %s", e)
-            verdict = {"drop": [], "issues": ""}
+            verdict = {
+                "drop": list(range(1, len(cl) + 1)),
+                "issues": "In-Depth review unavailable.",
+                "unavailable": True,
+            }
         steps.append(
             {
                 "role": "indepth_validator",
                 "model": validator_model,
                 "attempt": attempt,
+                "status": "unavailable" if verdict.get("unavailable") else "checked",
                 "drop": verdict.get("drop") or [],
                 "issues": verdict.get("issues", ""),
                 "claims_in": len(cl),
@@ -1910,6 +1915,11 @@ async def _gen_indepth(
         return claims, green
 
     v = await _audit(claims, 0)
+    if v.get("unavailable"):
+        return [], {
+            "level": "red",
+            "note": "In-Depth review was unavailable; no unreviewed claims were shipped.",
+        }
     if not (v.get("drop") or []):
         return claims, green
 
@@ -1939,6 +1949,11 @@ async def _gen_indepth(
             break
         claims = revised
         v = await _audit(claims, 1)
+        if v.get("unavailable"):
+            return [], {
+                "level": "red",
+                "note": "In-Depth review was unavailable; no unreviewed claims were shipped.",
+            }
         if not (v.get("drop") or []):
             return claims, {"level": "yellow", "note": _indepth_note("yellow", 0, "")}
 
@@ -2137,6 +2152,31 @@ async def _validate_and_refine_answer(
 # correlates a trace line to a results.jsonl cell by level_id + the ts falling in the cell's
 # started_at..ended_at window (the runner is strictly sequential).
 _TRACE_DIR = os.environ.get("TEAM_TRACE_DIR", "/app/trace")
+
+
+def _write_cancellation_trace(
+    level_id: Optional[str],
+    messages: List[Dict[str, Any]],
+    *,
+    router_lock_released: bool,
+) -> None:
+    """Record positive preemption evidence after the active model slot unwinds."""
+    try:
+        question = _latest_user_text(messages)
+        entry = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "event": "stream_cancelled",
+            "level_id": level_id,
+            "question": question[:2000],
+            "router_lock_released": router_lock_released,
+        }
+        os.makedirs(_TRACE_DIR, exist_ok=True)
+        with open(
+            os.path.join(_TRACE_DIR, "cancellations.jsonl"), "a", encoding="utf-8"
+        ) as stream:
+            stream.write(json.dumps(entry, default=str) + "\n")
+    except Exception as error:  # pragma: no cover - defensive
+        logger.warning("cancellation trace write failed (non-fatal): %s", error)
 
 
 def _write_trace(

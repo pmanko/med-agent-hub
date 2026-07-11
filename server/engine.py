@@ -136,6 +136,63 @@ def _context_summary(state: _State) -> Dict[str, Any]:
     }
 
 
+def _merge_reference_grounding(
+    existing: Dict[str, Any], incoming: Mapping[str, Any]
+) -> None:
+    """Merge usage and claim-level verdicts when Answer and In-Depth cite one record."""
+    usages = list(existing.get("usage") or [])
+    for usage in incoming.get("usage") or []:
+        if usage not in usages:
+            usages.append(usage)
+    existing["usage"] = usages
+
+    checks = list(existing.get("groundingChecks") or [])
+    for check in incoming.get("groundingChecks") or []:
+        if check not in checks:
+            checks.append(check)
+    if checks:
+        existing["groundingChecks"] = checks
+
+    groups = {
+        index
+        for reference in (existing, incoming)
+        for index in (reference.get("groundingGroup") or [])
+        if isinstance(index, int)
+    }
+    for check in checks:
+        groups.update(
+            index
+            for index in check.get("source_indices") or []
+            if isinstance(index, int)
+        )
+    if len(groups) > 1:
+        existing["groundingScope"] = "source_set"
+        existing["groundingGroup"] = sorted(groups)
+    elif groups or any(
+        reference.get("groundingScope") == "record"
+        for reference in (existing, incoming)
+    ):
+        existing["groundingScope"] = "record"
+        existing.pop("groundingGroup", None)
+
+    statuses = {check.get("status") for check in checks}
+    if not statuses:
+        statuses = {
+            existing.get("groundingStatus"),
+            incoming.get("groundingStatus"),
+        }
+    if statuses & {"unchecked", "checking", None}:
+        grounded, aggregate = None, "unchecked"
+    elif "mixed" in statuses or {"verified", "unsupported"} <= statuses:
+        grounded, aggregate = None, "mixed"
+    elif "unsupported" in statuses:
+        grounded, aggregate = False, "unsupported"
+    else:
+        grounded, aggregate = True, "verified"
+    existing["grounded"] = grounded
+    existing["groundingStatus"] = aggregate
+
+
 def _ledger_after_drug_injection(
     ledger: EvidenceLedger,
     chart: str,
@@ -954,7 +1011,8 @@ async def _execute_stages(
                     unsupported = [
                         reference
                         for reference in state.references
-                        if reference.get("groundingStatus") == "unsupported"
+                        if reference.get("groundingStatus")
+                        in {"unsupported", "mixed"}
                     ]
                     unchecked = [
                         reference
@@ -973,7 +1031,7 @@ async def _execute_stages(
                                     "id": "citation_grounding",
                                     "status": "fail",
                                     "severity": "block",
-                                    "reason": f"Citation [{reference.get('index')}] was not supported by its source record.",
+                                    "reason": f"Citation [{reference.get('index')}] was not fully supported by its source record.",
                                     "source_indices": [reference.get("index")],
                                 }
                                 for reference in unsupported
@@ -1213,24 +1271,7 @@ async def _execute_stages(
                         if existing is None:
                             state.references.append(reference)
                             continue
-                        usages = list(existing.get("usage") or [])
-                        for usage in reference.get("usage") or []:
-                            if usage not in usages:
-                                usages.append(usage)
-                        existing["usage"] = usages
-                        statuses = {
-                            existing.get("groundingStatus"),
-                            reference.get("groundingStatus"),
-                        }
-                        if "unsupported" in statuses:
-                            existing["grounded"] = False
-                            existing["groundingStatus"] = "unsupported"
-                        elif statuses & {"unchecked", "checking", None}:
-                            existing["grounded"] = None
-                            existing["groundingStatus"] = "unchecked"
-                        else:
-                            existing["grounded"] = True
-                            existing["groundingStatus"] = "verified"
+                        _merge_reference_grounding(existing, reference)
                     if (
                         state.indepth_gate["status"] == "needs_review"
                         and not state.indepth_error
@@ -1416,12 +1457,19 @@ class StageEngine:
                 else:
                     return
         finally:
-            if not producer.done():
+            was_cancelled = not producer.done()
+            if was_cancelled:
                 producer.cancel()
             try:
                 await producer
             except BaseException:
                 pass
+            if was_cancelled:
+                stages._write_cancellation_trace(
+                    request.profile.id,
+                    [dict(message) for message in request.messages],
+                    router_lock_released=not stages._ROUTER_LOCK.locked(),
+                )
 
     async def drain(self, request: ExecutionRequest) -> str:
         result: Optional[str] = None

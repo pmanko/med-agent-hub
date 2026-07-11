@@ -791,6 +791,82 @@ def test_final_unchecked_grounding_cannot_leave_answer_checked(monkeypatch):
     )
 
 
+def test_final_mixed_grounding_cannot_leave_answer_checked(monkeypatch):
+    _stub_common(monkeypatch)
+
+    async def fake_answer(*_args, **_kwargs):
+        return "One supported and one unsupported claim share source [1].", [1], []
+
+    async def mixed(_client, _model, _answer, references, _mappings):
+        output = []
+        for reference in references:
+            item = dict(reference)
+            item["grounded"] = None
+            item["groundingStatus"] = "mixed"
+            item["groundingChecks"] = [
+                {"status": "verified", "claim": "Supported claim.", "source_indices": [1]},
+                {"status": "unsupported", "claim": "Unsupported claim.", "source_indices": [1]},
+            ]
+            output.append(item)
+        return output
+
+    monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
+    monkeypatch.setattr(team, "_ground_references", mixed)
+
+    final = dict(_collect(_product_profile()))["done"]
+    assert final["references"][0]["groundingStatus"] == "mixed"
+    assert final["answerValidation"]["status"] == "needs_review"
+    assert final["answerValidation"]["issues"][-1]["id"] == "citation_grounding"
+
+
+def test_answer_and_indepth_grounding_checks_merge_for_shared_reference(monkeypatch):
+    _stub_common(monkeypatch)
+
+    async def fake_answer(*_args, **_kwargs):
+        return "Supported answer [1].", [1], []
+
+    async def fake_indepth(*_args, **_kwargs):
+        return ["Supported In-Depth claim [1]."]
+
+    async def checks_by_usage(_client, _model, _answer, references, _mappings):
+        output = []
+        for reference in references:
+            item = dict(reference)
+            location = (item.get("usage") or [{}])[0].get("location")
+            item["grounded"] = True
+            item["groundingStatus"] = "verified"
+            item["groundingScope"] = "record"
+            item["groundingChecks"] = [
+                {
+                    "status": "verified",
+                    "claim": "Supported answer."
+                    if location == "answer"
+                    else "Supported In-Depth claim.",
+                    "location": location,
+                    "path": "",
+                    "source_indices": [1],
+                }
+            ]
+            output.append(item)
+        return output
+
+    monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
+    monkeypatch.setattr(team, "_synthesize_indepth", fake_indepth)
+    monkeypatch.setattr(team, "_ground_references", checks_by_usage)
+
+    final = dict(_collect(_product_profile()))["done"]
+    reference = final["references"][0]
+    assert reference["groundingStatus"] == "verified"
+    assert {check["location"] for check in reference["groundingChecks"]} == {
+        "answer",
+        "indepth",
+    }
+    assert {usage["location"] for usage in reference["usage"]} == {
+        "answer",
+        "indepth",
+    }
+
+
 def test_indepth_citation_cannot_inherit_answer_verified_verdict(monkeypatch):
     _stub_common(monkeypatch)
     calls = []
@@ -1010,6 +1086,18 @@ def test_profile_stream_client_disconnect_mid_indepth_frees_router_lock(monkeypa
     makes it deterministic here. Stronger than test_chat_cancel_releases_router_lock: it drives the
     WHOLE staged generator to the in-depth phase, not just _chat in isolation."""
     _stub_common(monkeypatch)
+    cancellations = []
+    monkeypatch.setattr(
+        team,
+        "_write_cancellation_trace",
+        lambda level_id, messages, *, router_lock_released: cancellations.append(
+            {
+                "level_id": level_id,
+                "messages": messages,
+                "router_lock_released": router_lock_released,
+            }
+        ),
+    )
 
     async def fake_synth(*_a, **_k):
         # Bypass the answer leg's real _chat so the ONLY router-lock holder under test is in-depth.
@@ -1076,6 +1164,14 @@ def test_profile_stream_client_disconnect_mid_indepth_frees_router_lock(monkeypa
         # The preempting request now acquires the single slot immediately (would hang if still held).
         await asyncio.wait_for(team._ROUTER_LOCK.acquire(), timeout=1.0)
         team._ROUTER_LOCK.release()
+
+        assert cancellations == [
+            {
+                "level_id": "test-profile",
+                "messages": [{"role": "user", "content": "q?"}],
+                "router_lock_released": True,
+            }
+        ]
 
     asyncio.run(_run())
 

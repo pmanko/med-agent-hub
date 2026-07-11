@@ -183,6 +183,47 @@ def test_indepth_red_strips_after_failed_resynth():
     assert "claim-B-v1" not in env["answer"]  # still-flagged claim stripped
 
 
+def test_unavailable_indepth_reviewer_cannot_ship_complete(monkeypatch):
+    async def synthesize(*_args, **_kwargs):
+        return ["A claim whose review did not complete."]
+
+    async def fail_review(*_args, **_kwargs):
+        raise RuntimeError("reviewer unavailable")
+
+    monkeypatch.setattr(team, "_synthesize_indepth", synthesize)
+    monkeypatch.setattr(team, "_validate_indepth_verdict", fail_review)
+    steps = []
+
+    claims, confidence = asyncio.run(
+        team._gen_indepth(
+            None,
+            "SYNTH",
+            [],
+            "instruction",
+            "gathered",
+            "answer",
+            validator_model="VALIDATOR",
+            validator_prompt="validation",
+            chart="chart",
+            synth_temperature=0.0,
+            synth_repeat_penalty=None,
+            synth_dry=None,
+            validator_temperature=0.0,
+            validator_repeat_penalty=None,
+            validator_dry=None,
+            max_tokens=128,
+            max_loops=1,
+            steps=steps,
+        )
+    )
+
+    assert claims == []
+    assert confidence["level"] == "red"
+    assert "unavailable" in confidence["note"].lower()
+    validator_step = next(step for step in steps if step["role"] == "indepth_validator")
+    assert validator_step["status"] == "unavailable"
+
+
 # ---- trace package ---------------------------------------------------------
 
 
