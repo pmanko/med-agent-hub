@@ -219,6 +219,7 @@ def test_unavailable_indepth_reviewer_cannot_ship_complete(monkeypatch):
 
     assert claims == []
     assert confidence["level"] == "red"
+    assert confidence["status"] == "unavailable"
     assert "unavailable" in confidence["note"].lower()
     validator_step = next(step for step in steps if step["role"] == "indepth_validator")
     assert validator_step["status"] == "unavailable"

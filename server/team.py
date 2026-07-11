@@ -1918,6 +1918,7 @@ async def _gen_indepth(
     if v.get("unavailable"):
         return [], {
             "level": "red",
+            "status": "unavailable",
             "note": "In-Depth review was unavailable; no unreviewed claims were shipped.",
         }
     if not (v.get("drop") or []):
@@ -1952,6 +1953,7 @@ async def _gen_indepth(
         if v.get("unavailable"):
             return [], {
                 "level": "red",
+                "status": "unavailable",
                 "note": "In-Depth review was unavailable; no unreviewed claims were shipped.",
             }
         if not (v.get("drop") or []):

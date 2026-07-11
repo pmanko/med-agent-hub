@@ -9,6 +9,36 @@ from server.levels_loader import get_profile
 from tests.factories import patient_source_registry
 
 
+def test_product_profile_defaults_temporal_anchor_to_wall_clock(monkeypatch):
+    monkeypatch.delenv("HUB_ANCHOR", raising=False)
+    request = engine.ExecutionRequest(
+        profile=get_profile("single-e4b-checked"),
+        messages=[{"role": "user", "content": "Question"}],
+    )
+
+    assert engine._temporal_anchor(request) == "wall_clock"
+
+
+def test_fixed_evaluation_anchor_overrides_product_wall_clock_default(monkeypatch):
+    monkeypatch.setenv("HUB_ANCHOR", "2026-06-20")
+    request = engine.ExecutionRequest(
+        profile=get_profile("single-e4b-checked"),
+        messages=[{"role": "user", "content": "Question"}],
+    )
+
+    assert engine._temporal_anchor(request) == "2026-06-20"
+
+
+def test_low_level_leg_keeps_latest_record_default_without_an_explicit_anchor(monkeypatch):
+    monkeypatch.delenv("HUB_ANCHOR", raising=False)
+    request = engine.ExecutionRequest(
+        profile=get_profile("answer:gemma-4-12b"),
+        messages=[{"role": "user", "content": "Question"}],
+    )
+
+    assert engine._temporal_anchor(request) is None
+
+
 def test_blocking_adapter_drains_the_same_async_stage_engine(monkeypatch):
     request = engine.ExecutionRequest(
         profile=get_profile("answer:gemma-4-12b"),

@@ -109,6 +109,19 @@ def _prompt(profile: Profile, role: str, fallback: str) -> str:
     return load_prompt(str(profile.prompts.get(role) or fallback))
 
 
+def _temporal_anchor(request: ExecutionRequest) -> Optional[str]:
+    """Resolve temporal "today" without making historical charts current by default."""
+    configured = str(request.profile.policies.get("anchor") or "").strip()
+    if configured:
+        return configured
+    environment = str(os.environ.get("HUB_ANCHOR") or "").strip()
+    if environment:
+        return environment
+    if request.profile.output_mode == "product":
+        return "wall_clock"
+    return None
+
+
 def _context_summary(state: _State) -> Dict[str, Any]:
     view = state.view
     return {
@@ -390,13 +403,14 @@ async def _prepare_context(request: ExecutionRequest, state: _State) -> None:
     full_chart = ledger.render()
     mappings = ledger.mappings()
     raw_records = ledger.raw_records()
+    anchor = _temporal_anchor(request)
     if request.profile.policies.get("drug_safety") and full_chart:
         full_chart, mappings, state.drug_context = stages._prepare_drug_safety(
             full_chart,
             mappings,
             raw_records,
             stages._latest_user_text(state.messages),
-            str(request.profile.policies.get("anchor") or "") or None,
+            anchor,
             True,
         )
         ledger = _ledger_after_drug_injection(ledger, full_chart, mappings)
@@ -406,14 +420,6 @@ async def _prepare_context(request: ExecutionRequest, state: _State) -> None:
     temporal_enabled, _mode = resolve_temporal_policy(request.profile, request.context)
     temporal_block = ""
     if temporal_enabled:
-        anchor = (
-            str(
-                request.profile.policies.get("anchor")
-                or os.environ.get("HUB_ANCHOR")
-                or ""
-            )
-            or None
-        )
         state.reference_date = temporal.resolve_anchor(anchor, full_chart)
         state.temporal_facts = temporal.build_temporal_facts(
             full_chart,
@@ -1144,6 +1150,10 @@ async def _execute_stages(
                                     "claims": list(state.claims),
                                 }
                             )
+                        if state.indepth_conf.get("status") == "unavailable":
+                            state.indepth_error = (
+                                "In-Depth was withheld because review was unavailable."
+                            )
                     except Exception as exc:
                         state.indepth_error = str(exc)
                     continue
@@ -1155,6 +1165,8 @@ async def _execute_stages(
                         state.temporal_facts,
                         mode=temporal_mode,
                     )
+                    if state.indepth_conf.get("status") == "unavailable":
+                        state.indepth_gate["review_status"] = "unavailable"
                     state.claims = list(state.indepth_gate["claims"])
                     citation_checks: list[dict[str, Any]] = []
                     candidates: list[tuple[int, str, list[dict[str, Any]]]] = []

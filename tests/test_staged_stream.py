@@ -823,10 +823,10 @@ def test_answer_and_indepth_grounding_checks_merge_for_shared_reference(monkeypa
     _stub_common(monkeypatch)
 
     async def fake_answer(*_args, **_kwargs):
-        return "Supported answer [1].", [1], []
+        return "Supported answer [1][2].", [1, 2], []
 
     async def fake_indepth(*_args, **_kwargs):
-        return ["Supported In-Depth claim [1]."]
+        return ["Supported In-Depth claim [1][2]."]
 
     async def checks_by_usage(_client, _model, _answer, references, _mappings):
         output = []
@@ -835,7 +835,8 @@ def test_answer_and_indepth_grounding_checks_merge_for_shared_reference(monkeypa
             location = (item.get("usage") or [{}])[0].get("location")
             item["grounded"] = True
             item["groundingStatus"] = "verified"
-            item["groundingScope"] = "record"
+            item["groundingScope"] = "source_set"
+            item["groundingGroup"] = [1, 2]
             item["groundingChecks"] = [
                 {
                     "status": "verified",
@@ -844,7 +845,7 @@ def test_answer_and_indepth_grounding_checks_merge_for_shared_reference(monkeypa
                     else "Supported In-Depth claim.",
                     "location": location,
                     "path": "",
-                    "source_indices": [1],
+                    "source_indices": [1, 2],
                 }
             ]
             output.append(item)
@@ -865,6 +866,36 @@ def test_answer_and_indepth_grounding_checks_merge_for_shared_reference(monkeypa
         "answer",
         "indepth",
     }
+    assert reference["groundingScope"] == "source_set"
+    assert reference["groundingGroup"] == [1, 2]
+    assert all(
+        item["groundingScope"] == "source_set"
+        and item["groundingGroup"] == [1, 2]
+        for item in final["references"]
+    )
+
+
+def test_unavailable_indepth_reviewer_is_withheld_in_product_envelope(monkeypatch):
+    _stub_common(monkeypatch)
+
+    async def fake_answer(*_args, **_kwargs):
+        return "Supported answer [1].", [1], []
+
+    async def unavailable(*_args, **_kwargs):
+        return [], {
+            "level": "red",
+            "status": "unavailable",
+            "note": "In-Depth review was unavailable; no unreviewed claims were shipped.",
+        }
+
+    monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
+    monkeypatch.setattr(team, "_gen_indepth", unavailable)
+
+    final = dict(_collect(_product_profile(review_model="review")))["done"]
+    assert final["inDepth"]["status"] == "needs_review"
+    assert final["inDepth"]["answer"] == ""
+    assert "review was unavailable" in final["inDepth"]["error"]
+    assert final["inDepth"]["validation"]["review_status"] == "unavailable"
 
 
 def test_indepth_citation_cannot_inherit_answer_verified_verdict(monkeypatch):
