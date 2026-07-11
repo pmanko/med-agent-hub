@@ -1005,11 +1005,10 @@ async def _execute_stages(
                     if product:
                         yield (
                             "indepth_pending",
-                            json.dumps(
-                                {
-                                    "messageId": None,
-                                    "inDepth": {"status": "pending", "answer": ""},
-                                }
+                            _stream_payload(
+                                state,
+                                request,
+                                in_depth={"status": "pending", "answer": ""},
                             ),
                         )
                     if product and not stages._is_substantive_answer(state.answer_text):

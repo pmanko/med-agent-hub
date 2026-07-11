@@ -712,7 +712,11 @@ def test_final_unsupported_grounding_marks_answer_needs_review(monkeypatch):
     monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
     monkeypatch.setattr(team, "_ground_references", unsupported)
 
-    final = dict(_collect(_product_profile()))["done"]
+    events = dict(_collect(_product_profile()))
+    pending = events["indepth_pending"]
+    final = events["done"]
+    assert pending["references"][0]["groundingStatus"] == "unsupported"
+    assert pending["answerValidation"]["status"] == "needs_review"
     assert final["answerValidation"]["status"] == "needs_review"
     assert final["answerValidation"]["issues"][-1]["id"] == "citation_grounding"
 
