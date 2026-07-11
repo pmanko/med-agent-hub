@@ -404,23 +404,30 @@ async def _prepare_context(request: ExecutionRequest, state: _State) -> None:
     mappings = ledger.mappings()
     raw_records = ledger.raw_records()
     anchor = _temporal_anchor(request)
+    temporal_enabled, _mode = resolve_temporal_policy(request.profile, request.context)
+    resolved_reference_date = None
+    if temporal_enabled or request.profile.policies.get("drug_safety"):
+        resolved_reference_date = temporal.resolve_anchor(
+            anchor,
+            full_chart,
+            timezone_name=os.environ.get("HUB_TIMEZONE"),
+        )
     if request.profile.policies.get("drug_safety") and full_chart:
         full_chart, mappings, state.drug_context = stages._prepare_drug_safety(
             full_chart,
             mappings,
             raw_records,
             stages._latest_user_text(state.messages),
-            anchor,
+            resolved_reference_date,
             True,
         )
         ledger = _ledger_after_drug_injection(ledger, full_chart, mappings)
         state.ledger = ledger
 
     state.full_chart = full_chart
-    temporal_enabled, _mode = resolve_temporal_policy(request.profile, request.context)
     temporal_block = ""
     if temporal_enabled:
-        state.reference_date = temporal.resolve_anchor(anchor, full_chart)
+        state.reference_date = resolved_reference_date
         state.temporal_facts = temporal.build_temporal_facts(
             full_chart,
             state.reference_date,

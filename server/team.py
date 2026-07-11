@@ -129,7 +129,9 @@ def _prepare_drug_safety(
     if not enabled or not chart_text:
         return chart_text, mappings, None
     reference_date = temporal.resolve_anchor(
-        anchor or os.environ.get("HUB_ANCHOR"), chart_text
+        anchor or os.environ.get("HUB_ANCHOR"),
+        chart_text,
+        timezone_name=os.environ.get("HUB_TIMEZONE"),
     )
     dataset = drug_safety.load_dataset()
     patient_context = drug_safety.build_patient_context(

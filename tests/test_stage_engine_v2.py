@@ -39,6 +39,70 @@ def test_low_level_leg_keeps_latest_record_default_without_an_explicit_anchor(mo
     assert engine._temporal_anchor(request) is None
 
 
+def test_product_context_resolves_temporal_date_once_for_drug_safety_and_facts(
+    monkeypatch,
+):
+    from server import team, temporal
+
+    class TinyCounter:
+        async def count(self, _model, _text):
+            return 1
+
+    registry = patient_source_registry(
+        "[1] (2026-07-10) Encounter: Visit\n",
+        [
+            {
+                "resourceType": "Encounter",
+                "resourceUuid": "enc-1",
+                "date": "2026-07-10",
+                "text": "(2026-07-10) Encounter: Visit",
+            }
+        ],
+    )
+    resolve_calls = []
+    drug_dates = []
+    fact_dates = []
+    real_build = temporal.build_temporal_facts
+
+    def resolve(anchor, chart, *, timezone_name=None):
+        resolve_calls.append((anchor, timezone_name, chart))
+        return "2026-07-10"
+
+    def prepare_drugs(chart, mappings, _records, _question, reference_date, _enabled):
+        drug_dates.append(reference_date)
+        return chart, mappings, None
+
+    def build_facts(chart, reference_date, *, anchor_mode=None):
+        fact_dates.append(reference_date)
+        return real_build(chart, reference_date, anchor_mode=anchor_mode)
+
+    monkeypatch.setenv("HUB_TIMEZONE", "Pacific/Honolulu")
+    monkeypatch.setattr(temporal, "resolve_anchor", resolve)
+    monkeypatch.setattr(temporal, "build_temporal_facts", build_facts)
+    monkeypatch.setattr(team, "_prepare_drug_safety", prepare_drugs)
+    profile = replace(
+        get_profile("single-e4b-checked"),
+        context_window=2048,
+        reserved_output_tokens=64,
+    )
+    request = engine.ExecutionRequest(
+        profile=profile,
+        messages=[{"role": "user", "content": "When was the visit?"}],
+        patient="patient-1",
+        source_registry=registry,
+        token_counter=TinyCounter(),
+    )
+    state = engine._State(messages=[dict(item) for item in request.messages])
+
+    asyncio.run(engine._prepare_context(request, state))
+
+    assert len(resolve_calls) == 1
+    assert resolve_calls[0][:2] == ("wall_clock", "Pacific/Honolulu")
+    assert drug_dates == ["2026-07-10"]
+    assert fact_dates == ["2026-07-10"]
+    assert state.reference_date == "2026-07-10"
+
+
 def test_blocking_adapter_drains_the_same_async_stage_engine(monkeypatch):
     request = engine.ExecutionRequest(
         profile=get_profile("answer:gemma-4-12b"),

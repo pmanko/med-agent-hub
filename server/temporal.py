@@ -15,6 +15,7 @@ import datetime as _dt
 import json
 import re
 from typing import Any, Dict, List, Optional
+from zoneinfo import ZoneInfo
 
 # A record line is `[N] <rest>`; the date `(YYYY-MM-DD)` is present only on the FIRST line of a
 # same-date run (the serializer run-length-compresses it — e.g. Ellcky keeps 8/276 dates), so it is
@@ -203,7 +204,9 @@ def parse_events(chart: str) -> List[Dict[str, str]]:
     return out
 
 
-def resolve_anchor(anchor: Optional[str], chart: str) -> Optional[str]:
+def resolve_anchor(
+    anchor: Optional[str], chart: str, *, timezone_name: Optional[str] = None
+) -> Optional[str]:
     """Resolve the reference 'now' (ISO date).
        - None / 'latest_record' -> the max date of a CLINICAL record (administrative enrollments are
          excluded — a Program can post-date the last visit and must not define 'now');
@@ -212,6 +215,8 @@ def resolve_anchor(anchor: Optional[str], chart: str) -> Optional[str]:
     Returns None when latest_record is requested but the chart has no dates."""
     mode = (anchor or "latest_record").strip()
     if mode == "wall_clock":
+        if timezone_name:
+            return _dt.datetime.now(ZoneInfo(timezone_name)).date().isoformat()
         return _dt.date.today().isoformat()
     if _ISO_RE.fullmatch(mode):
         return mode

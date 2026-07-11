@@ -39,6 +39,26 @@ def test_resolve_anchor_latest_record_picks_max_date():
     )  # default = latest_record
 
 
+def test_resolve_anchor_wall_clock_uses_configured_deployment_timezone(monkeypatch):
+    instant = temporal._dt.datetime(
+        2026, 7, 11, 3, 0, tzinfo=temporal._dt.timezone.utc
+    )
+
+    class FixedDateTime:
+        @classmethod
+        def now(cls, timezone=None):
+            return instant.astimezone(timezone)
+
+    monkeypatch.setattr(temporal._dt, "datetime", FixedDateTime)
+
+    assert (
+        temporal.resolve_anchor(
+            "wall_clock", _CHART, timezone_name="Pacific/Honolulu"
+        )
+        == "2026-07-10"
+    )
+
+
 def test_resolve_anchor_explicit_date_passthrough():
     assert temporal.resolve_anchor("2006-06-01", _CHART) == "2006-06-01"
 
