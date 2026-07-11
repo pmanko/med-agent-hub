@@ -426,7 +426,15 @@ async def _ground_references(
             if group_position is None:
                 group_position = len(groups)
                 group_by_key[key] = group_position
-                groups.append({"claim": claim, "sources": [], "references": []})
+                groups.append(
+                    {
+                        "claim": claim,
+                        "location": key[0],
+                        "path": key[1],
+                        "sources": [],
+                        "references": [],
+                    }
+                )
             group = groups[group_position]
             if (
                 ref_position not in group["references"]
@@ -460,24 +468,47 @@ async def _ground_references(
         if out.get("resolutionStatus") == "unresolved":
             grounded_refs.append(out)
             continue
-        reference_verdicts = [
-            verdict_by_position.get(group_position)
-            for group_position in groups_by_reference[i]
-        ]
-        if not reference_verdicts or any(v is None for v in reference_verdicts):
+        grounding_checks = []
+        for group_position in groups_by_reference[i]:
+            group = groups[group_position]
+            group_verdict = verdict_by_position.get(group_position)
+            grounding_checks.append(
+                {
+                    "status": (
+                        "verified"
+                        if group_verdict is True
+                        else "unsupported"
+                        if group_verdict is False
+                        else "unchecked"
+                    ),
+                    "claim": group["claim"],
+                    "location": group["location"],
+                    "path": group["path"],
+                    "source_indices": sorted(
+                        {
+                            references[position].get("index")
+                            for position in group["references"]
+                            if isinstance(references[position].get("index"), int)
+                        }
+                    ),
+                }
+            )
+        check_statuses = {check["status"] for check in grounding_checks}
+        if not grounding_checks or "unchecked" in check_statuses:
             verdict = None
-        elif any(v is False for v in reference_verdicts):
+            aggregate_status = "unchecked"
+        elif check_statuses == {"unsupported"}:
             verdict = False
-        else:
+            aggregate_status = "unsupported"
+        elif check_statuses == {"verified"}:
             verdict = True
+            aggregate_status = "verified"
+        else:
+            verdict = None
+            aggregate_status = "mixed"
         out["grounded"] = verdict
-        out["groundingStatus"] = (
-            "verified"
-            if verdict is True
-            else "unsupported"
-            if verdict is False
-            else "unchecked"
-        )
+        out["groundingStatus"] = aggregate_status
+        out["groundingChecks"] = grounding_checks
         source_set = sorted(
             {
                 references[position].get("index")

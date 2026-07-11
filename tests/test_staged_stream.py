@@ -547,6 +547,18 @@ def test_ground_references_checks_a_multi_citation_claim_against_combined_source
     assert [item["groundingStatus"] for item in grounded] == ["verified", "verified"]
     assert [item["groundingScope"] for item in grounded] == ["source_set", "source_set"]
     assert [item["groundingGroup"] for item in grounded] == [[1, 2], [1, 2]]
+    assert all(
+        item["groundingChecks"] == [
+            {
+                "status": "verified",
+                "claim": "Weight decreased from 74 kg on 2006-03-16 to 71 kg on 2006-06-06 .",
+                "location": "answer",
+                "path": "",
+                "source_indices": [1, 2],
+            }
+        ]
+        for item in grounded
+    )
     prompt = calls[0]["messages"][0]["content"]
     assert prompt.count("PAIR ") == 1
     assert "[1] 2006-03-16 Weight (kg): 74 kg" in prompt
@@ -581,6 +593,39 @@ def test_ground_references_caps_sources_within_one_claim(monkeypatch):
         team._ENTAILMENT_MAX_SOURCES_PER_CLAIM
     )
     assert [item["groundingStatus"] for item in grounded].count("unchecked") == 3
+
+
+def test_ground_references_preserves_mixed_claim_level_verdicts(monkeypatch):
+    fake_chat, _calls = _fake_chat_returning_verdicts([["YES", "NO"]])
+    monkeypatch.setattr(team, "_chat", fake_chat)
+    refs = [
+        {
+            "index": 1,
+            "resolutionStatus": "resolved",
+            "usage": [
+                {"location": "answer", "path": "", "text": "Supported claim [1]."},
+                {"location": "answer", "path": "", "text": "Unsupported claim [1]."},
+            ],
+        }
+    ]
+    mappings = [{"index": 1, "date": "2026-01-01", "text": "source one"}]
+
+    async def _run():
+        return await team._ground_references(
+            None,
+            "M",
+            "Supported claim [1]. Unsupported claim [1].",
+            refs,
+            mappings,
+        )
+
+    grounded = asyncio.run(_run())
+    assert grounded[0]["groundingStatus"] == "mixed"
+    assert grounded[0]["grounded"] is None
+    assert [check["status"] for check in grounded[0]["groundingChecks"]] == [
+        "verified",
+        "unsupported",
+    ]
 
 
 def test_ground_references_unsupported_for_high_overlap_but_negated_statement(
@@ -773,9 +818,13 @@ def test_indepth_citation_cannot_inherit_answer_verified_verdict(monkeypatch):
     monkeypatch.setattr(team, "_synthesize_indepth", fake_indepth)
     monkeypatch.setattr(team, "_ground_references", ground_by_usage)
 
-    final = dict(_collect(_product_profile()))["done"]
+    events = dict(_collect(_product_profile()))
+    indepth_done = events["indepth_error"]
+    final = events["done"]
 
     assert len(calls) == 2
+    assert indepth_done["inDepth"]["status"] == "needs_review"
+    assert indepth_done["references"][0]["groundingStatus"] == "verified"
     assert final["inDepth"]["status"] == "needs_review"
     assert final["inDepth"]["answer"] == ""
     assert final["inDepth"]["validation"]["citation_checks"][0]["status"] == "fail"
@@ -783,6 +832,41 @@ def test_indepth_citation_cannot_inherit_answer_verified_verdict(monkeypatch):
     assert all(
         usage.get("location") != "indepth" for usage in final["references"][0]["usage"]
     )
+
+
+def test_unchecked_indepth_citation_is_omitted_and_cannot_report_complete(monkeypatch):
+    _stub_common(monkeypatch)
+
+    async def fake_answer(*_args, **_kwargs):
+        return "Supported answer [1].", [1], []
+
+    async def fake_indepth(*_args, **_kwargs):
+        return ["In-Depth claim whose support was not checked [1]."]
+
+    async def ground_by_usage(_client, _model, _answer, references, _mappings):
+        output = []
+        for reference in references:
+            item = dict(reference)
+            is_indepth = any(
+                usage.get("location") == "indepth"
+                for usage in item.get("usage") or []
+            )
+            item["grounded"] = None if is_indepth else True
+            item["groundingStatus"] = "unchecked" if is_indepth else "verified"
+            output.append(item)
+        return output
+
+    monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
+    monkeypatch.setattr(team, "_synthesize_indepth", fake_indepth)
+    monkeypatch.setattr(team, "_ground_references", ground_by_usage)
+
+    final = dict(_collect(_product_profile()))["done"]
+
+    assert final["inDepth"]["status"] == "needs_review"
+    assert final["inDepth"]["answer"] == ""
+    check = final["inDepth"]["validation"]["citation_checks"][0]
+    assert check["status"] == "fail"
+    assert "could not be checked" in check["reason"]
 
 
 def test_named_sse_emits_heartbeats_while_a_leg_stalls():

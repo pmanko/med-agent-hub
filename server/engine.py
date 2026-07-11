@@ -1155,7 +1155,8 @@ async def _execute_stages(
                         unsupported = [
                             reference
                             for reference in grounded_references
-                            if reference.get("groundingStatus") == "unsupported"
+                            if reference.get("groundingStatus")
+                            in {"unsupported", "mixed"}
                         ]
                         if unsupported:
                             citation_checks.append(
@@ -1167,6 +1168,25 @@ async def _execute_stages(
                                     "source_indices": [
                                         reference.get("index")
                                         for reference in unsupported
+                                    ],
+                                }
+                            )
+                            continue
+                        unchecked = [
+                            reference
+                            for reference in grounded_references
+                            if reference.get("groundingStatus") == "unchecked"
+                        ]
+                        if unchecked:
+                            citation_checks.append(
+                                {
+                                    "claim_index": claim_index,
+                                    "claim": claim,
+                                    "status": "fail",
+                                    "reason": "In-Depth citation support could not be checked within the grounding limits.",
+                                    "source_indices": [
+                                        reference.get("index")
+                                        for reference in unchecked
                                     ],
                                 }
                             )
@@ -1221,30 +1241,36 @@ async def _execute_stages(
                         )
                     if product:
                         if state.indepth_error:
+                            indepth = {
+                                "status": "needs_review",
+                                "answer": "",
+                                "error": state.indepth_error,
+                                "validation": state.indepth_gate,
+                            }
+                            payload = json.loads(
+                                _stream_payload(state, request, in_depth=indepth)
+                            )
+                            payload.update(indepth)
                             yield (
                                 "indepth_error",
-                                json.dumps(
-                                    {
-                                        "status": "needs_review",
-                                        "answer": "",
-                                        "error": state.indepth_error,
-                                        "validation": state.indepth_gate,
-                                    }
-                                ),
+                                json.dumps(payload),
                             )
                         else:
+                            indepth = {
+                                "status": "complete",
+                                "answer": "\n".join(
+                                    "- " + claim for claim in state.claims
+                                ),
+                                "error": "",
+                                "validation": state.indepth_gate,
+                            }
+                            payload = json.loads(
+                                _stream_payload(state, request, in_depth=indepth)
+                            )
+                            payload.update(indepth)
                             yield (
                                 "indepth_done",
-                                json.dumps(
-                                    {
-                                        "status": "complete",
-                                        "answer": "\n".join(
-                                            "- " + claim for claim in state.claims
-                                        ),
-                                        "error": "",
-                                        "validation": state.indepth_gate,
-                                    }
-                                ),
+                                json.dumps(payload),
                             )
                     continue
 
