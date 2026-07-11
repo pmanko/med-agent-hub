@@ -806,6 +806,10 @@ def test_named_sse_emits_heartbeats_while_a_leg_stalls():
     assert chunks[-1] == 'event: answer_done\ndata: {"answer":"hi"}\n\n'
 
 
+def test_default_heartbeat_interval_detects_product_preemption_promptly():
+    assert 0.1 <= openai_compat._SSE_HEARTBEAT_INTERVAL_S <= 1.0
+
+
 def test_named_sse_resumes_all_events_in_one_task_context():
     marker = ContextVar("stream-budget", default=None)
 

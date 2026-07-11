@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 import uuid
 from dataclasses import replace
@@ -171,7 +172,15 @@ def _sse_stream(model: str, content: str):
     yield "data: [DONE]\n\n"
 
 
-_SSE_HEARTBEAT_INTERVAL_S = 10.0
+def _heartbeat_interval() -> float:
+    try:
+        configured = float(os.environ.get("HUB_SSE_HEARTBEAT_SECONDS", "0.5"))
+    except ValueError:
+        configured = 0.5
+    return max(0.1, configured)
+
+
+_SSE_HEARTBEAT_INTERVAL_S = _heartbeat_interval()
 
 
 def _named_sse(gen, interval_s: float = _SSE_HEARTBEAT_INTERVAL_S):
