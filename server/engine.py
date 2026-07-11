@@ -64,6 +64,65 @@ class ExecutionRequest:
     token_counter: Optional[TokenCounter] = None
 
 
+def _chart_answer_response_format() -> Dict[str, Any]:
+    """Hub-owned structured-output contract for product Answer generation."""
+    cell = {
+        "type": "object",
+        "properties": {
+            "text": {"type": "string"},
+            "refs": {"type": "array", "items": {"type": "integer"}},
+        },
+        "required": ["text", "refs"],
+        "additionalProperties": False,
+    }
+    column = {
+        "type": "object",
+        "properties": {"key": {"type": "string"}, "label": {"type": "string"}},
+        "required": ["key", "label"],
+        "additionalProperties": False,
+    }
+    row = {
+        "type": "object",
+        "properties": {"cells": {"type": "object", "additionalProperties": cell}},
+        "required": ["cells"],
+        "additionalProperties": False,
+    }
+    block = {
+        "type": "object",
+        "properties": {
+            "kind": {"type": "string", "enum": ["table"]},
+            "title": {"type": "string"},
+            "columns": {"type": "array", "items": column},
+            "rows": {"type": "array", "items": row},
+        },
+        "required": ["kind", "title", "columns", "rows"],
+        "additionalProperties": False,
+    }
+    schema = {
+        "type": "object",
+        "properties": {
+            "answer": {"type": "string"},
+            "citations": {"type": "array", "items": {"type": "integer"}},
+            "blocks": {"type": "array", "items": block},
+        },
+        "required": ["answer", "citations", "blocks"],
+        "additionalProperties": False,
+    }
+    return {
+        "type": "json_schema",
+        "json_schema": {"name": "chart_answer", "strict": True, "schema": schema},
+    }
+
+
+def _answer_response_format(request: ExecutionRequest) -> Optional[Dict[str, Any]]:
+    """Use the caller contract when supplied; product profiles otherwise own it."""
+    if request.response_format is not None:
+        return request.response_format
+    if request.profile.output_mode == "product":
+        return _chart_answer_response_format()
+    return None
+
+
 @dataclass
 class _State:
     messages: List[Dict[str, Any]]
@@ -334,8 +393,9 @@ async def _count_answer_input(
     count_chat = getattr(counter, "count_chat", None)
     if callable(count_chat):
         payload: Dict[str, Any] = {"messages": actual_messages}
-        if request.response_format is not None:
-            payload["response_format"] = request.response_format
+        response_format = _answer_response_format(request)
+        if response_format is not None:
+            payload["response_format"] = response_format
         return await count_chat(request.profile.models["answer"], payload)
     # Unit-test counters can implement the simpler text protocol. Production
     # profiles instantiate RouterTokenCounter and therefore always take the exact
@@ -617,6 +677,7 @@ async def _execute_stages(
     """Execute the profile stage list and emit public phase events as stages complete."""
     state = _State(messages=[dict(message) for message in request.messages])
     sampling = _sampling(request)
+    answer_response_format = _answer_response_format(request)
     temporal_enabled, temporal_mode = resolve_temporal_policy(
         request.profile, request.context
     )
@@ -702,7 +763,7 @@ async def _execute_stages(
                         state.messages,
                         _prompt(request.profile, "answer", "synthesis-answer"),
                         state.gathered,
-                        response_format=request.response_format,
+                        response_format=answer_response_format,
                         temperature=sampling["answer_temperature"],
                         max_tokens=request.max_tokens,
                         repeat_penalty=sampling["answer_repeat_penalty"],
@@ -731,7 +792,7 @@ async def _execute_stages(
                             request.profile, "answer", "synthesis-answer"
                         ),
                         gathered=state.gathered,
-                        response_format=request.response_format,
+                        response_format=answer_response_format,
                         answer_text=state.answer_text,
                         citations=state.citations,
                         blocks=state.blocks,

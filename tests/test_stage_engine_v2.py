@@ -39,6 +39,45 @@ def test_low_level_leg_keeps_latest_record_default_without_an_explicit_anchor(mo
     assert engine._temporal_anchor(request) is None
 
 
+def test_product_profile_owns_answer_schema_when_client_omits_it():
+    request = engine.ExecutionRequest(
+        profile=get_profile("single-e4b-checked"),
+        messages=[{"role": "user", "content": "Question"}],
+    )
+
+    response_format = engine._answer_response_format(request)
+
+    assert response_format is not None
+    assert response_format["type"] == "json_schema"
+    assert response_format["json_schema"]["name"] == "chart_answer"
+    assert response_format["json_schema"]["strict"] is True
+    assert response_format["json_schema"]["schema"]["required"] == [
+        "answer",
+        "citations",
+        "blocks",
+    ]
+
+
+def test_low_level_leg_does_not_gain_product_answer_schema():
+    request = engine.ExecutionRequest(
+        profile=get_profile("answer:gemma-4-12b"),
+        messages=[{"role": "user", "content": "Question"}],
+    )
+
+    assert engine._answer_response_format(request) is None
+
+
+def test_explicit_client_answer_schema_takes_precedence():
+    explicit = {"type": "json_schema", "json_schema": {"name": "client_contract"}}
+    request = engine.ExecutionRequest(
+        profile=get_profile("single-e4b-checked"),
+        messages=[{"role": "user", "content": "Question"}],
+        response_format=explicit,
+    )
+
+    assert engine._answer_response_format(request) is explicit
+
+
 def test_product_context_resolves_temporal_date_once_for_drug_safety_and_facts(
     monkeypatch,
 ):
@@ -219,7 +258,10 @@ def test_product_request_cannot_disable_answer_or_indepth_temporal_enforcement(
         ],
     )
 
-    async def fake_answer(*_args, **_kwargs):
+    answer_formats = []
+
+    async def fake_answer(*_args, **kwargs):
+        answer_formats.append(kwargs["response_format"])
         return "The documented visit was 2026-01-01 [1].", [1], []
 
     async def fake_review(_client, **kwargs):
@@ -264,6 +306,7 @@ def test_product_request_cannot_disable_answer_or_indepth_temporal_enforcement(
     assert events["answer_done"]["temporalGate"]["mode"] == "enforce"
     assert events["done"]["temporalGate"]["mode"] == "enforce"
     assert events["done"]["inDepth"]["validation"]["mode"] == "enforce"
+    assert answer_formats[0]["json_schema"]["name"] == "chart_answer"
 
 
 def test_product_pipeline_fallback_records_enforced_temporal_gate(monkeypatch):
