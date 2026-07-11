@@ -92,9 +92,9 @@ def test_product_single_profile_has_no_fake_orchestrator_and_correct_order():
 
 def test_grounding_is_after_review_and_final_reference_resolution():
     # Required order: review -> final_resolve_refs -> ground_verdicts.
-    plan = levels_loader.get_stage_plan("single-12b-checked")
-    assert plan.stages.index("review") < plan.stages.index("final_resolve_refs")
-    assert plan.stages.index("final_resolve_refs") < plan.stages.index(
+    profile = levels_loader.get_profile("single-12b-checked")
+    assert profile.stages.index("review") < profile.stages.index("final_resolve_refs")
+    assert profile.stages.index("final_resolve_refs") < profile.stages.index(
         "ground_verdicts"
     )
 

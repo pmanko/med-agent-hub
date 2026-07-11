@@ -130,6 +130,27 @@ def _request_for(req: ChatCompletionRequest, profile: Profile) -> ExecutionReque
     )
 
 
+def _require_product_profile(req: ChatCompletionRequest, profile: Profile) -> None:
+    """Keep product clients on complete, safety-enforced profile plans.
+
+    Direct hub clients may intentionally use low-level legs. Product relays mark
+    their request explicitly so an arbitrary client-supplied model id cannot turn a
+    product Answer into an experimental ``off``/``warn`` execution.
+    """
+    product_request = bool((req.context or {}).get("require_product_profile"))
+    if product_request and (
+        profile.visibility != "product" or profile.output_mode != "product"
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "product_profile_required",
+                "model": req.model,
+                "message": "This client accepts configured product profiles only.",
+            },
+        )
+
+
 async def _content_for(req: ChatCompletionRequest) -> str:
     return await drain_profile(_request_for(req, get_profile(req.model)))
 
@@ -276,6 +297,7 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
     except ModelNotFoundError as error:
         raise _model_error(error) from error
 
+    _require_product_profile(req, profile)
     execution = _request_for(req, profile)
     if req.stream and profile.staged:
         execution = replace(execution, is_disconnected=request.is_disconnected)

@@ -23,7 +23,7 @@ Streaming and blocking requests execute the same asynchronous engine in `server/
 
 ## Profiles
 
-Configured profiles live in `server/levels.yaml` and declare a human label, topology, ordered stages, role models, prompts, validation policies, and context budget. The preferred product profile is `single-e4b-checked`; discovery marks it as the effective default only when it is available, otherwise the hub marks the available product profile with the lowest explicit `selection_priority`. Product envelopes always enforce deterministic temporal validation, regardless of discovery visibility, require exact tokenizer-backed context counting, and apply the hub-owned `chart_answer` JSON schema when the client does not supply a `response_format`. An explicit client schema still takes precedence; low-level legs retain their existing caller-controlled contract.
+Configured profiles live in `server/levels.yaml` and declare a human label, topology, ordered stages, role models, prompts, validation policies, and context budget. The preferred product profile is `single-e4b-checked`; discovery marks it as the effective default only when it is available, otherwise the hub marks the available product profile with the lowest explicit `selection_priority`. Product envelopes always enforce deterministic temporal validation, regardless of discovery visibility, require exact tokenizer-backed context counting, and apply the hub-owned `chart_answer` JSON schema. A product request cannot replace that contract; low-level legs retain their existing caller-controlled `response_format` behavior.
 
 Low-level experiment legs use these ids:
 

@@ -485,6 +485,10 @@ class RouterTokenCounter:
                     headers=headers,
                 )
                 if response.status_code == 404:
+                    # ``response_format`` is an out-of-band generation grammar in
+                    # llama.cpp, not chat-template input. /apply-template accepts only
+                    # the fields below; excluding the schema therefore preserves the
+                    # exact prompt-token count rather than approximating it.
                     template_body = {
                         key: body[key]
                         for key in ("model", "messages", "tools", "tool_choice")

@@ -323,39 +323,3 @@ profiles:
     models: {answer: gemma-4-12b}
     prompts: {answer: synthesis-cite-or-abstain}
     policies: {output: bare, temporal_gate: "off"}
-
-  indepth-only-gemma-4-12b:
-    label: In-Depth only 12B
-    topology: leg
-    stages: [context, indepth]
-    models: {indepth: gemma-4-12b}
-    prompts: {indepth: synthesis-indepth}
-    policies: {output: indepth, temporal_gate: "off"}
-    visibility: internal
-
-  indepth-only-qwen2.5-14b:
-    label: In-Depth only Qwen 14B
-    topology: leg
-    stages: [context, indepth]
-    models: {indepth: qwen2.5-14b}
-    prompts: {indepth: synthesis-indepth}
-    policies: {output: indepth, temporal_gate: "off"}
-    visibility: internal
-
-  indepth-only-medgemma-27b:
-    label: In-Depth only MedGemma 27B
-    topology: leg
-    stages: [context, indepth]
-    models: {indepth: medgemma-27b}
-    prompts: {indepth: synthesis-indepth}
-    policies: {output: indepth, temporal_gate: "off"}
-    visibility: internal
-
-  indepth-only-lfm2-24b-a2b:
-    label: In-Depth only LFM2 24B
-    topology: leg
-    stages: [context, indepth]
-    models: {indepth: lfm2-24b-a2b}
-    prompts: {indepth: synthesis-indepth}
-    policies: {output: indepth, temporal_gate: "off"}
-    visibility: internal

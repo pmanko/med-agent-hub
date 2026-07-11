@@ -136,7 +136,7 @@ def test_staged_stream_with_validator_emits_full_phase_sequence(monkeypatch):
         return ("Ans [1].", [1], [])
 
     async def fake_validate(_client, **_k):
-        assert _k.get("validator_model") is None
+        assert "validator_model" not in _k
         return (
             _k["answer_text"],
             _k["citations"],
@@ -158,7 +158,7 @@ def test_staged_stream_with_validator_emits_full_phase_sequence(monkeypatch):
         return {"answer_ok": True, "errors": []}
 
     monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
-    monkeypatch.setattr(team, "_validate_and_refine_answer", fake_validate)
+    monkeypatch.setattr(team, "_ensure_substantive_answer", fake_validate)
     monkeypatch.setattr(team, "_validate_answer_rewrite", fake_rewrite)
 
     events = _collect(_product_profile(review_model="V"))
@@ -208,7 +208,7 @@ def test_post_review_punctuation_rewrite_preserves_usable_answer_and_needs_revie
         return "Useful answer [1].", [1], []
 
     async def fake_validate(_client, **kwargs):
-        assert kwargs.get("validator_model") is None
+        assert "validator_model" not in kwargs
         return (
             kwargs["answer_text"],
             kwargs["citations"],
@@ -224,7 +224,7 @@ def test_post_review_punctuation_rewrite_preserves_usable_answer_and_needs_revie
         }
 
     monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
-    monkeypatch.setattr(team, "_validate_and_refine_answer", fake_validate)
+    monkeypatch.setattr(team, "_ensure_substantive_answer", fake_validate)
     monkeypatch.setattr(team, "_validate_answer_rewrite", punctuation_rewrite)
 
     events = dict(_collect(_product_profile(review_model="V")))
@@ -256,7 +256,7 @@ def test_indepth_unresolved_citation_is_not_displayed(monkeypatch):
 
     monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
     monkeypatch.setattr(team, "_gen_indepth", fake_indepth)
-    monkeypatch.setattr(team, "_validate_and_refine_answer", unchanged)
+    monkeypatch.setattr(team, "_ensure_substantive_answer", unchanged)
 
     events = dict(_collect(_product_profile(review_model="V")))
 
@@ -275,7 +275,7 @@ def test_staged_stream_without_validator_skips_validation_phase(monkeypatch):
     monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
 
     async def substance_only(_client, **kwargs):
-        assert kwargs["validator_model"] is None
+        assert "validator_model" not in kwargs
         return (
             kwargs["answer_text"],
             kwargs["citations"],
@@ -283,7 +283,7 @@ def test_staged_stream_without_validator_skips_validation_phase(monkeypatch):
             {"level": "green", "note": ""},
         )
 
-    monkeypatch.setattr(team, "_validate_and_refine_answer", substance_only)
+    monkeypatch.setattr(team, "_ensure_substantive_answer", substance_only)
 
     events = _collect(_product_profile())
     names = [n for n, _ in events]
@@ -311,7 +311,7 @@ def test_answer_done_timing_separates_answer_work_from_pipeline_overhead(monkeyp
         )
 
     monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
-    monkeypatch.setattr(team, "_validate_and_refine_answer", fake_validate)
+    monkeypatch.setattr(team, "_ensure_substantive_answer", fake_validate)
     monkeypatch.setattr(
         team, "_write_trace", lambda *_args, **kwargs: traces.append(kwargs)
     )
@@ -347,7 +347,7 @@ def test_non_substantive_product_answer_withholds_indepth(monkeypatch):
         raise AssertionError("In-Depth must not run from a non-substantive Answer")
 
     monkeypatch.setattr(team, "_synthesize_answer", fallback_answer)
-    monkeypatch.setattr(team, "_validate_and_refine_answer", fallback_validate)
+    monkeypatch.setattr(team, "_ensure_substantive_answer", fallback_validate)
     monkeypatch.setattr(team, "_gen_indepth", indepth_must_not_run)
     monkeypatch.setattr(team, "_synthesize_indepth", indepth_must_not_run)
 
@@ -372,7 +372,7 @@ def test_stage_drain_returns_final_post_review_envelope(monkeypatch):
         return ("Ans [1].", [1], [])
 
     async def fake_validate(_client, **_k):
-        assert _k.get("validator_model") is None
+        assert "validator_model" not in _k
         return (
             _k["answer_text"],
             _k["citations"],
@@ -394,7 +394,7 @@ def test_stage_drain_returns_final_post_review_envelope(monkeypatch):
         return {"answer_ok": True, "errors": []}
 
     monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
-    monkeypatch.setattr(team, "_validate_and_refine_answer", fake_validate)
+    monkeypatch.setattr(team, "_ensure_substantive_answer", fake_validate)
     monkeypatch.setattr(team, "_validate_answer_rewrite", fake_rewrite)
 
     async def _run():

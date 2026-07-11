@@ -72,14 +72,6 @@ class Profile:
         return str(self.policies.get("output", "bare"))
 
 
-@dataclass(frozen=True)
-class StagePlan:
-    id: str
-    stages: Tuple[str, ...]
-    topology: str
-    low_level_leg: bool = False
-
-
 def _split_dynamic_prompt_profile(
     profile_id: str, prefix: str
 ) -> tuple[str, str | None, str | None, float | None]:
@@ -414,13 +406,6 @@ def get_profile(profile_id: str) -> Profile:
     if profile_id not in raw:
         raise ModelNotFoundError(profile_id, list(raw))
     return _from_spec(profile_id, raw[profile_id] or {})
-
-
-def get_stage_plan(profile_id: str) -> StagePlan:
-    profile = get_profile(profile_id)
-    return StagePlan(
-        profile.id, profile.stages, profile.topology, profile.low_level_leg
-    )
 
 
 def resolve_temporal_policy(

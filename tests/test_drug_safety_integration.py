@@ -331,7 +331,7 @@ def test_profile_stream_omits_safety_warnings_when_disabled_default():
 
 
 def test_stage_engine_drain_carries_safety_warnings_through():
-    async def fake_stream(request):
+    async def fake_stream(request, _budget_policy=None):
         assert request.profile.policies["drug_safety"] is True
         yield (
             "done",

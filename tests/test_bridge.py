@@ -677,3 +677,38 @@ def test_unknown_model_id_returns_structured_model_not_found():
     assert r.json()["detail"]["code"] == "model_not_found"
     assert r.json()["detail"]["model"] == "some-raw-model"
     mock_drain.assert_not_called()
+
+
+def test_product_client_rejects_low_level_leg_before_execution():
+    with patch("server.openai_compat.drain_profile") as mock_drain:
+        client = TestClient(app)
+        r = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "answer:gemma-e4b@synthesis-answer~off",
+                "messages": MESSAGES,
+                "context": {"require_product_profile": True},
+            },
+        )
+
+    assert r.status_code == 400
+    assert r.json()["detail"]["code"] == "product_profile_required"
+    mock_drain.assert_not_called()
+
+
+def test_direct_hub_client_can_still_use_low_level_leg():
+    async def fake_drain(execution):
+        assert execution.profile.id == "answer:gemma-e4b@synthesis-answer~off"
+        return ENVELOPE
+
+    with patch("server.openai_compat.drain_profile", side_effect=fake_drain):
+        client = TestClient(app)
+        r = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "answer:gemma-e4b@synthesis-answer~off",
+                "messages": MESSAGES,
+            },
+        )
+
+    assert r.status_code == 200

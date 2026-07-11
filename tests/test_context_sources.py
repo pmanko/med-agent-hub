@@ -76,7 +76,13 @@ def test_router_chat_counter_falls_back_to_template_then_tokenize(monkeypatch):
     count = asyncio.run(
         counter.count_chat(
             "gemma-e4b",
-            {"messages": [{"role": "user", "content": "hello"}]},
+            {
+                "messages": [{"role": "user", "content": "hello"}],
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {"name": "chart_answer"},
+                },
+            },
         )
     )
 
@@ -86,6 +92,8 @@ def test_router_chat_counter_falls_back_to_template_then_tokenize(monkeypatch):
         "apply-template",
         "tokenize",
     ]
+    assert calls[0][1]["response_format"]["json_schema"]["name"] == "chart_answer"
+    assert set(calls[1][1]) == {"model", "messages"}
     assert calls[-1][1]["parse_special"] is True
 
 

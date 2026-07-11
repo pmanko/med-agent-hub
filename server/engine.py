@@ -115,12 +115,10 @@ def _chart_answer_response_format() -> Dict[str, Any]:
 
 
 def _answer_response_format(request: ExecutionRequest) -> Optional[Dict[str, Any]]:
-    """Use the caller contract when supplied; product profiles otherwise own it."""
-    if request.response_format is not None:
-        return request.response_format
+    """Product profiles own their contract; low-level legs remain caller-controlled."""
     if request.profile.output_mode == "product":
         return _chart_answer_response_format()
-    return None
+    return request.response_format
 
 
 @dataclass
@@ -673,6 +671,7 @@ def _raw_result(request: ExecutionRequest, state: _State) -> str:
 
 async def _execute_stages(
     request: ExecutionRequest,
+    budget_policy: Optional[stages.ChatBudgetPolicy] = None,
 ) -> AsyncIterator[Tuple[str, str]]:
     """Execute the profile stage list and emit public phase events as stages complete."""
     state = _State(messages=[dict(message) for message in request.messages])
@@ -685,17 +684,8 @@ async def _execute_stages(
     execution_started = time.perf_counter()
     answer_stage_ms: Optional[int] = None
     product = request.profile.output_mode == "product"
-    budget_policy: Optional[stages.ChatBudgetPolicy] = None
-    budget_token = None
-    if request.profile.exact_tokenizer:
-        counter = request.token_counter or RouterTokenCounter()
-        state.token_counter = counter
-        budget_policy = stages.ChatBudgetPolicy(
-            counter=counter,
-            context_window=request.profile.context_window,
-            reserved_output_tokens=request.profile.reserved_output_tokens,
-        )
-        budget_token = stages.activate_chat_budget(budget_policy)
+    if budget_policy is not None:
+        state.token_counter = budget_policy.counter
 
     try:
         async with httpx.AsyncClient() as client:
@@ -784,7 +774,7 @@ async def _execute_stages(
                         state.citations,
                         state.blocks,
                         state.answer_conf,
-                    ) = await stages._validate_and_refine_answer(
+                    ) = await stages._ensure_substantive_answer(
                         client,
                         synth_model=request.profile.models["answer"],
                         base_messages=state.messages,
@@ -796,15 +786,9 @@ async def _execute_stages(
                         answer_text=state.answer_text,
                         citations=state.citations,
                         blocks=state.blocks,
-                        validator_model=None,
-                        validator_prompt=None,
-                        chart=state.chart,
                         synth_temperature=sampling["answer_temperature"],
                         synth_repeat_penalty=sampling["answer_repeat_penalty"],
                         synth_dry=sampling["answer_dry"],
-                        validator_temperature=0.0,
-                        validator_repeat_penalty=None,
-                        validator_dry=None,
                         max_tokens=request.max_tokens,
                         max_loops=int(request.profile.policies.get("review_loops", 1)),
                         steps=state.steps,
@@ -1508,45 +1492,48 @@ async def _execute_stages(
             yield "done", json.dumps(payload)
         else:
             yield "result", fallback
-    finally:
-        if budget_token is not None:
-            stages.reset_chat_budget(budget_token)
+
+
+def _chat_budget_policy(
+    request: ExecutionRequest,
+) -> Optional[stages.ChatBudgetPolicy]:
+    if not request.profile.exact_tokenizer:
+        return None
+    return stages.ChatBudgetPolicy(
+        counter=request.token_counter or RouterTokenCounter(),
+        context_window=request.profile.context_window,
+        reserved_output_tokens=request.profile.reserved_output_tokens,
+    )
 
 
 class StageEngine:
     """Single owner of profile event execution and blocking event drain."""
 
     async def events(self, request: ExecutionRequest) -> AsyncIterator[Tuple[str, str]]:
-        queue: asyncio.Queue = asyncio.Queue()
-
-        async def produce() -> None:
-            try:
-                async for event in _execute_stages(request):
-                    await queue.put(("item", event))
-            except BaseException as error:
-                await queue.put(("error", error))
-            finally:
-                await queue.put(("done", None))
-
-        producer = asyncio.create_task(produce())
+        cancelled = False
+        budget_policy = _chat_budget_policy(request)
+        events = _execute_stages(request, budget_policy).__aiter__()
         try:
             while True:
-                kind, value = await queue.get()
-                if kind == "item":
-                    yield value
-                elif kind == "error":
-                    raise value
-                else:
+                budget_token = (
+                    stages.activate_chat_budget(budget_policy)
+                    if budget_policy is not None
+                    else None
+                )
+                try:
+                    event = await events.__anext__()
+                except StopAsyncIteration:
                     return
+                finally:
+                    if budget_token is not None:
+                        stages.reset_chat_budget(budget_token)
+                yield event
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
         finally:
-            was_cancelled = not producer.done()
-            if was_cancelled:
-                producer.cancel()
-            try:
-                await producer
-            except BaseException:
-                pass
-            if was_cancelled:
+            await events.aclose()
+            if cancelled:
                 stages._write_cancellation_trace(
                     request.profile.id,
                     [dict(message) for message in request.messages],

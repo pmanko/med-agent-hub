@@ -67,10 +67,21 @@ def test_low_level_leg_does_not_gain_product_answer_schema():
     assert engine._answer_response_format(request) is None
 
 
-def test_explicit_client_answer_schema_takes_precedence():
+def test_product_profile_ignores_conflicting_client_answer_schema():
     explicit = {"type": "json_schema", "json_schema": {"name": "client_contract"}}
     request = engine.ExecutionRequest(
         profile=get_profile("single-e4b-checked"),
+        messages=[{"role": "user", "content": "Question"}],
+        response_format=explicit,
+    )
+
+    assert engine._answer_response_format(request)["json_schema"]["name"] == "chart_answer"
+
+
+def test_low_level_leg_preserves_explicit_client_answer_schema():
+    explicit = {"type": "json_schema", "json_schema": {"name": "client_contract"}}
+    request = engine.ExecutionRequest(
+        profile=get_profile("answer:gemma-4-12b"),
         messages=[{"role": "user", "content": "Question"}],
         response_format=explicit,
     )
@@ -149,7 +160,7 @@ def test_blocking_adapter_drains_the_same_async_stage_engine(monkeypatch):
     )
     calls = []
 
-    async def fake_engine(actual_request):
+    async def fake_engine(actual_request, _budget_policy=None):
         calls.append(actual_request)
         yield "result", '{"answer":"ok","citations":[],"blocks":[]}'
 
@@ -282,7 +293,7 @@ def test_product_request_cannot_disable_answer_or_indepth_temporal_enforcement(
         return references
 
     monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
-    monkeypatch.setattr(team, "_validate_and_refine_answer", fake_review)
+    monkeypatch.setattr(team, "_ensure_substantive_answer", fake_review)
     monkeypatch.setattr(team, "_gen_indepth", fake_indepth)
     monkeypatch.setattr(team, "_ground_references", fake_ground)
     monkeypatch.setattr(team, "_write_trace", lambda *_args, **_kwargs: None)
