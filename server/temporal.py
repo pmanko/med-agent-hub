@@ -1214,7 +1214,96 @@ def _series_value_candidates(
     return values
 
 
-def _date_value_failures(answer: str, series: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _claim_local_series_values(
+    text: str,
+    series: Dict[str, Any],
+    selected_series: List[Dict[str, Any]],
+) -> List[tuple[re.Match, float]]:
+    values = _series_value_candidates(text, series)
+    if len(selected_series) <= 1:
+        return values
+
+    target_index = next(
+        (index for index, candidate in enumerate(selected_series) if candidate is series),
+        None,
+    )
+    if target_index is None:
+        return []
+    if re.search(r"\brespectively\b", text, re.I):
+        mention_starts: List[tuple[int, int]] = []
+        for index, candidate in enumerate(selected_series):
+            spans = _series_mention_spans(text, candidate)
+            if not spans:
+                mention_starts = []
+                break
+            mention_starts.append((min(start for start, _end in spans), index))
+        unit_sets = [
+            {
+                unicodedata.normalize("NFKC", str(point.get("unit") or "").strip())
+                for point in candidate.get("points") or []
+                if str(point.get("unit") or "").strip()
+            }
+            for candidate in selected_series
+        ]
+        common_units = set.intersection(*unit_sets) if unit_sets else set()
+        ordered_values: List[tuple[re.Match, float]] = []
+        for match in _NUMBER_TOKEN_RE.finditer(text):
+            try:
+                ordered_values.append((match, float(match.group())))
+            except ValueError:
+                continue
+        last_value_end = ordered_values[-1][0].end() if ordered_values else 0
+        shared_unit_suffix = text[last_value_end : last_value_end + 40].lstrip()
+        if (
+            len(mention_starts) == len(selected_series)
+            and len({start for start, _index in mention_starts})
+            == len(selected_series)
+            and len(ordered_values) == len(selected_series)
+            and common_units
+            and any(
+                _has_exact_unit_suffix(shared_unit_suffix, unit)
+                for unit in common_units
+            )
+        ):
+            mention_order = [index for _start, index in sorted(mention_starts)]
+            return [ordered_values[mention_order.index(target_index)]]
+    if not values:
+        return []
+    mentions = [
+        (index, span)
+        for index, candidate in enumerate(selected_series)
+        for span in _series_mention_spans(text, candidate)
+    ]
+    if not any(index == target_index for index, _span in mentions):
+        return []
+
+    assigned: List[tuple[re.Match, float]] = []
+    for value_match, value in values:
+        distances: List[tuple[int, int]] = []
+        for index, (start, end) in mentions:
+            if value_match.start() >= end:
+                distance = value_match.start() - end
+            elif start >= value_match.end():
+                distance = start - value_match.end()
+            else:
+                distance = 0
+            distances.append((distance, index))
+        nearest = min((distance for distance, _index in distances), default=None)
+        nearest_series = {
+            index
+            for distance, index in distances
+            if nearest is not None and distance == nearest
+        }
+        if nearest_series == {target_index}:
+            assigned.append((value_match, value))
+    return assigned
+
+
+def _date_value_failures(
+    answer: str,
+    series: Dict[str, Any],
+    selected_series: Optional[List[Dict[str, Any]]] = None,
+) -> List[Dict[str, Any]]:
     points = series.get("points") or []
     by_date: Dict[str, set] = {}
     value_dates: Dict[float, set] = {}
@@ -1237,7 +1326,9 @@ def _date_value_failures(answer: str, series: Dict[str, Any]) -> List[Dict[str, 
                 date_match.group()
             )
         value_text = "".join(value_sentence)
-        values = _series_value_candidates(value_text, series)
+        values = _claim_local_series_values(
+            value_text, series, selected_series or [series]
+        )
         if not values:
             continue
         all_expected_values = sorted(value_dates)
@@ -1543,7 +1634,7 @@ def run_temporal_gate(
             patch_answer, patch_citations = _series_patch(selected[0])
 
     for s in selected:
-        for failure in _date_value_failures(a, s)[:3]:
+        for failure in _date_value_failures(a, s, selected)[:3]:
             bound_date = failure.get("date")
             claim = (
                 f"value {failure['value']} to {bound_date}"

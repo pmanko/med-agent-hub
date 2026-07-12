@@ -882,6 +882,105 @@ def test_gate_preserves_ordinal_date_value_pairs_with_respectively():
     assert not any(c["id"] == "date_value_binding" for c in gate["checks"])
 
 
+def _paired_blood_pressure_facts():
+    return {
+        "reference_date": "2006-06-20",
+        "clinical_dates": [],
+        "admin_dates": [],
+        "date_ledger": [{"iso": "2006-06-06", "date_id": "bp"}],
+        "date_output_contract": {"allowed_iso_dates": ["2006-06-06"]},
+        "appointment_candidates": {},
+        "numeric_series": [
+            {
+                "concept": "Diastolic blood pressure",
+                "points": [
+                    {"date": "2006-06-06", "value": 60, "unit": "mmHg", "index": 15}
+                ],
+                "trend_supported": False,
+                "direction": "none",
+            },
+            {
+                "concept": "Systolic blood pressure",
+                "points": [
+                    {"date": "2006-06-06", "value": 110, "unit": "mmHg", "index": 17}
+                ],
+                "trend_supported": False,
+                "direction": "none",
+            },
+        ],
+    }
+
+
+def test_gate_binds_same_unit_values_to_their_named_series():
+    gate = temporal.run_temporal_gate(
+        "What was the most recent blood pressure?",
+        "The systolic blood pressure was 110 mmHg and the diastolic blood pressure was 60 mmHg on 2006-06-06 [17][15].",
+        [17, 15],
+        _paired_blood_pressure_facts(),
+        "enforce",
+    )
+
+    assert not any(c["id"] == "date_value_binding" for c in gate["checks"])
+
+
+def test_gate_rejects_same_unit_values_swapped_between_named_series():
+    gate = temporal.run_temporal_gate(
+        "What was the most recent blood pressure?",
+        "The systolic blood pressure was 60 mmHg and the diastolic blood pressure was 110 mmHg on 2006-06-06 [17][15].",
+        [17, 15],
+        _paired_blood_pressure_facts(),
+        "enforce",
+    )
+
+    assert gate["status"] == "fail"
+    assert any(c["id"] == "date_value_binding" for c in gate["checks"])
+
+
+@pytest.mark.parametrize(
+    "answer",
+    (
+        "Systolic blood pressure and diastolic blood pressure were 110 mmHg and 60 mmHg, respectively, on 2006-06-06 [17][15].",
+        "The systolic and diastolic blood pressures were 110 and 60 mmHg, respectively, on 2006-06-06 [17][15].",
+    ),
+)
+def test_gate_binds_coordinated_same_unit_values_by_respective_order(answer):
+    gate = temporal.run_temporal_gate(
+        "What was the most recent blood pressure?",
+        answer,
+        [17, 15],
+        _paired_blood_pressure_facts(),
+        "enforce",
+    )
+
+    assert not any(c["id"] == "date_value_binding" for c in gate["checks"])
+
+
+def test_gate_rejects_coordinated_same_unit_values_swapped_by_respective_order():
+    gate = temporal.run_temporal_gate(
+        "What was the most recent blood pressure?",
+        "The systolic and diastolic blood pressures were 60 and 110 mmHg, respectively, on 2006-06-06 [17][15].",
+        [17, 15],
+        _paired_blood_pressure_facts(),
+        "enforce",
+    )
+
+    assert gate["status"] == "fail"
+    assert any(c["id"] == "date_value_binding" for c in gate["checks"])
+
+
+@pytest.mark.parametrize("values", ("110 and 60", "60 and 110"))
+def test_gate_leaves_generic_coordinated_multi_series_values_unbound(values):
+    gate = temporal.run_temporal_gate(
+        "What was the most recent blood pressure?",
+        f"The blood pressure values were {values} mmHg, respectively, on 2006-06-06 [17][15].",
+        [17, 15],
+        _paired_blood_pressure_facts(),
+        "enforce",
+    )
+
+    assert not any(c["id"] == "date_value_binding" for c in gate["checks"])
+
+
 def test_gate_fails_malformed_date_output_and_can_patch_selected_series():
     facts = temporal.build_temporal_facts(_CHART, "2006-06-01")
     gate = temporal.run_temporal_gate(
