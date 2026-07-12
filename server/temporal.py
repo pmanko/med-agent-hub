@@ -1667,6 +1667,38 @@ def run_temporal_gate(
 
 
 _DANGLING_CITATION_RE = re.compile(r"\s*\[\s*$")
+_VALID_CITATION_TOKEN_RE = re.compile(
+    r"(?<![\w\[])\[\d+(?:\s*,\s*\d+)*\](?![\w\]])"
+)
+_GROUPED_CITATION_RE = re.compile(
+    r"(?<![\w\[])\[((?:\d+\s*,\s*)+\d+)\](?![\w\]])"
+)
+
+
+def _canonicalize_grouped_citations(claim: str) -> Tuple[str, List[int]]:
+    source_indices: List[int] = []
+
+    def replacement(match: re.Match) -> str:
+        indices: List[int] = []
+        for value in re.findall(r"\d+", match.group(1)):
+            index = int(value)
+            if index not in indices:
+                indices.append(index)
+            if index not in source_indices:
+                source_indices.append(index)
+        return "".join(f"[{index}]" for index in indices)
+
+    return _GROUPED_CITATION_RE.sub(replacement, claim or ""), source_indices
+
+
+def canonicalize_indepth_citations(claim: str) -> Tuple[str, List[int]]:
+    """Canonicalize only complete, standalone numeric citation groups."""
+    return _canonicalize_grouped_citations(claim)
+
+
+def _has_malformed_citation_syntax(claim: str) -> bool:
+    remainder = _VALID_CITATION_TOKEN_RE.sub("", claim or "")
+    return "[" in remainder or "]" in remainder
 
 
 def _repair_dangling_indepth_citation(
@@ -1761,6 +1793,11 @@ def gate_indepth_claims(
         }
     for index, claim in enumerate(claims or [], 1):
         original_claim = claim
+        canonicalized_indices: List[int] = []
+        if normalized_mode == "enforce":
+            claim, canonicalized_indices = _canonicalize_grouped_citations(claim or "")
+            if canonicalized_indices:
+                edited = True
         citation_repair = (
             _repair_dangling_indepth_citation(claim or "", temporal_facts)
             if normalized_mode == "enforce"
@@ -1773,10 +1810,7 @@ def gate_indepth_claims(
         gate = run_temporal_gate(
             question, claim or "", citations, temporal_facts, normalized_mode
         )
-        if (
-            normalized_mode != "off"
-            and _DANGLING_CITATION_RE.search(claim or "")
-        ):
+        if normalized_mode != "off" and _has_malformed_citation_syntax(claim or ""):
             gate = dict(gate)
             gate_checks = list(gate.get("checks") or [])
             _add_check(
@@ -1785,7 +1819,7 @@ def gate_indepth_claims(
                 "fail",
                 "block",
                 original_claim[:240],
-                "The claim ends with a truncated evidence citation.",
+                "The claim contains malformed, attached, nested, or incomplete evidence citation syntax.",
                 citations,
             )
             gate.update(
@@ -1803,6 +1837,12 @@ def gate_indepth_claims(
                 "status": "repaired",
                 "source_index": source_index,
                 "reason": repair_reason,
+            }
+        if canonicalized_indices:
+            check["evaluated_claim"] = claim
+            check["citation_canonicalization"] = {
+                "status": "canonicalized",
+                "source_indices": canonicalized_indices,
             }
         checks.append(check)
         if gate.get("status") != "fail" or normalized_mode != "enforce":

@@ -1,12 +1,13 @@
-"""Two-call generation + two independent validators, each with a re-synth cycle that yields a
-per-section CONFIDENCE label (green / yellow / red). The Answer and the In-Depth are distinct from
-generation onward and combined into one body only at the chartsearchai handoff.
+"""Two-call generation with independent Answer and In-Depth review lifecycles.
 
-  Confidence (per section): green = passed review first pass; yellow = flagged -> re-synthesized ->
-  cleared; red = flagged -> re-synthesized -> still flagged. We ALWAYS ship the answer — a red
-  section ships WITH its criticism (never hidden; the renderer decides visibility). A reasonless
-  Answer flag (answer_ok=False, empty issues) is treated as PASS (noise guard). The structured
-  confidence rides the envelope `confidence` field AND the reasoning trace.
+The Answer and In-Depth are distinct from generation onward and combined into one body only at the
+ChartSearchAI handoff. In-Depth preserves approved claims after a partial rejection; only a total
+rejection permits one bounded fresh synthesis.
+
+  Confidence (per section): green = passed review first pass; yellow = a total rejection was replaced
+  by a clean fresh synthesis; red = one or more claims were removed. Product profiles separately
+  withhold an empty or unreviewed section. The structured confidence rides the envelope `confidence`
+  field and the reasoning trace.
 
 Mocks only the model boundary (`_chat`) and exercises the compiled stages end-to-end. The mock
 branches on the response_format json_schema name so the four call sites (chart_answer synth, in_depth
@@ -166,7 +167,7 @@ def test_answer_green_clean_first_pass():
 # gate (non-substantive answer never ships green) is covered there too.
 
 
-# ---- IN-DEPTH confidence (re-synth before strip) ---------------------------
+# ---- IN-DEPTH confidence (preserve survivors; retry total rejection once) --
 
 
 def test_indepth_green_no_drop():
@@ -175,23 +176,146 @@ def test_indepth_green_no_drop():
     assert "claim-A-v0" in env["answer"] and "claim-B-v0" in env["answer"]
 
 
-def test_indepth_yellow_resynth_clears_drop():
-    """In-Depth flagged on first audit -> re-synth -> clean -> yellow, the REVISED claims (v1) ship."""
+def test_indepth_partial_drop_preserves_survivor_without_resynth():
+    """A partial reviewer drop must not discard and regenerate the claims that passed."""
     calls, env = _run([{"answer_ok": True}], iv_drops=[[2], []])
     _a, i_synth, _av, i_val = _counts(calls)
-    assert i_synth == 2 and i_val == 2, calls  # synth + re-synth, two audits
+    assert i_synth == 1 and i_val == 1, calls
+    assert env["confidence"]["in_depth"]["level"] == "red"
+    assert "claim-A-v0" in env["answer"]
+    assert "claim-B-v0" not in env["answer"]
+
+
+def test_indepth_yellow_resynth_clears_total_drop():
+    """Only a total initial rejection triggers one bounded fresh synthesis."""
+    calls, env = _run([{"answer_ok": True}], iv_drops=[[1, 2], []])
+    _a, i_synth, _av, i_val = _counts(calls)
+    assert i_synth == 2 and i_val == 2, calls
     assert env["confidence"]["in_depth"]["level"] == "yellow"
-    assert "claim-A-v1" in env["answer"]  # revised claims adopted
+    assert env["confidence"]["in_depth"]["removed"] == 2
+    assert env["confidence"]["in_depth"]["issues"] == "flagged"
+    assert env["confidence"]["in_depth"]["review_attempts"] == 2
+    assert "claim-A-v1" in env["answer"]
 
 
 def test_indepth_red_strips_after_failed_resynth():
-    """In-Depth flagged -> re-synth -> STILL flagged -> red: strip the still-flagged claim, keep rest."""
-    calls, env = _run([{"answer_ok": True}], iv_drops=[[2], [2]])
+    """A total rejection may re-synth once; remaining flagged claims are then stripped."""
+    calls, env = _run([{"answer_ok": True}], iv_drops=[[1, 2], [2]])
     _a, i_synth, _av, i_val = _counts(calls)
     assert i_synth == 2 and i_val == 2, calls
     assert env["confidence"]["in_depth"]["level"] == "red"
+    assert env["confidence"]["in_depth"]["removed"] == 3
+    assert env["confidence"]["in_depth"]["issues"] == "flagged"
+    assert env["confidence"]["in_depth"]["review_attempts"] == 2
     assert "claim-A-v1" in env["answer"]  # surviving claim kept
     assert "claim-B-v1" not in env["answer"]  # still-flagged claim stripped
+
+
+def test_indepth_retry_is_structurally_capped_at_one():
+    """A permissive legacy loop setting cannot create an unbounded regeneration cycle."""
+    calls, env = _run(
+        [{"answer_ok": True}],
+        iv_drops=[[1, 2], [1, 2], []],
+        validator_max_loops=3,
+    )
+    _a, i_synth, _av, i_val = _counts(calls)
+    assert i_synth == 2 and i_val == 2, calls
+    assert env["confidence"]["in_depth"]["level"] == "red"
+
+
+def test_empty_indepth_retry_is_recorded_in_trace(monkeypatch):
+    syntheses = iter((["first claim", "second claim"], []))
+
+    async def synthesize(*_args, **_kwargs):
+        return next(syntheses)
+
+    async def reject_all(*_args, **_kwargs):
+        return {"drop": [1, 2], "issues": "Both claims were unsupported."}
+
+    monkeypatch.setattr(team, "_synthesize_indepth", synthesize)
+    monkeypatch.setattr(team, "_validate_indepth_verdict", reject_all)
+    steps = []
+
+    claims, confidence = asyncio.run(
+        team._gen_indepth(
+            None,
+            "SYNTH",
+            [],
+            "instruction",
+            "gathered",
+            "answer",
+            validator_model="VALIDATOR",
+            validator_prompt="validation",
+            chart="chart",
+            synth_temperature=0.0,
+            synth_repeat_penalty=None,
+            synth_dry=None,
+            validator_temperature=0.0,
+            validator_repeat_penalty=None,
+            validator_dry=None,
+            max_tokens=128,
+            max_loops=1,
+            steps=steps,
+        )
+    )
+
+    assert claims == []
+    assert confidence["removed"] == 2
+    assert confidence["issues"] == "Both claims were unsupported."
+    assert confidence["review_attempts"] == 1
+    retry_step = next(step for step in steps if step["role"] == "indepth_resynth")
+    assert retry_step["claims"] == []
+
+
+def test_indepth_canonicalizes_grouped_citations_before_review(monkeypatch):
+    reviewed_claims = []
+
+    async def synthesize(*_args, **_kwargs):
+        return ["The measurements are supported by [18, 17]."]
+
+    async def review(*_args, **kwargs):
+        reviewed_claims.extend(kwargs["claims"])
+        return {"drop": [], "issues": ""}
+
+    monkeypatch.setattr(team, "_synthesize_indepth", synthesize)
+    monkeypatch.setattr(team, "_validate_indepth_verdict", review)
+    steps = []
+
+    claims, confidence = asyncio.run(
+        team._gen_indepth(
+            None,
+            "SYNTH",
+            [],
+            "instruction",
+            "gathered",
+            "answer",
+            validator_model="VALIDATOR",
+            validator_prompt="validation",
+            chart="chart",
+            synth_temperature=0.0,
+            synth_repeat_penalty=None,
+            synth_dry=None,
+            validator_temperature=0.0,
+            validator_repeat_penalty=None,
+            validator_dry=None,
+            max_tokens=128,
+            max_loops=1,
+            steps=steps,
+            canonicalize_citations=True,
+        )
+    )
+
+    assert reviewed_claims == ["The measurements are supported by [18][17]."]
+    assert claims == reviewed_claims
+    assert confidence["level"] == "green"
+    assert steps[0]["original_claims"] == [
+        "The measurements are supported by [18, 17]."
+    ]
+    assert steps[0]["citation_canonicalized"] is True
+
+
+def test_extract_citations_preserves_first_appearance_order():
+    assert team._extract_citations("First [18], then [17], then [18].") == [18, 17]
 
 
 def test_unavailable_indepth_reviewer_cannot_ship_complete(monkeypatch):

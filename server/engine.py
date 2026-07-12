@@ -1240,6 +1240,9 @@ async def _execute_stages(
                                     request.profile.policies.get("review_loops", 1)
                                 ),
                                 steps=state.steps,
+                                canonicalize_citations=(
+                                    product and temporal_mode == "enforce"
+                                ),
                             )
                         else:
                             state.claims = await stages._synthesize_indepth(
@@ -1280,6 +1283,19 @@ async def _execute_stages(
                     )
                     if state.indepth_conf.get("status") == "unavailable":
                         state.indepth_gate["review_status"] = "unavailable"
+                    elif state.indepth_conf.get("status") == "edited":
+                        state.indepth_gate["review_status"] = "edited"
+                        state.indepth_gate["review_removed"] = int(
+                            state.indepth_conf.get("removed") or 0
+                        )
+                        state.indepth_gate["review_issues"] = str(
+                            state.indepth_conf.get("issues") or ""
+                        )
+                        state.indepth_gate["review_attempts"] = int(
+                            state.indepth_conf.get("review_attempts") or 1
+                        )
+                        if state.indepth_gate.get("status") == "checked":
+                            state.indepth_gate["status"] = "edited"
                     state.claims = list(state.indepth_gate["claims"])
                     citation_checks: list[dict[str, Any]] = []
                     candidates: list[tuple[int, str, list[dict[str, Any]]]] = []

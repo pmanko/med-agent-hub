@@ -7,6 +7,8 @@ import asyncio
 import json
 from contextvars import ContextVar
 
+import pytest
+
 import server.openai_compat as openai_compat
 import server.team as team
 from server.levels_loader import get_profile
@@ -1034,6 +1036,87 @@ def test_unavailable_indepth_reviewer_is_withheld_in_product_envelope(monkeypatc
     assert final["inDepth"]["answer"] == ""
     assert "review was unavailable" in final["inDepth"]["error"]
     assert final["inDepth"]["validation"]["review_status"] == "unavailable"
+
+
+def test_partial_indepth_review_is_reported_as_edited(monkeypatch):
+    _stub_common(monkeypatch)
+
+    async def fake_answer(*_args, **_kwargs):
+        return "Supported answer [1].", [1], []
+
+    async def edited(*_args, **_kwargs):
+        return ["The supported claim remains [1]."], {
+            "level": "red",
+            "status": "edited",
+            "removed": 1,
+            "issues": "The second claim was unsupported.",
+            "review_attempts": 1,
+            "note": "One unsupported claim was removed.",
+        }
+
+    monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
+    monkeypatch.setattr(team, "_gen_indepth", edited)
+
+    final = dict(_collect(_product_profile(review_model="review")))["done"]
+    assert final["inDepth"]["status"] == "complete"
+    assert final["inDepth"]["answer"] == "- The supported claim remains [1]."
+    validation = final["inDepth"]["validation"]
+    assert validation["status"] == "edited"
+    assert validation["review_status"] == "edited"
+    assert validation["review_removed"] == 1
+    assert validation["review_issues"] == "The second claim was unsupported."
+    assert validation["review_attempts"] == 1
+
+
+@pytest.mark.parametrize(
+    ("confidence", "expected_removed", "expected_issues"),
+    (
+        (
+            {
+                "level": "yellow",
+                "status": "edited",
+                "removed": 2,
+                "issues": "The initial draft was unsupported.",
+                "review_attempts": 2,
+                "note": "The draft was replaced.",
+            },
+            2,
+            "The initial draft was unsupported.",
+        ),
+        (
+            {
+                "level": "red",
+                "status": "edited",
+                "removed": 3,
+                "issues": "The initial draft was unsupported.; One retry claim was unsupported.",
+                "review_attempts": 2,
+                "note": "Unsupported claims were removed.",
+            },
+            3,
+            "The initial draft was unsupported.; One retry claim was unsupported.",
+        ),
+    ),
+)
+def test_retry_review_metadata_survives_product_envelope(
+    monkeypatch, confidence, expected_removed, expected_issues
+):
+    _stub_common(monkeypatch)
+
+    async def fake_answer(*_args, **_kwargs):
+        return "Supported answer [1].", [1], []
+
+    async def edited(*_args, **_kwargs):
+        return ["The replacement claim is supported [1]."], confidence
+
+    monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
+    monkeypatch.setattr(team, "_gen_indepth", edited)
+
+    final = dict(_collect(_product_profile(review_model="review")))["done"]
+    validation = final["inDepth"]["validation"]
+    assert validation["status"] == "edited"
+    assert validation["review_removed"] == expected_removed
+    assert validation["review_issues"] == expected_issues
+    assert validation["review_attempts"] == 2
 
 
 def test_non_substantive_review_preserves_answer_temporal_gate(monkeypatch):

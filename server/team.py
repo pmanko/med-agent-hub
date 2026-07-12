@@ -1845,12 +1845,13 @@ async def _gen_indepth(
     max_tokens: Optional[int],
     max_loops: int,
     steps: List[Dict[str, Any]],
+    canonicalize_citations: bool = False,
 ) -> Tuple[List[str], Dict[str, Any]]:
-    """IN-DEPTH path with the same confidence cycle as the Answer: synthesize the KB-informed claim
-    list, audit it; if flagged, RE-SYNTHESIZE (with feedback) and re-audit BEFORE stripping. Returns
-    (surviving_claims, confidence) where confidence.level is green (clean first pass) / yellow
-    (flagged then cleared on re-synth) / red (still flagged -> the survivors are kept, the rest
-    block/stripped). Records every call into `steps`."""
+    """Synthesize and audit In-Depth claims without replacing reviewer-approved work.
+
+    A partial rejection returns the original survivors. A total rejection permits one fresh attempt,
+    which is audited before any surviving claims can ship. Every model call is recorded in `steps`.
+    """
     green = {"level": "green", "note": ""}
 
     async def _audit(cl: List[str], attempt: int) -> Dict[str, Any]:
@@ -1900,9 +1901,14 @@ async def _gen_indepth(
         repeat_penalty=synth_repeat_penalty,
         dry=synth_dry,
     )
-    steps.append(
-        {"role": "indepth_synth", "model": synth_model, "claims": list(claims)}
-    )
+    original_claims = list(claims)
+    if canonicalize_citations:
+        claims = [temporal.canonicalize_indepth_citations(claim)[0] for claim in claims]
+    synth_step = {"role": "indepth_synth", "model": synth_model, "claims": list(claims)}
+    if claims != original_claims:
+        synth_step["original_claims"] = original_claims
+        synth_step["citation_canonicalized"] = True
+    steps.append(synth_step)
     if not (validator_model and claims):
         return claims, green
 
@@ -1916,8 +1922,31 @@ async def _gen_indepth(
     if not (v.get("drop") or []):
         return claims, green
 
-    # flagged -> re-synthesize the In-Depth (feedback) and re-audit BEFORE stripping.
-    for _ in range(max(0, max_loops)):
+    initial_drop = set(v.get("drop") or [])
+    initial_issues = str(v.get("issues") or "")
+    initial_survivors = [
+        claim for index, claim in enumerate(claims, start=1) if index not in initial_drop
+    ]
+    if initial_survivors:
+        logger.info(
+            "indepth-validator: partial drop -> preserve %d unflagged claim(s)",
+            len(initial_survivors),
+        )
+        return initial_survivors, {
+            "level": "red",
+            "status": "edited",
+            "removed": len(initial_drop),
+            "issues": initial_issues,
+            "review_attempts": 1,
+            "note": _indepth_note(
+                "red", len(initial_drop), initial_issues
+            ),
+        }
+
+    # A total rejection gets one bounded fresh attempt. Partial rejection returns the unflagged
+    # claims above so a retry cannot destroy good work or introduce new errors.
+    retry_reviewed = False
+    for _ in range(1 if max_loops > 0 else 0):
         logger.info("indepth-validator: claims flagged -> re-synthesizing")
         revised = await _synthesize_indepth(
             client,
@@ -1935,13 +1964,26 @@ async def _gen_indepth(
                 {"role": "user", "content": _indepth_feedback(v, claims)},
             ],
         )
-        steps.append(
-            {"role": "indepth_resynth", "model": synth_model, "claims": list(revised)}
-        )
+        original_revised = list(revised)
+        if canonicalize_citations:
+            revised = [
+                temporal.canonicalize_indepth_citations(claim)[0]
+                for claim in revised
+            ]
+        revised_step = {
+            "role": "indepth_resynth",
+            "model": synth_model,
+            "claims": list(revised),
+        }
+        if revised != original_revised:
+            revised_step["original_claims"] = original_revised
+            revised_step["citation_canonicalized"] = True
+        steps.append(revised_step)
         if not revised:
             break
         claims = revised
         v = await _audit(claims, 1)
+        retry_reviewed = True
         if v.get("unavailable"):
             return [], {
                 "level": "red",
@@ -1949,22 +1991,47 @@ async def _gen_indepth(
                 "note": "In-Depth review was unavailable; no unreviewed claims were shipped.",
             }
         if not (v.get("drop") or []):
-            return claims, {"level": "yellow", "note": _indepth_note("yellow", 0, "")}
+            return claims, {
+                "level": "yellow",
+                "status": "edited",
+                "removed": len(initial_drop),
+                "issues": initial_issues,
+                "review_attempts": 2,
+                "note": _indepth_note("yellow", 0, ""),
+            }
 
     # still flagged after re-synth -> block/strip the remaining flagged claims (red).
     drop = v.get("drop") or []
+    retry_drop = set(drop) if retry_reviewed else set()
+    retry_issues = str(v.get("issues") or "") if retry_reviewed else ""
+    lifecycle_issues = list(
+        dict.fromkeys(issue for issue in (initial_issues, retry_issues) if issue)
+    )
     kept = [c for i, c in enumerate(claims, start=1) if i not in set(drop)]
     logger.info("indepth-validator: still flagged after re-synth -> strip %s", drop)
     return kept, {
         "level": "red",
-        "note": _indepth_note("red", len(drop), v.get("issues", "")),
+        "status": "edited",
+        "removed": len(initial_drop) + len(retry_drop),
+        "issues": "; ".join(lifecycle_issues),
+        "review_attempts": 2 if retry_reviewed else 1,
+        "note": _indepth_note(
+            "red",
+            len(initial_drop) + len(retry_drop),
+            "; ".join(lifecycle_issues),
+        ),
     }
 
 
 def _extract_citations(text: str) -> List[int]:
     """The 1-based [N] citation indices a corrected answer cites, in order, deduped — so an adopted
     rewrite carries its own citations rather than the superseded draft's."""
-    return sorted({int(m) for m in re.findall(r"\[(\d+)\]", text or "")})
+    citations: List[int] = []
+    for match in re.finditer(r"\[(\d+)\]", text or ""):
+        index = int(match.group(1))
+        if index not in citations:
+            citations.append(index)
+    return citations
 
 
 def _rw_issue(verdict: Optional[Dict[str, Any]]) -> str:

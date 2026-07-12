@@ -350,3 +350,66 @@ def test_dangling_citation_repair_does_not_mutate_off_or_warn_modes():
     assert "citation_repair" not in off["checks"][0]
     assert "citation_repair" not in warn["checks"][0]
     assert warn["checks"][0]["gate"]["status"] == "fail"
+
+
+def test_grouped_numeric_citations_are_canonicalized_in_enforce_mode():
+    claim = "The recorded vital signs are supported by sources [18, 17, 15]."
+
+    result = gate_indepth_claims("What was recorded?", [claim], FACTS, mode="enforce")
+
+    assert result["status"] == "edited"
+    assert result["claims"] == [
+        "The recorded vital signs are supported by sources [18][17][15]."
+    ]
+    assert result["checks"][0]["citation_canonicalization"] == {
+        "status": "canonicalized",
+        "source_indices": [18, 17, 15],
+    }
+
+
+def test_grouped_numeric_citations_are_not_mutated_in_warn_mode():
+    claim = "The recorded vital signs are supported by sources [18, 17, 15]."
+
+    result = gate_indepth_claims("What was recorded?", [claim], FACTS, mode="warn")
+
+    assert result["claims"] == [claim]
+    assert "citation_canonicalization" not in result["checks"][0]
+
+
+def test_grouped_numeric_citations_deduplicate_without_reordering():
+    claim = "The recorded vital signs are supported by sources [18, 18, 17]."
+
+    result = gate_indepth_claims("What was recorded?", [claim], FACTS, mode="enforce")
+
+    assert result["claims"] == [
+        "The recorded vital signs are supported by sources [18][17]."
+    ]
+    assert result["checks"][0]["citation_canonicalization"]["source_indices"] == [
+        18,
+        17,
+    ]
+
+
+@pytest.mark.parametrize(
+    "citation",
+    (
+        "[[18,17]]",
+        "x[18,17]y",
+        "[18, foo]",
+    ),
+)
+def test_malformed_grouped_citations_fail_closed_in_enforce_mode(citation):
+    claim = f"The recorded vital signs are supported by sources {citation}."
+
+    result = gate_indepth_claims("What was recorded?", [claim], FACTS, mode="enforce")
+
+    assert result["status"] == "needs_review"
+    assert result["claims"] == []
+    assert result["removed"] == [1]
+    citation_checks = [
+        check
+        for check in result["checks"][0]["gate"]["checks"]
+        if check["id"] == "citation_format"
+    ]
+    assert len(citation_checks) == 1
+    assert citation_checks[0]["severity"] == "block"
