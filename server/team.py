@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 import httpx
 
 from . import drug_safety, kb, temporal
-from .config import EXPERT_DRY_MULTIPLIER, llm_config
+from .config import EXPERT_DRY_MULTIPLIER, llm_config, resolve_hub_build_revision
 from .context_sources import (
     ChatTokenCounter,
     ContextSourceError,
@@ -197,7 +197,12 @@ def _enforce_product_citation_contract(
     explicit = _citation_indices(inline + block_refs)
     if explicit:
         return answer, explicit, []
-    if len(declared) == 1 and answer.strip():
+    prose_claims = [
+        fragment.strip()
+        for fragment in re.split(r"(?<=[.!?])\s+|\n+", answer.strip())
+        if fragment.strip()
+    ]
+    if len(declared) == 1 and len(prose_claims) == 1:
         marker = f"[{declared[0]}]"
         stripped = answer.rstrip()
         match = re.search(r"([.!?])$", stripped)
@@ -206,15 +211,16 @@ def _enforce_product_citation_contract(
         else:
             stripped += f" {marker}"
         return stripped, declared, []
-    if len(declared) > 1:
+    if declared:
         return answer, declared, [
             {
                 "id": "citation_scope",
                 "status": "fail",
                 "severity": "block",
                 "reason": (
-                    "Multiple top-level citations were declared without inline claim markers or "
-                    "structured cell refs, so their usage cannot be mapped safely."
+                    "Top-level citations were declared without an unambiguous single prose claim, "
+                    "inline claim markers, or structured cell refs, so their usage cannot be "
+                    "mapped safely."
                 ),
                 "source_indices": declared,
             }
@@ -2195,15 +2201,11 @@ def _write_trace(
                 "validator": validator,
             },
             "sampling": sampling or {},
+            "hub_revision": resolve_hub_build_revision(),
             "answer_text": answer_text,
             "in_depth_claims": in_depth_claims or [],
             "answer_confidence": answer_confidence,
             "indepth_confidence": indepth_confidence,
-            "temporal_facts_schema_version": (
-                temporal_facts.get("schema_version")
-                if isinstance(temporal_facts, dict)
-                else None
-            ),
             "temporal_facts_summary": temporal.compact_temporal_facts_summary(
                 temporal_facts
             ),

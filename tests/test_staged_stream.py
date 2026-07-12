@@ -902,6 +902,33 @@ def test_product_single_unscoped_citation_is_scoped_and_grounded(monkeypatch):
     assert final["answerValidation"]["status"] == "checked"
 
 
+def test_temporal_patch_is_citation_canonicalized_after_gate(monkeypatch):
+    _stub_common(monkeypatch)
+
+    async def fake_answer(*_args, **_kwargs):
+        return "Unsafe draft without markers.", [1, 2], []
+
+    def patching_gate(**_kwargs):
+        return (
+            "Safe deterministic correction.",
+            [1],
+            [],
+            {"mode": "enforce", "status": "fail", "applied": "patch"},
+            "Unsafe draft without markers.",
+        )
+
+    monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
+    monkeypatch.setattr(team, "_apply_temporal_gate", patching_gate)
+
+    final = dict(_collect(_product_profile()))["done"]
+    assert final["answer"] == "Safe deterministic correction [1]."
+    assert not any(
+        issue["id"] == "citation_scope"
+        for issue in final["answerValidation"]["issues"]
+    )
+    assert final["answerValidation"]["status"] == "checked"
+
+
 def test_final_mixed_grounding_cannot_leave_answer_checked(monkeypatch):
     _stub_common(monkeypatch)
 

@@ -17,6 +17,19 @@ def test_llm_backend_is_openai_compatible_router_configuration():
     config.validate_config()
 
 
+def test_build_revision_uses_exact_configured_commit(monkeypatch):
+    monkeypatch.setenv("HUB_BUILD_REVISION", "a" * 40)
+
+    assert config.resolve_hub_build_revision() == "a" * 40
+
+
+def test_startup_rejects_unidentified_packaged_revision(monkeypatch):
+    monkeypatch.setattr(config, "resolve_hub_build_revision", lambda: "")
+
+    with pytest.raises(ValueError, match="HUB_BUILD_REVISION.*40-character Git commit"):
+        config.validate_config()
+
+
 def test_querystore_is_optional():
     blank = config.QueryStoreConfig(base_url="", username="", password="")
     configured = config.QueryStoreConfig(

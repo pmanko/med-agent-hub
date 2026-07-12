@@ -3,7 +3,6 @@ from __future__ import annotations
 from server.temporal import gate_indepth_claims
 
 FACTS = {
-    "schema_version": "temporal_facts.v1",
     "reference_date": "2026-06-20",
     "clinical_dates": [],
     "admin_dates": [],

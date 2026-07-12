@@ -799,36 +799,13 @@ async def _execute_stages(
                         max_loops=int(request.profile.policies.get("review_loops", 1)),
                         steps=state.steps,
                     )
-                    if request.profile.output_mode == "product":
-                        before_answer = state.answer_text
-                        before_citations = list(state.citations)
-                        (
-                            state.answer_text,
-                            state.citations,
-                            state.citation_issues,
-                        ) = stages._enforce_product_citation_contract(
-                            state.answer_text, state.citations, state.blocks
-                        )
-                        if (
-                            state.answer_text != before_answer
-                            or state.citations != before_citations
-                            or state.citation_issues
-                        ):
-                            state.steps.append(
-                                {
-                                    "role": "citation_contract",
-                                    "status": (
-                                        "fail" if state.citation_issues else "canonicalized"
-                                    ),
-                                    "before": before_citations,
-                                    "after": list(state.citations),
-                                }
-                            )
                     answer_stage_ms = round((time.perf_counter() - answer_started) * 1000)
                     continue
 
                 if stage == "gate":
                     gate_count += 1
+                    before_gate_answer = state.answer_text
+                    before_gate_citations = list(state.citations)
                     if (
                         request.profile.output_mode == "review"
                         and not state.answer_text
@@ -880,6 +857,36 @@ async def _execute_stages(
                         state.answer_conf = stages._merge_temporal_gate_conf(
                             state.answer_conf, state.answer_gate
                         )
+                    if request.profile.output_mode == "product":
+                        before_contract_answer = state.answer_text
+                        before_contract_citations = list(state.citations)
+                        (
+                            state.answer_text,
+                            state.citations,
+                            state.citation_issues,
+                        ) = stages._enforce_product_citation_contract(
+                            state.answer_text, state.citations, state.blocks
+                        )
+                        contract_changed = (
+                            state.answer_text != before_contract_answer
+                            or state.citations != before_contract_citations
+                        )
+                        if gate_count > 1 and (
+                            state.answer_text != before_gate_answer
+                            or state.citations != before_gate_citations
+                        ):
+                            state.review_edited = True
+                        if contract_changed or state.citation_issues:
+                            state.steps.append(
+                                {
+                                    "role": "citation_contract",
+                                    "status": (
+                                        "fail" if state.citation_issues else "canonicalized"
+                                    ),
+                                    "before": before_contract_citations,
+                                    "after": list(state.citations),
+                                }
+                            )
                     continue
 
                 if stage == "resolve_refs":
@@ -1025,21 +1032,6 @@ async def _execute_stages(
                             or state.citations != state.review_draft_citations
                             or state.blocks != state.review_draft_blocks
                         )
-                    if request.profile.output_mode == "product":
-                        before_answer = state.answer_text
-                        before_citations = list(state.citations)
-                        (
-                            state.answer_text,
-                            state.citations,
-                            state.citation_issues,
-                        ) = stages._enforce_product_citation_contract(
-                            state.answer_text, state.citations, state.blocks
-                        )
-                        if (
-                            state.answer_text != before_answer
-                            or state.citations != before_citations
-                        ):
-                            state.review_edited = True
                     continue
 
                 if stage == "final_resolve_refs":

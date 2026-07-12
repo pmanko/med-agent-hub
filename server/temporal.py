@@ -55,6 +55,15 @@ _NO_UPCOMING_RE = re.compile(
 _LAST_VISIT_RE = re.compile(
     r"\b(last|most recent|latest)\b.{0,30}\b(visit|encounter)\b", re.I
 )
+_VISIT_ASSERTION_NEGATION_RE = re.compile(
+    r"^\s*(?:(?:is|was|remains)\s+)?(?:not documented|not available|unknown|none)\b",
+    re.I,
+)
+_VISIT_DATE_RELATION_NEGATION_RE = re.compile(
+    r"^\s*(?:\[\d+\]\s*)?(?:(?:is|was)\s+not(?:\s+(?:on|at|dated|the\s+date\s+of\s+the))?|"
+    r"did\s+not\s+occur(?:\s+on)?)\s*$",
+    re.I,
+)
 _TREND_RE = re.compile(
     r"\b(trend|changed|change|increas(?:e|ed|ing)|decreas(?:e|ed|ing)|declin(?:e|ed|ing)|"
     r"improv(?:e|ed|ing)|worsen(?:ed|ing)?|gain(?:ed|ing)?|growing|growth|lost|losing|rising|falling)\b",
@@ -540,7 +549,6 @@ def build_temporal_facts(
     ledger = _date_ledger(date_roles, reference_date)
 
     return {
-        "schema_version": "temporal_facts.v1.2",
         "date_output_contract": {
             "copy_dates_verbatim_from_date_ledger": True,
             "date_id_format": "DYYYY_MM_DD",
@@ -615,8 +623,7 @@ def compact_temporal_facts_for_prompt(facts: Dict[str, Any]) -> Dict[str, Any]:
     appt = facts.get("appointment_candidates") or {}
     past_appts = appt.get("past") or []
     prompt_facts: Dict[str, Any] = {
-        "schema_version": facts.get("schema_version"),
-        "render_profile": "prompt_compact.v1",
+        "render_profile": "compact",
         "date_output_contract": facts.get("date_output_contract"),
         "date_ledger": facts.get("date_ledger") or [],
         "anchor_mode": facts.get("anchor_mode"),
@@ -668,7 +675,7 @@ def render_temporal_facts(facts: Dict[str, Any], profile: str = "full") -> str:
         prompt_facts = facts
         marker = "deterministic JSON from the chart"
     return (
-        f"Structured temporal facts ({facts.get('schema_version')}; {marker}). "
+        f"Structured temporal facts ({marker}). "
         "For any date you write, copy an `iso` value from `date_ledger`; do not reformat "
         "or reconstruct dates from memory.\n"
         "```json\n" + json.dumps(prompt_facts, separators=(",", ":")) + "\n```"
@@ -757,6 +764,60 @@ def _final_gate_status(checks: List[Dict[str, Any]]) -> str:
 
 def _fact_dates(cands: List[Dict[str, Any]]) -> List[str]:
     return sorted({c.get("date") for c in cands if c.get("date")})
+
+
+def _asserted_last_visit_dates(question: str, answer: str) -> List[str]:
+    """Return dates governed by a positive last-visit assertion.
+
+    Bind each date to the nearest ``last visit/encounter`` phrase on either side within the same
+    assertion. This avoids a broad disclaimer elsewhere masking a contradictory assertion, without
+    having to enumerate conjunctions such as "but", "although", or "yet".
+    """
+    question_asks_last = bool(_LAST_VISIT_RE.search(question or ""))
+    answer = answer or ""
+    named_visits = list(_LAST_VISIT_RE.finditer(answer))
+    date_matches = list(_ISO_TOKEN_RE.finditer(answer))
+    asserted: List[str] = []
+    for date_match in date_matches:
+        candidates = []
+        for visit_match in named_visits:
+            between_start = min(date_match.end(), visit_match.end())
+            between_end = max(date_match.start(), visit_match.start())
+            between = answer[between_start:between_end] if between_end > between_start else ""
+            distance = min(
+                abs(date_match.start() - visit_match.end()),
+                abs(visit_match.start() - date_match.end()),
+            )
+            if distance <= 120 and not re.search(r"[.!?]\s+", between):
+                candidates.append((distance, visit_match, between))
+        if candidates:
+            _distance, nearest, between = min(candidates, key=lambda item: item[0])
+            immediate_prefix = answer[max(0, nearest.start() - 30) : nearest.start()]
+            directly_negated = bool(
+                re.search(
+                    r"\b(?:no|without)\s+(?:explicit\s+)?(?:the\s+)?$|"
+                    r"\bnot\s+(?:the\s+)?$",
+                    immediate_prefix,
+                    re.I,
+                )
+            )
+            assertion_tail = answer[
+                nearest.end() : min(len(answer), max(date_match.end(), nearest.end() + 50))
+            ]
+            if (
+                not directly_negated
+                and not _VISIT_DATE_RELATION_NEGATION_RE.match(between)
+                and not _VISIT_ASSERTION_NEGATION_RE.match(assertion_tail)
+            ):
+                asserted.append(date_match.group(0))
+            continue
+        if question_asks_last and not named_visits and len(date_matches) == 1:
+            local = answer[max(0, date_match.start() - 100) : date_match.end()]
+            if not re.search(r"\bclinical activity\b", local, re.I) and not re.search(
+                r"\b(?:no|without)\b.{0,50}\b(?:visit|encounter)\b", answer, re.I
+            ):
+                asserted.append(date_match.group(0))
+    return sorted(set(asserted))
 
 
 def _latest_candidate(cands: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -1217,10 +1278,11 @@ def run_temporal_gate(
             )
 
     last = temporal_facts.get("last_clinical_encounter") or {}
+    latest_activity = temporal_facts.get("latest_clinical_activity") or {}
     last_date = last.get("date")
-    if last_date and _LAST_VISIT_RE.search(qa):
-        answer_dates = _fact_dates([{"date": d} for d in _ISO_TOKEN_RE.findall(a)])
-        if answer_dates and last_date not in answer_dates:
+    if _LAST_VISIT_RE.search(qa):
+        asserted_visit_dates = _asserted_last_visit_dates(q, a)
+        if last_date and any(date != last_date for date in asserted_visit_dates):
             indices = [i for i in (last.get("indices") or []) if isinstance(i, int)]
             _add_check(
                 checks,
@@ -1238,6 +1300,34 @@ def run_temporal_gate(
                     + (f" {cite}." if cite else ".")
                 )
                 patch_citations = indices[:3]
+        elif not last_date and asserted_visit_dates:
+            activity_date = latest_activity.get("date")
+            activity_indices = [
+                i
+                for i in (latest_activity.get("indices") or [])
+                if isinstance(i, int)
+            ]
+            _add_check(
+                checks,
+                "last_visit",
+                "fail",
+                "block",
+                a[:240],
+                "The answer asserts a last-visit date, but the evidence ledger has no explicit visit/encounter record.",
+                activity_indices[:1],
+            )
+            if not patch_answer:
+                cite = f" [{activity_indices[0]}]" if activity_indices else ""
+                activity_clause = (
+                    f" The latest dated clinical activity is {activity_date}{cite}."
+                    if activity_date
+                    else ""
+                )
+                patch_answer = (
+                    "No explicit visit/encounter record is documented in the available chart."
+                    + activity_clause
+                )
+                patch_citations = activity_indices[:1]
 
     selected = _selected_series(q, a, temporal_facts)
     if _TREND_RE.search(qa) and selected:

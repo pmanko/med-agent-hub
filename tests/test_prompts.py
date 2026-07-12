@@ -135,8 +135,8 @@ def test_synthesis_prompts_instruct_on_temporal_facts_sidecar():
         "synthesis-date-output-contract",
     ):
         text = prompt_loader.load_prompt(name)
-        assert "temporal_facts.v1" in text
-        assert "temporal_facts.v1.2" in text
+        assert "temporal_facts" in text
+        assert "temporal_facts.v" not in text
         assert "reference_date" in text
         assert "date_ledger" in text
         assert "DYYYY_MM_DD" in text

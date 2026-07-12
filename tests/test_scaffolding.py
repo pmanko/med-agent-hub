@@ -78,7 +78,8 @@ def test_single_profile_still_gets_temporal_context(monkeypatch):
     asyncio.run(run_profile(profile, _MSGS, response_format=_RF))
     synth = next(c for c in calls if c["rf"])
     blob = json.dumps(synth["messages"])
-    assert "temporal_facts.v1" in blob
+    assert "temporal_facts" in blob
+    assert "temporal_facts.v" not in blob
     assert "reference_date" in blob and "2026-01-07" in blob
     assert "last_clinical_encounter" in blob
 
@@ -129,6 +130,7 @@ def test_temporal_gate_enforce_patches_answer_and_trace(monkeypatch, tmp_path):
     calls = []
     monkeypatch.setattr(team, "_chat", _wrong_upcoming_chat(calls))
     monkeypatch.setattr(team, "_TRACE_DIR", str(tmp_path))
+    monkeypatch.setenv("HUB_BUILD_REVISION", "a" * 40)
 
     profile = single_profile(
         answer="SYNTH",
@@ -160,7 +162,8 @@ def test_temporal_gate_enforce_patches_answer_and_trace(monkeypatch, tmp_path):
         trace["original_answer_text"]
         == "The next upcoming appointment is 2026-01-07 [2]."
     )
-    assert trace["temporal_facts_schema_version"] == "temporal_facts.v1.2"
+    assert trace["hub_revision"] == "a" * 40
+    assert "temporal_facts_schema_version" not in trace
 
 
 def test_temporal_gate_warn_records_failure_without_changing_answer(

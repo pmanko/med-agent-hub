@@ -261,6 +261,16 @@ def test_product_citation_contract_scopes_one_declared_source_to_prose():
     assert issues == []
 
 
+def test_product_citation_contract_does_not_scope_one_source_over_two_claims():
+    answer, citations, issues = team._enforce_product_citation_contract(
+        "The visit was on 2006-06-06. The weight was 71 kg.", [4], []
+    )
+
+    assert answer == "The visit was on 2006-06-06. The weight was 71 kg."
+    assert citations == [4]
+    assert issues[0]["id"] == "citation_scope"
+
+
 def test_product_citation_contract_blocks_unscoped_multi_source_set():
     answer, citations, issues = team._enforce_product_citation_contract(
         "The documented visit was on 2006-06-06.", [4, 1, 2], []

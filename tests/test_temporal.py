@@ -264,12 +264,161 @@ def test_activity_only_chart_does_not_fabricate_a_clinical_encounter():
     assert "Do NOT report this activity date as a visit date" in block
 
 
-# ---- temporal_facts.v1.2 sidecar -------------------------------------------
+def test_last_visit_claim_fails_when_only_clinical_activity_is_documented():
+    facts = temporal.build_temporal_facts(_SPARSE_ACTIVITY_ONLY, "2026-06-20")
+
+    result = temporal.run_temporal_gate(
+        "When was the last visit?",
+        "The last visit was 2026-01-07 [2].",
+        [2],
+        facts,
+        "enforce",
+    )
+
+    assert result["status"] == "fail"
+    assert result["patch_answer"].startswith(
+        "No explicit visit/encounter record is documented"
+    )
+    assert "latest dated clinical activity is 2026-01-07 [2]" in result["patch_answer"]
+    assert result["patch_citations"] == [2]
+
+
+def test_last_visit_abstention_may_report_separate_latest_activity():
+    facts = temporal.build_temporal_facts(_SPARSE_ACTIVITY_ONLY, "2026-06-20")
+
+    result = temporal.run_temporal_gate(
+        "When was the last visit?",
+        "No explicit visit is documented. The latest clinical activity was 2026-01-07 [2].",
+        [2],
+        facts,
+        "enforce",
+    )
+
+    assert not any(check["id"] == "last_visit" for check in result["checks"])
+
+
+@pytest.mark.parametrize(
+    "answer",
+    (
+        "No explicit visit is documented, but the last visit was 2026-01-07 [2].",
+        "There is no encounter record. The last visit occurred on 2026-01-07 [2].",
+        "Although no explicit visit is documented, the last visit was 2026-01-07 [2].",
+        "While no encounter is documented, the last visit occurred on 2026-01-07 [2].",
+        "No explicit visit is documented, yet the last visit was 2026-01-07 [2].",
+        "No explicit visit is documented — the last visit was 2026-01-07 [2].",
+        "On 2026-01-07 [2], the last visit occurred.",
+        "2026-01-07 [2] was the date of the last encounter.",
+        "The date 2026-01-07 [2] corresponds to the last visit.",
+        "Clinical activity was reviewed, but the last visit was 2026-01-07 [2].",
+        "The latest clinical activity is unclear; however, the last encounter was 2026-01-07 [2].",
+        "No visit is documented. Clinical activity exists, yet the last visit occurred on 2026-01-07 [2].",
+    ),
+)
+def test_last_visit_disclaimer_cannot_mask_a_contradictory_assertion(answer):
+    facts = temporal.build_temporal_facts(_SPARSE_ACTIVITY_ONLY, "2026-06-20")
+
+    result = temporal.run_temporal_gate(
+        "When was the last visit?", answer, [2], facts, "enforce"
+    )
+
+    assert result["status"] == "fail"
+    assert any(check["id"] == "last_visit" for check in result["checks"])
+
+
+@pytest.mark.parametrize(
+    "answer",
+    (
+        "2026-01-07 [2] was not the date of the last encounter.",
+        "On 2026-01-07 [2], no last visit is documented.",
+        "The last visit is not documented as of 2026-01-07 [2].",
+    ),
+)
+def test_negated_date_first_visit_claim_is_not_treated_as_an_assertion(answer):
+    facts = temporal.build_temporal_facts(_SPARSE_ACTIVITY_ONLY, "2026-06-20")
+
+    result = temporal.run_temporal_gate(
+        "When was the last visit?", answer, [2], facts, "enforce"
+    )
+
+    assert not any(check["id"] == "last_visit" for check in result["checks"])
+
+
+@pytest.mark.parametrize(
+    "answer",
+    (
+        "The last visit was 2025-12-31 [4] at an unknown location.",
+        "The last encounter on 2025-12-31 [4] had an unknown provider.",
+        "The last visit was 2025-12-31 [4] and the diagnosis is not available.",
+    ),
+)
+def test_unknown_visit_attributes_do_not_mask_a_wrong_visit_date(answer):
+    facts = temporal.build_temporal_facts(_PROGRAM_CONFOUND, "2026-06-20")
+
+    result = temporal.run_temporal_gate(
+        "When was the last visit?", answer, [4], facts, "enforce"
+    )
+
+    assert result["status"] == "fail"
+    assert any(check["id"] == "last_visit" for check in result["checks"])
+
+
+def test_unknown_location_does_not_block_the_correct_visit_date():
+    facts = temporal.build_temporal_facts(_PROGRAM_CONFOUND, "2026-06-20")
+
+    result = temporal.run_temporal_gate(
+        "When was the last visit?",
+        "The last visit was 2026-01-07 [5] at Unknown Location.",
+        [5],
+        facts,
+        "enforce",
+    )
+
+    assert not any(check["id"] == "last_visit" for check in result["checks"])
+
+
+@pytest.mark.parametrize(
+    "answer",
+    (
+        "The last encounter did not include labs and occurred on 2025-12-31 [4].",
+        "The last visit was not routine; it occurred on 2025-12-31 [4].",
+        "The last visit did not document a diagnosis and was on 2025-12-31 [4].",
+        "The last visit was not at Clinic A but on 2025-12-31 [4] at Clinic B.",
+    ),
+)
+def test_unrelated_negation_does_not_mask_a_wrong_visit_date(answer):
+    facts = temporal.build_temporal_facts(_PROGRAM_CONFOUND, "2026-06-20")
+
+    result = temporal.run_temporal_gate(
+        "When was the last visit?", answer, [4], facts, "enforce"
+    )
+
+    assert result["status"] == "fail"
+    assert any(check["id"] == "last_visit" for check in result["checks"])
+
+
+@pytest.mark.parametrize(
+    "answer",
+    (
+        "The last visit was not on 2025-12-31 [4].",
+        "The last visit did not occur on 2025-12-31 [4].",
+    ),
+)
+def test_direct_visit_date_negation_is_not_an_assertion(answer):
+    facts = temporal.build_temporal_facts(_PROGRAM_CONFOUND, "2026-06-20")
+
+    result = temporal.run_temporal_gate(
+        "When was the last visit?", answer, [4], facts, "enforce"
+    )
+
+    assert not any(check["id"] == "last_visit" for check in result["checks"])
+
+
+# ---- temporal facts sidecar ------------------------------------------------
 
 
 def test_temporal_facts_captures_return_visit_dates_and_classifies_against_anchor():
     facts = temporal.build_temporal_facts(_CHART, "2006-06-01")
-    assert facts["schema_version"] == "temporal_facts.v1.2"
+    assert "schema_version" not in facts
     assert facts["reference_date"] == "2006-06-01"
     assert facts["reference_date_id"] == "D2006_06_01"
     assert facts["last_clinical_encounter"]["date"] == "2006-05-18"
@@ -308,7 +457,8 @@ def _rendered_json_payload(rendered: str) -> dict:
 def test_render_temporal_facts_includes_full_json_sidecar_marker():
     facts = temporal.build_temporal_facts(_CHART, "2006-05-18")
     rendered = temporal.render_temporal_facts(facts)
-    assert "temporal_facts.v1.2" in rendered
+    assert "Structured temporal facts" in rendered
+    assert "temporal_facts.v" not in rendered
     assert '"date_ledger"' in rendered
     assert '"return_visit_dates"' in rendered
     assert '"numeric_series"' in rendered
@@ -572,7 +722,6 @@ def test_gate_fails_pathological_malformed_date_strings():
 @pytest.mark.parametrize("answer", ["Seen on 2025-10-//13.", "Seen on 2026-01-09."])
 def test_gate_rejects_malformed_and_nonledger_dates_when_ledger_is_empty(answer):
     facts = {
-        "schema_version": "temporal_facts.v1.1",
         "date_output_contract": {},
         "date_ledger": [],
         "numeric_series": [],
