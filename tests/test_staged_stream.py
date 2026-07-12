@@ -336,7 +336,7 @@ def test_staged_stream_without_validator_skips_validation_phase(monkeypatch):
     assert dict(events)["done"]["inDepth"]["status"] == "complete"
 
 
-def test_answer_done_timing_separates_answer_work_from_pipeline_overhead(monkeypatch):
+def test_stage_timing_covers_reviewed_profile_and_repeated_gate(monkeypatch):
     _stub_common(monkeypatch)
     traces = []
 
@@ -354,32 +354,82 @@ def test_answer_done_timing_separates_answer_work_from_pipeline_overhead(monkeyp
     monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
     monkeypatch.setattr(team, "_ensure_substantive_answer", fake_validate)
     monkeypatch.setattr(
+        team,
+        "_validate_answer_rewrite",
+        lambda *_args, **_kwargs: asyncio.sleep(
+            0, result={"answer_ok": True, "errors": []}
+        ),
+    )
+    monkeypatch.setattr(
         team, "_write_trace", lambda *_args, **kwargs: traces.append(kwargs)
     )
 
-    _collect(_product_profile())
-
-    timing = next(
-        step for step in traces[0]["steps"] if step["role"] == "answer_timing"
-    )
-    assert timing["answer_stage_ms"] >= 0
-    assert timing["answer_to_done_ms"] >= timing["answer_stage_ms"]
-    assert timing["pipeline_overhead_ms"] == (
-        timing["answer_to_done_ms"] - timing["answer_stage_ms"]
-    )
-    assert 0 <= timing["pipeline_overhead_ratio"] <= 1
+    profile = _product_profile(review_model="review")
+    _collect(profile)
 
     stage_timings = [
         step for step in traces[0]["steps"] if step["role"] == "stage_timing"
     ]
     assert [step["stage"] for step in stage_timings] == list(
-        _product_profile().stages
+        profile.stages
     )
     assert [
         step["occurrence"] for step in stage_timings if step["stage"] == "gate"
-    ] == [1]
+    ] == [1, 2]
     assert all(step["duration_ms"] >= 0 for step in stage_timings)
     assert all(step["status"] == "completed" for step in stage_timings)
+
+
+def test_stage_timing_is_closed_before_public_phase_yield(monkeypatch):
+    _stub_common(monkeypatch)
+    clock = [10.0]
+    traces = []
+
+    async def fake_answer(*_args, **_kwargs):
+        return ("Answer [1].", [1], [])
+
+    async def fake_validate(_client, **kwargs):
+        return (
+            kwargs["answer_text"],
+            kwargs["citations"],
+            kwargs["blocks"],
+            {"level": "green", "note": ""},
+        )
+
+    monkeypatch.setattr(engine.time, "perf_counter", lambda: clock[0])
+    monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
+    monkeypatch.setattr(team, "_ensure_substantive_answer", fake_validate)
+    monkeypatch.setattr(
+        team,
+        "_validate_answer_rewrite",
+        lambda *_args, **_kwargs: asyncio.sleep(
+            0, result={"answer_ok": True, "errors": []}
+        ),
+    )
+    monkeypatch.setattr(
+        team, "_write_trace", lambda *_args, **kwargs: traces.append(kwargs)
+    )
+
+    async def consume_slowly():
+        async for name, _data in stream_profile(
+            _product_profile(review_model="review"),
+            [{"role": "user", "content": "q?"}],
+            patient="p",
+            context={"temporal": False},
+            model_label="lvl",
+            source_registry=_TEST_SOURCE,
+        ):
+            if name in {"answer_done", "answer_validation", "indepth_done"}:
+                clock[0] += 60.0
+
+    asyncio.run(consume_slowly())
+
+    assert traces
+    stage_timings = [
+        step for step in traces[0]["steps"] if step["role"] == "stage_timing"
+    ]
+    assert stage_timings
+    assert all(step["duration_ms"] == 0 for step in stage_timings)
 
 
 def test_failed_stage_is_timed(monkeypatch):

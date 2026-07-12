@@ -845,8 +845,6 @@ async def _execute_stages(
     active_stage_started = 0.0
     active_stage_occurrence = 0
     active_stage_recorded = True
-    execution_started = time.perf_counter()
-    answer_stage_ms: Optional[int] = None
     product = request.profile.output_mode == "product"
     if budget_policy is not None:
         state.token_counter = budget_policy.counter
@@ -968,7 +966,6 @@ async def _execute_stages(
                     continue
 
                 if stage == "answer":
-                    answer_started = time.perf_counter()
                     (
                         state.answer_text,
                         state.citations,
@@ -1019,7 +1016,6 @@ async def _execute_stages(
                         max_loops=int(request.profile.policies.get("review_loops", 1)),
                         steps=state.steps,
                     )
-                    answer_stage_ms = round((time.perf_counter() - answer_started) * 1000)
                     record_stage_timing()
                     continue
 
@@ -1159,25 +1155,6 @@ async def _execute_stages(
                     )
                     prior_validation = state.answer_validation
                     state.answer_validation = fast_validation
-                    answer_to_done_ms = round(
-                        (time.perf_counter() - execution_started) * 1000
-                    )
-                    pipeline_overhead_ms = max(
-                        0, answer_to_done_ms - (answer_stage_ms or 0)
-                    )
-                    state.steps.append(
-                        {
-                            "role": "answer_timing",
-                            "answer_stage_ms": answer_stage_ms,
-                            "answer_to_done_ms": answer_to_done_ms,
-                            "pipeline_overhead_ms": pipeline_overhead_ms,
-                            "pipeline_overhead_ratio": round(
-                                pipeline_overhead_ms / answer_to_done_ms, 4
-                            )
-                            if answer_to_done_ms
-                            else 0.0,
-                        }
-                    )
                     record_stage_timing()
                     yield (
                         "answer_done",
@@ -1722,6 +1699,7 @@ async def _execute_stages(
                             "In-Depth was withheld because evidence checks rejected every claim."
                         )
                     if product:
+                        record_stage_timing()
                         if state.indepth_error:
                             indepth = {
                                 "status": "needs_review",
@@ -1757,7 +1735,8 @@ async def _execute_stages(
                                 "indepth_done",
                                 json.dumps(payload),
                             )
-                    record_stage_timing()
+                    else:
+                        record_stage_timing()
                     continue
 
         if product:
