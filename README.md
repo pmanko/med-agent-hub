@@ -45,13 +45,14 @@ Low-level legs are callable but are not advertised by `GET /v1/models`. Unknown 
 
 Querystore is not a startup dependency. Inline requests work without it, and alternate sources can implement the same `ContextSource` contract. A caller can request a source list with `context.sources`; otherwise the hub selects one patient source or the inline chart. Team gather profiles add static knowledge as a supplemental source in the same evidence ledger, so KB facts retain stable provenance and citation mappings instead of traveling through a parallel context path.
 
-Small charts retain their original chart text. Oversized charts use stable mandatory/exact-match/overlap/recency ordering, preserve canonical citation indices, include whole records only, and disclose every included or excluded source id in trace metadata. Temporal facts and deterministic checks always use the complete evidence ledger. Mandatory-context overflow returns `insufficient_context` rather than silently truncating evidence.
+Small charts retain their original chart text. Oversized charts use stable mandatory/exact-match/overlap/recency ordering, preserve canonical citation indices, include whole records only, and disclose every included or excluded source id and reason in trace metadata. Answer, In-Depth synthesis, In-Depth review, and the bounded retry each fit a stage-local prompt view with the exact model tokenizer; all views derive from the same complete ledger. Temporal facts and deterministic checks always use that complete ledger. Mandatory-context overflow returns structured `insufficient_context` metadata rather than silently truncating evidence.
 
 ## Validation and Evidence
 
 - Every product Answer receives deterministic substance, date, temporal, date-value, and trend checks before `answer_done`.
 - Reviewer edits are checked again before they can ship.
 - Every product In-Depth claim receives deterministic temporal, citation-resolution, and citation-grounding results before display.
+- Citation grounding checks every claim group in stable, context-bounded sequential batches; a failed batch cannot erase verdicts from successful batches.
 - References resolve against the complete current evidence ledger and carry source id, resource metadata, source text, usage locations, resolution state, and final grounding state.
 - Citation count is metadata, not a confidence score.
 

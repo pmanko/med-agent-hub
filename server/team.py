@@ -8,7 +8,7 @@ import re
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Tuple
 
 import httpx
 
@@ -259,7 +259,12 @@ def _reference_usages(
         {"location": answer_location, "text": fragment}
         for fragment in _claim_fragments_for_index(answer, index)
     ]
-    if index in (structured_citations or []) and not usages:
+    block_refs = _block_temporal_text_and_refs(blocks or [])[1]
+    if (
+        index in (structured_citations or [])
+        and index not in block_refs
+        and not usages
+    ):
         usages.append({"location": answer_location, "text": answer})
 
     def walk(value: Any, path: str) -> None:
@@ -299,8 +304,7 @@ def _claim_fragments_for_index(answer: str, index: int) -> List[str]:
     return fragments
 
 
-_ENTAILMENT_MAX_PAIRS = 16  # beyond this, references keep an "unchecked" verdict rather than an
-                            # unbounded batch call — mirrors the Java verifier's cap.
+_ENTAILMENT_MAX_PAIRS = 16  # Maximum claim groups per bounded grounding request.
 _ENTAILMENT_MAX_SOURCES_PER_CLAIM = 8
 _ENTAILMENT_SOURCE_CHARS = 3000
 _ENTAILMENT_MAX_SOURCE_SET_CHARS = 12000
@@ -362,6 +366,8 @@ async def _entailment_verdicts(
         verdicts = obj.get("verdicts") if isinstance(obj, dict) else None
         if not isinstance(verdicts, list):
             raise ValueError("entailment response missing a 'verdicts' array")
+    except InsufficientContextError:
+        raise
     except Exception:
         logger.warning(
             "entailment grounding[%s] call failed/unparseable -> all %d pair(s) unchecked",
@@ -379,6 +385,33 @@ async def _entailment_verdicts(
         else:
             out.append(None)
     return out
+
+
+async def _bounded_entailment_verdicts(
+    client: httpx.AsyncClient,
+    model: str,
+    pairs: List[Tuple[str, str]],
+) -> List[Optional[bool]]:
+    """Check every pair in stable batches and split any batch that exceeds the model window."""
+    verdicts: List[Optional[bool]] = []
+    for start in range(0, len(pairs), _ENTAILMENT_MAX_PAIRS):
+        batch = pairs[start : start + _ENTAILMENT_MAX_PAIRS]
+
+        async def check(items: List[Tuple[str, str]]) -> List[Optional[bool]]:
+            try:
+                return await _entailment_verdicts(client, model, items)
+            except InsufficientContextError:
+                if len(items) == 1:
+                    logger.warning(
+                        "entailment grounding[%s] single pair exceeds context -> unchecked",
+                        model,
+                    )
+                    return [None]
+                midpoint = len(items) // 2
+                return await check(items[:midpoint]) + await check(items[midpoint:])
+
+        verdicts.extend(await check(batch))
+    return verdicts
 
 
 async def _ground_references(
@@ -458,12 +491,12 @@ async def _ground_references(
             ):
                 groups_by_reference[ref_position].append(group_position)
 
-    checkable_positions = list(range(min(len(groups), _ENTAILMENT_MAX_PAIRS)))
+    checkable_positions = list(range(len(groups)))
     pairs = [
         ("\n".join(groups[i]["sources"]), groups[i]["claim"])
         for i in checkable_positions
     ]
-    verdicts = await _entailment_verdicts(client, model, pairs) if pairs else []
+    verdicts = await _bounded_entailment_verdicts(client, model, pairs) if pairs else []
     verdict_by_position = dict(zip(checkable_positions, verdicts))
 
     grounded_refs: List[Dict[str, Any]] = []
@@ -1269,14 +1302,12 @@ async def _synthesize_indepth(
     """In-Depth synthesis: elaborate the already-produced direct answer into a list of claim
     strings (one addressable claim each). `extra_msgs` carries the prior draft + validator
     feedback on a re-synthesis pass. FAIL-OPEN: returns [] on any error."""
-    user = (
-        indepth_instruction
-        + "\n\n=== DIRECT ANSWER (elaborate THIS; do not restate it) ===\n"
-        + answer_text
-        + ("\n\n=== GATHERED KB / EVIDENCE ===\n" + gathered if gathered else "")
-    )
-    messages = (
-        list(base_messages) + [{"role": "user", "content": user}] + (extra_msgs or [])
+    messages = _indepth_messages(
+        base_messages,
+        indepth_instruction,
+        gathered,
+        answer_text,
+        extra_msgs=extra_msgs,
     )
     try:
         msg = await _chat(
@@ -1300,6 +1331,25 @@ async def _synthesize_indepth(
     return [
         c.strip() for c in (obj.get("claims") or []) if isinstance(c, str) and c.strip()
     ]
+
+
+def _indepth_messages(
+    base_messages: List[Dict[str, Any]],
+    indepth_instruction: str,
+    gathered: str,
+    answer_text: str,
+    *,
+    extra_msgs: Optional[List[Dict[str, Any]]] = None,
+) -> List[Dict[str, Any]]:
+    user = (
+        indepth_instruction
+        + "\n\n=== DIRECT ANSWER (elaborate THIS; do not restate it) ===\n"
+        + answer_text
+        + ("\n\n=== GATHERED KB / EVIDENCE ===\n" + gathered if gathered else "")
+    )
+    return (
+        list(base_messages) + [{"role": "user", "content": user}] + (extra_msgs or [])
+    )
 
 
 async def _validate_answer_rewrite(
@@ -1386,23 +1436,17 @@ async def _validate_indepth_verdict(
     """Audit the In-Depth claims claim-by-claim. Returns {drop: [1-based claim numbers, clamped to
     1..len(claims)], issues: str}. FAIL-OPEN: returns {drop: [], issues: ""} on any parse failure.
     """
-    instruction = load_prompt(validation_prompt + "-indepth")
-    numbered = "\n".join(f"{i}. {c}" for i, c in enumerate(claims, start=1))
-    audit_user = (
-        instruction
-        + "\n\n=== NUMBERED EVIDENCE LEDGER (patient records and KnowledgeReference records) ===\n"
-        + (chart or "(none)")
-        + "\n\n=== GATHERED KB / EVIDENCE (the guidance the team retrieved) ===\n"
-        + (gathered or "(none)")
-        + "\n\n=== DIRECT ANSWER (context) ===\n"
-        + answer_text
-        + "\n\n=== IN-DEPTH CLAIMS (numbered; return the numbers to DROP) ===\n"
-        + numbered
+    messages = _indepth_validation_messages(
+        chart=chart,
+        gathered=gathered,
+        answer_text=answer_text,
+        claims=claims,
+        validation_prompt=validation_prompt,
     )
     msg = await _chat(
         client,
         validator_model,
-        [{"role": "user", "content": audit_user}],
+        messages,
         response_format=_INDEPTH_VERDICT_RF,
         temperature=temperature,
         max_tokens=max_tokens,
@@ -1439,6 +1483,30 @@ async def _validate_indepth_verdict(
         (verdict.get("issues") or "")[:120],
     )
     return {"drop": drop, "issues": verdict.get("issues", "")}
+
+
+def _indepth_validation_messages(
+    *,
+    chart: str,
+    gathered: str,
+    answer_text: str,
+    claims: List[str],
+    validation_prompt: str = "validation",
+) -> List[Dict[str, Any]]:
+    instruction = load_prompt(validation_prompt + "-indepth")
+    numbered = "\n".join(f"{i}. {c}" for i, c in enumerate(claims, start=1))
+    audit_user = (
+        instruction
+        + "\n\n=== NUMBERED EVIDENCE LEDGER (patient records and KnowledgeReference records) ===\n"
+        + (chart or "(none)")
+        + "\n\n=== GATHERED KB / EVIDENCE (the guidance the team retrieved) ===\n"
+        + (gathered or "(none)")
+        + "\n\n=== DIRECT ANSWER (context) ===\n"
+        + answer_text
+        + "\n\n=== IN-DEPTH CLAIMS (numbered; return the numbers to DROP) ===\n"
+        + numbered
+    )
+    return [{"role": "user", "content": audit_user}]
 
 
 def _answer_note(level: str, first_issue: str, last_issue: str) -> str:
@@ -1846,6 +1914,10 @@ async def _gen_indepth(
     max_loops: int,
     steps: List[Dict[str, Any]],
     canonicalize_citations: bool = False,
+    review_context_fitter: Optional[Callable[[List[str]], Awaitable[str]]] = None,
+    retry_context_fitter: Optional[
+        Callable[[List[Dict[str, Any]]], Awaitable[List[Dict[str, Any]]]]
+    ] = None,
 ) -> Tuple[List[str], Dict[str, Any]]:
     """Synthesize and audit In-Depth claims without replacing reviewer-approved work.
 
@@ -1856,10 +1928,15 @@ async def _gen_indepth(
 
     async def _audit(cl: List[str], attempt: int) -> Dict[str, Any]:
         try:
+            audit_chart = (
+                await review_context_fitter(cl)
+                if review_context_fitter is not None
+                else chart
+            )
             verdict = await _validate_indepth_verdict(
                 client,
                 validator_model,
-                chart=chart,
+                chart=audit_chart,
                 gathered=gathered,
                 answer_text=answer_text,
                 claims=cl,
@@ -1869,6 +1946,8 @@ async def _gen_indepth(
                 dry=validator_dry,
                 validation_prompt=validator_prompt or "validation",
             )
+        except InsufficientContextError:
+            raise
         except Exception as e:
             logger.warning("indepth-validator call failed: %s", e)
             verdict = {
@@ -1948,10 +2027,19 @@ async def _gen_indepth(
     retry_reviewed = False
     for _ in range(1 if max_loops > 0 else 0):
         logger.info("indepth-validator: claims flagged -> re-synthesizing")
+        retry_extra = [
+            {"role": "assistant", "content": json.dumps({"claims": claims})},
+            {"role": "user", "content": _indepth_feedback(v, claims)},
+        ]
+        retry_messages = (
+            await retry_context_fitter(retry_extra)
+            if retry_context_fitter is not None
+            else base_messages
+        )
         revised = await _synthesize_indepth(
             client,
             synth_model,
-            base_messages,
+            retry_messages,
             indepth_instruction,
             gathered,
             answer_text,
@@ -1959,10 +2047,7 @@ async def _gen_indepth(
             max_tokens=max_tokens,
             repeat_penalty=synth_repeat_penalty,
             dry=synth_dry,
-            extra_msgs=[
-                {"role": "assistant", "content": json.dumps({"claims": claims})},
-                {"role": "user", "content": _indepth_feedback(v, claims)},
-            ],
+            extra_msgs=retry_extra,
         )
         original_revised = list(revised)
         if canonicalize_citations:

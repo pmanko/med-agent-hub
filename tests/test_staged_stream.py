@@ -10,7 +10,9 @@ from contextvars import ContextVar
 import pytest
 
 import server.openai_compat as openai_compat
+import server.engine as engine
 import server.team as team
+from server.context_sources import InsufficientContextError
 from server.levels_loader import get_profile
 from tests.factories import (
     make_profile,
@@ -713,10 +715,10 @@ def test_ground_references_unsupported_for_high_overlap_but_negated_statement(
     assert len(calls) == 1
 
 
-def test_ground_references_caps_pairs_and_unchecks_the_rest(monkeypatch):
+def test_ground_references_checks_all_pairs_in_stable_bounded_batches(monkeypatch):
     n = team._ENTAILMENT_MAX_PAIRS + 3
     fake_chat, calls = _fake_chat_returning_verdicts(
-        [["YES"] * team._ENTAILMENT_MAX_PAIRS]
+        [["YES"] * team._ENTAILMENT_MAX_PAIRS, ["YES"] * 3]
     )
     monkeypatch.setattr(team, "_chat", fake_chat)
     refs = [
@@ -746,11 +748,397 @@ def test_ground_references_caps_pairs_and_unchecks_the_rest(monkeypatch):
         )
 
     grounded = asyncio.run(_run())
-    assert len(calls) == 1  # still exactly one batched call, capped, never unbounded
+    assert len(calls) == 2
+    assert calls[0]["messages"][0]["content"].count("PAIR ") == team._ENTAILMENT_MAX_PAIRS
+    assert calls[1]["messages"][0]["content"].count("PAIR ") == 3
     verified = [r for r in grounded if r["groundingStatus"] == "verified"]
     unchecked = [r for r in grounded if r["groundingStatus"] == "unchecked"]
-    assert len(verified) == team._ENTAILMENT_MAX_PAIRS
-    assert len(unchecked) == 3
+    assert len(verified) == n
+    assert unchecked == []
+
+
+def test_ground_references_isolates_a_failed_later_batch(monkeypatch):
+    n = team._ENTAILMENT_MAX_PAIRS + 3
+    calls = []
+
+    async def fake_chat(_client, _model, messages, **_kwargs):
+        calls.append(messages)
+        if len(calls) == 2:
+            raise RuntimeError("second batch failed")
+        return {
+            "content": json.dumps(
+                {"verdicts": ["YES"] * team._ENTAILMENT_MAX_PAIRS}
+            )
+        }
+
+    monkeypatch.setattr(team, "_chat", fake_chat)
+    refs = [
+        {
+            "index": i,
+            "resourceType": "obs",
+            "resourceUuid": f"u{i}",
+            "date": "2026-01-01",
+        }
+        for i in range(1, n + 1)
+    ]
+    mappings = [
+        {
+            "index": i,
+            "resourceType": "obs",
+            "resourceUuid": f"u{i}",
+            "date": "2026-01-01",
+            "text": f"finding number {i}",
+        }
+        for i in range(1, n + 1)
+    ]
+    answer = " ".join(f"Claim about finding {i} [{i}]." for i in range(1, n + 1))
+
+    grounded = asyncio.run(
+        team._ground_references(None, "M", answer, refs, mappings)
+    )
+
+    assert len(calls) == 2
+    assert [r["groundingStatus"] for r in grounded[: team._ENTAILMENT_MAX_PAIRS]] == [
+        "verified"
+    ] * team._ENTAILMENT_MAX_PAIRS
+    assert [r["groundingStatus"] for r in grounded[team._ENTAILMENT_MAX_PAIRS :]] == [
+        "unchecked"
+    ] * 3
+
+
+def test_grounding_batch_splits_until_each_request_fits(monkeypatch):
+    calls = []
+
+    async def limited(_client, _model, pairs):
+        calls.append(len(pairs))
+        if len(pairs) > 2:
+            raise InsufficientContextError(
+                "grounding batch exceeds context", mandatory_ids=()
+            )
+        return [True] * len(pairs)
+
+    monkeypatch.setattr(team, "_entailment_verdicts", limited)
+
+    verdicts = asyncio.run(
+        team._bounded_entailment_verdicts(
+            None,
+            "M",
+            [(f"source {index}", f"claim {index}") for index in range(5)],
+        )
+    )
+
+    assert verdicts == [True] * 5
+    assert calls == [5, 2, 3, 1, 2]
+
+
+def test_product_long_table_finishes_checked_after_all_grounding_batches(
+    monkeypatch,
+):
+    total = team._ENTAILMENT_MAX_PAIRS + 3
+    mappings = [
+        {
+            "index": index,
+            "resourceType": "obs",
+            "resourceUuid": f"u{index}",
+            "date": "2026-01-01",
+            "text": f"finding number {index}",
+        }
+        for index in range(1, total + 1)
+    ]
+    source = patient_source_registry(
+        "".join(
+            f"[{item['index']}] {item['text']}\n" for item in mappings
+        ),
+        mappings,
+    )
+
+    def fake_gate(**kwargs):
+        return (
+            kwargs["answer_text"],
+            kwargs["citations"],
+            kwargs["blocks"],
+            {"mode": "enforce", "status": "not_applicable", "applied": "none"},
+            None,
+        )
+
+    async def fake_answer(*_args, **_kwargs):
+        return (
+            "The documented findings are listed in the table.",
+            [],
+            [
+                {
+                    "kind": "table",
+                    "title": "Findings",
+                    "columns": [{"key": "finding", "label": "Finding"}],
+                    "rows": [
+                        {
+                            "cells": {
+                                "finding": {
+                                    "text": f"finding number {index}",
+                                    "refs": [index],
+                                }
+                            }
+                        }
+                        for index in range(1, total + 1)
+                    ],
+                }
+            ],
+        )
+
+    async def keep_answer(_client, **kwargs):
+        return (
+            kwargs["answer_text"],
+            kwargs["citations"],
+            kwargs["blocks"],
+            {"level": "green", "note": ""},
+        )
+
+    async def fake_indepth(*_args, **_kwargs):
+        return ["Finding 1 is documented [1]."]
+
+    fake_chat, calls = _fake_chat_returning_verdicts(
+        [
+            ["YES"] * team._ENTAILMENT_MAX_PAIRS,
+            ["YES"] * 3,
+            ["YES"],
+        ]
+    )
+    monkeypatch.setattr(team, "_apply_temporal_gate", fake_gate)
+    monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
+    monkeypatch.setattr(team, "_ensure_substantive_answer", keep_answer)
+    monkeypatch.setattr(team, "_synthesize_indepth", fake_indepth)
+    monkeypatch.setattr(team, "_chat", fake_chat)
+    monkeypatch.setattr(team, "_write_trace", lambda *_args, **_kwargs: None)
+
+    async def collect():
+        return dict(
+            [
+                (name, json.loads(data))
+                async for name, data in stream_profile(
+                    _product_profile(),
+                    [{"role": "user", "content": "List the findings."}],
+                    patient="p",
+                    context={"temporal": False},
+                    model_label="lvl",
+                    source_registry=source,
+                )
+            ]
+        )
+
+    final = asyncio.run(collect())["done"]
+    assert len(calls) == 3
+    assert final["answerValidation"]["status"] == "checked"
+    assert len(final["references"]) == total
+    assert all(
+        reference["groundingStatus"] == "verified"
+        for reference in final["references"]
+    )
+
+
+def test_product_long_indepth_keeps_all_verified_claims(monkeypatch):
+    total = team._ENTAILMENT_MAX_PAIRS + 3
+    mappings = [
+        {
+            "index": index,
+            "resourceType": "obs",
+            "resourceUuid": f"u{index}",
+            "date": "2026-01-01",
+            "text": f"finding number {index}",
+        }
+        for index in range(1, total + 1)
+    ]
+    source = patient_source_registry(
+        "".join(f"[{item['index']}] {item['text']}\n" for item in mappings),
+        mappings,
+    )
+
+    def fake_gate(**kwargs):
+        return (
+            kwargs["answer_text"],
+            kwargs["citations"],
+            kwargs["blocks"],
+            {"mode": "enforce", "status": "not_applicable", "applied": "none"},
+            None,
+        )
+
+    async def fake_answer(*_args, **_kwargs):
+        return "Finding 1 is documented [1].", [1], []
+
+    async def keep_answer(_client, **kwargs):
+        return (
+            kwargs["answer_text"],
+            kwargs["citations"],
+            kwargs["blocks"],
+            {"level": "green", "note": ""},
+        )
+
+    async def fake_indepth(*_args, **_kwargs):
+        return [
+            f"Finding {index} is documented [{index}]."
+            for index in range(1, total + 1)
+        ]
+
+    fake_chat, calls = _fake_chat_returning_verdicts(
+        [["YES"], ["YES"] * team._ENTAILMENT_MAX_PAIRS, ["YES"] * 3]
+    )
+    monkeypatch.setattr(team, "_apply_temporal_gate", fake_gate)
+    monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
+    monkeypatch.setattr(team, "_ensure_substantive_answer", keep_answer)
+    monkeypatch.setattr(team, "_synthesize_indepth", fake_indepth)
+    monkeypatch.setattr(team, "_chat", fake_chat)
+    monkeypatch.setattr(team, "_write_trace", lambda *_args, **_kwargs: None)
+
+    async def collect():
+        return dict(
+            [
+                (name, json.loads(data))
+                async for name, data in stream_profile(
+                    _product_profile(),
+                    [{"role": "user", "content": "Explain the findings."}],
+                    patient="p",
+                    context={"temporal": False},
+                    model_label="lvl",
+                    source_registry=source,
+                )
+            ]
+        )
+
+    final = asyncio.run(collect())["done"]
+    assert len(calls) == 3
+    assert final["inDepth"]["status"] == "complete"
+    assert final["inDepth"]["answer"].count("\n-") + 1 == total
+    assert len(final["references"]) == total
+
+
+def test_gen_indepth_refits_review_and_retry_subcalls(monkeypatch):
+    synth_calls = []
+    review_charts = []
+    fitted_retry_messages = []
+
+    async def synth(
+        _client,
+        _model,
+        base_messages,
+        *_args,
+        extra_msgs=None,
+        **_kwargs,
+    ):
+        synth_calls.append((base_messages, extra_msgs))
+        return ["Initial claim [1]."] if extra_msgs is None else ["Revised claim [1]."]
+
+    async def review(_client, _model, *, chart, claims, **_kwargs):
+        review_charts.append(chart)
+        return (
+            {"drop": [1], "issues": "retry"}
+            if claims[0].startswith("Initial")
+            else {"drop": [], "issues": ""}
+        )
+
+    async def fit_review(claims):
+        return "review chart for " + claims[0]
+
+    async def fit_retry(extra_msgs):
+        fitted_retry_messages.extend(extra_msgs)
+        return [{"role": "user", "content": "retry chart"}]
+
+    monkeypatch.setattr(team, "_synthesize_indepth", synth)
+    monkeypatch.setattr(team, "_validate_indepth_verdict", review)
+
+    claims, confidence = asyncio.run(
+        team._gen_indepth(
+            None,
+            "writer",
+            [{"role": "user", "content": "answer chart"}],
+            "instruction",
+            "gathered",
+            "answer",
+            validator_model="reviewer",
+            validator_prompt="validation-rewrite",
+            chart="answer chart",
+            synth_temperature=0,
+            synth_repeat_penalty=None,
+            synth_dry=None,
+            validator_temperature=0,
+            validator_repeat_penalty=None,
+            validator_dry=None,
+            max_tokens=64,
+            max_loops=1,
+            steps=[],
+            review_context_fitter=fit_review,
+            retry_context_fitter=fit_retry,
+        )
+    )
+
+    assert claims == ["Revised claim [1]."]
+    assert confidence["status"] == "edited"
+    assert review_charts == [
+        "review chart for Initial claim [1].",
+        "review chart for Revised claim [1].",
+    ]
+    assert synth_calls[1][0] == [{"role": "user", "content": "retry chart"}]
+    assert synth_calls[1][1] == fitted_retry_messages
+
+
+def test_product_indepth_mandatory_overflow_has_structured_terminal_metadata(
+    monkeypatch,
+):
+    _stub_common(monkeypatch)
+
+    async def fake_answer(*_args, **_kwargs):
+        return "Supported answer [1].", [1], []
+
+    async def overflow(*_args, **_kwargs):
+        raise InsufficientContextError(
+            "mandatory evidence cannot fit", mandatory_ids=("source-1",)
+        )
+
+    monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
+    monkeypatch.setattr(engine, "_select_indepth_context", overflow)
+
+    events = dict(_collect(_product_profile()))
+    assert events["indepth_error"]["inDepth"]["errorCode"] == "insufficient_context"
+    assert events["done"]["inDepth"]["mandatorySourceIds"] == ["source-1"]
+    assert events["done"]["answer"] == "Supported answer [1]."
+
+
+def test_product_review_context_overflow_reaches_structured_terminal_metadata(
+    monkeypatch,
+):
+    real_gen_indepth = team._gen_indepth
+    _stub_common(monkeypatch)
+
+    async def fake_answer(*_args, **_kwargs):
+        return "Supported answer [1].", [1], []
+
+    async def keep_answer(_client, **kwargs):
+        return (
+            kwargs["answer_text"],
+            kwargs["citations"],
+            kwargs["blocks"],
+            {"level": "green", "note": ""},
+        )
+
+    async def clean_review(*_args, **_kwargs):
+        return {"answer_ok": True, "errors": []}
+
+    async def fake_indepth(*_args, **_kwargs):
+        return ["Supported context [1]."]
+
+    async def review_overflow(*_args, **_kwargs):
+        raise InsufficientContextError(
+            "review evidence cannot fit", mandatory_ids=("source-1",)
+        )
+
+    monkeypatch.setattr(team, "_gen_indepth", real_gen_indepth)
+    monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
+    monkeypatch.setattr(team, "_ensure_substantive_answer", keep_answer)
+    monkeypatch.setattr(team, "_validate_answer_rewrite", clean_review)
+    monkeypatch.setattr(team, "_synthesize_indepth", fake_indepth)
+    monkeypatch.setattr(engine, "_select_indepth_review_context", review_overflow)
+
+    events = dict(_collect(_product_profile(review_model="review")))
+    assert events["indepth_error"]["inDepth"]["errorCode"] == "insufficient_context"
+    assert events["done"]["inDepth"]["mandatorySourceIds"] == ["source-1"]
 
 
 def test_nested_references_resolve_against_current_source_ledger():

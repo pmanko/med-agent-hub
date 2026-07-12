@@ -39,6 +39,7 @@ from .context_sources import (
     EvidenceRecord,
     HistoryView,
     IncludedRecord,
+    InsufficientContextError,
     RouterTokenCounter,
     SourceRegistry,
     TokenCounter,
@@ -157,6 +158,8 @@ class _State:
     )
     indepth_gate: Optional[Dict[str, Any]] = None
     indepth_error: str = ""
+    indepth_error_code: Optional[str] = None
+    indepth_mandatory_source_ids: List[str] = field(default_factory=list)
     drug_context: Any = None
     raw_review_content: Optional[str] = None
     history: Optional[HistoryView] = None
@@ -429,6 +432,156 @@ async def _select_answer_context(
     )
     state.chart = state.view.render()
     state.messages = _replace_chart_message(state.messages, state.chart)
+
+
+async def _count_indepth_input(
+    request: ExecutionRequest,
+    state: _State,
+    chart: str,
+    prior_answer: str,
+    extra_msgs: Optional[List[Dict[str, Any]]] = None,
+) -> int:
+    counter = state.token_counter
+    if counter is None:
+        raise ContextSourceError(
+            "tokenization_unavailable",
+            "The profile requires an exact token counter.",
+            source="llama-router",
+        )
+    messages = _replace_chart_message(state.messages, chart)
+    messages = stages._indepth_messages(
+        messages,
+        _prompt(request.profile, "indepth", "synthesis-indepth"),
+        state.gathered,
+        prior_answer,
+        extra_msgs=extra_msgs,
+    )
+    count_chat = getattr(counter, "count_chat", None)
+    if callable(count_chat):
+        return await count_chat(
+            request.profile.models["indepth"],
+            {"messages": messages, "response_format": stages._INDEPTH_RF},
+        )
+    rendered = "\n".join(
+        f"{message.get('role', 'user')}: {message.get('content', '')}"
+        for message in messages
+    )
+    return await counter.count(request.profile.models["indepth"], rendered)
+
+
+async def _select_indepth_context(
+    request: ExecutionRequest,
+    state: _State,
+    prior_answer: str,
+    *,
+    extra_msgs: Optional[List[Dict[str, Any]]] = None,
+    stage: str = "indepth",
+) -> Tuple[ContextView, List[Dict[str, Any]], str]:
+    if state.token_counter is None or state.context_budget is None:
+        raise ContextSourceError(
+            "tokenization_unavailable",
+            "The profile requires exact context selection.",
+            source="llama-router",
+        )
+    view = await select_context(
+        state.ledger,
+        question=stages._latest_user_text(state.messages),
+        model=request.profile.models["indepth"],
+        budget=state.context_budget,
+        counter=state.token_counter,
+        input_measure=lambda chart: _count_indepth_input(
+            request, state, chart, prior_answer, extra_msgs
+        ),
+    )
+    chart = view.render()
+    messages = _replace_chart_message(state.messages, chart)
+    state.steps.append(
+        {
+            "role": "context_selection",
+            "stage": stage,
+            "mode": view.mode,
+            "input_tokens": view.input_tokens,
+            "input_limit": view.input_limit,
+            "included": [
+                {"stable_id": item.stable_id, "reason": item.reason}
+                for item in view.included
+            ],
+            "excluded": [
+                {"stable_id": item.stable_id, "reason": item.reason}
+                for item in view.excluded
+            ],
+        }
+    )
+    return view, messages, chart
+
+
+async def _select_indepth_review_context(
+    request: ExecutionRequest,
+    state: _State,
+    prior_answer: str,
+    claims: List[str],
+) -> str:
+    counter = state.token_counter
+    budget = state.context_budget
+    if counter is None or budget is None:
+        raise ContextSourceError(
+            "tokenization_unavailable",
+            "The profile requires exact context selection.",
+            source="llama-router",
+        )
+    reviewer_model = request.profile.models["review"]
+
+    async def measure(chart: str) -> int:
+        messages = stages._indepth_validation_messages(
+            chart=chart,
+            gathered=state.gathered,
+            answer_text=prior_answer,
+            claims=claims,
+            validation_prompt=str(
+                request.profile.prompts.get("review") or "validation-rewrite"
+            ),
+        )
+        count_chat = getattr(counter, "count_chat", None)
+        if callable(count_chat):
+            return await count_chat(
+                reviewer_model,
+                {
+                    "messages": messages,
+                    "response_format": stages._INDEPTH_VERDICT_RF,
+                },
+            )
+        rendered = "\n".join(
+            f"{message.get('role', 'user')}: {message.get('content', '')}"
+            for message in messages
+        )
+        return await counter.count(reviewer_model, rendered)
+
+    view = await select_context(
+        state.ledger,
+        question=stages._latest_user_text(state.messages),
+        model=reviewer_model,
+        budget=budget,
+        counter=counter,
+        input_measure=measure,
+    )
+    state.steps.append(
+        {
+            "role": "context_selection",
+            "stage": "indepth_review",
+            "mode": view.mode,
+            "input_tokens": view.input_tokens,
+            "input_limit": view.input_limit,
+            "included": [
+                {"stable_id": item.stable_id, "reason": item.reason}
+                for item in view.included
+            ],
+            "excluded": [
+                {"stable_id": item.stable_id, "reason": item.reason}
+                for item in view.excluded
+            ],
+        }
+    )
+    return view.render()
 
 
 async def _prepare_context(request: ExecutionRequest, state: _State) -> None:
@@ -1205,17 +1358,46 @@ async def _execute_stages(
                         else state.answer_text
                     )
                     try:
+                        indepth_messages = state.messages
+                        indepth_chart = state.chart
+                        if product and request.profile.exact_tokenizer:
+                            (
+                                _indepth_view,
+                                indepth_messages,
+                                indepth_chart,
+                            ) = await _select_indepth_context(
+                                request, state, prior_answer
+                            )
                         if (
                             "review" in request.profile.models
                             and request.profile.output_mode != "indepth"
                         ):
+                            async def fit_review(claims: List[str]) -> str:
+                                return await _select_indepth_review_context(
+                                    request, state, prior_answer, claims
+                                )
+
+                            async def fit_retry(
+                                extra_msgs: List[Dict[str, Any]],
+                            ) -> List[Dict[str, Any]]:
+                                _view, messages, _chart = (
+                                    await _select_indepth_context(
+                                        request,
+                                        state,
+                                        prior_answer,
+                                        extra_msgs=extra_msgs,
+                                        stage="indepth_retry",
+                                    )
+                                )
+                                return messages
+
                             (
                                 state.claims,
                                 state.indepth_conf,
                             ) = await stages._gen_indepth(
                                 client,
                                 request.profile.models["indepth"],
-                                state.messages,
+                                indepth_messages,
                                 _prompt(
                                     request.profile, "indepth", "synthesis-indepth"
                                 ),
@@ -1226,7 +1408,7 @@ async def _execute_stages(
                                     request.profile.prompts.get("review")
                                     or "validation-rewrite"
                                 ),
-                                chart=state.chart,
+                                chart=indepth_chart,
                                 synth_temperature=sampling["answer_temperature"],
                                 synth_repeat_penalty=sampling["answer_repeat_penalty"],
                                 synth_dry=sampling["answer_dry"],
@@ -1243,12 +1425,22 @@ async def _execute_stages(
                                 canonicalize_citations=(
                                     product and temporal_mode == "enforce"
                                 ),
+                                review_context_fitter=(
+                                    fit_review
+                                    if product and request.profile.exact_tokenizer
+                                    else None
+                                ),
+                                retry_context_fitter=(
+                                    fit_retry
+                                    if product and request.profile.exact_tokenizer
+                                    else None
+                                ),
                             )
                         else:
                             state.claims = await stages._synthesize_indepth(
                                 client,
                                 request.profile.models["indepth"],
-                                state.messages,
+                                indepth_messages,
                                 _prompt(
                                     request.profile, "indepth", "synthesis-indepth"
                                 ),
@@ -1270,6 +1462,21 @@ async def _execute_stages(
                             state.indepth_error = (
                                 "In-Depth was withheld because review was unavailable."
                             )
+                    except InsufficientContextError as exc:
+                        state.indepth_error = str(exc)
+                        state.indepth_error_code = exc.code
+                        state.indepth_mandatory_source_ids = list(
+                            exc.mandatory_ids
+                        )
+                        state.steps.append(
+                            {
+                                "role": "indepth_withheld",
+                                "reason": exc.code,
+                                "mandatory_source_ids": list(
+                                    exc.mandatory_ids
+                                ),
+                            }
+                        )
                     except Exception as exc:
                         state.indepth_error = str(exc)
                     continue
@@ -1439,6 +1646,11 @@ async def _execute_stages(
                                 "error": state.indepth_error,
                                 "validation": state.indepth_gate,
                             }
+                            if state.indepth_error_code:
+                                indepth["errorCode"] = state.indepth_error_code
+                                indepth["mandatorySourceIds"] = list(
+                                    state.indepth_mandatory_source_ids
+                                )
                             payload = json.loads(
                                 _stream_payload(state, request, in_depth=indepth)
                             )
@@ -1476,6 +1688,11 @@ async def _execute_stages(
                 "error": state.indepth_error or "",
                 "validation": state.indepth_gate,
             }
+            if state.indepth_error_code:
+                indepth["errorCode"] = state.indepth_error_code
+                indepth["mandatorySourceIds"] = list(
+                    state.indepth_mandatory_source_ids
+                )
             yield "done", _stream_payload(state, request, in_depth=indepth)
         else:
             yield "result", _raw_result(request, state)

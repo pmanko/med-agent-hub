@@ -1,6 +1,7 @@
 """Executable acceptance checks for exact deterministic context budgeting."""
 
 import asyncio
+import json
 from dataclasses import replace
 
 import pytest
@@ -201,6 +202,61 @@ def test_actual_chat_request_overflow_is_rejected_before_backend_call():
     assert client.requests == []
 
 
+def test_grounding_batches_split_against_the_actual_chat_budget():
+    class PairCounter:
+        async def count_chat(self, _model, payload):
+            prompt = payload["messages"][0]["content"]
+            return prompt.count("PAIR ") * 10
+
+    class GroundingResponse:
+        status_code = 200
+
+        def __init__(self, count):
+            self.count = count
+
+        def json(self):
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {"verdicts": ["YES"] * self.count}
+                            )
+                        }
+                    }
+                ]
+            }
+
+    class GroundingClient:
+        def __init__(self):
+            self.batch_sizes = []
+
+        async def post(self, _url, *, json, **_kwargs):
+            count = json["messages"][0]["content"].count("PAIR ")
+            self.batch_sizes.append(count)
+            return GroundingResponse(count)
+
+    policy = team.ChatBudgetPolicy(
+        counter=PairCounter(), context_window=35, reserved_output_tokens=5
+    )
+    token = team.activate_chat_budget(policy)
+    client = GroundingClient()
+    try:
+        verdicts = asyncio.run(
+            team._bounded_entailment_verdicts(
+                client,
+                "fixture-model",
+                [(f"source {index}", f"claim {index}") for index in range(5)],
+            )
+        )
+    finally:
+        team.reset_chat_budget(token)
+
+    assert verdicts == [True] * 5
+    assert client.batch_sizes == [2, 3]
+    assert [item["input_tokens"] for item in policy.measurements] == [50, 20, 30]
+
+
 def test_team_derived_context_triggers_exact_answer_context_reselection():
     mappings = [
         {
@@ -247,3 +303,257 @@ def test_team_derived_context_triggers_exact_answer_context_reselection():
     asyncio.run(engine._select_answer_context(request, state))
 
     assert len(state.view.records) < before
+
+
+def test_indepth_refits_context_without_mutating_answer_view_or_ledger():
+    mappings = [
+        {
+            "resourceType": "Observation",
+            "resourceUuid": f"obs-{index}",
+            "date": f"2026-01-0{index}",
+            "text": f"(2026-01-0{index}) Weight: {70 + index} kg",
+        }
+        for index in range(1, 4)
+    ]
+    registry = patient_source_registry(
+        "".join(f"[{index}] {row['text']}\n" for index, row in enumerate(mappings, 1)),
+        mappings,
+    )
+
+    class StageCounter:
+        async def count(self, _model, text):
+            return text.count("\n[") + 1
+
+        async def count_chat(self, _model, payload):
+            content = "\n".join(
+                str(message.get("content") or "")
+                for message in payload["messages"]
+            )
+            records = sum(
+                1
+                for line in content.splitlines()
+                if len(line) > 2 and line[0] == "[" and line[1].isdigit()
+            )
+            fixed = 2 if "=== DIRECT ANSWER" in content else 1
+            return records + fixed
+
+    profile = replace(
+        get_profile("single-e4b-checked"),
+        context_window=5,
+        reserved_output_tokens=1,
+    )
+    state = engine._State(
+        messages=[{"role": "user", "content": "What is the weight trend?"}]
+    )
+    request = engine.ExecutionRequest(
+        profile=profile,
+        messages=state.messages,
+        patient="patient-1",
+        source_registry=registry,
+        token_counter=StageCounter(),
+    )
+
+    asyncio.run(engine._prepare_context(request, state))
+    assert state.view is not None and state.view.mode == "full"
+    assert len(state.view.records) == len(state.ledger.records) == 3
+
+    indepth_view, indepth_messages, indepth_chart = asyncio.run(
+        engine._select_indepth_context(request, state, "The weight declined.")
+    )
+
+    assert indepth_view.mode == "selected"
+    assert len(indepth_view.records) == 2
+    assert indepth_view.input_tokens <= indepth_view.input_limit
+    assert len(state.view.records) == len(state.ledger.records) == 3
+    record_lines = lambda text: sum(
+        1
+        for line in text.splitlines()
+        if len(line) > 2 and line[0] == "[" and line[1].isdigit()
+    )
+    assert record_lines(state.chart) == 3
+    assert record_lines(indepth_chart) == 2
+    assert any(
+        "Patient records (most recent first):" in str(message.get("content") or "")
+        and str(message.get("content") or "").count("\n[") == 2
+        for message in indepth_messages
+    )
+    context_step = state.steps[-1]
+    assert context_step["stage"] == "indepth"
+    assert all(item["stable_id"] and item["reason"] for item in context_step["included"])
+    assert all(item["stable_id"] and item["reason"] for item in context_step["excluded"])
+
+
+def test_indepth_synthesis_review_and_retry_match_the_exact_backend_guard():
+    mappings = [
+        {
+            "resourceType": "Observation",
+            "resourceUuid": f"obs-{index}",
+            "date": f"2026-01-0{index}",
+            "text": f"(2026-01-0{index}) Finding: value {index}",
+        }
+        for index in range(1, 4)
+    ]
+    registry = patient_source_registry(
+        "".join(f"[{index}] {row['text']}\n" for index, row in enumerate(mappings, 1)),
+        mappings,
+    )
+
+    class StageExactCounter:
+        async def count(self, _model, text):
+            return len(text.split())
+
+        async def count_chat(self, _model, payload):
+            content = "\n".join(
+                str(message.get("content") or "")
+                for message in payload["messages"]
+            )
+            records = sum(
+                1
+                for line in content.splitlines()
+                if len(line) > 2 and line[0] == "[" and line[1].isdigit()
+            )
+            schema = (
+                (payload.get("response_format") or {})
+                .get("json_schema", {})
+                .get("name")
+            )
+            if schema == "in_depth":
+                fixed = 5 if "retry-feedback" in content else 3
+            elif schema == "indepth_verdict":
+                fixed = 4
+            else:
+                fixed = 1
+            return records + fixed
+
+    base_profile = get_profile("single-e4b-checked")
+    profile = replace(
+        base_profile,
+        models={
+            **base_profile.models,
+            "indepth": "writer-model",
+            "review": "reviewer-model",
+        },
+        context_window=8,
+        reserved_output_tokens=2,
+    )
+    counter = StageExactCounter()
+    state = engine._State(
+        messages=[{"role": "user", "content": "What are the findings?"}]
+    )
+    request = engine.ExecutionRequest(
+        profile=profile,
+        messages=state.messages,
+        patient="patient-1",
+        source_registry=registry,
+        token_counter=counter,
+    )
+    asyncio.run(engine._prepare_context(request, state))
+    answer = "The findings are documented."
+    initial_view, initial_messages, _ = asyncio.run(
+        engine._select_indepth_context(request, state, answer)
+    )
+    review_chart = asyncio.run(
+        engine._select_indepth_review_context(
+            request, state, answer, ["Finding 1 [1]."]
+        )
+    )
+    retry_extra = [
+        {"role": "assistant", "content": '{"claims":["Finding 1 [1]."]}'},
+        {"role": "user", "content": "retry-feedback"},
+    ]
+    retry_view, retry_messages, _ = asyncio.run(
+        engine._select_indepth_context(
+            request,
+            state,
+            answer,
+            extra_msgs=retry_extra,
+            stage="indepth_retry",
+        )
+    )
+
+    assert initial_view.mode == "full" and len(initial_view.records) == 3
+    assert sum(1 for line in review_chart.splitlines() if line.startswith("[")) == 2
+    assert retry_view.mode == "selected" and len(retry_view.records) == 1
+
+    class StageResponse:
+        status_code = 200
+
+        def __init__(self, content):
+            self.content = content
+
+        def json(self):
+            return {"choices": [{"message": {"content": self.content}}]}
+
+    class StageClient:
+        def __init__(self):
+            self.requests = []
+
+        async def post(self, _url, *, json, **_kwargs):
+            self.requests.append(json)
+            schema = json["response_format"]["json_schema"]["name"]
+            if schema == "indepth_verdict":
+                return StageResponse('{"drop":[],"issues":""}')
+            return StageResponse('{"claims":["Finding 1 [1]."]}')
+
+    client = StageClient()
+    policy = team.ChatBudgetPolicy(
+        counter=counter, context_window=8, reserved_output_tokens=2
+    )
+    token = team.activate_chat_budget(policy)
+    try:
+        asyncio.run(
+            team._synthesize_indepth(
+                client,
+                "writer-model",
+                initial_messages,
+                engine._prompt(profile, "indepth", "synthesis-indepth"),
+                state.gathered,
+                answer,
+                temperature=0,
+                max_tokens=None,
+                repeat_penalty=None,
+                dry=None,
+            )
+        )
+        asyncio.run(
+            team._validate_indepth_verdict(
+                client,
+                "reviewer-model",
+                chart=review_chart,
+                gathered=state.gathered,
+                answer_text=answer,
+                claims=["Finding 1 [1]."],
+                max_tokens=None,
+                temperature=0,
+                repeat_penalty=None,
+                dry=None,
+                validation_prompt=str(
+                    profile.prompts.get("review") or "validation-rewrite"
+                ),
+            )
+        )
+        asyncio.run(
+            team._synthesize_indepth(
+                client,
+                "writer-model",
+                retry_messages,
+                engine._prompt(profile, "indepth", "synthesis-indepth"),
+                state.gathered,
+                answer,
+                temperature=0,
+                max_tokens=None,
+                repeat_penalty=None,
+                dry=None,
+                extra_msgs=retry_extra,
+            )
+        )
+    finally:
+        team.reset_chat_budget(token)
+
+    assert len(client.requests) == 3
+    assert [row["model"] for row in policy.measurements] == [
+        "writer-model",
+        "reviewer-model",
+        "writer-model",
+    ]
+    assert [row["input_tokens"] for row in policy.measurements] == [6, 6, 6]
