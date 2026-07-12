@@ -1475,7 +1475,7 @@ async def _execute_stages(
                     if state.indepth_error
                     else "\n".join("- " + claim for claim in state.claims)
                 ),
-                "error": state.indepth_error,
+                "error": state.indepth_error or "",
                 "validation": state.indepth_gate,
             }
             yield "done", _stream_payload(state, request, in_depth=indepth)

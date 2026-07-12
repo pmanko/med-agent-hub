@@ -194,6 +194,8 @@ def test_staged_stream_with_validator_emits_full_phase_sequence(monkeypatch):
     # done: in-depth complete
     assert ev["done"]["inDepth"]["status"] == "complete"
     assert "claim one" in ev["done"]["inDepth"]["answer"]
+    assert ev["indepth_done"]["inDepth"] == ev["done"]["inDepth"]
+    assert ev["done"]["inDepth"]["error"] == ""
     assert ev["done"]["model"] == "lvl"
     final_ref = ev["done"]["references"][0]
     assert final_ref["index"] == 2
