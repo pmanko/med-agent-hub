@@ -1442,7 +1442,6 @@ async def _execute_stages(
                             payload = json.loads(
                                 _stream_payload(state, request, in_depth=indepth)
                             )
-                            payload.update(indepth)
                             yield (
                                 "indepth_error",
                                 json.dumps(payload),
@@ -1459,7 +1458,6 @@ async def _execute_stages(
                             payload = json.loads(
                                 _stream_payload(state, request, in_depth=indepth)
                             )
-                            payload.update(indepth)
                             yield (
                                 "indepth_done",
                                 json.dumps(payload),

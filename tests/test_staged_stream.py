@@ -195,6 +195,8 @@ def test_staged_stream_with_validator_emits_full_phase_sequence(monkeypatch):
     assert ev["done"]["inDepth"]["status"] == "complete"
     assert "claim one" in ev["done"]["inDepth"]["answer"]
     assert ev["indepth_done"]["inDepth"] == ev["done"]["inDepth"]
+    assert ev["indepth_done"]["answer"] == ev["done"]["answer"]
+    assert "status" not in ev["indepth_done"]
     assert ev["done"]["inDepth"]["error"] == ""
     assert ev["done"]["model"] == "lvl"
     final_ref = ev["done"]["references"][0]
@@ -1168,6 +1170,9 @@ def test_indepth_citation_cannot_inherit_answer_verified_verdict(monkeypatch):
     events = dict(_collect(_product_profile()))
     indepth_done = events["indepth_error"]
     final = events["done"]
+    assert indepth_done["inDepth"] == final["inDepth"]
+    assert indepth_done["answer"] == final["answer"]
+    assert "status" not in indepth_done
 
     assert len(calls) == 2
     assert indepth_done["inDepth"]["status"] == "needs_review"
