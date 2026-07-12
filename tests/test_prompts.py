@@ -143,6 +143,14 @@ def test_synthesis_prompts_instruct_on_temporal_facts_sidecar():
         assert "Do not infer a trend from one point" in text
 
 
+def test_indepth_prompt_matches_evidence_gate_contract():
+    text = prompt_loader.load_prompt("synthesis-indepth")
+
+    assert "directly relevant to the question and direct answer" in text
+    assert "A displayed In-Depth claim without a chart anchor is rejected" in text
+    assert "If a useful idea cannot be connected to a specific patient record" in text
+
+
 def test_direct_answer_prompt_requires_minimal_explicit_prose_citations():
     text = prompt_loader.load_prompt("synthesis-answer")
 

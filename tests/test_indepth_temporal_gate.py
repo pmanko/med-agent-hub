@@ -117,3 +117,82 @@ def test_safe_patch_must_stay_within_original_claim_citations():
     assert result["removed"] == []
     assert result["claims"][0].startswith("The chart shows one dated CD4 count measurement")
     assert "[178]" in result["claims"][0]
+
+
+def test_long_indepth_date_is_not_inferred_as_a_last_visit_short_answer():
+    facts = {
+        **MULTI_COUNT_FACTS,
+        "last_clinical_encounter": {
+            "date": "2006-06-06",
+            "indices": [4],
+        },
+        "date_ledger": [
+            {"iso": "2006-06-06", "date_id": "visit"},
+            {"iso": "2006-04-04", "date_id": "cd4"},
+        ],
+        "date_output_contract": {
+            "allowed_iso_dates": ["2006-06-06", "2006-04-04"]
+        },
+    }
+    claim = (
+        "The patient's CD4 count was documented on 2006-04-04 as 341 cells/uL [178], "
+        "which warrants continued clinical monitoring."
+    )
+
+    result = gate_indepth_claims(
+        "What was the most recent documented clinical visit?",
+        [claim],
+        facts,
+        mode="enforce",
+    )
+
+    assert result["status"] == "checked"
+    assert result["claims"] == [claim]
+
+
+def test_indepth_blood_pressure_claim_does_not_bind_white_blood_cells():
+    facts = {
+        **FACTS,
+        "last_clinical_encounter": {"date": "2006-06-06", "indices": [4]},
+        "numeric_series": [
+            {
+                "concept": "White blood cells",
+                "points": [
+                    {"date": "2006-04-04", "value": 5300, "unit": "10^3/uL", "index": 185}
+                ],
+                "trend_supported": False,
+                "direction": "none",
+            },
+            {
+                "concept": "Diastolic blood pressure",
+                "points": [
+                    {"date": "2006-04-25", "value": 70, "unit": "mmHg", "index": 88},
+                    {"date": "2006-06-06", "value": 60, "unit": "mmHg", "index": 15},
+                ],
+                "trend_supported": True,
+                "direction": "down",
+            },
+        ],
+        "date_ledger": [
+            {"iso": "2006-06-06", "date_id": "visit"},
+            {"iso": "2006-04-25", "date_id": "bp-old"},
+            {"iso": "2006-04-04", "date_id": "wbc"},
+        ],
+        "date_output_contract": {
+            "allowed_iso_dates": ["2006-06-06", "2006-04-25", "2006-04-04"]
+        },
+    }
+    claim = (
+        "The patient's blood pressure readings show a downward trend, with the most recent "
+        "diastolic reading being 60 mmHg [15]."
+    )
+
+    result = gate_indepth_claims(
+        "What was the most recent documented clinical visit?",
+        [claim],
+        facts,
+        mode="enforce",
+    )
+
+    assert result["status"] == "checked"
+    assert result["claims"] == [claim]

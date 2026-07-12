@@ -376,6 +376,208 @@ def test_unknown_location_does_not_block_the_correct_visit_date():
     assert not any(check["id"] == "last_visit" for check in result["checks"])
 
 
+def test_series_selection_prefers_specific_blood_pressure_concepts():
+    facts = {
+        "numeric_series": [
+            {"concept": "White blood cells"},
+            {"concept": "Diastolic blood pressure"},
+            {"concept": "Systolic blood pressure"},
+        ]
+    }
+
+    selected = temporal._selected_series(
+        "What was the latest visit?",
+        "The patient's blood pressure readings show a downward trend.",
+        facts,
+    )
+
+    assert {item["concept"] for item in selected} == {
+        "Diastolic blood pressure",
+        "Systolic blood pressure",
+    }
+
+
+def test_series_selection_uses_exact_tokens_not_substrings():
+    facts = {
+        "numeric_series": [
+            {"concept": "Weight"},
+            {"concept": "Pulse"},
+            {"concept": "CD4 count"},
+        ]
+    }
+
+    assert temporal._selected_series(
+        "Review care", "The overweight impulse was labeled XCD4Y.", facts
+    ) == []
+
+
+def test_series_selection_keeps_independently_named_measurements():
+    facts = {
+        "numeric_series": [
+            {"concept": "White blood cells"},
+            {"concept": "Diastolic blood pressure"},
+            {"concept": "Pulse"},
+        ]
+    }
+
+    selected = temporal._selected_series(
+        "Review trends",
+        "Diastolic blood pressure decreased while pulse decreased.",
+        facts,
+    )
+
+    assert {item["concept"] for item in selected} == {
+        "Diastolic blood pressure",
+        "Pulse",
+    }
+
+
+def test_trend_direction_is_checked_per_named_measurement():
+    facts = {
+        "date_ledger": [],
+        "date_output_contract": {},
+        "appointment_candidates": {},
+        "numeric_series": [
+            {
+                "concept": "Diastolic blood pressure",
+                "points": [{"index": 1}, {"index": 2}],
+                "trend_supported": True,
+                "direction": "down",
+            },
+            {
+                "concept": "Pulse",
+                "points": [{"index": 3}, {"index": 4}],
+                "trend_supported": True,
+                "direction": "up",
+            },
+        ],
+    }
+
+    result = temporal.run_temporal_gate(
+        "Review both trends",
+        "Diastolic blood pressure increased, while pulse decreased.",
+        [1, 2, 3, 4],
+        facts,
+        "enforce",
+    )
+
+    contradictions = [
+        check for check in result["checks"] if check["id"] == "trend_direction"
+    ]
+    assert len(contradictions) == 2
+    assert any("Diastolic blood pressure" in check["reason"] for check in contradictions)
+    assert any("Pulse" in check["reason"] for check in contradictions)
+
+
+def test_shared_trend_predicate_applies_to_coordinated_measurements():
+    facts = {
+        "date_ledger": [],
+        "date_output_contract": {},
+        "appointment_candidates": {},
+        "numeric_series": [
+            {
+                "concept": "Diastolic blood pressure",
+                "points": [{"index": 1}, {"index": 2}],
+                "trend_supported": True,
+                "direction": "down",
+            },
+            {
+                "concept": "Pulse",
+                "points": [{"index": 3}, {"index": 4}],
+                "trend_supported": True,
+                "direction": "up",
+            },
+        ],
+    }
+
+    result = temporal.run_temporal_gate(
+        "Review both trends",
+        "Diastolic blood pressure and pulse increased.",
+        [1, 2, 3, 4],
+        facts,
+        "enforce",
+    )
+
+    contradictions = [
+        check for check in result["checks"] if check["id"] == "trend_direction"
+    ]
+    assert len(contradictions) == 1
+    assert "Diastolic blood pressure" in contradictions[0]["reason"]
+
+
+def test_shared_trend_predicate_supports_oxford_comma_lists():
+    facts = {
+        "date_ledger": [],
+        "date_output_contract": {},
+        "appointment_candidates": {},
+        "numeric_series": [
+            {
+                "concept": "Diastolic blood pressure",
+                "points": [{"index": 1}, {"index": 2}],
+                "trend_supported": True,
+                "direction": "down",
+            },
+            {
+                "concept": "Systolic blood pressure",
+                "points": [{"index": 3}, {"index": 4}],
+                "trend_supported": True,
+                "direction": "down",
+            },
+            {
+                "concept": "Pulse",
+                "points": [{"index": 5}, {"index": 6}],
+                "trend_supported": True,
+                "direction": "up",
+            },
+        ],
+    }
+
+    result = temporal.run_temporal_gate(
+        "Review all trends",
+        "Diastolic blood pressure, systolic blood pressure, and pulse increased.",
+        [1, 2, 3, 4, 5, 6],
+        facts,
+        "enforce",
+    )
+
+    contradictions = [
+        check for check in result["checks"] if check["id"] == "trend_direction"
+    ]
+    assert len(contradictions) == 2
+    assert {"Diastolic blood pressure", "Systolic blood pressure"} == {
+        concept
+        for concept in ("Diastolic blood pressure", "Systolic blood pressure")
+        if any(concept in check["reason"] for check in contradictions)
+    }
+
+
+def test_series_selection_keeps_overlapping_exact_cd4_concepts():
+    facts = {
+        "numeric_series": [
+            {"concept": "CD4 count"},
+            {"concept": "CD4%"},
+        ]
+    }
+
+    selected = temporal._selected_series(
+        "Review trends",
+        "The CD4 count decreased while CD4% increased.",
+        facts,
+    )
+
+    assert {item["concept"] for item in selected} == {"CD4 count", "CD4%"}
+
+    percent_only = temporal._selected_series(
+        "Review trends", "The CD4% increased.", facts
+    )
+    assert [item["concept"] for item in percent_only] == ["CD4%"]
+
+    count_only = temporal._selected_series(
+        "Review trends", "The CD4 count decreased.", facts
+    )
+    assert [item["concept"] for item in count_only] == ["CD4 count"]
+
+
 @pytest.mark.parametrize(
     "answer",
     (

@@ -811,7 +811,12 @@ def _asserted_last_visit_dates(question: str, answer: str) -> List[str]:
             ):
                 asserted.append(date_match.group(0))
             continue
-        if question_asks_last and not named_visits and len(date_matches) == 1:
+        if (
+            question_asks_last
+            and not named_visits
+            and len(date_matches) == 1
+            and len(answer.split()) <= 15
+        ):
             local = answer[max(0, date_match.start() - 100) : date_match.end()]
             if not re.search(r"\bclinical activity\b", local, re.I) and not re.search(
                 r"\b(?:no|without)\b.{0,50}\b(?:visit|encounter)\b", answer, re.I
@@ -901,31 +906,182 @@ def _date_output_failures(answer: str, facts: Dict[str, Any]) -> List[Dict[str, 
     return out
 
 
+def _series_terms(item: Dict[str, Any]) -> Tuple[List[str], set[str]]:
+    concept = str(item.get("concept") or "").lower()
+    phrase_tokens = [
+        token for token in re.split(r"[^a-z0-9%]+", concept) if len(token) >= 2
+    ]
+    aliases = {
+        token
+        for token in phrase_tokens
+        if len(token) >= 3 and token not in _CONCEPT_STOP_TOKENS
+    }
+    if "haemoglobin" in concept:
+        aliases.update({"hemoglobin", "hgb"})
+    if "weight" in concept:
+        aliases.update({"wt", "growth", "gaining"})
+    if "height" in concept:
+        aliases.update({"growth", "growing"})
+    if "cd4" in concept:
+        aliases.add("cd4")
+    return phrase_tokens, aliases
+
+
 def _selected_series(
     question: str, answer: str, facts: Dict[str, Any]
 ) -> List[Dict[str, Any]]:
-    hay = (question + " " + answer).lower()
-    selected = []
-    for s in facts.get("numeric_series") or []:
-        concept = str(s.get("concept") or "")
-        low = concept.lower()
-        tokens = [
-            t
-            for t in re.split(r"[^a-z0-9%]+", low)
-            if len(t) >= 3 and t not in _CONCEPT_STOP_TOKENS
+    series = facts.get("numeric_series") or []
+
+    def scored(text: str) -> List[Tuple[int, set[str], Dict[str, Any]]]:
+        word_list = [
+            token
+            for token in re.split(r"[^a-z0-9%]+", (text or "").lower())
+            if token
         ]
-        aliases = set(tokens)
-        if "haemoglobin" in low:
-            aliases.update({"hemoglobin", "hgb"})
-        if "weight" in low:
-            aliases.update({"wt", "growth", "gaining"})
-        if "height" in low:
-            aliases.update({"growth", "growing"})
-        if "cd4" in low:
-            aliases.add("cd4")
-        if any(a in hay for a in aliases):
-            selected.append(s)
+        words = set(word_list)
+        candidates: List[Tuple[int, set[str], Dict[str, Any]]] = []
+        for item in series:
+            phrase_tokens, aliases = _series_terms(item)
+            matched = words & aliases
+            phrase_match = bool(phrase_tokens) and any(
+                word_list[start : start + len(phrase_tokens)] == phrase_tokens
+                for start in range(len(word_list) - len(phrase_tokens) + 1)
+            )
+            value = (100 if phrase_match else 0) + len(matched)
+            if value > 0:
+                candidates.append((value, matched, item))
+        return candidates
+
+    candidates = scored(answer)
+    if not candidates:
+        candidates = scored(question)
+    selected: List[Dict[str, Any]] = []
+    for score, matched, item in candidates:
+        dominated = any(
+            score < 100 and matched <= other_matched and score < other_score
+            for other_score, other_matched, _other_item in candidates
+        )
+        if not dominated:
+            selected.append(item)
     return selected
+
+
+def _series_mention_spans(answer: str, item: Dict[str, Any]) -> List[Tuple[int, int]]:
+    phrase_tokens, aliases = _series_terms(item)
+    if phrase_tokens:
+        phrase_pattern = r"(?<![a-z0-9%])" + r"\s+".join(
+            re.escape(token) for token in phrase_tokens
+        ) + r"(?![a-z0-9%])"
+        phrase_spans = [
+            match.span() for match in re.finditer(phrase_pattern, answer, re.I)
+        ]
+        if phrase_spans:
+            return phrase_spans
+    spans: set[Tuple[int, int]] = set()
+    for term in sorted(aliases, key=len, reverse=True):
+        pattern = r"(?<![a-z0-9%])" + re.escape(term) + r"(?![a-z0-9%])"
+        spans.update(match.span() for match in re.finditer(pattern, answer, re.I))
+    clustered: List[Tuple[int, int]] = []
+    for start, end in sorted(spans):
+        if not clustered or start - clustered[-1][1] > 40:
+            clustered.append((start, end))
+        else:
+            clustered[-1] = (clustered[-1][0], max(clustered[-1][1], end))
+    return clustered
+
+
+def _series_mention_positions(answer: str, item: Dict[str, Any]) -> List[int]:
+    return [start for start, _end in _series_mention_spans(answer, item)]
+
+
+def _answer_direction_for_series(
+    answer: str, item: Dict[str, Any], selected: List[Dict[str, Any]]
+) -> Optional[str]:
+    mentions = [
+        (index, span)
+        for index, candidate in enumerate(selected)
+        for span in _series_mention_spans(answer, candidate)
+    ]
+    target_index = next(
+        (index for index, candidate in enumerate(selected) if candidate is item), None
+    )
+    if target_index is None or not any(index == target_index for index, _span in mentions):
+        return _answer_direction(answer) if len(selected) == 1 else None
+
+    direction_spans: List[Tuple[str, Tuple[int, int]]] = [
+        ("down", match.span()) for match in _DOWN_WORD_RE.finditer(answer)
+    ]
+    for match in _UP_WORD_RE.finditer(answer):
+        local = answer[max(0, match.start() - 25) : match.end()]
+        direction_spans.append(
+            ("down" if _NEGATED_UP_RE.search(local) else "up", match.span())
+        )
+
+    directions: set[str] = set()
+    for direction, (direction_start, direction_end) in direction_spans:
+        distances = []
+        for index, (mention_start, mention_end) in mentions:
+            if direction_start >= mention_end:
+                distance = direction_start - mention_end
+            elif mention_start >= direction_end:
+                distance = mention_start - direction_end
+            else:
+                distance = 0
+            distances.append((distance, index))
+        nearest = min((distance for distance, _index in distances), default=None)
+        assigned = {
+            index for distance, index in distances if nearest is not None and distance == nearest
+        }
+
+        preceding = sorted(
+            (
+                (mention_start, mention_end, index)
+                for index, (mention_start, mention_end) in mentions
+                if mention_end <= direction_start
+            ),
+            key=lambda value: value[1],
+        )
+        if preceding and re.fullmatch(
+            r"\s*(?:both\s+)?", answer[preceding[-1][1] : direction_start], re.I
+        ):
+            group = [preceding[-1]]
+            for candidate in reversed(preceding[:-1]):
+                connector = answer[candidate[1] : group[-1][0]]
+                if not re.fullmatch(
+                    r"\s*(?:(?:,|/|&)(?:\s*(?:and|or))?|(?:and|or))\s*",
+                    connector,
+                    re.I,
+                ):
+                    break
+                group.append(candidate)
+            assigned.update(index for _start, _end, index in group)
+
+        following = sorted(
+            (
+                (mention_start, mention_end, index)
+                for index, (mention_start, mention_end) in mentions
+                if mention_start >= direction_end
+            ),
+            key=lambda value: value[0],
+        )
+        if following and re.fullmatch(
+            r"\s*", answer[direction_end : following[0][0]]
+        ):
+            group = [following[0]]
+            for candidate in following[1:]:
+                connector = answer[group[-1][1] : candidate[0]]
+                if not re.fullmatch(
+                    r"\s*(?:(?:,|/|&)(?:\s*(?:and|or))?|(?:and|or))\s*",
+                    connector,
+                    re.I,
+                ):
+                    break
+                group.append(candidate)
+            assigned.update(index for _start, _end, index in group)
+
+        if target_index in assigned:
+            directions.add(direction)
+    return next(iter(directions)) if len(directions) == 1 else None
 
 
 def _answer_direction(answer: str) -> Optional[str]:
@@ -1331,8 +1487,8 @@ def run_temporal_gate(
 
     selected = _selected_series(q, a, temporal_facts)
     if _TREND_RE.search(qa) and selected:
-        answer_dir = _answer_direction(a)
         for s in selected:
+            answer_dir = _answer_direction_for_series(a, s, selected)
             indices = [
                 p.get("index")
                 for p in (s.get("points") or [])
