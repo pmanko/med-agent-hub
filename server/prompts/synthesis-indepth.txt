@@ -11,6 +11,13 @@ Write 1-3 claims. Prioritise, in order:
 2. A trend or comparison only when the cited records collectively state every value and date used.
 3. Guideline or general-medical context only when a supporting numbered KnowledgeReference record is present in the supplied evidence.
 
+Keep the retrieval task narrow:
+- When the question asks only for a factual point lookup such as a last visit, latest result, current medication, or single event, first confirm and use the record already cited by the DIRECT ANSWER. Add at most one chart-context claim containing only extra details stated by that same record.
+- When the question explicitly asks for a trend, comparison, interpretation, or guidance, the point-lookup limit does not apply. Provide only the requested context, keep each claim atomic, and cite every chart endpoint or supporting KnowledgeReference it needs.
+- Do not introduce a trend, comparison, different measurement, or unrelated chart topic unless the question asks for it or it is necessary to explain the direct answer.
+- A claim may cover one evidence record or one concept series, never several unrelated measurements. For example, do not bundle weight, blood pressure, pulse, oxygen saturation, and temperature into one claim.
+- When one record supports the claim, put exactly that one [N] citation at the end. A comparison may cite only the endpoint records that state its values and dates.
+
 Each string in "claims":
 - States ONE checkable idea.
 - Includes [N] citations to the smallest source set that supports it.

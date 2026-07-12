@@ -150,6 +150,15 @@ def test_indepth_prompt_matches_evidence_gate_contract():
     assert "the cited source set must support the entire displayed claim" in text
     assert "Do not use a patient chart citation as support for outside medical knowledge" in text
     assert "If no supporting KnowledgeReference record is present" in text
+    assert "asks only for a factual point lookup" in text
+    assert "first confirm and use the record already cited by the DIRECT ANSWER" in text
+    assert "explicitly asks for a trend, comparison, interpretation, or guidance" in text
+    assert "the point-lookup limit does not apply" in text
+    assert "Do not introduce a trend, comparison, different measurement" in text
+    assert "A claim may cover one evidence record or one concept series" in text
+    assert "do not bundle weight, blood pressure, pulse" in text
+    assert "put exactly that one [N] citation at the end" in text
+    assert "cite every chart endpoint or supporting KnowledgeReference it needs" in text
 
 
 @pytest.mark.parametrize(
