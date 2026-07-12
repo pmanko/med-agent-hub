@@ -369,6 +369,65 @@ def test_answer_done_timing_separates_answer_work_from_pipeline_overhead(monkeyp
     )
     assert 0 <= timing["pipeline_overhead_ratio"] <= 1
 
+    stage_timings = [
+        step for step in traces[0]["steps"] if step["role"] == "stage_timing"
+    ]
+    assert [step["stage"] for step in stage_timings] == list(
+        _product_profile().stages
+    )
+    assert [
+        step["occurrence"] for step in stage_timings if step["stage"] == "gate"
+    ] == [1]
+    assert all(step["duration_ms"] >= 0 for step in stage_timings)
+    assert all(step["status"] == "completed" for step in stage_timings)
+
+
+def test_failed_stage_is_timed(monkeypatch):
+    _stub_common(monkeypatch)
+    traces = []
+
+    async def failing_answer(*_args, **_kwargs):
+        raise RuntimeError("answer failed")
+
+    monkeypatch.setattr(team, "_synthesize_answer", failing_answer)
+    monkeypatch.setattr(
+        team, "_write_trace", lambda *_args, **kwargs: traces.append(kwargs)
+    )
+
+    _collect(_product_profile())
+
+    timing = next(
+        step
+        for step in traces[0]["steps"]
+        if step["role"] == "stage_timing" and step["stage"] == "answer"
+    )
+    assert timing["status"] == "failed"
+    assert timing["duration_ms"] >= 0
+
+
+def test_context_source_failure_timing_reaches_trace(monkeypatch):
+    from server.context_sources import ContextSourceError
+
+    _stub_common(monkeypatch)
+    traces = []
+
+    async def failing_context(*_args, **_kwargs):
+        raise ContextSourceError("context_source_failed", "source failed", source="test")
+
+    monkeypatch.setattr(engine, "_prepare_context", failing_context)
+    monkeypatch.setattr(
+        team, "_write_trace", lambda *_args, **kwargs: traces.append(kwargs)
+    )
+
+    with pytest.raises(ContextSourceError):
+        _collect(_product_profile())
+
+    timing = next(
+        step for step in traces[0]["steps"] if step["role"] == "stage_timing"
+    )
+    assert timing["stage"] == "context"
+    assert timing["status"] == "failed"
+
 
 def test_non_substantive_product_answer_withholds_indepth(monkeypatch):
     _stub_common(monkeypatch)
@@ -1913,6 +1972,10 @@ def test_profile_stream_client_disconnect_mid_indepth_frees_router_lock(monkeypa
     WHOLE staged generator to the in-depth phase, not just _chat in isolation."""
     _stub_common(monkeypatch)
     cancellations = []
+    traces = []
+    monkeypatch.setattr(
+        team, "_write_trace", lambda *_args, **kwargs: traces.append(kwargs)
+    )
     monkeypatch.setattr(
         team,
         "_write_cancellation_trace",
@@ -1998,6 +2061,12 @@ def test_profile_stream_client_disconnect_mid_indepth_frees_router_lock(monkeypa
                 "router_lock_released": True,
             }
         ]
+        timing = next(
+            step
+            for step in traces[0]["steps"]
+            if step["role"] == "stage_timing" and step["stage"] == "indepth"
+        )
+        assert timing["status"] == "cancelled"
 
     asyncio.run(_run())
 

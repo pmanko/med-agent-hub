@@ -1,11 +1,8 @@
 """Render querystore records into the numbered chart text the hub's LLM prompts expect.
 
-This is the hub's OWN serializer — deliberately NOT a byte-copy of chartsearchai's
-``PatientChartSerializer``. It keeps the prompt-compatible shape (numbered ``[N] (date) text`` records,
-citable by index, with obs-group labels) but drops chartsearchai's micro-optimizations (date run-length
-compression, label dedup, the live-age splice) so the hub can iterate the format independently.
-chartsearchai keeps its own serializer in-process; the small overlap (numbering / date / group label) is
-acceptable duplication, not a planned debt — see the hub's querystore-retrieval design.
+The hub owns this serializer because it owns context retrieval and prompt construction. ChartSearchAI
+relays patient/profile requests and does not build a second chart snapshot. Validation fixtures use this
+same renderer so judges see the exact numbered evidence ledger supplied to the model.
 
 Input is the raw querystore REST representation: each record is a dict with ``resourceType``,
 ``resourceUuid``, ``date`` (ISO ``yyyy-MM-dd``), ``text`` (the labelled per-record projection), and

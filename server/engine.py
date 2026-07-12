@@ -840,17 +840,90 @@ async def _execute_stages(
         request.profile, request.context
     )
     gate_count = 0
+    stage_occurrences: Dict[str, int] = {}
+    active_stage: Optional[str] = None
+    active_stage_started = 0.0
+    active_stage_occurrence = 0
+    active_stage_recorded = True
     execution_started = time.perf_counter()
     answer_stage_ms: Optional[int] = None
     product = request.profile.output_mode == "product"
     if budget_policy is not None:
         state.token_counter = budget_policy.counter
 
+    def record_stage_timing(status: str = "completed") -> None:
+        nonlocal active_stage_recorded
+        if active_stage is None or active_stage_recorded:
+            return
+        state.steps.append(
+            {
+                "role": "stage_timing",
+                "stage": active_stage,
+                "occurrence": active_stage_occurrence,
+                "duration_ms": round(
+                    (time.perf_counter() - active_stage_started) * 1000
+                ),
+                "status": status,
+            }
+        )
+        active_stage_recorded = True
+
+    def write_execution_trace(*, answer_text: Optional[str] = None) -> None:
+        if budget_policy is not None and not any(
+            step.get("role") == "exact_request_budgets" for step in state.steps
+        ):
+            state.steps.append(
+                {
+                    "role": "exact_request_budgets",
+                    "measurements": list(budget_policy.measurements),
+                }
+            )
+        stages._write_trace(
+            request.profile.id,
+            state.messages,
+            orchestrator=request.profile.models.get("orchestrator"),
+            expert=request.profile.models.get("expert"),
+            synthesizer=request.profile.models.get(
+                "answer", request.profile.models.get("indepth")
+            ),
+            validator=request.profile.models.get("review"),
+            steps=state.steps,
+            answer_confidence=state.answer_conf,
+            indepth_confidence=state.indepth_conf,
+            answer_text=state.answer_text if answer_text is None else answer_text,
+            in_depth_claims=state.claims,
+            reference_date=state.reference_date,
+            temporal_facts=state.temporal_facts,
+            temporal_gate=state.answer_gate,
+            original_answer_text=state.original_answer,
+            answer_validation=state.answer_validation,
+            context_summary=_context_summary(state),
+            indepth_temporal_gate=state.indepth_gate,
+            final_references=state.references,
+            sampling={
+                "answer_temperature": sampling["answer_temperature"],
+                "synth_temperature": sampling["answer_temperature"],
+                "synth_temperature_floor": sampling["answer_temperature"],
+                "synth_temperature_source": (
+                    "level_knob"
+                    if "temperature" in request.profile.knobs.get("answer", {})
+                    else "request_or_default"
+                ),
+            },
+        )
+
     try:
         async with httpx.AsyncClient() as client:
             for stage in request.profile.stages:
+                stage_occurrences[stage] = stage_occurrences.get(stage, 0) + 1
+                active_stage = stage
+                active_stage_started = time.perf_counter()
+                active_stage_occurrence = stage_occurrences[stage]
+                active_stage_recorded = False
+
                 if stage == "context":
                     await _prepare_context(request, state)
+                    record_stage_timing()
                     continue
 
                 if stage == "gather":
@@ -891,6 +964,7 @@ async def _execute_stages(
                         state.steps.append(
                             {"role": "context_reselection", **_context_summary(state)}
                         )
+                    record_stage_timing()
                     continue
 
                 if stage == "answer":
@@ -946,6 +1020,7 @@ async def _execute_stages(
                         steps=state.steps,
                     )
                     answer_stage_ms = round((time.perf_counter() - answer_started) * 1000)
+                    record_stage_timing()
                     continue
 
                 if stage == "gate":
@@ -956,6 +1031,7 @@ async def _execute_stages(
                         request.profile.output_mode == "review"
                         and not state.answer_text
                     ):
+                        record_stage_timing()
                         continue
                     if gate_count == 1:
                         (
@@ -1033,6 +1109,7 @@ async def _execute_stages(
                                     "after": list(state.citations),
                                 }
                             )
+                    record_stage_timing()
                     continue
 
                 if stage == "resolve_refs":
@@ -1101,6 +1178,7 @@ async def _execute_stages(
                             else 0.0,
                         }
                     )
+                    record_stage_timing()
                     yield (
                         "answer_done",
                         _stream_payload(
@@ -1178,6 +1256,7 @@ async def _execute_stages(
                             or state.citations != state.review_draft_citations
                             or state.blocks != state.review_draft_blocks
                         )
+                    record_stage_timing()
                     continue
 
                 if stage == "final_resolve_refs":
@@ -1237,6 +1316,7 @@ async def _execute_stages(
                                 or (state.review_draft if state.review_edited else None)
                             ),
                         )
+                    record_stage_timing()
                     continue
 
                 if stage == "ground_verdicts":
@@ -1318,6 +1398,7 @@ async def _execute_stages(
                             + list(state.citation_issues),
                             original_answer=prior.get("originalAnswer"),
                         )
+                    record_stage_timing()
                     if "review" in request.profile.stages:
                         yield (
                             "answer_validation",
@@ -1351,6 +1432,7 @@ async def _execute_stages(
                                 "reason": "non-substantive-answer",
                             }
                         )
+                        record_stage_timing()
                         continue
                     prior_answer = (
                         stages._latest_assistant_text(state.messages)
@@ -1479,6 +1561,7 @@ async def _execute_stages(
                         )
                     except Exception as exc:
                         state.indepth_error = str(exc)
+                    record_stage_timing()
                     continue
 
                 if stage == "indepth_gate":
@@ -1674,6 +1757,7 @@ async def _execute_stages(
                                 "indepth_done",
                                 json.dumps(payload),
                             )
+                    record_stage_timing()
                     continue
 
         if product:
@@ -1697,49 +1781,17 @@ async def _execute_stages(
         else:
             yield "result", _raw_result(request, state)
 
-        if budget_policy is not None:
-            state.steps.append(
-                {
-                    "role": "exact_request_budgets",
-                    "measurements": list(budget_policy.measurements),
-                }
-            )
-        stages._write_trace(
-            request.profile.id,
-            state.messages,
-            orchestrator=request.profile.models.get("orchestrator"),
-            expert=request.profile.models.get("expert"),
-            synthesizer=request.profile.models.get(
-                "answer", request.profile.models.get("indepth")
-            ),
-            validator=request.profile.models.get("review"),
-            steps=state.steps,
-            answer_confidence=state.answer_conf,
-            indepth_confidence=state.indepth_conf,
-            answer_text=state.answer_text,
-            in_depth_claims=state.claims,
-            reference_date=state.reference_date,
-            temporal_facts=state.temporal_facts,
-            temporal_gate=state.answer_gate,
-            original_answer_text=state.original_answer,
-            answer_validation=state.answer_validation,
-            context_summary=_context_summary(state),
-            indepth_temporal_gate=state.indepth_gate,
-            final_references=state.references,
-            sampling={
-                "answer_temperature": sampling["answer_temperature"],
-                "synth_temperature": sampling["answer_temperature"],
-                "synth_temperature_floor": sampling["answer_temperature"],
-                "synth_temperature_source": (
-                    "level_knob"
-                    if "temperature" in request.profile.knobs.get("answer", {})
-                    else "request_or_default"
-                ),
-            },
-        )
+        write_execution_trace()
+    except asyncio.CancelledError:
+        record_stage_timing("cancelled")
+        write_execution_trace()
+        raise
     except ContextSourceError:
+        record_stage_timing("failed")
+        write_execution_trace()
         raise
     except Exception as exc:
+        record_stage_timing("failed")
         fallback = stages._fallback_envelope(
             "I could not produce a complete answer for this turn. Please try again."
         )
@@ -1775,20 +1827,7 @@ async def _execute_stages(
                 "answer": "",
                 "error": "In-Depth was not generated.",
             }
-            stages._write_trace(
-                request.profile.id,
-                state.messages,
-                orchestrator=request.profile.models.get("orchestrator"),
-                expert=request.profile.models.get("expert"),
-                synthesizer=request.profile.models.get("answer"),
-                validator=request.profile.models.get("review"),
-                steps=state.steps,
-                answer_confidence=state.answer_conf,
-                answer_text=str(payload.get("answer") or ""),
-                temporal_facts=state.temporal_facts,
-                temporal_gate=fallback_gate,
-                context_summary=_context_summary(state),
-            )
+            write_execution_trace(answer_text=str(payload.get("answer") or ""))
             yield "done", json.dumps(payload)
         else:
             yield "result", fallback
