@@ -15,7 +15,7 @@ import datetime as _dt
 import json
 import re
 import unicodedata
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 # A record line is `[N] <rest>`; the date `(YYYY-MM-DD)` is present only on the FIRST line of a
@@ -1129,6 +1129,25 @@ def _series_patch(series: Dict[str, Any]) -> tuple[str, List[int]]:
     )
 
 
+def _has_exact_unit_suffix(suffix: str, unit: str) -> bool:
+    normalized_suffix = unicodedata.normalize("NFKC", suffix).translate(
+        str.maketrans({"⁄": "/", "∕": "/", "−": "-"})
+    )
+    normalized_unit = unicodedata.normalize("NFKC", unit).translate(
+        str.maketrans({"⁄": "/", "∕": "/", "−": "-"})
+    )
+    match = re.match(re.escape(normalized_unit) + r"(?![a-z0-9])", normalized_suffix, re.I)
+    if not match:
+        return False
+    continuation = normalized_suffix[match.end() :]
+    return not re.match(
+        r"\s*(?:/|per\b|(?:[·*]\s*)?m\s*(?:\^\s*)?(?:\{\s*)?"
+        r"(?:-\s*)?[23](?:\s*\})?)",
+        continuation,
+        re.I,
+    )
+
+
 def _series_value_candidates(
     text: str, series: Dict[str, Any]
 ) -> List[tuple[re.Match, float]]:
@@ -1167,25 +1186,10 @@ def _series_value_candidates(
     if "cd4" in concept:
         concept_tokens.add("cd4")
 
-    def has_exact_unit(suffix: str, unit: str) -> bool:
-        match = re.match(re.escape(unit) + r"(?![a-z0-9])", suffix, re.I)
-        if not match:
-            return False
-        continuation = suffix[match.end() :]
-        normalized = unicodedata.normalize("NFKC", continuation).translate(
-            str.maketrans({"⁄": "/", "∕": "/", "−": "-"})
-        )
-        return not re.match(
-            r"\s*(?:/|per\b|(?:[·*]\s*)?m\s*(?:\^\s*)?(?:\{\s*)?"
-            r"(?:-\s*)?[23](?:\s*\})?)",
-            normalized,
-            re.I,
-        )
-
     explicit: set[int] = set()
     for index, (match, _value) in enumerate(all_numbers):
         suffix = text[match.end() : match.end() + 24].lstrip().lower()
-        if any(has_exact_unit(suffix, unit) for unit in units):
+        if any(_has_exact_unit_suffix(suffix, unit) for unit in units):
             explicit.add(index)
 
     # In ranges such as "53 to 52 kg", the trailing unit applies to both values.
@@ -1571,6 +1575,75 @@ def run_temporal_gate(
     )
 
 
+_DANGLING_CITATION_RE = re.compile(r"\s*\[\s*$")
+
+
+def _repair_dangling_indepth_citation(
+    claim: str, temporal_facts: Optional[Dict[str, Any]]
+) -> Optional[Tuple[str, int, str]]:
+    """Repair one truncated trailing citation only when evidence binding is unique."""
+    if not claim or not _DANGLING_CITATION_RE.search(claim):
+        return None
+    existing = [int(value) for value in re.findall(r"\[(\d+)]", claim)]
+    if existing:
+        return None
+    cleaned = _DANGLING_CITATION_RE.sub("", claim).rstrip()
+    if not temporal_facts:
+        return None
+
+    dates = set(_ISO_TOKEN_RE.findall(claim))
+    if not dates:
+        return None
+    without_dates = list(claim)
+    for match in _ISO_TOKEN_RE.finditer(claim):
+        without_dates[match.start() : match.end()] = " " * len(match.group())
+    value_text = "".join(without_dates)
+
+    matching_indices: set[int] = set()
+    for series in _selected_series("", claim, temporal_facts):
+        claimed_values = _series_value_candidates(value_text, series)
+        if not claimed_values:
+            continue
+        for point in series.get("points") or []:
+            index = point.get("index")
+            try:
+                point_value = float(point.get("value"))
+            except (TypeError, ValueError):
+                continue
+            point_unit = unicodedata.normalize(
+                "NFKC", str(point.get("unit") or "").strip()
+            )
+            value_matches = False
+            for value_match, claimed_value in claimed_values:
+                if point_value != claimed_value:
+                    continue
+                if point_unit:
+                    suffix = unicodedata.normalize(
+                        "NFKC", value_text[value_match.end() : value_match.end() + 40]
+                    )
+                    if not _has_exact_unit_suffix(suffix.lstrip(), point_unit):
+                        continue
+                value_matches = True
+                break
+            if (
+                isinstance(index, int)
+                and str(point.get("date")) in dates
+                and value_matches
+            ):
+                matching_indices.add(index)
+    if len(matching_indices) != 1:
+        return None
+
+    source_index = next(iter(matching_indices))
+    punctuation = cleaned[-1] if cleaned[-1:] in {".", "!", "?"} else ""
+    stem = cleaned[:-1].rstrip() if punctuation else cleaned
+    return (
+        f"{stem} [{source_index}]{punctuation}",
+        source_index,
+        "A truncated trailing citation uniquely matched one dated numeric record.",
+    )
+
+
 def gate_indepth_claims(
     question: str,
     claims: List[str],
@@ -1596,11 +1669,51 @@ def gate_indepth_claims(
             "checks": [],
         }
     for index, claim in enumerate(claims or [], 1):
+        original_claim = claim
+        citation_repair = (
+            _repair_dangling_indepth_citation(claim or "", temporal_facts)
+            if normalized_mode == "enforce"
+            else None
+        )
+        if citation_repair:
+            claim, source_index, repair_reason = citation_repair
+            edited = True
         citations = [int(value) for value in re.findall(r"\[(\d+)]", claim or "")]
         gate = run_temporal_gate(
             question, claim or "", citations, temporal_facts, normalized_mode
         )
-        checks.append({"claim_index": index, "claim": claim, "gate": gate})
+        if (
+            normalized_mode != "off"
+            and _DANGLING_CITATION_RE.search(claim or "")
+        ):
+            gate = dict(gate)
+            gate_checks = list(gate.get("checks") or [])
+            _add_check(
+                gate_checks,
+                "citation_format",
+                "fail",
+                "block",
+                original_claim[:240],
+                "The claim ends with a truncated evidence citation.",
+                citations,
+            )
+            gate.update(
+                {
+                    "status": "fail",
+                    "checks": gate_checks,
+                    "patch_answer": None,
+                    "patch_citations": [],
+                }
+            )
+        check = {"claim_index": index, "claim": original_claim, "gate": gate}
+        if citation_repair:
+            check["evaluated_claim"] = claim
+            check["citation_repair"] = {
+                "status": "repaired",
+                "source_index": source_index,
+                "reason": repair_reason,
+            }
+        checks.append(check)
         if gate.get("status") != "fail" or normalized_mode != "enforce":
             kept.append(claim)
             continue

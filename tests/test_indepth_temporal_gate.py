@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from server.temporal import gate_indepth_claims
 
 FACTS = {
@@ -196,3 +198,155 @@ def test_indepth_blood_pressure_claim_does_not_bind_white_blood_cells():
 
     assert result["status"] == "checked"
     assert result["claims"] == [claim]
+
+
+def test_dangling_citation_is_repaired_from_one_exact_numeric_point():
+    facts = {
+        **FACTS,
+        "numeric_series": [
+            {
+                "concept": "Weight",
+                "points": [
+                    {"date": "2006-06-06", "value": 71, "unit": "kg", "index": 19}
+                ],
+                "trend_supported": False,
+                "direction": "none",
+            }
+        ],
+        "date_ledger": [{"iso": "2006-06-06", "date_id": "weight"}],
+        "date_output_contract": {"allowed_iso_dates": ["2006-06-06"]},
+    }
+
+    result = gate_indepth_claims(
+        "What was the patient's weight?",
+        ["The patient's weight was 71 kg on 2006-06-06 ["],
+        facts,
+        mode="enforce",
+    )
+
+    assert result["status"] == "edited"
+    assert result["claims"] == ["The patient's weight was 71 kg on 2006-06-06 [19]"]
+    assert result["checks"][0]["citation_repair"]["source_index"] == 19
+
+
+def test_dangling_citation_is_not_repaired_when_point_binding_is_ambiguous():
+    facts = {
+        **FACTS,
+        "numeric_series": [
+            {
+                "concept": "Weight",
+                "points": [
+                    {"date": "2006-06-06", "value": 71, "unit": "kg", "index": 19},
+                    {"date": "2006-06-06", "value": 71, "unit": "kg", "index": 20},
+                ],
+                "trend_supported": True,
+                "direction": "flat",
+            }
+        ],
+        "date_ledger": [{"iso": "2006-06-06", "date_id": "weight"}],
+        "date_output_contract": {"allowed_iso_dates": ["2006-06-06"]},
+    }
+    claim = "The patient's weight was 71 kg on 2006-06-06 ["
+
+    result = gate_indepth_claims(
+        "What was the patient's weight?", [claim], facts, mode="enforce"
+    )
+
+    assert result["status"] == "needs_review"
+    assert result["claims"] == []
+    assert result["removed"] == [1]
+    assert "citation_repair" not in result["checks"][0]
+
+
+def test_uncited_claim_without_malformed_marker_is_not_auto_cited():
+    facts = {
+        **FACTS,
+        "numeric_series": [
+            {
+                "concept": "Weight",
+                "points": [
+                    {"date": "2006-06-06", "value": 71, "unit": "kg", "index": 19}
+                ],
+                "trend_supported": False,
+                "direction": "none",
+            }
+        ],
+        "date_ledger": [{"iso": "2006-06-06", "date_id": "weight"}],
+        "date_output_contract": {"allowed_iso_dates": ["2006-06-06"]},
+    }
+    claim = "The patient's weight was 71 kg on 2006-06-06."
+
+    result = gate_indepth_claims(
+        "What was the patient's weight?", [claim], facts, mode="enforce"
+    )
+
+    assert result["claims"] == [claim]
+    assert "citation_repair" not in result["checks"][0]
+
+
+@pytest.mark.parametrize("written_unit", ("lb", "kg/m2", "kg/m²", "kg per m2"))
+def test_dangling_citation_with_wrong_unit_is_rejected_not_repaired(written_unit):
+    facts = {
+        **FACTS,
+        "numeric_series": [
+            {
+                "concept": "Weight",
+                "points": [
+                    {"date": "2006-06-06", "value": 71, "unit": "kg", "index": 19}
+                ],
+                "trend_supported": False,
+                "direction": "none",
+            }
+        ],
+        "date_ledger": [{"iso": "2006-06-06", "date_id": "weight"}],
+        "date_output_contract": {"allowed_iso_dates": ["2006-06-06"]},
+    }
+
+    result = gate_indepth_claims(
+        "What was the patient's weight?",
+        [f"The patient's weight was 71 {written_unit} on 2006-06-06 ["],
+        facts,
+        mode="enforce",
+    )
+
+    assert result["status"] == "needs_review"
+    assert result["claims"] == []
+    assert "citation_repair" not in result["checks"][0]
+
+
+def test_existing_citation_does_not_authorize_cleaning_a_second_uncited_claim():
+    claim = "Weight was 71 kg [19]. Monitoring is recommended ["
+
+    result = gate_indepth_claims(
+        "What was the patient's weight?", [claim], FACTS, mode="enforce"
+    )
+
+    assert result["status"] == "needs_review"
+    assert result["claims"] == []
+    assert "citation_repair" not in result["checks"][0]
+
+
+def test_dangling_citation_repair_does_not_mutate_off_or_warn_modes():
+    facts = {
+        **FACTS,
+        "numeric_series": [
+            {
+                "concept": "Weight",
+                "points": [
+                    {"date": "2006-06-06", "value": 71, "unit": "kg", "index": 19}
+                ],
+                "trend_supported": False,
+                "direction": "none",
+            }
+        ],
+    }
+    claim = "The patient's weight was 71 kg on 2006-06-06 ["
+
+    off = gate_indepth_claims("What was the weight?", [claim], facts, mode="off")
+    warn = gate_indepth_claims("What was the weight?", [claim], facts, mode="warn")
+
+    assert off["claims"] == [claim]
+    assert warn["claims"] == [claim]
+    assert "citation_repair" not in off["checks"][0]
+    assert "citation_repair" not in warn["checks"][0]
+    assert warn["checks"][0]["gate"]["status"] == "fail"

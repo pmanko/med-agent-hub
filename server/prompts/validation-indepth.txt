@@ -6,6 +6,7 @@ Return JSON only:
 {"drop": [<the NUMBERS of in-depth claims to remove>], "issues": "<a short note on what you dropped and why, or empty>"}
 
 For every claim, the cited source set must support the entire displayed claim. Add a claim number to "drop" when any factual clause is not supported by its cited numbered sources, including:
+- a missing or malformed [N] evidence citation;
 - a patient value, date, drug, result, trend, or comparison that is wrong, invented, or missing a required source;
 - an interpretation, threshold, risk, recommendation, guideline, or general-medical statement that its cited sources do not state;
 - guidance that is misapplied to this patient; or
