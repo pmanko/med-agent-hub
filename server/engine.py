@@ -701,11 +701,7 @@ async def _execute_stages(
                     continue
 
                 if stage == "gather":
-                    (
-                        kb_context,
-                        expert_notes,
-                        gather_steps,
-                    ) = await stages._gather_evidence(
+                    expert_notes, gather_steps = await stages._gather_evidence(
                         client,
                         has_expert="expert" in request.profile.models,
                         orchestrator_model=request.profile.models["orchestrator"],
@@ -727,12 +723,9 @@ async def _execute_stages(
                         exp_temp=sampling["expert_temperature"],
                         exp_rp=sampling["expert_repeat_penalty"],
                         exp_dry=sampling["expert_dry"],
-                        allow_kb_search=(
-                            "knowledge-base" not in state.ledger.source_names
-                        ),
                     )
                     state.steps.extend(gather_steps)
-                    gathered = stages._gathered_evidence(kb_context, expert_notes)
+                    gathered = stages._gathered_evidence(expert_notes)
                     state.derived_context = gathered
                     if gathered:
                         state.gathered = (
@@ -1420,8 +1413,7 @@ async def _execute_stages(
                         and not state.indepth_error
                     ):
                         state.indepth_error = (
-                            "In-Depth was withheld because deterministic temporal checks "
-                            "rejected every claim."
+                            "In-Depth was withheld because evidence checks rejected every claim."
                         )
                     if product:
                         if state.indepth_error:

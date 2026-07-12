@@ -1090,10 +1090,151 @@ def test_indepth_citation_cannot_inherit_answer_verified_verdict(monkeypatch):
     assert final["inDepth"]["status"] == "needs_review"
     assert final["inDepth"]["answer"] == ""
     assert final["inDepth"]["validation"]["citation_checks"][0]["status"] == "fail"
+    assert "evidence checks rejected every claim" in final["inDepth"]["error"]
     assert final["references"][0]["groundingStatus"] == "verified"
     assert all(
         usage.get("location") != "indepth" for usage in final["references"][0]["usage"]
     )
+
+
+def test_knowledge_reference_survives_source_set_grounding_with_provenance(monkeypatch):
+    mappings = [
+        {
+            "index": 1,
+            "sourceId": "test:patient:1",
+            "source": "test-patient",
+            "resourceType": "Observation",
+            "resourceUuid": "obs-1",
+            "date": "2026-01-01",
+            "text": "The patient takes Examplemed.",
+        },
+        {
+            "index": 2,
+            "sourceId": "knowledge-base:guide-1",
+            "source": "knowledge-base",
+            "resourceType": "KnowledgeReference",
+            "resourceUuid": "guide-1",
+            "date": None,
+            "text": "Example guidance: Examplemed requires annual monitoring.",
+            "provenance": {
+                "authority": "Example Authority",
+                "version": "2026",
+                "url": "https://example.test/guide",
+                "license": "CC BY",
+            },
+        },
+    ]
+    claim = "The patient takes Examplemed [1], which requires annual monitoring [2]."
+    references = team._resolve_references(
+        [1, 2],
+        mappings,
+        answer=claim,
+        grounding_status="unchecked",
+        answer_usage_location="indepth",
+    )
+
+    async def supported(_client, _model, pairs):
+        assert len(pairs) == 1
+        assert "[1]" in pairs[0][0] and "[2]" in pairs[0][0]
+        return [True]
+
+    monkeypatch.setattr(team, "_entailment_verdicts", supported)
+    grounded = asyncio.run(
+        team._ground_references(None, "model", claim, references, mappings)
+    )
+
+    assert [item["groundingStatus"] for item in grounded] == ["verified", "verified"]
+    kb_reference = grounded[1]
+    assert kb_reference["resourceType"] == "KnowledgeReference"
+    assert kb_reference["sourceId"] == "knowledge-base:guide-1"
+    assert kb_reference["source"] == "knowledge-base"
+    assert kb_reference["provenance"] == {
+        "authority": "Example Authority",
+        "version": "2026",
+        "url": "https://example.test/guide",
+        "license": "CC BY",
+    }
+    assert kb_reference["groundingGroup"] == [1, 2]
+
+
+def test_product_review_and_final_event_preserve_grounded_knowledge_reference(monkeypatch):
+    real_ground = team._ground_references
+    _stub_common(monkeypatch)
+    monkeypatch.setattr(team, "_ground_references", real_ground)
+
+    async def fake_answer(*_args, **_kwargs):
+        return (
+            "The chart documents Examplemed [1], and the reference recommends monitoring [3].",
+            [1, 3],
+            [],
+        )
+
+    async def fake_review(_client, _model, **kwargs):
+        assert "KnowledgeReference (source: knowledge-base)" in kwargs["chart"]
+        return {"answer_ok": True, "errors": []}
+
+    async def fake_indepth(*_args, **_kwargs):
+        return (
+            ["Examplemed is documented [1], with monitoring recommended by the reference [3]."],
+            {"level": "green", "note": ""},
+        )
+
+    async def supported(_client, _model, pairs):
+        assert pairs
+        return [True] * len(pairs)
+
+    async def fake_gather(*_args, **_kwargs):
+        return [], []
+
+    monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
+    monkeypatch.setattr(team, "_validate_answer_rewrite", fake_review)
+    monkeypatch.setattr(team, "_gen_indepth", fake_indepth)
+    monkeypatch.setattr(team, "_entailment_verdicts", supported)
+    monkeypatch.setattr(team, "_gather_evidence", fake_gather)
+    monkeypatch.setattr(
+        "server.context_sources.kb.search",
+        lambda _query, k=3: [
+            {
+                "id": "guide-1",
+                "title": "Example guidance",
+                "text": "Examplemed requires monitoring.",
+                "source": "Example Authority",
+                "version": "2026",
+                "url": "https://example.test/guide",
+                "license": "CC BY",
+            }
+        ],
+    )
+
+    events = dict(
+        _collect(
+            _product_profile(
+                review_model="review",
+                orchestrator_model="orchestrator",
+                expert_model="expert",
+            )
+        )
+    )
+    final = events["done"]
+    kb_reference = next(
+        reference
+        for reference in final["references"]
+        if reference["resourceType"] == "KnowledgeReference"
+    )
+
+    assert final["answerValidation"]["status"] == "checked"
+    assert final["inDepth"]["status"] == "complete"
+    assert kb_reference["groundingStatus"] == "verified"
+    assert kb_reference["provenance"] == {
+        "authority": "Example Authority",
+        "url": "https://example.test/guide",
+        "version": "2026",
+        "license": "CC BY",
+    }
+    assert {usage["location"] for usage in kb_reference["usage"]} == {
+        "answer",
+        "indepth",
+    }
 
 
 def test_unchecked_indepth_citation_is_omitted_and_cannot_report_complete(monkeypatch):

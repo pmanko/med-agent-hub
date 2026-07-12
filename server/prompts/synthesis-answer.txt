@@ -1,6 +1,6 @@
 Write ONLY a JSON object with exactly three keys: "answer" (a string), "citations" (an array of integers), "blocks" (an array). Output nothing before or after the JSON object.
 
-Your job is the DIRECT ANSWER ONLY. The "answer" string is the bottom-line response in ONE or TWO sentences — nothing more. Use only the patient chart above and the gathered evidence below (knowledge-base reference snippets and the clinical expert's notes). Cite patient-chart records inline as [N].
+Your job is the DIRECT ANSWER ONLY. The "answer" string is the bottom-line response in ONE or TWO sentences — nothing more. Use only the numbered evidence above and the gathered clinical-expert notes below. Patient facts must come from patient records. Guideline or general-medical facts must come from records explicitly labeled KnowledgeReference. Cite either source type inline as [N].
 
 Do NOT write an "**In Depth**" section. Do NOT add any markdown header, bullet list, reasoning, background, or elaboration. No "**Answer**" header either — the "answer" value is the sentence(s) by themselves. Do not restate the question; do not add a generic "consult a doctor" disclaimer.
 
@@ -11,14 +11,14 @@ TEMPORAL FACTS:
 When a `temporal_facts` JSON block is present in gathered evidence, use it for date ordering and temporal inference. Treat `reference_date` as the current date. For date parsing, use `date_ledger`: each entry gives the exact `iso` date plus labeled `year`, `month`, and `day` parts. When writing a date, copy the exact `iso` string from `date_ledger`; do not reconstruct, shorten, translate, underscore, slash, or otherwise reformat dates. Use `*_date_id` fields internally to match measurements/events to ledger dates, but never write a `DYYYY_MM_DD` date_id in the answer. Do not call a date upcoming/future/next unless it is after `reference_date`. Do not infer a trend from one point. Bind numeric values to the dates shown in `numeric_series` or the chart records. If prose and `temporal_facts` appear to conflict, cite the underlying chart record and prefer `temporal_facts` for ordering.
 
 CITATIONS — read carefully:
-- The integers in "citations" and the [N] markers are RECORD INDICES from the numbered patient chart ONLY. A claim gets an integer ONLY if you can point to the numbered chart record that states it.
+- The integers in "citations" and the [N] markers are indices from the numbered evidence ledger. A patient claim gets an integer only from the patient record that states it; an external-guidance claim gets an integer only from a KnowledgeReference record that states it.
 - Every [N] in the answer must also appear in "citations". For table/list answers, "citations" is the de-duplicated union of records used in answer prose and table refs; do not repeat every table citation inline in the answer summary.
 - For prose-only answers (`blocks` is `[]`), "citations" must contain exactly the distinct [N] markers written in the answer. Use the smallest set of records that directly states the claim. Do not include every record from the same date or encounter merely because it is nearby.
-- Knowledge-base / guideline facts, the medical expert's notes, and your own medical knowledge are NOT chart records — name them inline in prose (e.g. "per WHO HIV guidelines") and NEVER wrap them in brackets and NEVER place them in "citations". A bracket that contains anything other than a chart-record integer is malformed.
+- Clinical-expert notes and your own medical knowledge are not evidence records and cannot be cited. Do not state outside guidance unless a numbered KnowledgeReference supports it. A bracket that contains anything other than an evidence-record integer is malformed.
 - Never invent a record, dose, source name, guideline title, threshold, or chart-record index. If neither the chart nor a reference snippet supports the answer, say the information is not available rather than guessing.
 
 BLOCKS:
 - Leave "blocks" as [] unless the answer ENUMERATES multiple items (e.g. a medication list or a lab list). Then emit exactly ONE table block.
-- Each table cell that comes from a chart record carries that record's index in its "refs" (e.g. "refs": [29]). Same citation rule as above: refs hold chart-record integers only.
-- For table answers, keep the answer string brief and let the table refs carry itemized evidence.
+- Each table cell that comes from an evidence record carries that record's ledger index in its "refs" (e.g. "refs": [29]). Patient values use patient-record indices; external guidance uses KnowledgeReference indices.
+- For table answers, keep the answer string brief and let the table refs carry itemized evidence-ledger indices.
 - Include a column ONLY if the chart actually supplies that value for at least one row — do NOT add a column (e.g. dose, date) whose cells you would leave blank. An all-empty column is malformed; drop it and keep only columns you can populate from the records.

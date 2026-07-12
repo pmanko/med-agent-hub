@@ -28,8 +28,8 @@ def test_unknown_profile_fails_with_structured_model_not_found():
 def test_expert_role_controls_tool_availability():
     names_with = [tool["function"]["name"] for tool in team._tool_definitions(True)]
     names_without = [tool["function"]["name"] for tool in team._tool_definitions(False)]
-    assert "medical_expert" in names_with
-    assert names_without == ["kb_search"]
+    assert names_with == ["medical_expert"]
+    assert names_without == []
 
 
 @pytest.mark.parametrize("writer", ["mistral-nemo-12b-q8", "qwen3.6-35b"])

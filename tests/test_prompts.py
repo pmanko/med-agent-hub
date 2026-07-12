@@ -147,8 +147,58 @@ def test_indepth_prompt_matches_evidence_gate_contract():
     text = prompt_loader.load_prompt("synthesis-indepth")
 
     assert "directly relevant to the question and direct answer" in text
-    assert "A displayed In-Depth claim without a chart anchor is rejected" in text
-    assert "If a useful idea cannot be connected to a specific patient record" in text
+    assert "the cited source set must support the entire displayed claim" in text
+    assert "Do not use a patient chart citation as support for outside medical knowledge" in text
+    assert "If no supporting KnowledgeReference record is present" in text
+
+
+@pytest.mark.parametrize(
+    "name",
+    (
+        "validation-indepth",
+        "validation-rewrite-indepth",
+    ),
+)
+def test_indepth_review_prompts_enforce_the_same_source_support_contract(name):
+    text = prompt_loader.load_prompt(name)
+
+    assert "the cited source set must support the entire displayed claim" in text
+    assert "outside medical knowledge requires a cited KnowledgeReference" in text
+    assert "Do not KEEP a claim merely because the guidance sounds standard" in text
+
+
+def test_combined_validator_uses_the_same_indepth_source_support_contract():
+    text = prompt_loader.load_prompt("validation")
+
+    assert "the cited source set must support the entire displayed claim" in text
+    assert "outside medical knowledge requires a supporting source" in text
+
+
+def test_indepth_resynthesis_feedback_uses_the_same_source_contract():
+    feedback = team._indepth_feedback(
+        {"drop": [1], "issues": "The cited chart record does not state the guidance."},
+        ["Unsupported guidance [1]."],
+    )
+
+    assert "supported by its cited numbered source set" in feedback
+    assert "KnowledgeReference" in feedback
+    assert "patient chart citation" in feedback
+
+
+def test_product_answer_prompt_distinguishes_patient_records_from_knowledge_sources():
+    text = prompt_loader.load_prompt("synthesis-answer")
+
+    assert "Patient facts must come from patient records" in text
+    assert "KnowledgeReference" in text
+
+
+@pytest.mark.parametrize(
+    "name", ("synthesis", "synthesis-chartsearchai", "synthesis-coverage")
+)
+def test_raw_batch_prompts_do_not_emit_ungrounded_knowledge_citations(name):
+    text = prompt_loader.load_prompt(name)
+
+    assert "ignore records labeled KnowledgeReference" in text
 
 
 def test_direct_answer_prompt_requires_minimal_explicit_prose_citations():

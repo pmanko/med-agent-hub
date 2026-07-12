@@ -72,7 +72,7 @@ class EvidenceRecord:
         title = str(self.metadata.get("title") or "").strip()
         if not title:
             title = self.text.splitlines()[0][:120]
-        return {
+        mapping = {
             "index": index,
             "sourceId": self.stable_id,
             "source": self.source,
@@ -82,6 +82,14 @@ class EvidenceRecord:
             "text": self.text,
             "title": title,
         }
+        provenance = {
+            key: self.metadata.get(key)
+            for key in ("authority", "url", "version", "license")
+            if self.metadata.get(key)
+        }
+        if provenance:
+            mapping["provenance"] = provenance
+        return mapping
 
 
 def _render_records(
@@ -90,12 +98,15 @@ def _render_records(
     if not records:
         return ""
     record_indices = indices or range(1, len(records) + 1)
-    return (
-        "\n".join(
-            f"[{index}] {record.text}" for index, record in zip(record_indices, records)
-        )
-        + "\n"
-    )
+    def rendered_text(record: EvidenceRecord) -> str:
+        if record.resource_type == "KnowledgeReference":
+            return f"KnowledgeReference (source: {record.source}): {record.text}"
+        return record.text
+
+    return "\n".join(
+        f"[{index}] {rendered_text(record)}"
+        for index, record in zip(record_indices, records)
+    ) + "\n"
 
 
 @dataclass(frozen=True)
@@ -268,7 +279,42 @@ class StaticKnowledgeSource:
     supports_patient = False
 
     async def fetch(self, request: ContextRequest) -> EvidenceLedger:
-        rows = kb.search(request.question, k=3)
+        query = request.question.strip()
+        rows = kb.search(query, k=3)
+        prior_answer = next(
+            (
+                str(message.get("content") or "").strip()
+                for message in reversed(request.messages)
+                if message.get("role") == "assistant"
+                and str(message.get("content") or "").strip()
+            ),
+            "",
+        )
+        prior_answer = _CITATION_TOKEN.sub("", prior_answer).strip()
+        if prior_answer:
+            expanded_query = (
+                f"{query}\nPrior answer context: {prior_answer[:1200]}".strip()
+            )
+            expanded_rows = kb.search(expanded_query, k=3)
+            # Protect current-topic recall while reserving one slot for anaphoric follow-ups.
+            # Stable-id deduplication and fixed lane order keep the merge deterministic.
+            merged: list[dict[str, Any]] = []
+            seen_ids: set[str] = set()
+
+            def add(candidates: Sequence[Mapping[str, Any]], limit: int) -> None:
+                for candidate in candidates:
+                    source_id = str(candidate.get("id") or "")
+                    if not source_id or source_id in seen_ids:
+                        continue
+                    seen_ids.add(source_id)
+                    merged.append(dict(candidate))
+                    if len(merged) >= limit:
+                        return
+
+            add(rows[:2], 2)
+            add(expanded_rows, min(3, len(merged) + 1))
+            add(rows[2:], 3)
+            rows = merged[:3]
         records = []
         for position, row in enumerate(rows, 1):
             source_id = str(row.get("id") or position)
@@ -288,6 +334,7 @@ class StaticKnowledgeSource:
                     date=None,
                     text=text,
                     metadata={
+                        "authority": row.get("source"),
                         "url": row.get("url"),
                         "version": row.get("version"),
                         "license": row.get("license"),

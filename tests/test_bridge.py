@@ -428,11 +428,9 @@ def test_orchestrator_consults_the_medical_expert_on_a_tool_call():
     assert team.llm_config.med_model in calls
 
 
-def test_kb_results_are_threaded_into_the_medical_expert():
-    # The headline of the prompt-driven design: when the orchestrator calls
-    # kb_search then medical_expert, the clinical model must reason WITH the
-    # retrieved guidance — the KB block is built into the expert's user message
-    # in code, not left to the orchestrator to copy across.
+def test_normalized_kb_records_are_threaded_into_the_medical_expert():
+    # Retrieval is completed before gather. The expert receives the same numbered ledger,
+    # including provenance-labelled KnowledgeReference records, with no second search path.
     captured = {}
     orch_turns = {"n": 0}
 
@@ -452,25 +450,9 @@ def test_kb_results_are_threaded_into_the_medical_expert():
         if model == team.llm_config.med_model:
             captured["expert_user"] = messages[-1]["content"]
             return {"content": "the chart's regimen is outdated per the guidance"}
-        # Orchestrator: kb_search, then medical_expert, then done.
+        # Orchestrator: consult the expert once, then stop.
         orch_turns["n"] += 1
         if orch_turns["n"] == 1:
-            return {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [
-                    {
-                        "id": "k1",
-                        "function": {
-                            "name": "kb_search",
-                            "arguments": json.dumps(
-                                {"query": "stavudine d4T phase-out"}
-                            ),
-                        },
-                    }
-                ],
-            }
-        if orch_turns["n"] == 2:
             return {
                 "role": "assistant",
                 "content": None,
@@ -488,62 +470,22 @@ def test_kb_results_are_threaded_into_the_medical_expert():
             }
         return {"content": "ok", "tool_calls": None}
 
-    with patch.object(team, "_chat", side_effect=fake_chat):
+    with patch.object(team, "_chat", side_effect=fake_chat), patch(
+        "server.context_sources.kb.search",
+        return_value=[
+            {
+                "id": "who-d4t",
+                "title": "WHO guidance",
+                "text": "Stavudine is not a preferred antiretroviral backbone.",
+                "source": "WHO",
+            }
+        ],
+    ):
         run(run_profile(_team_profile(), MESSAGES, response_format=RESP_FORMAT))
 
     expert_user = captured["expert_user"]
-    # The expert received the labelled reference block AND the real KB snippet text
-    # retrieved by kb_search (the d4T phase-out snippet contains "stavudine").
-    assert "Reference guidance" in expert_user
+    assert "KnowledgeReference (source: knowledge-base)" in expert_user
     assert "stavudine" in expert_user.lower()
-
-
-def test_orchestrator_can_search_the_knowledge_base():
-    # The orchestrator emits a kb_search tool call; the REAL KB runs (only _chat
-    # is seamed) and its labelled reference snippet flows into the synthesis turn.
-    captured = {}
-
-    async def fake_chat(
-        client,
-        model,
-        messages,
-        *,
-        tools=None,
-        response_format=None,
-        temperature=None,
-        max_tokens=None,
-        **kwargs,
-    ):
-        if response_format is not None:
-            captured["synth"] = messages
-            return {"content": ENVELOPE}
-        already_searched = any(m.get("role") == "tool" for m in messages)
-        if tools is not None and not already_searched:
-            return {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [
-                    {
-                        "id": "k1",
-                        "function": {
-                            "name": "kb_search",
-                            "arguments": json.dumps(
-                                {"query": "metformin first-line diabetes"}
-                            ),
-                        },
-                    }
-                ],
-            }
-        return {"content": "ok", "tool_calls": None}
-
-    with patch.object(team, "_chat", side_effect=fake_chat):
-        out = run(run_profile(_team_profile(), MESSAGES, response_format=RESP_FORMAT))
-
-    json.loads(out)  # still a valid envelope
-    blob = json.dumps(captured["synth"]).lower()
-    # The real corpus snippet reached synthesis, labelled as reference (not chart) data.
-    assert "metformin" in blob
-    assert "knowledge-base reference snippets" in blob
 
 
 def test_profile_drain_falls_back_to_a_valid_envelope_when_synthesis_fails():

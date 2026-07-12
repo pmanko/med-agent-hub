@@ -208,6 +208,12 @@ def test_requested_source_list_composes_patient_and_knowledge_evidence(monkeypat
         "inline:1",
         "knowledge-base:who-1",
     ]
+    assert ledger.mappings()[1]["provenance"] == {
+        "authority": "WHO",
+        "url": "https://example.test/who",
+        "version": "2026",
+        "license": "CC BY",
+    }
 
 
 def test_supplemental_source_uses_the_same_normalized_ledger(monkeypatch):
@@ -237,6 +243,88 @@ def test_supplemental_source_uses_the_same_normalized_ledger(monkeypatch):
     assert ledger.source_names == ("inline", "knowledge-base")
     assert ledger.records[1].stable_id == "knowledge-base:kb-1"
     assert ledger.mappings()[1]["resourceType"] == "KnowledgeReference"
+    assert "[2] KnowledgeReference (source: knowledge-base):" in ledger.render()
+
+
+def test_knowledge_source_uses_latest_completed_answer_for_followup_recall(monkeypatch):
+    captured = []
+
+    def fake_search(query, k=3):
+        captured.append(query)
+        if "Prior answer context" in query:
+            return [
+                {
+                    "id": "d4t-guidance",
+                    "title": "ART guidance",
+                    "text": "Stavudine is not preferred.",
+                    "source": "WHO",
+                }
+            ]
+        return []
+
+    monkeypatch.setattr("server.context_sources.kb.search", fake_search)
+    source = StaticKnowledgeSource()
+    request = ContextRequest(
+        messages=(
+            {"role": "user", "content": "What regimen is documented?"},
+            {"role": "assistant", "content": "The regimen includes stavudine [12]."},
+            {"role": "user", "content": "Is that still recommended?"},
+        ),
+        question="Is that still recommended?",
+    )
+
+    ledger = asyncio.run(source.fetch(request))
+
+    assert len(captured) == 2
+    assert captured[0] == "Is that still recommended?"
+    assert "stavudine" in captured[1]
+    assert "[12]" not in captured[1]
+    assert [record.stable_id for record in ledger.records] == [
+        "knowledge-base:d4t-guidance"
+    ]
+
+
+def test_knowledge_source_protects_current_topic_from_prior_answer_pollution(monkeypatch):
+    def fake_search(query, k=3):
+        if "Prior answer context" in query:
+            return [
+                {"id": "hiv-1", "title": "HIV 1", "text": "ART", "source": "WHO"},
+                {"id": "hiv-2", "title": "HIV 2", "text": "ART", "source": "WHO"},
+                {"id": "hiv-3", "title": "HIV 3", "text": "ART", "source": "WHO"},
+            ]
+        return [
+            {
+                "id": "metformin",
+                "title": "Metformin monitoring",
+                "text": "Monitor renal function.",
+                "source": "Reference",
+            },
+            {
+                "id": "diabetes",
+                "title": "Diabetes care",
+                "text": "Review glycemic control.",
+                "source": "Reference",
+            },
+        ]
+
+    monkeypatch.setattr("server.context_sources.kb.search", fake_search)
+    ledger = asyncio.run(
+        StaticKnowledgeSource().fetch(
+            ContextRequest(
+                messages=(
+                    {"role": "assistant", "content": "The prior regimen used stavudine [7]."},
+                    {"role": "user", "content": "What monitoring does metformin require?"},
+                ),
+                question="What monitoring does metformin require?",
+            )
+        )
+    )
+
+    assert [record.stable_id for record in ledger.records] == [
+        "knowledge-base:metformin",
+        "knowledge-base:diabetes",
+        "knowledge-base:hiv-1",
+    ]
 
 
 def test_querystore_mapping_keeps_the_matching_raw_record_when_invalid_rows_are_skipped():

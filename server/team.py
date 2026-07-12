@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 import httpx
 
-from . import drug_safety, kb, temporal
+from . import drug_safety, temporal
 from .config import EXPERT_DRY_MULTIPLIER, llm_config, resolve_hub_build_revision
 from .context_sources import (
     ChatTokenCounter,
@@ -31,56 +31,20 @@ MAX_TOOL_ITERATIONS = 3
 # prompt edit changes behaviour with no rebuild. A missing file fails loud — the
 # files are the single source of truth.
 
-# Prefix that marks a real (non-abstain) kb_search observation.
-_KB_BLOCK_HEADER = "Knowledge-base reference snippets"
-
-
-def _tool_definitions(
-    has_expert: bool = True, allow_kb_search: bool = True
-) -> List[Dict[str, Any]]:
-    """Tool definitions for sources not already supplied by the context ledger."""
+def _tool_definitions(has_expert: bool = True) -> List[Dict[str, Any]]:
+    """Optional specialist tools; evidence retrieval is owned by context sources."""
     tools: List[Dict[str, Any]] = [
-        {
-            "type": "function",
-            "function": {
-                "name": "kb_search",
-                "description": (
-                    "Search the clinical knowledge base of openly-licensed reference "
-                    "guidance (WHO IMCI danger signs, essential medicines, standard "
-                    "dosing and thresholds, antiretroviral guidance) for facts that are "
-                    "NOT in the patient's chart. Call this FIRST for any claim about a "
-                    "guideline, a drug or dose, a threshold, a danger sign, an "
-                    "immunization schedule, a normal/reference range, or whether a "
-                    "treatment is current or recommended. Example: the question asks "
-                    "whether a patient's regimen is still recommended -> "
-                    'kb_search({"query": "WHO first-line ART; stavudine d4T '
-                    'phase-out"}). Returns reference snippets with provenance — never '
-                    "patient data; cite the source inline as prose, never as an integer."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "The clinical topic, drug, or guideline term to look up.",
-                        }
-                    },
-                    "required": ["query"],
-                },
-            },
-        },
         {
             "type": "function",
             "function": {
                 "name": "medical_expert",
                 "description": (
                     "Consult a clinical expert to interpret THIS patient's chart against "
-                    "the question. Call this AFTER kb_search when guideline/dosing/"
-                    "threshold facts matter: the expert AUTOMATICALLY receives the "
-                    "snippets kb_search returned this turn, so you do NOT copy any facts "
-                    "into your question — just ask what you want interpreted. Use for "
+                    "the question. The expert receives the same numbered evidence ledger, "
+                    "including any KnowledgeReference records supplied by context sources. "
+                    "Use for "
                     "clinical judgment and interpretation, not for plain chart lookup you "
-                    "can answer yourself. Example: after retrieving the guidance -> "
+                    "can answer yourself. Example -> "
                     'medical_expert({"query": "Given the chart\'s regimen, is it still '
                     'WHO-recommended, and what is the concern if not?"}).'
                 ),
@@ -99,8 +63,6 @@ def _tool_definitions(
     ]
     if not has_expert:
         tools = [t for t in tools if t["function"]["name"] != "medical_expert"]
-    if not allow_kb_search:
-        tools = [t for t in tools if t["function"]["name"] != "kb_search"]
     return tools
 
 
@@ -272,6 +234,7 @@ def _resolve_references(
             "date": m.get("date"),
             "title": m.get("title") or "",
             "sourceText": m.get("text") or "",
+            "provenance": dict(m.get("provenance") or {}),
             "resolutionStatus": "resolved",
             "usage": _reference_usages(
                 answer or "", blocks or [], c, citations, answer_usage_location
@@ -726,25 +689,13 @@ async def _run_medical_expert(
     query: str,
     chart_context: str,
     expert_system: str,
-    kb_context: str = "",
     model: Optional[str] = None,
     temperature: float = 0.1,
     repeat_penalty: Optional[float] = None,
     dry_multiplier: float = EXPERT_DRY_MULTIPLIER,
 ) -> str:
-    """Typed clinical-expert tool: a single MedGemma call, free text (no schema).
-    The KB block (when any was retrieved) is placed FIRST in the user message so the
-    decisive reference guidance is not lost in the middle of a long chart."""
-    if kb_context:
-        user = (
-            "Reference guidance (NOT chart data; for dosing/threshold/guideline facts "
-            "use only these or say they were not found):\n"
-            f"{kb_context}\n\n"
-            f"Patient chart:\n{chart_context}\n\n"
-            f"Question: {query}"
-        )
-    else:
-        user = f"Patient chart:\n{chart_context}\n\nQuestion: {query}"
+    """Typed clinical-expert tool over the numbered evidence ledger, free text (no schema)."""
+    user = f"Patient chart and numbered evidence:\n{chart_context}\n\nQuestion: {query}"
     messages = [
         {"role": "system", "content": expert_system},
         {"role": "user", "content": user},
@@ -765,33 +716,9 @@ async def _run_medical_expert(
         return "(medical expert unavailable for this turn)"
 
 
-def _run_kb_search(query: str) -> str:
-    """Typed knowledge-base tool: BM25 over the openly-licensed clinical seed.
-    Formats hits as labelled reference snippets; abstains (empty) on no match."""
-    try:
-        hits = kb.search(query)
-    except Exception as e:  # tool failure must not abort the turn
-        logger.warning("kb_search tool failed: %s", e)
-        return "(knowledge base unavailable for this turn)"
-    if not hits:
-        return "(no relevant knowledge-base entries — do not invent guidance)"
-    lines = [
-        f"{_KB_BLOCK_HEADER} (NOT chart data; cite the source inline as prose, never "
-        "as an integer citation):"
-    ]
-    for h in hits:
-        src = ", ".join(p for p in (h.get("source"), h.get("version")) if p)
-        lines.append(f"- {h['text']} [{src}]")
-    return "\n".join(lines)
-
-
-def _gathered_evidence(kb_context: str, expert_notes: List[str]) -> str:
-    """Collapse the accumulated KB snippets (first) and clinical-expert notes into a
-    single 'Gathered evidence' block for the synthesis turn. Empty when no tool
-    produced usable output."""
+def _gathered_evidence(expert_notes: List[str]) -> str:
+    """Collapse clinical-expert notes into synthesis context; sources stay in the ledger."""
     parts: List[str] = []
-    if kb_context:
-        parts.append(kb_context)
     notes = [
         n for n in expert_notes if n and not n.startswith("(medical expert unavailable")
     ]
@@ -1394,7 +1321,7 @@ async def _validate_answer_rewrite(
     instruction = load_prompt(validation_prompt + "-answer")
     audit_user = (
         instruction
-        + "\n\n=== PATIENT CHART (ground truth) ===\n"
+        + "\n\n=== NUMBERED EVIDENCE LEDGER (patient records and KnowledgeReference records) ===\n"
         + (chart or "(none)")
         + "\n\n=== GATHERED KB / EVIDENCE (the guidance the team retrieved) ===\n"
         + (gathered or "(none)")
@@ -1463,7 +1390,7 @@ async def _validate_indepth_verdict(
     numbered = "\n".join(f"{i}. {c}" for i, c in enumerate(claims, start=1))
     audit_user = (
         instruction
-        + "\n\n=== PATIENT CHART (ground truth) ===\n"
+        + "\n\n=== NUMBERED EVIDENCE LEDGER (patient records and KnowledgeReference records) ===\n"
         + (chart or "(none)")
         + "\n\n=== GATHERED KB / EVIDENCE (the guidance the team retrieved) ===\n"
         + (gathered or "(none)")
@@ -1891,8 +1818,9 @@ def _indepth_feedback(verdict: Dict[str, Any], claims: List[str]) -> str:
         parts.append("Reviewer note: " + issues)
     parts.append(
         "Rewrite the In-Depth as a fresh list of claims: drop or correct the flagged points, "
-                 "keep only well-grounded WHO/guideline guidance applied to this patient, and never "
-        "invent a source, dose, or value."
+        "make every factual clause fully supported by its cited numbered source set, and never "
+        "use a patient chart citation as support for outside medical knowledge. If no supporting "
+        "KnowledgeReference is present, use only directly supported patient-chart context."
     )
     return "\n".join(parts)
 
@@ -2241,15 +2169,12 @@ async def _gather_evidence(
     exp_temp: Optional[float] = None,
     exp_rp: Optional[float] = None,
     exp_dry: Optional[float] = None,
-    allow_kb_search: bool = True,
-) -> Tuple[str, List[str], List[Dict[str, Any]]]:
-    """Gather team/expert/KB context for a compiled ``gather`` stage.
+) -> Tuple[List[str], List[Dict[str, Any]]]:
+    """Gather optional clinical-expert context for a compiled ``gather`` stage.
 
-    The tool loop uses a small orchestrator to call ``medical_expert``/``kb_search`` and is
-    followed by a deterministic KB fallback when the model does not request one.
-    Returns ``(kb_context, expert_notes, orch_steps)``.
+    Evidence retrieval is completed by ``ContextSource`` adapters before this stage. The
+    orchestrator may consult the configured expert over that normalized, numbered ledger.
     """
-    kb_context = ""
     expert_notes: List[str] = []
     orch_steps: List[Dict[str, Any]] = []
 
@@ -2259,7 +2184,7 @@ async def _gather_evidence(
     loop_messages: List[Dict[str, Any]] = [
         {"role": "system", "content": orchestrator_system}
     ] + [m for m in messages if m.get("role") != "system"]
-    tools = _tool_definitions(has_expert, allow_kb_search)
+    tools = _tool_definitions(has_expert)
 
     try:
         for _ in range(MAX_TOOL_ITERATIONS if tools else 0):
@@ -2304,7 +2229,6 @@ async def _gather_evidence(
                             args.get("query", ""),
                             chart,
                             expert_system,
-                            kb_context=kb_context,
                             model=expert_model,
                             temperature=exp_temp,
                             repeat_penalty=exp_rp,
@@ -2319,23 +2243,6 @@ async def _gather_evidence(
                                 "note": observation[:400],
                             }
                         )
-                    elif name == "kb_search":
-                        observation = _run_kb_search(args.get("query", ""))
-                        hit = observation.startswith(_KB_BLOCK_HEADER)
-                        if hit:
-                            kb_context = (
-                                kb_context + "\n\n" + observation
-                                if kb_context
-                                else observation
-                            )
-                        orch_steps.append(
-                            {
-                                "role": "kb_search",
-                                "query": args.get("query", ""),
-                                "hit": hit,
-                                "chars": len(observation),
-                            }
-                            )
                     else:
                         observation = f"(unknown tool: {name})"
                 loop_messages.append(
@@ -2350,24 +2257,4 @@ async def _gather_evidence(
     except Exception as e:
         logger.warning("orchestrator tool loop failed, proceeding to synthesis: %s", e)
 
-    # KB-retrieval fallback: small orchestrators often skip kb_search (esp. on follow-up turns),
-    # leaving the In-Depth with no guidance to ground. If nothing was gathered, do one deterministic
-    # kb_search on the question so the synthesis still has reference context.
-    if allow_kb_search and not kb_context:
-        q = _latest_user_text(messages)
-        if q:
-            obs = _run_kb_search(q)
-            hit = obs.startswith(_KB_BLOCK_HEADER)
-            if hit:
-                kb_context = obs
-            orch_steps.append(
-                {
-                    "role": "kb_search",
-                    "query": q[:160],
-                    "hit": hit,
-                    "chars": len(obs),
-                    "fallback": True,
-    }
-            )
-
-    return kb_context, expert_notes, orch_steps
+    return expert_notes, orch_steps

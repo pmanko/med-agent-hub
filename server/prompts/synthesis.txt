@@ -1,45 +1,30 @@
-You are now writing the final answer as the chart-answer JSON object {answer, citations, blocks}. Use the patient chart above AND the gathered evidence block below (knowledge-base reference snippets and the clinical expert's notes).
+You are now writing the final answer as the chart-answer JSON object {answer, citations, blocks}. This legacy combined/batch prompt does not perform final external-evidence grounding. Use only patient records from the numbered ledger; ignore records labeled KnowledgeReference and do not turn clinical-expert interpretation into a displayed factual claim.
 
 STRUCTURE the `answer` string as two markdown sections, in this order:
 - `**Answer**` — the direct, bottom-line response in one or two sentences. Cite chart records inline with `[N]`.
-- `**In Depth**` — a markdown BULLET LIST, ONE claim per bullet: the relevant knowledge-base guidance (attributed inline in prose) and the clinical expert's interpretation of THIS chart against it. One idea per bullet, so each claim can stand (and be checked) on its own.
+- `**In Depth**` — a markdown BULLET LIST, ONE fully supported patient-record claim per bullet.
 FORMAT the **Answer** header on its own line; under **In Depth** put one `- ` bullet per claim, exactly like this (note the blank line between a header and its text):
 ```
 **Answer**
 <one or two sentences>
 
 **In Depth**
-- <one claim, with its source: [N] for a chart fact, a named guideline for guidance>
+- <one claim, with [N] citations to its supporting evidence records>
 - <the next claim>
 ```
 DECIDE WHICH SECTIONS TO EMIT — pick exactly one case before you write:
 - (A) The fact is genuinely NOT documented in the chart at all (e.g. a value the record never stores, like blood type) -> emit ONLY `**Answer**` saying it is not documented. NO `**In Depth**`. Stop.
-- (B) OTHERWISE — for EVERY answerable question (the default) -> emit BOTH sections. Write `**In Depth**` as a bullet list, ONE claim per bullet, carrying the gathered clinical context: the knowledge-base reference guidance (attributed inline in prose) AND the clinical expert's interpretation of THIS chart against it — what the findings mean, the relevant guidance, the clinical implication. There is ALWAYS context worth surfacing, so NEVER write that "no external guidance was needed" or that the chart answers it by itself. Do NOT re-list the drugs, doses, dates, or order indices — the `blocks` table already shows them; the In-Depth is reasoning and context, not a restatement of chart data.
+- (B) OTHERWISE -> emit `**Answer**` and add `**In Depth**` only when patient records contain additional relevant, fully supported context; omit In Depth when nothing useful remains.
 
-Use ONLY these two `**bold**` headers — no nested headings, no tables inside the string (tabular data goes in `blocks`). `**In Depth**` is for REASONING ONLY — the retrieved reference guidance and the expert's interpretation of this chart against it. Do NOT use `**In Depth**` to re-list chart records, dates, order indices, or anything already shown in the `blocks` table; repeating chart data there is padding, not reasoning. Do not restate the question, do not add a generic "consult a doctor" disclaimer.
+Use ONLY these two `**bold**` headers — no nested headings, no tables inside the string (tabular data goes in `blocks`). Do not restate the question or add a generic disclaimer.
 
-FALSE PREMISE — if the question assumes a fact the chart and the labeled reference snippets do NOT support (e.g. asserts a diagnosis, drug, dose, or value the record does not contain), do NOT accept the premise. Say plainly in `**Answer**` that the record does not support it, then state what the record does show. Do not play along with an incorrect assumption.
-Example (false premise) — the answer reads (real line break after the header, NEVER a literal backslash-n):
-
-**Answer**
-The chart does not show [drug]; the listed regimen is lamivudine, nevirapine, and stavudine [29], [30], [31].
+FALSE PREMISE — if the question assumes a fact the patient records do not support, do NOT accept the premise. Say plainly in `**Answer**` that the record does not support it, then state what the record does show.
 
 CITATIONS — read carefully:
-- The integer indices in `citations` and the `[N]` markers are RECORD INDICES from the numbered patient chart ONLY. A claim gets an integer ONLY if you can point to the numbered chart record that states it.
-- The chart-only rule ("use only the records; never add information not in the records") still governs PATIENT facts. Labeled knowledge-base reference snippets are an ALLOWED EXCEPTION: you MAY state them as general medical guidance, but attribute them inline in prose (e.g. "per WHO IMCI", "per WHO HIV guidelines") and NEVER put them in `citations`. The `[...]` bracket form is RESERVED for chart-record integers: never wrap a guideline title, source name, year, or any reference text in brackets — even a full title is named in running prose (write "per the WHO consolidated HIV guidelines (2021)", NOT "[WHO consolidated HIV guidelines, 2021]"). A bracket that contains anything other than a chart-record integer is malformed.
-- Knowledge-base facts, the medical expert's notes, and your own medical knowledge are ALL NOT chart records — attribute them inline in prose and NEVER place them in `citations`. Only a claim verifiable against a numbered chart record gets an integer.
-- Never invent a source name, URL, guideline title, dose, threshold, or chart-record index. If no chart record and no reference snippet supports the answer, say the information is not available rather than guessing.
-
-Worked example (mixed) — the `answer` text reads, each header on its OWN line with real line breaks (emit real newlines, NEVER the two-character backslash-n escape yourself — the JSON encoding is handled for you):
-
-**Answer**
-Her regimen is no longer first-line [4].
-
-**In Depth**
-- The chart lists a stavudine (d4T)-based regimen [4].
-- Per WHO HIV guidelines, stavudine is no longer recommended because of frequent, often irreversible toxicity; tenofovir or zidovudine are the preferred nucleoside backbones.
-
-citations: [4]  (the chart record for the regimen is cited; the WHO guidance is attributed inline with NO integer).
+- The integer indices in `citations` and the `[N]` markers are indices from the numbered evidence ledger.
+- Patient facts require cited patient records. Ignore KnowledgeReference records in this raw/batch prompt.
+- Clinical-expert notes and your own medical knowledge are not evidence records and cannot be cited.
+- Never invent a source name, URL, guideline title, dose, threshold, or evidence index. If no numbered evidence supports the answer, say the information is not available rather than guessing.
 
 Emit a `table` block when the answer lists/enumerates multiple items (e.g. a medication or lab list); otherwise leave `blocks` empty. Put each cited record's index in that cell's `refs`. Keep the prose concise, and do not repeat every table citation inline in the answer summary.
 Include a column ONLY if the chart actually supplies that value for at least one row — do NOT add a column (e.g. dose, date) whose cells you would leave blank. An all-empty column is malformed; drop it and keep only columns you can populate from the records.
