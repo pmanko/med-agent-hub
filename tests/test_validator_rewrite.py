@@ -210,6 +210,69 @@ def test_answer_review_preserves_original_when_no_safe_patch():
     assert env["confidence"]["answer"]["level"] == "red"
 
 
+def test_answer_review_ignores_an_error_whose_wrong_text_is_not_in_the_draft():
+    calls, env = _run_review(
+        [
+            {
+                "answer_ok": False,
+                "errors": [
+                    _err(
+                        "lisinopril on 2 026-01-07",
+                        "The chart says lisinopril on 2026-01-07 [1].",
+                        "lisinopril on 2026-01-07",
+                    )
+                ],
+                "corrected_answer": "The patient is taking lisinopril [1].",
+            }
+        ],
+        answer="The patient is taking aspirin [1].",
+    )
+
+    assert env["answer"] == "The patient is taking aspirin [1]."
+    assert env["answerValidation"]["status"] == "checked"
+    assert env["answerValidation"]["issues"] == []
+    assert [name for _model, name in calls].count("rewrite_verdict") == 1
+
+
+def test_answer_review_does_not_apply_a_mixed_localized_and_unlocalized_rewrite():
+    _calls, env = _run_review(
+        [
+            {
+                "answer_ok": False,
+                "errors": [
+                    _err("aspirin", "Lisinopril is active [1].", "lisinopril"),
+                    _err("warfarin", "No warfarin record exists.", "remove"),
+                ],
+                "corrected_answer": "The patient is taking lisinopril [1].",
+            }
+        ],
+        answer="The patient is taking aspirin [1].",
+    )
+
+    assert env["answer"] == "The patient is taking aspirin [1]."
+    assert env["answerValidation"]["status"] == "needs_review"
+    assert len(env["answerValidation"]["issues"]) == 1
+
+
+def test_answer_review_derives_failure_from_localized_errors_when_flag_is_inconsistent():
+    _calls, env = _run_review(
+        [
+            {
+                "answer_ok": True,
+                "errors": [
+                    _err("aspirin", "Lisinopril is active [1].", "lisinopril")
+                ],
+                "corrected_answer": "",
+            }
+        ],
+        answer="The patient is taking aspirin [1].",
+    )
+
+    assert env["answer"] == "The patient is taking aspirin [1]."
+    assert env["answerValidation"]["status"] == "needs_review"
+    assert len(env["answerValidation"]["issues"]) == 1
+
+
 def _dated_review_messages(answer):
     """Like _review_messages, but the chart context carries a dated appointment record so the
     deterministic temporal gate has something to check the (possibly reviewer-rewritten) answer
@@ -376,7 +439,7 @@ def test_adopts_corrected_answer_without_regenerating():
         [
             {
                 "answer_ok": False,
-                "errors": [_err("65 kg", "weight 71 kg on 2026-01-26 [15]", "71 kg")],
+                "errors": [_err("ans-v0", "weight 71 kg on 2026-01-26 [15]", "71 kg")],
                 "corrected_answer": "The patient weighs 71 kg [15].",
             },
             {"answer_ok": True, "errors": [], "corrected_answer": ""},
@@ -402,7 +465,7 @@ def test_never_regress_reverts_to_original_when_rewrite_is_worse():
         [
             {
                 "answer_ok": False,
-                "errors": [_err("65 kg", "weight 71 kg [15]", "71 kg")],
+                "errors": [_err("ans-v0", "weight 71 kg [15]", "71 kg")],
                 "corrected_answer": "The patient weighs 71 kg but the HbA1c is 12 and BP 200/130.",
             },
             # re-audit of the rewrite: it introduced NEW errors (2 > the original's 1)
@@ -432,12 +495,15 @@ def test_adopts_improved_but_imperfect_rewrite_as_red():
         [
             {
                 "answer_ok": False,
-                "errors": [_err("a", "x [1]", "a2"), _err("b", "y [2]", "b2")],
+                "errors": [
+                    _err("ans", "x [1]", "a2"),
+                    _err("v0", "y [2]", "b2"),
+                ],
                 "corrected_answer": "improved answer [1] [2]",
             },
             {
                 "answer_ok": False,
-                "errors": [_err("b", "y [2]", "b2")],
+                "errors": [_err("improved", "y [2]", "b2")],
                 "corrected_answer": "improved answer [1] [2]",
             },
         ],
@@ -456,7 +522,7 @@ def test_flag_without_a_rewrite_keeps_original_red():
         [
             {
                 "answer_ok": False,
-                "errors": [_err("65 kg", "weight 71 kg [15]", "71 kg")],
+                "errors": [_err("ans-v0", "weight 71 kg [15]", "71 kg")],
                 "corrected_answer": "",
             },
         ],

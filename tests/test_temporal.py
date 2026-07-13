@@ -724,6 +724,186 @@ def test_gate_fails_past_return_visit_called_upcoming_and_offers_patch():
     assert gate["patch_citations"] == [5]
 
 
+def test_historical_return_visit_date_is_not_treated_as_last_clinical_visit():
+    chart = """Patient records (most recent first):
+[4] (2026-01-26) Encounter: Adult Visit at Clinic A
+[22] Return visit date: 2026-02-23
+"""
+    facts = temporal.build_temporal_facts(chart, "2026-06-20")
+
+    gate = temporal.run_temporal_gate(
+        "Does this patient have any upcoming appointments?",
+        (
+            "No upcoming appointment is documented after 2026-06-20. The latest return-visit "
+            "date found is 2026-02-23, which is before the reference date [22]."
+        ),
+        [22],
+        facts,
+        "enforce",
+    )
+
+    assert not any(check["id"] == "last_visit" for check in gate["checks"])
+    assert gate["patch_answer"] is None
+
+
+def test_return_visit_short_answer_does_not_use_last_encounter_fallback():
+    chart = """Patient records (most recent first):
+[4] (2026-01-26) Encounter: Adult Visit at Clinic A
+[22] Return visit date: 2026-02-23
+"""
+    facts = temporal.build_temporal_facts(chart, "2026-06-20")
+
+    gate = temporal.run_temporal_gate(
+        "When was the last visit?",
+        "Latest return-visit date: 2026-02-23 [22].",
+        [22],
+        facts,
+        "enforce",
+    )
+
+    assert not any(check["id"] == "last_visit" for check in gate["checks"])
+    assert gate["patch_answer"] is None
+
+
+def test_previous_anticipated_follow_up_date_is_not_framed_as_future():
+    facts = temporal.build_temporal_facts(_CHART, "2006-06-01")
+
+    gate = temporal.run_temporal_gate(
+        "Does this patient have any upcoming appointments?",
+        "A previous anticipated follow-up date was 2006-05-18 [5].",
+        [5],
+        facts,
+        "enforce",
+    )
+
+    assert not any(
+        check["id"] == "upcoming_date" and check["status"] == "fail"
+        for check in gate["checks"]
+    )
+    assert gate["patch_answer"] is None
+
+
+def test_historical_date_near_next_visit_instruction_is_not_framed_as_future():
+    facts = temporal.build_temporal_facts(_CHART, "2006-06-01")
+
+    gate = temporal.run_temporal_gate(
+        "What should be reviewed?",
+        "At the next visit, compare the result from 2006-05-18 [5].",
+        [5],
+        facts,
+        "enforce",
+    )
+
+    assert not any(
+        check["id"] == "upcoming_date" and check["status"] == "fail"
+        for check in gate["checks"]
+    )
+    assert gate["patch_answer"] is None
+
+
+def test_past_date_scheduled_as_appointment_is_framed_as_future():
+    facts = temporal.build_temporal_facts(_CHART, "2006-06-01")
+
+    gate = temporal.run_temporal_gate(
+        "Does this patient have any upcoming appointments?",
+        "The appointment is scheduled for 2006-05-18 [5].",
+        [5],
+        facts,
+        "enforce",
+    )
+
+    assert any(
+        check["id"] == "upcoming_date" and check["status"] == "fail"
+        for check in gate["checks"]
+    )
+
+
+@pytest.mark.parametrize(
+    "answer",
+    (
+        "The next appointment date is 2006-05-18 [5].",
+        "The upcoming return-visit date is 2006-05-18 [5].",
+    ),
+)
+def test_explicit_future_event_date_phrase_is_framed_as_future(answer):
+    facts = temporal.build_temporal_facts(_CHART, "2006-06-01")
+
+    gate = temporal.run_temporal_gate(
+        "Does this patient have any upcoming appointments?",
+        answer,
+        [5],
+        facts,
+        "enforce",
+    )
+
+    assert any(
+        check["id"] == "upcoming_date" and check["status"] == "fail"
+        for check in gate["checks"]
+    )
+
+
+def test_negated_clause_does_not_mask_later_future_claim_in_same_sentence():
+    facts = temporal.build_temporal_facts(_CHART, "2006-06-01")
+
+    gate = temporal.run_temporal_gate(
+        "Does this patient have any upcoming appointments?",
+        (
+            "No future appointment is documented, but the next appointment is "
+            "2006-05-18 [5]."
+        ),
+        [5],
+        facts,
+        "enforce",
+    )
+
+    assert any(
+        check["id"] == "upcoming_date" and check["status"] == "fail"
+        for check in gate["checks"]
+    )
+
+
+@pytest.mark.parametrize(
+    "answer",
+    (
+        "No upcoming appointment on 2006-05-18 [5] is documented.",
+        "There is no next visit for 2006-05-18 [5].",
+    ),
+)
+def test_directly_negated_future_phrase_does_not_fail(answer):
+    facts = temporal.build_temporal_facts(_CHART, "2006-06-01")
+
+    gate = temporal.run_temporal_gate(
+        "Does this patient have any upcoming appointments?",
+        answer,
+        [5],
+        facts,
+        "enforce",
+    )
+
+    assert not any(
+        check["id"] == "upcoming_date" and check["status"] == "fail"
+        for check in gate["checks"]
+    )
+
+
+def test_previously_scheduled_past_appointment_is_not_framed_as_future():
+    facts = temporal.build_temporal_facts(_CHART, "2006-06-01")
+
+    gate = temporal.run_temporal_gate(
+        "What appointment history is documented?",
+        "The appointment was previously scheduled for 2006-05-18 [5].",
+        [5],
+        facts,
+        "enforce",
+    )
+
+    assert not any(
+        check["id"] == "upcoming_date" and check["status"] == "fail"
+        for check in gate["checks"]
+    )
+    assert gate["patch_answer"] is None
+
+
 def test_gate_warn_mode_reports_but_does_not_patch_by_itself():
     facts = temporal.build_temporal_facts(_CHART, "2006-06-01")
     gate = temporal.run_temporal_gate(

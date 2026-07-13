@@ -1576,17 +1576,42 @@ async def _validate_answer_rewrite(
             raw[:240],
         )
         return {"answer_ok": True, "errors": []}
-    errors = [e for e in (verdict.get("errors") or []) if isinstance(e, dict)]
+    raw_errors = [e for e in (verdict.get("errors") or []) if isinstance(e, dict)]
+
+    def normalize_fragment(value: Any) -> str:
+        return " ".join(
+            unicodedata.normalize("NFKC", str(value or "")).casefold().split()
+        )
+
+    reviewed_text = normalize_fragment(answer_text)
+    errors = [
+        error
+        for error in raw_errors
+        if normalize_fragment(error.get("wrong"))
+        and normalize_fragment(error.get("wrong")) in reviewed_text
+    ]
+    discarded_errors = len(raw_errors) - len(errors)
+    if discarded_errors:
+        logger.warning(
+            "rewrite-validator[%s] discarded %d unlocalized error(s)",
+            validator_model,
+            discarded_errors,
+        )
+    answer_ok = not errors
     logger.info(
         "rewrite-validator[%s] answer_ok=%s n_errors=%d",
         validator_model,
-        verdict.get("answer_ok"),
+        answer_ok,
         len(errors),
     )
     return {
-        "answer_ok": verdict.get("answer_ok", True),
+        "answer_ok": answer_ok,
         "errors": errors,
-        "corrected_answer": (verdict.get("corrected_answer") or "").strip(),
+        "corrected_answer": (
+            (verdict.get("corrected_answer") or "").strip()
+            if errors and not discarded_errors
+            else ""
+        ),
     }
 
 

@@ -47,6 +47,18 @@ _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+|\n+")
 _UPCOMING_RE = re.compile(
     r"\b(upcoming|future|next|scheduled|appointment|follow-?up|return visit)\b", re.I
 )
+_FUTURE_EVENT_PATTERN = r"(?:appointment|visit|follow-?up|return[- ]visit)"
+_FUTURE_DATE_PREFIX_RE = re.compile(
+    rf"(?:\b(?:(?:next|upcoming|future)\s+)+{_FUTURE_EVENT_PATTERN}(?:\s+date)?\b"
+    rf"(?:\s+(?:is|will be|on|for))?|"
+    rf"\b{_FUTURE_EVENT_PATTERN}(?:\s+date)?\b\s+is\s+scheduled\s+for)\s*$",
+    re.I,
+)
+_FUTURE_DATE_SUFFIX_RE = re.compile(
+    rf"^\s*(?:(?:is|will be)\s+)?(?:the\s+)?"
+    rf"(?:(?:next|upcoming|future)\s+)+{_FUTURE_EVENT_PATTERN}\b",
+    re.I,
+)
 _NO_UPCOMING_RE = re.compile(
     r"\b(no|none|not|without|does not|doesn't|isn't|not documented|no documented)"
     r"\b.{0,90}\b(upcoming|future|next|appointment|follow-?up|return visit)\b",
@@ -775,7 +787,11 @@ def _asserted_last_visit_dates(question: str, answer: str) -> List[str]:
     """
     question_asks_last = bool(_LAST_VISIT_RE.search(question or ""))
     answer = answer or ""
-    named_visits = list(_LAST_VISIT_RE.finditer(answer))
+    named_visits = [
+        match
+        for match in _LAST_VISIT_RE.finditer(answer)
+        if not re.search(r"\breturn[- ]visit\b", match.group(0), re.I)
+    ]
     date_matches = list(_ISO_TOKEN_RE.finditer(answer))
     asserted: List[str] = []
     for date_match in date_matches:
@@ -816,6 +832,9 @@ def _asserted_last_visit_dates(question: str, answer: str) -> List[str]:
             and not named_visits
             and len(date_matches) == 1
             and len(answer.split()) <= 15
+            and not re.search(
+                r"\b(?:return[- ]visit|appointment|follow-?up)\b", answer, re.I
+            )
         ):
             local = answer[max(0, date_match.start() - 100) : date_match.end()]
             if not re.search(r"\bclinical activity\b", local, re.I) and not re.search(
@@ -823,6 +842,26 @@ def _asserted_last_visit_dates(question: str, answer: str) -> List[str]:
             ):
                 asserted.append(date_match.group(0))
     return sorted(set(asserted))
+
+
+def _date_has_future_framing(sentence: str, date_match: re.Match) -> bool:
+    prefix = sentence[max(0, date_match.start() - 120) : date_match.start()]
+    suffix = sentence[date_match.end() : min(len(sentence), date_match.end() + 80)]
+    prefix_match = _FUTURE_DATE_PREFIX_RE.search(prefix)
+    if prefix_match:
+        clause_start = max(
+            (
+                boundary.end()
+                for boundary in re.finditer(
+                    r"[.;!?]|\b(?:but|however|yet)\b", prefix[: prefix_match.end()], re.I
+                )
+            ),
+            default=0,
+        )
+        clause = prefix[clause_start : prefix_match.end()]
+        if not _NO_UPCOMING_RE.search(clause):
+            return True
+    return bool(_FUTURE_DATE_SUFFIX_RE.search(suffix))
 
 
 def _latest_candidate(cands: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -1481,9 +1520,10 @@ def run_temporal_gate(
                 [],
             )
         for sentence in _SENTENCE_RE.split(a):
-            if not _UPCOMING_RE.search(sentence) or _NO_UPCOMING_RE.search(sentence):
-                continue
-            for date in _ISO_TOKEN_RE.findall(sentence):
+            for date_match in _ISO_TOKEN_RE.finditer(sentence):
+                if not _date_has_future_framing(sentence, date_match):
+                    continue
+                date = date_match.group()
                 if ref and date <= ref:
                     indices = [
                         c.get("index") for c in all_candidates if c.get("date") == date
