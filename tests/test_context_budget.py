@@ -421,6 +421,8 @@ def test_indepth_synthesis_review_and_retry_match_the_exact_backend_guard():
                 fixed = 5 if "retry-feedback" in content else 3
             elif schema == "indepth_verdict":
                 fixed = 4
+            elif schema == "rewrite_verdict":
+                fixed = 4
             else:
                 fixed = 1
             return records + fixed
@@ -452,6 +454,9 @@ def test_indepth_synthesis_review_and_retry_match_the_exact_backend_guard():
     initial_view, initial_messages, _ = asyncio.run(
         engine._select_indepth_context(request, state, answer)
     )
+    answer_review_chart = asyncio.run(
+        engine._select_answer_review_context(request, state, answer, [])
+    )
     review_chart = asyncio.run(
         engine._select_indepth_review_context(
             request, state, answer, ["Finding 1 [1]."]
@@ -472,6 +477,9 @@ def test_indepth_synthesis_review_and_retry_match_the_exact_backend_guard():
     )
 
     assert initial_view.mode == "full" and len(initial_view.records) == 3
+    assert sum(
+        1 for line in answer_review_chart.splitlines() if line.startswith("[")
+    ) == 2
     assert sum(1 for line in review_chart.splitlines() if line.startswith("[")) == 2
     assert retry_view.mode == "selected" and len(retry_view.records) == 1
 

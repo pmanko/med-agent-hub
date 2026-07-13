@@ -149,6 +149,11 @@ def test_staged_stream_with_validator_emits_full_phase_sequence(monkeypatch):
         )
 
     rewrite_calls = 0
+    selected_reviews = []
+
+    async def fake_select_review(_request, state, answer, blocks, *, stage="answer_review"):
+        selected_reviews.append((stage, answer, blocks))
+        return state.chart
 
     async def fake_rewrite(*_args, **_kwargs):
         nonlocal rewrite_calls
@@ -164,6 +169,7 @@ def test_staged_stream_with_validator_emits_full_phase_sequence(monkeypatch):
     monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
     monkeypatch.setattr(team, "_ensure_substantive_answer", fake_validate)
     monkeypatch.setattr(team, "_validate_answer_rewrite", fake_rewrite)
+    monkeypatch.setattr(engine, "_select_answer_review_context", fake_select_review)
 
     events = _collect(_product_profile(review_model="V"))
     names = [n for n, _ in events]
@@ -205,6 +211,10 @@ def test_staged_stream_with_validator_emits_full_phase_sequence(monkeypatch):
     assert final_ref["index"] == 2
     assert final_ref["groundingStatus"] == "verified"
     assert final_ref["grounded"] is True
+    assert [(stage, answer) for stage, answer, _blocks in selected_reviews] == [
+        ("answer_review", "Ans [1]."),
+        ("answer_review_retry", "Ans fixed [2]."),
+    ]
 
 
 def test_post_review_punctuation_rewrite_preserves_usable_answer_and_needs_review(
@@ -721,10 +731,10 @@ def test_ground_references_checks_a_multi_citation_claim_against_combined_source
     assert "[2] 2006-06-06 Weight (kg): 71 kg" in prompt
 
 
-def test_ground_references_caps_sources_within_one_claim(monkeypatch):
-    fake_chat, _calls = _fake_chat_returning_verdicts([["YES"]])
+def test_ground_references_does_not_silently_drop_sources_within_one_claim(monkeypatch):
+    fake_chat, calls = _fake_chat_returning_verdicts([["YES"]])
     monkeypatch.setattr(team, "_chat", fake_chat)
-    total = team._ENTAILMENT_MAX_SOURCES_PER_CLAIM + 3
+    total = 11
     statement = "A collectively supported claim " + "".join(
         f"[{index}]" for index in range(1, total + 1)
     )
@@ -745,10 +755,179 @@ def test_ground_references_caps_sources_within_one_claim(monkeypatch):
         return await team._ground_references(None, "M", statement, refs, mappings)
 
     grounded = asyncio.run(_run())
-    assert [item["groundingStatus"] for item in grounded].count("verified") == (
-        team._ENTAILMENT_MAX_SOURCES_PER_CLAIM
+    assert [item["groundingStatus"] for item in grounded] == ["verified"] * total
+    assert all(item["groundingGroup"] == list(range(1, total + 1)) for item in grounded)
+    prompt = calls[0]["messages"][0]["content"]
+    assert all(f"source {index}" in prompt for index in range(1, total + 1))
+
+
+def test_ground_references_marks_an_oversized_source_set_unchecked(monkeypatch):
+    async def unexpected_llm(*_args, **_kwargs):
+        raise AssertionError("an incomplete source set must not be partially judged")
+
+    monkeypatch.setattr(team, "_bounded_entailment_verdicts", unexpected_llm)
+    statement = "A claim supported by one very large record [1]."
+    refs = [
+        {
+            "index": 1,
+            "usage": [{"location": "answer", "text": statement}],
+            "resolutionStatus": "resolved",
+        }
+    ]
+    mappings = [
+        {
+            "index": 1,
+            "date": "2026-01-01",
+            "text": "x" * (team._ENTAILMENT_SOURCE_CHARS + 1),
+        }
+    ]
+
+    grounded = asyncio.run(
+        team._ground_references(None, "M", statement, refs, mappings)
     )
-    assert [item["groundingStatus"] for item in grounded].count("unchecked") == 3
+
+    assert grounded[0]["groundingStatus"] == "unchecked"
+    assert grounded[0]["grounded"] is None
+    assert grounded[0]["groundingChecks"][0]["status"] == "unchecked"
+
+
+def test_ground_references_marks_cumulative_source_set_overflow_unchecked(monkeypatch):
+    async def unexpected_llm(*_args, **_kwargs):
+        raise AssertionError("an incomplete source set must not be partially judged")
+
+    monkeypatch.setattr(team, "_bounded_entailment_verdicts", unexpected_llm)
+    total = 5
+    statement = "A claim " + "".join(f"[{index}]" for index in range(1, total + 1))
+    refs = [
+        {
+            "index": index,
+            "usage": [{"location": "answer", "text": statement}],
+            "resolutionStatus": "resolved",
+        }
+        for index in range(1, total + 1)
+    ]
+    mappings = [
+        {"index": index, "text": f"source-{index}-" + "x" * 2500}
+        for index in range(1, total + 1)
+    ]
+
+    grounded = asyncio.run(
+        team._ground_references(None, "M", statement, refs, mappings)
+    )
+
+    assert [item["groundingStatus"] for item in grounded] == ["unchecked"] * total
+
+
+def test_ground_references_verifies_literal_table_facts_without_an_llm(monkeypatch):
+    async def unexpected_llm(*_args, **_kwargs):
+        raise AssertionError("literal table facts should not call semantic grounding")
+
+    monkeypatch.setattr(team, "_bounded_entailment_verdicts", unexpected_llm)
+    blocks = [
+        {
+            "kind": "table",
+            "title": "Weight",
+            "columns": [
+                {"key": "date", "label": "Date"},
+                {"key": "weight", "label": "Weight"},
+            ],
+            "rows": [
+                {
+                    "cells": {
+                        "date": {"text": "2026-01-26", "refs": [19]},
+                        "weight": {"text": "71.0 kg", "refs": [19]},
+                    }
+                }
+            ],
+        }
+    ]
+    mappings = [
+        {
+            "index": 19,
+            "date": "2026-01-26",
+            "text": "(2026-01-26) Weight (kg): 71 kg",
+        }
+    ]
+    refs = team._resolve_references(
+        [19], mappings, blocks=blocks, grounding_status="checking"
+    )
+
+    grounded = asyncio.run(team._ground_references(None, "M", "", refs, mappings))
+
+    assert grounded[0]["groundingStatus"] == "verified"
+    assert {check["method"] for check in grounded[0]["groundingChecks"]} == {
+        "deterministic_exact"
+    }
+
+
+def test_ground_references_exact_match_does_not_match_inside_another_word(monkeypatch):
+    fake_chat, _calls = _fake_chat_returning_verdicts([["NO"]])
+    monkeypatch.setattr(team, "_chat", fake_chat)
+    blocks = [
+        {
+            "kind": "table",
+            "title": "Finding",
+            "columns": [{"key": "finding", "label": "Finding"}],
+            "rows": [
+                {"cells": {"finding": {"text": "normal", "refs": [1]}}}
+            ],
+        }
+    ]
+    mappings = [{"index": 1, "text": "Abnormal result"}]
+    refs = team._resolve_references(
+        [1], mappings, blocks=blocks, grounding_status="checking"
+    )
+
+    grounded = asyncio.run(team._ground_references(None, "M", "", refs, mappings))
+
+    assert grounded[0]["groundingStatus"] == "unsupported"
+    assert "method" not in grounded[0]["groundingChecks"][0]
+
+
+def test_ground_references_exact_match_ignores_the_citation_prefix(monkeypatch):
+    fake_chat, _calls = _fake_chat_returning_verdicts([["NO"]])
+    monkeypatch.setattr(team, "_chat", fake_chat)
+    blocks = [
+        {
+            "kind": "table",
+            "title": "Value",
+            "columns": [{"key": "value", "label": "Value"}],
+            "rows": [{"cells": {"value": {"text": "19", "refs": [19]}}}],
+        }
+    ]
+    mappings = [{"index": 19, "text": "No matching clinical value"}]
+    refs = team._resolve_references(
+        [19], mappings, blocks=blocks, grounding_status="checking"
+    )
+
+    grounded = asyncio.run(team._ground_references(None, "M", "", refs, mappings))
+
+    assert grounded[0]["groundingStatus"] == "unsupported"
+    assert "method" not in grounded[0]["groundingChecks"][0]
+
+
+def test_ground_references_exact_match_does_not_bypass_negation(monkeypatch):
+    fake_chat, _calls = _fake_chat_returning_verdicts([["NO"]])
+    monkeypatch.setattr(team, "_chat", fake_chat)
+    blocks = [
+        {
+            "kind": "table",
+            "title": "Medication",
+            "columns": [{"key": "medication", "label": "Medication"}],
+            "rows": [
+                {"cells": {"medication": {"text": "ibuprofen", "refs": [1]}}}
+            ],
+        }
+    ]
+    mappings = [{"index": 1, "text": "No allergy to ibuprofen"}]
+    refs = team._resolve_references(
+        [1], mappings, blocks=blocks, grounding_status="checking"
+    )
+
+    grounded = asyncio.run(team._ground_references(None, "M", "", refs, mappings))
+
+    assert grounded[0]["groundingStatus"] == "unsupported"
+    assert "method" not in grounded[0]["groundingChecks"][0]
 
 
 def test_ground_references_preserves_mixed_claim_level_verdicts(monkeypatch):
@@ -1035,11 +1214,17 @@ def test_product_long_table_finishes_checked_after_all_grounding_batches(
         )
 
     final = asyncio.run(collect())["done"]
+    # Generic text cells still require semantic grounding; the shortcut is limited to canonical
+    # mapping facts such as a record date or the value after a structured chart-field separator.
     assert len(calls) == 3
     assert final["answerValidation"]["status"] == "checked"
     assert len(final["references"]) == total
     assert all(
         reference["groundingStatus"] == "verified"
+        for reference in final["references"]
+    )
+    assert all(
+        all(check.get("method") != "deterministic_exact" for check in reference["groundingChecks"])
         for reference in final["references"]
     )
 
@@ -1377,6 +1562,57 @@ def test_product_overdeclared_unscoped_citations_cannot_leave_answer_checked(
     assert final["answerValidation"]["status"] == "needs_review"
     assert any(
         issue["id"] == "citation_scope"
+        for issue in final["answerValidation"]["issues"]
+    )
+
+
+def test_withheld_malformed_table_remains_needs_review_after_llm_review(monkeypatch):
+    _stub_common(monkeypatch)
+
+    async def fake_answer(*_args, **_kwargs):
+        return (
+            "The documented weight is shown below [1].",
+            [1],
+            [
+                {
+                    "kind": "table",
+                    "title": "Weight",
+                    "columns": [
+                        {"key": "date", "label": "Date"},
+                        {"key": "weight", "label": "Weight"},
+                    ],
+                    "rows": [
+                        {
+                            "cells": {
+                                "unexpected": {"text": "2025-01-01", "refs": [1]}
+                            }
+                        }
+                    ],
+                }
+            ],
+        )
+
+    async def keep_answer(_client, **kwargs):
+        return (
+            kwargs["answer_text"],
+            kwargs["citations"],
+            kwargs["blocks"],
+            {"level": "green", "note": ""},
+        )
+
+    async def clean_review(*_args, **_kwargs):
+        return {"answer_ok": True, "errors": []}
+
+    monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
+    monkeypatch.setattr(team, "_ensure_substantive_answer", keep_answer)
+    monkeypatch.setattr(team, "_validate_answer_rewrite", clean_review)
+
+    final = dict(_collect(_product_profile(review_model="V")))["done"]
+
+    assert final["blocks"] == []
+    assert final["answerValidation"]["status"] == "needs_review"
+    assert any(
+        issue["id"] == "table_contract"
         for issue in final["answerValidation"]["issues"]
     )
 

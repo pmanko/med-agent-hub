@@ -139,6 +139,7 @@ class _State:
     steps: List[Dict[str, Any]] = field(default_factory=list)
     answer_text: str = ""
     citations: List[int] = field(default_factory=list)
+    table_issues: List[Dict[str, Any]] = field(default_factory=list)
     citation_issues: List[Dict[str, Any]] = field(default_factory=list)
     blocks: List[Any] = field(default_factory=list)
     answer_conf: Dict[str, Any] = field(
@@ -513,6 +514,81 @@ async def _select_indepth_context(
         }
     )
     return view, messages, chart
+
+
+async def _select_answer_review_context(
+    request: ExecutionRequest,
+    state: _State,
+    answer_text: str,
+    blocks: List[Any],
+    *,
+    stage: str = "answer_review",
+) -> str:
+    """Select evidence against the reviewer's exact prompt, schema, and output reserve."""
+    counter = state.token_counter
+    budget = state.context_budget
+    if counter is None or budget is None:
+        raise ContextSourceError(
+            "tokenization_unavailable",
+            "The profile requires exact context selection.",
+            source="llama-router",
+        )
+    reviewer_model = request.profile.models["review"]
+    review_text = answer_text
+    block_text, _block_refs = stages._block_temporal_text_and_refs(blocks)
+    if block_text:
+        review_text += "\n\n=== STRUCTURED BLOCK TEXT ===\n" + block_text
+
+    async def measure(chart: str) -> int:
+        messages = stages._answer_validation_messages(
+            chart=chart,
+            gathered=state.gathered,
+            answer_text=review_text,
+            validation_prompt=str(
+                request.profile.prompts.get("review") or "validation-rewrite"
+            ),
+        )
+        count_chat = getattr(counter, "count_chat", None)
+        if callable(count_chat):
+            return await count_chat(
+                reviewer_model,
+                {
+                    "messages": messages,
+                    "response_format": stages._REWRITE_VERDICT_RF,
+                },
+            )
+        rendered = "\n".join(
+            f"{message.get('role', 'user')}: {message.get('content', '')}"
+            for message in messages
+        )
+        return await counter.count(reviewer_model, rendered)
+
+    view = await select_context(
+        state.ledger,
+        question=stages._latest_user_text(state.messages),
+        model=reviewer_model,
+        budget=budget,
+        counter=counter,
+        input_measure=measure,
+    )
+    state.steps.append(
+        {
+            "role": "context_selection",
+            "stage": stage,
+            "mode": view.mode,
+            "input_tokens": view.input_tokens,
+            "input_limit": view.input_limit,
+            "included": [
+                {"stable_id": item.stable_id, "reason": item.reason}
+                for item in view.included
+            ],
+            "excluded": [
+                {"stable_id": item.stable_id, "reason": item.reason}
+                for item in view.excluded
+            ],
+        }
+    )
+    return view.render()
 
 
 async def _select_indepth_review_context(
@@ -1023,12 +1099,34 @@ async def _execute_stages(
                     gate_count += 1
                     before_gate_answer = state.answer_text
                     before_gate_citations = list(state.citations)
+                    block_issues: List[Dict[str, Any]] = []
                     if (
                         request.profile.output_mode == "review"
                         and not state.answer_text
                     ):
                         record_stage_timing()
                         continue
+                    if request.profile.output_mode == "product":
+                        before_blocks = list(state.blocks)
+                        state.blocks, block_issues = stages._normalize_product_blocks(
+                            state.blocks
+                        )
+                        if block_issues:
+                            state.table_issues = block_issues
+                        if state.blocks != before_blocks or block_issues:
+                            state.steps.append(
+                                {
+                                    "role": "table_contract",
+                                    "status": (
+                                        "fail" if block_issues else "canonicalized"
+                                    ),
+                                    "before_blocks": len(before_blocks),
+                                    "after_blocks": len(state.blocks),
+                                    "n_issues": len(block_issues),
+                                }
+                            )
+                        if gate_count > 1 and state.blocks != before_blocks:
+                            state.review_edited = True
                     if gate_count == 1:
                         (
                             state.answer_text,
@@ -1081,10 +1179,11 @@ async def _execute_stages(
                         (
                             state.answer_text,
                             state.citations,
-                            state.citation_issues,
+                            citation_issues,
                         ) = stages._enforce_product_citation_contract(
                             state.answer_text, state.citations, state.blocks
                         )
+                        state.citation_issues = state.table_issues + citation_issues
                         contract_changed = (
                             state.answer_text != before_contract_answer
                             or state.citations != before_contract_citations
@@ -1186,6 +1285,23 @@ async def _execute_stages(
                             "citations": list(state.citations),
                             "blocks": list(state.blocks),
                         }
+                    review_chart_selector = None
+                    if (
+                        request.profile.output_mode == "product"
+                        and request.profile.exact_tokenizer
+                    ):
+                        async def review_chart_selector(
+                            answer_text: str,
+                            blocks: List[Any],
+                            stage: str,
+                        ) -> str:
+                            return await _select_answer_review_context(
+                                request,
+                                state,
+                                answer_text,
+                                blocks,
+                                stage=stage,
+                            )
                     (
                         state.raw_review_content,
                         state.answer_conf,
@@ -1213,6 +1329,7 @@ async def _execute_stages(
                         max_tokens=request.max_tokens,
                         steps=state.steps,
                         payload_override=payload_override,
+                        review_chart_selector=review_chart_selector,
                     )
                     if reviewed_gate is not None:
                         state.answer_gate = reviewed_gate

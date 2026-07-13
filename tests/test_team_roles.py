@@ -280,3 +280,84 @@ def test_product_citation_contract_blocks_unscoped_multi_source_set():
     assert citations == [4, 1, 2]
     assert issues[0]["id"] == "citation_scope"
     assert issues[0]["severity"] == "block"
+
+
+def test_product_table_contract_repairs_alternating_cells_by_declared_columns():
+    blocks = [
+        {
+            "kind": "table",
+            "title": "Weights",
+            "columns": [
+                {"key": "date", "label": "Date"},
+                {"key": "weight", "label": "Weight"},
+            ],
+            "rows": [
+                {"cells": {"refs": {"text": "2026-01-01", "refs": [7]}}},
+                {"cells": {"refs": {"text": "71.0 kg", "refs": [7]}}},
+                {"cells": {"refs": {"text": "2026-02-01", "refs": [8]}}},
+                {"cells": {"refs": {"text": "70.0 kg", "refs": [8]}}},
+            ],
+        }
+    ]
+
+    normalized, issues = team._normalize_product_blocks(blocks)
+
+    assert issues == []
+    assert normalized[0]["rows"] == [
+        {
+            "cells": {
+                "date": {"text": "2026-01-01", "refs": [7]},
+                "weight": {"text": "71.0 kg", "refs": [7]},
+            }
+        },
+        {
+            "cells": {
+                "date": {"text": "2026-02-01", "refs": [8]},
+                "weight": {"text": "70.0 kg", "refs": [8]},
+            }
+        },
+    ]
+
+
+def test_product_table_contract_drops_an_unrepairable_block():
+    blocks = [
+        {
+            "kind": "table",
+            "title": "Weights",
+            "columns": [
+                {"key": "date", "label": "Date"},
+                {"key": "weight", "label": "Weight"},
+            ],
+            "rows": [
+                {"cells": {"unexpected": {"text": "2026-01-01", "refs": [7]}}}
+            ],
+        }
+    ]
+
+    normalized, issues = team._normalize_product_blocks(blocks)
+
+    assert normalized == []
+    assert issues[0]["id"] == "table_contract"
+    assert issues[0]["severity"] == "block"
+
+
+def test_product_table_contract_does_not_guess_reversed_flat_cell_order():
+    blocks = [
+        {
+            "kind": "table",
+            "title": "Weights",
+            "columns": [
+                {"key": "date", "label": "Date"},
+                {"key": "weight", "label": "Weight"},
+            ],
+            "rows": [
+                {"cells": {"refs": {"text": "71.0 kg", "refs": [7]}}},
+                {"cells": {"refs": {"text": "2026-01-01", "refs": [7]}}},
+            ],
+        }
+    ]
+
+    normalized, issues = team._normalize_product_blocks(blocks)
+
+    assert normalized == []
+    assert issues[0]["id"] == "table_contract"

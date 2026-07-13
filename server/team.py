@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import unicodedata
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -140,6 +141,133 @@ def _citation_indices(citations: List[int], answer: Optional[str] = None) -> Lis
                 out.append(idx)
                 seen.add(idx)
     return out
+
+
+def _normalize_product_blocks(
+    blocks: List[Any],
+) -> Tuple[List[Any], List[Dict[str, Any]]]:
+    """Validate table rows against their declared columns and repair one safe flat form.
+
+    JSON Schema cannot express that the keys in every ``row.cells`` object must equal the dynamic
+    ``columns[*].key`` values. Small models can therefore satisfy the grammar while emitting one
+    cell per row under a placeholder key. When all cells form complete, citation-consistent groups
+    in declared column order, rebuild those rows deterministically. Otherwise withhold the malformed
+    block and surface a blocking product-contract issue.
+    """
+
+    def valid_cell(value: Any) -> bool:
+        return (
+            isinstance(value, dict)
+            and set(value) == {"text", "refs"}
+            and isinstance(value.get("text"), str)
+            and isinstance(value.get("refs"), list)
+            and all(isinstance(ref, int) for ref in value["refs"])
+        )
+
+    def cell_matches_column(column: Any, cell: Dict[str, Any]) -> bool:
+        if not isinstance(column, dict):
+            return False
+        descriptor = " ".join(
+            str(column.get(field) or "").casefold() for field in ("key", "label")
+        )
+        text = str(cell.get("text") or "").strip()
+        if re.search(r"\bdate\b", descriptor):
+            return re.fullmatch(r"\d{4}-\d{2}-\d{2}", text) is not None
+        if re.search(r"\bweight\b", descriptor):
+            return (
+                re.fullmatch(
+                    r"-?\d+(?:\.\d+)?\s*(?:kg|kgs?|kilograms?|lb|lbs?|pounds?)",
+                    text,
+                    flags=re.IGNORECASE,
+                )
+                is not None
+            )
+        return False
+
+    normalized: List[Any] = []
+    issues: List[Dict[str, Any]] = []
+    for position, block in enumerate(blocks or []):
+        columns = block.get("columns") if isinstance(block, dict) else None
+        rows = block.get("rows") if isinstance(block, dict) else None
+        keys = [
+            str(column.get("key") or "").strip()
+            for column in (columns or [])
+            if isinstance(column, dict)
+        ]
+        base_valid = (
+            isinstance(block, dict)
+            and block.get("kind") == "table"
+            and isinstance(block.get("title"), str)
+            and isinstance(columns, list)
+            and len(keys) == len(columns)
+            and bool(keys)
+            and all(keys)
+            and len(set(keys)) == len(keys)
+            and isinstance(rows, list)
+            and bool(rows)
+        )
+        row_cells = [
+            row.get("cells") if isinstance(row, dict) else None for row in (rows or [])
+        ]
+        if base_valid and all(
+            isinstance(cells, dict)
+            and set(cells) == set(keys)
+            and all(valid_cell(cell) for cell in cells.values())
+            for cells in row_cells
+        ):
+            normalized.append(block)
+            continue
+
+        repairable = (
+            base_valid
+            and len(row_cells) % len(keys) == 0
+            and all(
+                isinstance(cells, dict)
+                and len(cells) == 1
+                and all(valid_cell(cell) for cell in cells.values())
+                for cells in row_cells
+            )
+        )
+        repaired_rows: List[Dict[str, Any]] = []
+        if repairable:
+            flat_cells = [next(iter(cells.values())) for cells in row_cells]
+            for start in range(0, len(flat_cells), len(keys)):
+                group = flat_cells[start : start + len(keys)]
+                ref_sets = {tuple(cell["refs"]) for cell in group}
+                if (
+                    len(ref_sets) != 1
+                    or not next(iter(ref_sets), ())
+                    or not all(
+                        cell_matches_column(column, cell)
+                        for column, cell in zip(columns, group)
+                    )
+                ):
+                    repairable = False
+                    break
+                repaired_rows.append(
+                    {"cells": {key: cell for key, cell in zip(keys, group)}}
+                )
+        if repairable:
+            repaired = dict(block)
+            repaired["rows"] = repaired_rows
+            normalized.append(repaired)
+            continue
+
+        issues.append(
+            {
+                "id": "table_contract",
+                "status": "fail",
+                "severity": "block",
+                "reason": (
+                    f"Structured table {position + 1} was withheld because its row cells did not "
+                    "match the declared column keys and could not be repaired safely."
+                ),
+                "source_indices": _block_temporal_text_and_refs([block])[1]
+                if isinstance(block, dict)
+                else [],
+            }
+        )
+    return normalized, issues
 
 
 def _enforce_product_citation_contract(
@@ -305,7 +433,6 @@ def _claim_fragments_for_index(answer: str, index: int) -> List[str]:
 
 
 _ENTAILMENT_MAX_PAIRS = 16  # Maximum claim groups per bounded grounding request.
-_ENTAILMENT_MAX_SOURCES_PER_CLAIM = 8
 _ENTAILMENT_SOURCE_CHARS = 3000
 _ENTAILMENT_MAX_SOURCE_SET_CHARS = 12000
 
@@ -427,10 +554,18 @@ async def _ground_references(
     a change claim). Grouping identical usage text prevents each source from being incorrectly asked
     to support the entire multi-source sentence by itself.
     """
+    mapping_by_index = {
+        mapping.get("index"): mapping
+        for mapping in (mappings or [])
+        if isinstance(mapping.get("index"), int)
+    }
     text_by_index = {
-        m.get("index"): " ".join(str(p) for p in (m.get("date"), m.get("text")) if p)
-        for m in (mappings or [])
-        if isinstance(m.get("index"), int)
+        index: " ".join(
+            str(part)
+            for part in (mapping.get("date"), mapping.get("text"))
+            if part
+        )
+        for index, mapping in mapping_by_index.items()
     }
 
     groups: List[Dict[str, Any]] = []
@@ -439,7 +574,13 @@ async def _ground_references(
     for ref_position, ref in enumerate(references or []):
         idx = ref.get("index")
         idx = idx if isinstance(idx, int) else -1
+        mapping = mapping_by_index.get(idx) or {}
         source = str(text_by_index.get(idx) or "").strip()
+        source_facts = [str(mapping.get("date") or "").strip()]
+        source_text = str(mapping.get("text") or "").strip()
+        if ":" in source_text:
+            source_facts.append(source_text.rsplit(":", 1)[-1].strip())
+        source_facts = [fact for fact in source_facts if fact]
         usages = [
             usage
             for usage in (ref.get("usage") or [])
@@ -469,35 +610,68 @@ async def _ground_references(
                         "location": key[0],
                         "path": key[1],
                         "sources": [],
+                        "source_facts": [],
                         "references": [],
+                        "complete": True,
                     }
                 )
             group = groups[group_position]
-            if (
-                ref_position not in group["references"]
-                and len(group["references"]) < _ENTAILMENT_MAX_SOURCES_PER_CLAIM
-            ):
+            if ref_position not in group["references"]:
+                group["references"].append(ref_position)
+                for fact in source_facts:
+                    if fact not in group["source_facts"]:
+                        group["source_facts"].append(fact)
                 remaining = _ENTAILMENT_MAX_SOURCE_SET_CHARS - sum(
                     len(item) for item in group["sources"]
                 )
-                if remaining <= 0:
-                    continue
-                source_item = f"[{idx}] {source}"[: min(remaining, _ENTAILMENT_SOURCE_CHARS)]
-                group["references"].append(ref_position)
-                group["sources"].append(source_item)
+                source_item = f"[{idx}] {source}"
+                if (
+                    remaining <= 0
+                    or len(source_item) > remaining
+                    or len(source_item) > _ENTAILMENT_SOURCE_CHARS
+                ):
+                    group["complete"] = False
+                else:
+                    group["sources"].append(source_item)
             if (
                 ref_position in group["references"]
                 and group_position not in groups_by_reference[ref_position]
             ):
                 groups_by_reference[ref_position].append(group_position)
 
-    checkable_positions = list(range(len(groups)))
+    def normalize_fact(value: str) -> str:
+        text = unicodedata.normalize("NFKC", value or "").casefold()
+        text = re.sub(r"[\u2010-\u2015\u2212]", "-", text)
+        text = re.sub(r"(?<![\w.])(-?\d+)\.0+(?=\D|$)", r"\1", text)
+        return " ".join(text.split())
+
+    deterministic_positions = {
+        position
+        for position, group in enumerate(groups)
+        if group["complete"]
+        and group["location"] == "block"
+        and normalize_fact(group["claim"])
+        and any(
+            normalize_fact(group["claim"]) == normalize_fact(fact)
+            for fact in group["source_facts"]
+        )
+    }
+    checkable_positions = [
+        position
+        for position, group in enumerate(groups)
+        if group["complete"]
+        and group["sources"]
+        and position not in deterministic_positions
+    ]
     pairs = [
         ("\n".join(groups[i]["sources"]), groups[i]["claim"])
         for i in checkable_positions
     ]
     verdicts = await _bounded_entailment_verdicts(client, model, pairs) if pairs else []
-    verdict_by_position = dict(zip(checkable_positions, verdicts))
+    verdict_by_position = {
+        **{position: True for position in deterministic_positions},
+        **dict(zip(checkable_positions, verdicts)),
+    }
 
     grounded_refs: List[Dict[str, Any]] = []
     for i, ref in enumerate(references or []):
@@ -509,8 +683,7 @@ async def _ground_references(
         for group_position in groups_by_reference[i]:
             group = groups[group_position]
             group_verdict = verdict_by_position.get(group_position)
-            grounding_checks.append(
-                {
+            grounding_check = {
                     "status": (
                         "verified"
                         if group_verdict is True
@@ -529,7 +702,9 @@ async def _ground_references(
                         }
                     ),
                 }
-            )
+            if group_position in deterministic_positions:
+                grounding_check["method"] = "deterministic_exact"
+            grounding_checks.append(grounding_check)
         check_statuses = {check["status"] for check in grounding_checks}
         if not grounding_checks or "unchecked" in check_statuses:
             verdict = None
@@ -1368,20 +1543,16 @@ async def _validate_answer_rewrite(
     """Rewrite-mode audit: localize each chart contradiction AND return the corrected answer. Returns
     {answer_ok, errors:[{wrong,chart,fix}], corrected_answer}. FAIL-OPEN: {answer_ok: True, errors: []}
     on any parse failure so a flaky validator never blocks the run."""
-    instruction = load_prompt(validation_prompt + "-answer")
-    audit_user = (
-        instruction
-        + "\n\n=== NUMBERED EVIDENCE LEDGER (patient records and KnowledgeReference records) ===\n"
-        + (chart or "(none)")
-        + "\n\n=== GATHERED KB / EVIDENCE (the guidance the team retrieved) ===\n"
-        + (gathered or "(none)")
-        + "\n\n=== DRAFT ANSWER ===\n"
-        + answer_text
+    messages = _answer_validation_messages(
+        chart=chart,
+        gathered=gathered,
+        answer_text=answer_text,
+        validation_prompt=validation_prompt,
     )
     msg = await _chat(
         client,
         validator_model,
-        [{"role": "user", "content": audit_user}],
+        messages,
         response_format=_REWRITE_VERDICT_RF,
         temperature=temperature,
         max_tokens=max_tokens,
@@ -1417,6 +1588,26 @@ async def _validate_answer_rewrite(
         "errors": errors,
         "corrected_answer": (verdict.get("corrected_answer") or "").strip(),
     }
+
+
+def _answer_validation_messages(
+    *,
+    chart: str,
+    gathered: str,
+    answer_text: str,
+    validation_prompt: str = _REWRITE_VALIDATOR_PROMPT,
+) -> List[Dict[str, Any]]:
+    instruction = load_prompt(validation_prompt + "-answer")
+    audit_user = (
+        instruction
+        + "\n\n=== NUMBERED EVIDENCE LEDGER (patient records and KnowledgeReference records) ===\n"
+        + (chart or "(none)")
+        + "\n\n=== GATHERED KB / EVIDENCE (the guidance the team retrieved) ===\n"
+        + (gathered or "(none)")
+        + "\n\n=== DRAFT ANSWER ===\n"
+        + answer_text
+    )
+    return [{"role": "user", "content": audit_user}]
 
 
 async def _validate_indepth_verdict(
@@ -1548,6 +1739,9 @@ async def _review_existing_answer(
     max_tokens: Optional[int],
     steps: List[Dict[str, Any]],
     payload_override: Optional[Dict[str, Any]] = None,
+    review_chart_selector: Optional[
+        Callable[[str, List[Any], str], Awaitable[str]]
+    ] = None,
 ) -> Tuple[
     str, Dict[str, Any], str, Dict[str, Any], Optional[Dict[str, Any]], Optional[str]
 ]:
@@ -1667,11 +1861,16 @@ async def _review_existing_answer(
         block_text, _block_refs = _block_temporal_text_and_refs(blocks)
         if block_text:
             review_text += "\n\n=== STRUCTURED BLOCK TEXT ===\n" + block_text
+        review_chart = (
+            await review_chart_selector(answer_text, blocks, "answer_review")
+            if review_chart_selector is not None
+            else chart
+        )
         try:
             verdict = await _validate_answer_rewrite(
                 client,
                 reviewer_model,
-                chart=chart,
+                chart=review_chart,
                 gathered=gathered,
                 answer_text=review_text,
                 max_tokens=max_tokens,
@@ -1736,10 +1935,15 @@ async def _review_existing_answer(
                 and corrected != answer_text
                 and _is_substantive_answer(corrected)
             ):
+                recheck_chart = (
+                    await review_chart_selector(corrected, [], "answer_review_retry")
+                    if review_chart_selector is not None
+                    else chart
+                )
                 recheck = await _validate_answer_rewrite(
                     client,
                     reviewer_model,
-                    chart=chart,
+                    chart=recheck_chart,
                     gathered=gathered,
                     answer_text=corrected,
                     max_tokens=max_tokens,
