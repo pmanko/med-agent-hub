@@ -94,37 +94,33 @@ def test_parse_extracts_numeric_obs_only():
     assert weights[0]["unit"] == "kg"
 
 
-# ---- build_temporal_block ---------------------------------------------------
+# ---- active temporal facts and renderer ------------------------------------
 
 
-def test_block_carries_anchor_and_correct_recency_and_trend():
-    block = temporal.build_temporal_block(_CHART, "2006-05-18")
-    # the explicit reference-date anchor line
-    assert "2006-05-18" in block
-    assert "recent" in block.lower()  # tells the model how to read "now"/"most recent"
-    # haemoglobin most-recent is 3.9 (2006-04-24), NOT the older 9.1 (the ordering bug P1 fixes)
-    hgb_line = next(l for l in block.splitlines() if "Haemoglobin" in l)
-    assert "3.9" in hgb_line
-    assert hgb_line.index("3.9") < (
-        hgb_line.index("9.1") if "9.1" in hgb_line else len(hgb_line)
-    )
-    # weight is a real downward trend 52 -> 41
-    wt_line = next(l for l in block.splitlines() if "Weight" in l)
-    assert "52" in wt_line and "41.0" in wt_line
+def test_facts_carry_anchor_and_correct_recency_and_trend():
+    facts = temporal.build_temporal_facts(_CHART, "2006-05-18")
+    by_concept = {item["concept"]: item for item in facts["numeric_series"]}
+
+    assert facts["reference_date"] == "2006-05-18"
+    assert by_concept["Haemoglobin"]["most_recent"]["value"] == 3.9
+    assert [point["value"] for point in by_concept["Haemoglobin"]["points"]] == [
+        9.1,
+        3.9,
+    ]
+    assert by_concept["Weight"]["direction"] == "down"
+    assert by_concept["Weight"]["points"][0]["value"] == 52.0
+    assert by_concept["Weight"]["most_recent"]["value"] == 41.0
+    assert "2006-05-18" in temporal.render_temporal_facts(facts)
 
 
-def test_block_single_point_makes_no_trend_claim():
-    block = temporal.build_temporal_block(_CHART, "2006-05-18")
-    cd4_line = next(l for l in block.splitlines() if "CD4 count" in l)
-    # one CD4 point -> report the value, never a trend/direction (the <2-points guard)
-    assert "72" in cd4_line
-    assert (
-        "↑" not in cd4_line and "↓" not in cd4_line and "trend" not in cd4_line.lower()
-    )
+def test_facts_single_point_make_no_trend_claim():
+    facts = temporal.build_temporal_facts(_CHART, "2006-05-18")
+    cd4 = next(item for item in facts["numeric_series"] if item["concept"] == "CD4 count")
 
-
-def test_block_empty_without_anchor_or_series():
-    assert temporal.build_temporal_block("no dates", None) == ""
+    assert cd4["most_recent"]["value"] == 72.0
+    assert cd4["n_points"] == 1
+    assert cd4["trend_supported"] is False
+    assert cd4["direction"] == "none"
 
 
 # ---- run-length compression (real Ellcky chart: only 8/276 lines keep the date) -------------
@@ -152,19 +148,11 @@ def test_parse_carries_date_forward_across_run_length_compression():
     assert by.get(("Body surface area", "2026-02-02")) == 45.5
 
 
-def test_block_states_most_recent_record_date_for_last_visit():
-    # "When was the last visit?" needs the most-recent RECORD date stated explicitly, so the model
-    # REPORTS it instead of fabricating (the am-last-visit failure). Distinct from the anchor/now.
-    block = temporal.build_temporal_block(
-        _CHART, "2006-06-01"
-    )  # anchor (now) != latest record
-    line = next(
-        (l for l in block.splitlines() if l.startswith("Most recent clinical visit")),
-        None,
-    )
-    assert (
-        line is not None and "2006-05-18" in line
-    )  # the chart's max CLINICAL date = the last visit
+def test_facts_state_most_recent_record_date_for_last_visit():
+    facts = temporal.build_temporal_facts(_CHART, "2006-06-01")
+
+    assert facts["reference_date"] == "2006-06-01"
+    assert facts["last_clinical_encounter"]["date"] == "2006-05-18"
 
 
 # ---- typed event timeline: an administrative record (e.g. a Program enrollment) must NOT be reported
@@ -207,23 +195,10 @@ _EXPLICIT_ENCOUNTER_BEFORE_LATER_OBSERVATION = """Patient records (most recent f
 
 
 def test_event_timeline_excludes_program_enrollment_from_last_visit():
-    block = temporal.build_temporal_block(_PROGRAM_CONFOUND, anchor="2026-06-20")
-    visit_line = next(
-        (l for l in block.splitlines() if l.startswith("Most recent clinical visit")),
-        None,
-    )
-    assert visit_line is not None, block
-    assert (
-        "2026-01-07" in visit_line and "2026-05-20" not in visit_line
-    )  # the visit, not the enrollment
-    admin_line = next(
-        (l for l in block.splitlines() if "Administrative record" in l), None
-    )
-    assert (
-        admin_line is not None
-        and "2026-05-20" in admin_line
-        and "Tuberculosis" in admin_line
-    )
+    facts = temporal.build_temporal_facts(_PROGRAM_CONFOUND, anchor="2026-06-20")
+
+    assert facts["last_clinical_encounter"]["date"] == "2026-01-07"
+    assert facts["admin_dates"][0]["date"] == "2026-05-20"
 
 
 def test_resolve_anchor_latest_record_ignores_program_enrollment():
@@ -259,9 +234,9 @@ def test_activity_only_chart_does_not_fabricate_a_clinical_encounter():
     assert facts["last_clinical_encounter"] is None
     assert facts["latest_clinical_activity"]["date"] == "2026-01-07"
     assert facts["latest_clinical_activity"]["indices"] == [2, 3]
-    block = temporal.build_temporal_block(_SPARSE_ACTIVITY_ONLY, "2026-06-20")
-    assert "No explicit visit/encounter record is present" in block
-    assert "Do NOT report this activity date as a visit date" in block
+    rendered = temporal.render_temporal_facts(facts)
+    assert '"last_clinical_encounter":null' in rendered
+    assert '"latest_clinical_activity"' in rendered
 
 
 def test_last_visit_claim_fails_when_only_clinical_activity_is_documented():

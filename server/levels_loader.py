@@ -53,7 +53,6 @@ class Profile:
     models: Mapping[str, str]
     prompts: Mapping[str, str]
     policies: Mapping[str, Any]
-    capabilities: Mapping[str, bool]
     knobs: Mapping[str, Any] = field(default_factory=dict)
     visibility: str = "experimental"
     default: bool = False
@@ -65,7 +64,11 @@ class Profile:
 
     @property
     def staged(self) -> bool:
-        return bool(self.capabilities.get("staged"))
+        return self.output_mode == "product"
+
+    @property
+    def validation(self) -> bool:
+        return "review" in self.stages
 
     @property
     def output_mode(self) -> str:
@@ -151,7 +154,6 @@ def _dynamic_profile(profile_id: str) -> Optional[Profile]:
                 "output": output,
                 "drug_safety": False,
             },
-            capabilities={"staged": False, "validation": role == "review"},
             knobs=knobs,
             visibility="internal",
             low_level_leg=True,
@@ -181,7 +183,6 @@ def _from_spec(profile_id: str, spec: Mapping[str, Any]) -> Profile:
         models=dict(spec.get("models") or {}),
         prompts=dict(spec.get("prompts") or {}),
         policies=dict(spec.get("policies") or {}),
-        capabilities=dict(spec.get("capabilities") or {}),
         knobs=dict(spec.get("knobs") or {}),
         visibility=str(spec.get("visibility") or "experimental"),
         default=bool(spec.get("default", False)),
@@ -338,7 +339,6 @@ def compile_profile(profile: Profile) -> Profile:
         models=_freeze_mapping(profile.models),
         prompts=_freeze_mapping(profile.prompts),
         policies=_freeze_mapping(profile.policies),
-        capabilities=_freeze_mapping(profile.capabilities),
         knobs=_freeze_mapping(profile.knobs),
         visibility=profile.visibility,
         default=profile.default,
@@ -434,7 +434,7 @@ def profile_metadata(
         "id": profile.id,
         "label": profile.label,
         "staged": profile.staged,
-        "validation": bool(profile.capabilities.get("validation")),
+        "validation": profile.validation,
         "temporal_enforcement": str(profile.policies.get("temporal_gate", "off")),
         "available": bool(available),
         "default": profile.default if effective_default is None else bool(effective_default),

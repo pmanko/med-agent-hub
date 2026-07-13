@@ -186,6 +186,19 @@ def test_discovery_metadata_is_authoritative_and_dynamic_legs_are_not_advertised
     }
 
 
+def test_stage_plan_derives_discovery_capabilities_without_manual_flags():
+    profile = get_profile("single-e4b-checked")
+    metadata = profile_metadata(profile, available=True)
+
+    assert metadata["staged"] is True
+    assert metadata["validation"] is True
+
+
+def test_unconsumed_legacy_staged_profiles_are_removed():
+    assert "med-agent-team-staged-12b" not in profile_ids()
+    assert "med-agent-team-staged-12b-validated" not in profile_ids()
+
+
 def test_only_one_configured_profile_is_default():
     defaults = [
         profile_id for profile_id in profile_ids() if get_profile(profile_id).default

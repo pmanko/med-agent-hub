@@ -130,7 +130,6 @@ def _product_profile(
         models=models,
         prompts=prompts,
         output="product",
-        capabilities={"staged": True, "validation": bool(review_model)},
     )
 
 
@@ -881,11 +880,14 @@ def test_ground_references_does_not_silently_drop_sources_within_one_claim(monke
     assert all(f"source {index}" in prompt for index in range(1, total + 1))
 
 
-def test_ground_references_marks_an_oversized_source_set_unchecked(monkeypatch):
-    async def unexpected_llm(*_args, **_kwargs):
-        raise AssertionError("an incomplete source set must not be partially judged")
+def test_ground_references_sends_a_large_source_to_exact_budget_checker(monkeypatch):
+    checked = []
 
-    monkeypatch.setattr(team, "_bounded_entailment_verdicts", unexpected_llm)
+    async def exact_checker(_client, _model, pairs):
+        checked.extend(pairs)
+        return [True]
+
+    monkeypatch.setattr(team, "_bounded_entailment_verdicts", exact_checker)
     statement = "A claim supported by one very large record [1]."
     refs = [
         {
@@ -898,7 +900,7 @@ def test_ground_references_marks_an_oversized_source_set_unchecked(monkeypatch):
         {
             "index": 1,
             "date": "2026-01-01",
-            "text": "x" * (team._ENTAILMENT_SOURCE_CHARS + 1),
+            "text": "x" * 3001,
         }
     ]
 
@@ -906,16 +908,19 @@ def test_ground_references_marks_an_oversized_source_set_unchecked(monkeypatch):
         team._ground_references(None, "M", statement, refs, mappings)
     )
 
-    assert grounded[0]["groundingStatus"] == "unchecked"
-    assert grounded[0]["grounded"] is None
-    assert grounded[0]["groundingChecks"][0]["status"] == "unchecked"
+    assert grounded[0]["groundingStatus"] == "verified"
+    assert len(checked) == 1
+    assert "x" * 3001 in checked[0][0]
 
 
-def test_ground_references_marks_cumulative_source_set_overflow_unchecked(monkeypatch):
-    async def unexpected_llm(*_args, **_kwargs):
-        raise AssertionError("an incomplete source set must not be partially judged")
+def test_ground_references_sends_complete_multi_source_claim_to_exact_budget_checker(monkeypatch):
+    checked = []
 
-    monkeypatch.setattr(team, "_bounded_entailment_verdicts", unexpected_llm)
+    async def exact_checker(_client, _model, pairs):
+        checked.extend(pairs)
+        return [True]
+
+    monkeypatch.setattr(team, "_bounded_entailment_verdicts", exact_checker)
     total = 5
     statement = "A claim " + "".join(f"[{index}]" for index in range(1, total + 1))
     refs = [
@@ -935,7 +940,9 @@ def test_ground_references_marks_cumulative_source_set_overflow_unchecked(monkey
         team._ground_references(None, "M", statement, refs, mappings)
     )
 
-    assert [item["groundingStatus"] for item in grounded] == ["unchecked"] * total
+    assert [item["groundingStatus"] for item in grounded] == ["verified"] * total
+    assert len(checked) == 1
+    assert all(f"source-{index}-" in checked[0][0] for index in range(1, total + 1))
 
 
 def test_ground_references_verifies_literal_table_facts_without_an_llm(monkeypatch):
@@ -1160,11 +1167,9 @@ def test_ground_references_unsupported_for_high_overlap_but_negated_statement(
     assert len(calls) == 1
 
 
-def test_ground_references_checks_all_pairs_in_stable_bounded_batches(monkeypatch):
-    n = team._ENTAILMENT_MAX_PAIRS + 3
-    fake_chat, calls = _fake_chat_returning_verdicts(
-        [["YES"] * team._ENTAILMENT_MAX_PAIRS, ["YES"] * 3]
-    )
+def test_ground_references_checks_all_pairs_in_one_request_when_they_fit(monkeypatch):
+    n = 19
+    fake_chat, calls = _fake_chat_returning_verdicts([["YES"] * n])
     monkeypatch.setattr(team, "_chat", fake_chat)
     refs = [
         {
@@ -1193,28 +1198,21 @@ def test_ground_references_checks_all_pairs_in_stable_bounded_batches(monkeypatc
         )
 
     grounded = asyncio.run(_run())
-    assert len(calls) == 2
-    assert calls[0]["messages"][0]["content"].count("PAIR ") == team._ENTAILMENT_MAX_PAIRS
-    assert calls[1]["messages"][0]["content"].count("PAIR ") == 3
+    assert len(calls) == 1
+    assert calls[0]["messages"][0]["content"].count("PAIR ") == n
     verified = [r for r in grounded if r["groundingStatus"] == "verified"]
     unchecked = [r for r in grounded if r["groundingStatus"] == "unchecked"]
     assert len(verified) == n
     assert unchecked == []
 
 
-def test_ground_references_isolates_a_failed_later_batch(monkeypatch):
-    n = team._ENTAILMENT_MAX_PAIRS + 3
+def test_ground_references_marks_all_pairs_unchecked_when_a_fitting_call_fails(monkeypatch):
+    n = 19
     calls = []
 
     async def fake_chat(_client, _model, messages, **_kwargs):
         calls.append(messages)
-        if len(calls) == 2:
-            raise RuntimeError("second batch failed")
-        return {
-            "content": json.dumps(
-                {"verdicts": ["YES"] * team._ENTAILMENT_MAX_PAIRS}
-            )
-        }
+        raise RuntimeError("grounding failed")
 
     monkeypatch.setattr(team, "_chat", fake_chat)
     refs = [
@@ -1242,13 +1240,8 @@ def test_ground_references_isolates_a_failed_later_batch(monkeypatch):
         team._ground_references(None, "M", answer, refs, mappings)
     )
 
-    assert len(calls) == 2
-    assert [r["groundingStatus"] for r in grounded[: team._ENTAILMENT_MAX_PAIRS]] == [
-        "verified"
-    ] * team._ENTAILMENT_MAX_PAIRS
-    assert [r["groundingStatus"] for r in grounded[team._ENTAILMENT_MAX_PAIRS :]] == [
-        "unchecked"
-    ] * 3
+    assert len(calls) == 1
+    assert [r["groundingStatus"] for r in grounded] == ["unchecked"] * n
 
 
 def test_grounding_batch_splits_until_each_request_fits(monkeypatch):
@@ -1279,7 +1272,7 @@ def test_grounding_batch_splits_until_each_request_fits(monkeypatch):
 def test_product_long_table_finishes_checked_after_all_grounding_batches(
     monkeypatch,
 ):
-    total = team._ENTAILMENT_MAX_PAIRS + 3
+    total = 19
     mappings = [
         {
             "index": index,
@@ -1342,11 +1335,7 @@ def test_product_long_table_finishes_checked_after_all_grounding_batches(
         return ["Finding 1 is documented [1]."]
 
     fake_chat, calls = _fake_chat_returning_verdicts(
-        [
-            ["YES"] * team._ENTAILMENT_MAX_PAIRS,
-            ["YES"] * 3,
-            ["YES"],
-        ]
+        [["YES"] * total, ["YES"]]
     )
     monkeypatch.setattr(team, "_apply_temporal_gate", fake_gate)
     monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
@@ -1373,7 +1362,7 @@ def test_product_long_table_finishes_checked_after_all_grounding_batches(
     final = asyncio.run(collect())["done"]
     # Generic text cells still require semantic grounding; the shortcut is limited to canonical
     # mapping facts such as a record date or the value after a structured chart-field separator.
-    assert len(calls) == 3
+    assert len(calls) == 2
     assert final["answerValidation"]["status"] == "checked"
     assert len(final["references"]) == total
     assert all(
@@ -1387,7 +1376,7 @@ def test_product_long_table_finishes_checked_after_all_grounding_batches(
 
 
 def test_product_long_indepth_keeps_all_verified_claims(monkeypatch):
-    total = team._ENTAILMENT_MAX_PAIRS + 3
+    total = 19
     mappings = [
         {
             "index": index,
@@ -1429,9 +1418,7 @@ def test_product_long_indepth_keeps_all_verified_claims(monkeypatch):
             for index in range(1, total + 1)
         ]
 
-    fake_chat, calls = _fake_chat_returning_verdicts(
-        [["YES"], ["YES"] * team._ENTAILMENT_MAX_PAIRS, ["YES"] * 3]
-    )
+    fake_chat, calls = _fake_chat_returning_verdicts([["YES"], ["YES"] * total])
     monkeypatch.setattr(team, "_apply_temporal_gate", fake_gate)
     monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
     monkeypatch.setattr(team, "_ensure_substantive_answer", keep_answer)
@@ -1455,7 +1442,7 @@ def test_product_long_indepth_keeps_all_verified_claims(monkeypatch):
         )
 
     final = asyncio.run(collect())["done"]
-    assert len(calls) == 3
+    assert len(calls) == 2
     assert final["inDepth"]["status"] == "complete"
     assert final["inDepth"]["answer"].count("\n-") + 1 == total
     assert len(final["references"]) == total

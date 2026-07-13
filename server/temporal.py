@@ -794,10 +794,6 @@ def _final_gate_status(checks: List[Dict[str, Any]]) -> str:
     return "pass"
 
 
-def _fact_dates(cands: List[Dict[str, Any]]) -> List[str]:
-    return sorted({c.get("date") for c in cands if c.get("date")})
-
-
 def _asserted_last_visit_dates(question: str, answer: str) -> List[str]:
     """Return dates governed by a positive last-visit assertion.
 
@@ -1058,10 +1054,6 @@ def _series_mention_spans(answer: str, item: Dict[str, Any]) -> List[Tuple[int, 
         else:
             clustered[-1] = (clustered[-1][0], max(clustered[-1][1], end))
     return clustered
-
-
-def _series_mention_positions(answer: str, item: Dict[str, Any]) -> List[int]:
-    return [start for start, _end in _series_mention_spans(answer, item)]
 
 
 def _answer_direction_for_series(
@@ -1952,87 +1944,3 @@ def gate_indepth_claims(
         "removed": removed,
         "checks": checks,
     }
-
-
-def build_temporal_block(chart: str, anchor: Optional[str]) -> str:
-    """The injected evidence block: the anchor line + per-concept series. '' when there's neither
-    an anchor nor any series. The synth/validator read 'most recent' and trends FROM here.
-    """
-    obs = parse_dated_observations(chart)
-    if not anchor and not obs:
-        return ""
-    lines: List[str] = []
-    if anchor:
-        lines.append(
-            f'Current date: {anchor}. Interpret "current", "recent", and "most recent" '
-            f"relative to THIS date; the patient's records may predate it. Use the dated series "
-            f"below verbatim — do not infer dates, values, or trends not shown."
-        )
-    # Typed event timeline: "last visit"/"most recent" must resolve to a clinical visit/encounter,
-    # NOT the chart's max date (which can be an administrative Program enrollment that post-dates the
-    # last visit). Type each record by class; report the most-recent CLINICAL date + the visit dates,
-    # and list administrative records separately so they are never mistaken for a visit.
-    events = parse_events(chart)
-    visit_dates = sorted({e["date"] for e in _clinical_encounter_events(events)}, reverse=True)
-    if visit_dates:
-        lines.append(
-            f'Most recent clinical visit/encounter: {visit_dates[0]}. Answer "last visit" / '
-            f'"most recent visit" from THIS date — the administrative records below are NOT visits.'
-        )
-        shown = visit_dates[:12]
-        more = f" (+{len(visit_dates) - 12} earlier)" if len(visit_dates) > 12 else ""
-        lines.append(
-            "Clinical visit/encounter dates (newest first): "
-            + ", ".join(shown)
-            + more
-            + "."
-        )
-    elif events:
-        clinical_dates = sorted(
-            {e["date"] for e in events if e["cls"] not in _ADMIN_CLASSES}, reverse=True
-        )
-        if clinical_dates:
-            lines.append(
-                "No explicit visit/encounter record is present. Latest dated clinical activity: "
-                f"{clinical_dates[0]}. Do NOT report this activity date as a visit date."
-            )
-    seen_admin: set = set()
-    for e in sorted(
-        (e for e in events if e["cls"] in _ADMIN_CLASSES),
-        key=lambda e: e["date"],
-        reverse=True,
-    ):
-        summary = e["body"].split(". ")[0].strip()
-        if (e["date"], summary) in seen_admin:
-            continue
-        seen_admin.add((e["date"], summary))
-        lines.append(f"Administrative record on {e['date']} (NOT a visit): {summary}.")
-    by_concept: Dict[str, List[Dict[str, Any]]] = {}
-    for o in obs:
-        by_concept.setdefault(o["concept"], []).append(o)
-    if by_concept:
-        if lines:
-            lines.append("")
-        lines.append("Computed numeric series (deterministic, oldest→newest):")
-    for concept, series in by_concept.items():
-        series = sorted(series, key=lambda o: o["date"])
-        last = series[-1]
-        unit = (" " + last["unit"]) if last["unit"] else ""
-        if len(series) < 2:
-            lines.append(
-                f"- {concept}: {last['value']}{unit} ({last['date']}) — single measurement."
-            )
-            continue
-        first = series[0]
-        vals = [o["value"] for o in series]
-        direction = (
-            "↑"
-            if last["value"] > first["value"]
-            else ("↓" if last["value"] < first["value"] else "→")
-        )
-        lines.append(
-            f"- {concept}: most recent {last['value']}{unit} ({last['date']}); "
-            f"{len(series)} values {first['value']}→{last['value']} {direction} "
-            f"over {first['date']}…{last['date']}; range {min(vals)}–{max(vals)}."
-        )
-    return "\n".join(lines)

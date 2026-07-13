@@ -443,10 +443,6 @@ def _claim_fragments_for_index(answer: str, index: int) -> List[str]:
     return fragments
 
 
-_ENTAILMENT_MAX_PAIRS = 16  # Maximum claim groups per bounded grounding request.
-_ENTAILMENT_SOURCE_CHARS = 3000
-_ENTAILMENT_MAX_SOURCE_SET_CHARS = 12000
-
 _ENTAILMENT_SYSTEM_PROMPT = (
     "You are a strict clinical fact-checker. For each PAIR, decide whether the SOURCE record "
     "supports the STATEMENT. Answer NO if: the statement is about a different person or describes "
@@ -530,26 +526,22 @@ async def _bounded_entailment_verdicts(
     model: str,
     pairs: List[Tuple[str, str]],
 ) -> List[Optional[bool]]:
-    """Check every pair in stable batches and split any batch that exceeds the model window."""
-    verdicts: List[Optional[bool]] = []
-    for start in range(0, len(pairs), _ENTAILMENT_MAX_PAIRS):
-        batch = pairs[start : start + _ENTAILMENT_MAX_PAIRS]
+    """Check all pairs together, splitting only when exact token measurement overflows."""
 
-        async def check(items: List[Tuple[str, str]]) -> List[Optional[bool]]:
-            try:
-                return await _entailment_verdicts(client, model, items)
-            except InsufficientContextError:
-                if len(items) == 1:
-                    logger.warning(
-                        "entailment grounding[%s] single pair exceeds context -> unchecked",
-                        model,
-                    )
-                    return [None]
-                midpoint = len(items) // 2
-                return await check(items[:midpoint]) + await check(items[midpoint:])
+    async def check(items: List[Tuple[str, str]]) -> List[Optional[bool]]:
+        try:
+            return await _entailment_verdicts(client, model, items)
+        except InsufficientContextError:
+            if len(items) == 1:
+                logger.warning(
+                    "entailment grounding[%s] single pair exceeds context -> unchecked",
+                    model,
+                )
+                return [None]
+            midpoint = len(items) // 2
+            return await check(items[:midpoint]) + await check(items[midpoint:])
 
-        verdicts.extend(await check(batch))
-    return verdicts
+    return await check(pairs) if pairs else []
 
 
 async def _ground_references(
@@ -625,7 +617,6 @@ async def _ground_references(
                         "sources": [],
                         "source_facts": [],
                         "references": [],
-                        "complete": True,
                     }
                 )
             group = groups[group_position]
@@ -634,18 +625,8 @@ async def _ground_references(
                 for fact in source_facts:
                     if fact not in group["source_facts"]:
                         group["source_facts"].append(fact)
-                remaining = _ENTAILMENT_MAX_SOURCE_SET_CHARS - sum(
-                    len(item) for item in group["sources"]
-                )
                 source_item = f"[{idx}] {source}"
-                if (
-                    remaining <= 0
-                    or len(source_item) > remaining
-                    or len(source_item) > _ENTAILMENT_SOURCE_CHARS
-                ):
-                    group["complete"] = False
-                else:
-                    group["sources"].append(source_item)
+                group["sources"].append(source_item)
             if (
                 ref_position in group["references"]
                 and group_position not in groups_by_reference[ref_position]
@@ -661,8 +642,7 @@ async def _ground_references(
     deterministic_methods = {
         position: "deterministic_exact"
         for position, group in enumerate(groups)
-        if group["complete"]
-        and group["location"] == "block"
+        if group["location"] == "block"
         and len(group["references"]) == 1
         and normalize_fact(group["claim"])
         and any(
@@ -671,7 +651,7 @@ async def _ground_references(
         )
     }
     for position, group in enumerate(groups):
-        if not group["complete"] or position in deterministic_methods:
+        if position in deterministic_methods:
             continue
         source_indices = sorted(
             {
@@ -705,8 +685,7 @@ async def _ground_references(
     checkable_positions = [
         position
         for position, group in enumerate(groups)
-        if group["complete"]
-        and group["sources"]
+        if group["sources"]
         and position not in deterministic_positions
     ]
     pairs = [

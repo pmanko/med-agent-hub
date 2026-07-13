@@ -154,10 +154,6 @@ def _require_product_profile(req: ChatCompletionRequest, profile: Profile) -> No
         )
 
 
-async def _content_for(req: ChatCompletionRequest) -> str:
-    return await drain_profile(_request_for(req, get_profile(req.model)))
-
-
 def _completion_envelope(model: str, content: str) -> Dict[str, Any]:
     return {
         "id": f"chatcmpl-{uuid.uuid4().hex}",

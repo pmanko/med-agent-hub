@@ -13,7 +13,6 @@ stage_sets:
   single_bare_reviewed: &single_bare_reviewed [context, answer, gate, review, gate]
   single_combined: &single_combined [context, answer, gate, indepth]
   product: &product [context, answer, gate, resolve_refs, review, gate, final_resolve_refs, ground_verdicts, indepth, indepth_gate]
-  product_no_review: &product_no_review [context, answer, gate, resolve_refs, final_resolve_refs, ground_verdicts, indepth, indepth_gate]
   team_product: &team_product [context, gather, answer, gate, resolve_refs, review, gate, final_resolve_refs, ground_verdicts, indepth, indepth_gate]
 
 profiles:
@@ -30,7 +29,6 @@ profiles:
     stages: *team_reviewed
     models: {orchestrator: gemma-e2b-q2, expert: medgemma-1.5-4b, answer: qwen3-4b, review: gemma-e4b-q8, indepth: qwen3-4b}
     policies: {output: combined, temporal_gate: "off"}
-    capabilities: {validation: true}
 
   med-agent-team-low-validated-12b:
     label: Low team with 12B review
@@ -39,7 +37,6 @@ profiles:
     models: {orchestrator: gemma-e2b-q2, expert: medgemma-1.5-4b, answer: qwen3-4b, review: gemma-4-12b, grounding: qwen3-4b, indepth: qwen3-4b}
     prompts: {review: validation}
     policies: {output: product, temporal_gate: enforce, temporal_render: full}
-    capabilities: {staged: true, validation: true}
     context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true}
 
   med-agent-team-med:
@@ -69,7 +66,6 @@ profiles:
     stages: *team_reviewed
     models: {orchestrator: lfm2-2.6b, expert: medgemma-1.5-4b-q8, answer: lfm2-24b-a2b, review: gemma-4-12b, indepth: lfm2-24b-a2b}
     policies: {output: combined, temporal_gate: "off"}
-    capabilities: {validation: true}
 
   med-agent-team-med-liquid-qwensynth:
     label: Liquid coordinator with Qwen writer
@@ -77,7 +73,6 @@ profiles:
     stages: *team_reviewed
     models: {orchestrator: lfm2-2.6b, expert: medgemma-1.5-4b-q8, answer: qwen2.5-14b, review: gemma-4-12b, indepth: qwen2.5-14b}
     policies: {output: combined, temporal_gate: "off"}
-    capabilities: {validation: true}
 
   med-agent-team-med-validated:
     label: Medium checked team
@@ -86,7 +81,6 @@ profiles:
     models: {orchestrator: gemma-e4b-q8, expert: medgemma-1.5-4b-q8, answer: qwen2.5-14b, review: gemma-4-12b, grounding: qwen2.5-14b, indepth: qwen2.5-14b}
     prompts: {review: validation}
     policies: {output: product, temporal_gate: enforce, temporal_render: full}
-    capabilities: {staged: true, validation: true}
     context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true}
 
   med-agent-team-med-liquidwriter-validated:
@@ -95,7 +89,6 @@ profiles:
     stages: *team_reviewed
     models: {orchestrator: gemma-e4b-q8, expert: medgemma-1.5-4b-q8, answer: lfm2-24b-a2b, review: gemma-4-12b, indepth: lfm2-24b-a2b}
     policies: {output: combined, temporal_gate: "off"}
-    capabilities: {validation: true}
 
   med-agent-team-high:
     label: High team
@@ -111,7 +104,6 @@ profiles:
     models: {orchestrator: gemma-31b, expert: medgemma-27b, answer: qwen3.6-35b-q6, review: gemma-31b, grounding: qwen3.6-35b-q6, indepth: qwen3.6-35b-q6}
     prompts: {review: validation}
     policies: {output: product, temporal_gate: enforce, temporal_render: full}
-    capabilities: {staged: true, validation: true}
     context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true}
 
   med-agent-team-12b:
@@ -145,28 +137,6 @@ profiles:
     prompts: {answer: synthesis-chartsearchai, indepth: synthesis-indepth}
     policies: {output: combined, temporal_gate: "off"}
 
-  med-agent-team-staged-12b:
-    label: Legacy staged 12B
-    topology: single
-    stages: *product_no_review
-    models: {answer: gemma-4-12b, grounding: gemma-4-12b, indepth: gemma-4-12b}
-    prompts: {answer: synthesis-answer, indepth: synthesis-indepth}
-    policies: {output: product, temporal_gate: enforce, temporal_render: full}
-    capabilities: {staged: true, validation: false}
-    context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true}
-    knobs: {answer: {temperature: 0}}
-
-  med-agent-team-staged-12b-validated:
-    label: Legacy staged checked 12B
-    topology: single
-    stages: *product
-    models: {answer: gemma-4-12b, review: gemma-4-12b, grounding: gemma-4-12b, indepth: gemma-4-12b}
-    prompts: {answer: synthesis-answer, review: validation-rewrite, indepth: synthesis-indepth}
-    policies: {output: product, temporal_gate: enforce, temporal_render: full}
-    capabilities: {staged: true, validation: true}
-    context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true}
-    knobs: {answer: {temperature: 0}}
-
   single-12b-checked:
     label: Checked answer (12B)
     topology: single
@@ -174,7 +144,6 @@ profiles:
     models: {answer: gemma-4-12b, review: gemma-4-12b, grounding: gemma-4-12b, indepth: gemma-4-12b}
     prompts: {answer: synthesis-answer, review: validation-rewrite, indepth: synthesis-indepth}
     policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true}
-    capabilities: {staged: true, validation: true}
     visibility: product
     selection_priority: 30
     context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true}
@@ -187,7 +156,6 @@ profiles:
     models: {answer: gemma-e4b, review: gemma-e4b, grounding: gemma-e4b, indepth: gemma-e4b}
     prompts: {answer: synthesis-answer, review: validation-rewrite, indepth: synthesis-indepth}
     policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true}
-    capabilities: {staged: true, validation: true}
     visibility: product
     default: true
     selection_priority: 10
@@ -201,7 +169,6 @@ profiles:
     models: {answer: gemma-26b, review: gemma-26b, grounding: gemma-26b, indepth: gemma-26b}
     prompts: {answer: synthesis-answer, review: validation-rewrite, indepth: synthesis-indepth}
     policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true}
-    capabilities: {staged: true, validation: true}
     visibility: product
     selection_priority: 20
     context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true}
@@ -214,7 +181,6 @@ profiles:
     models: {orchestrator: gemma-e4b-q8, expert: medgemma-1.5-4b-q8, answer: qwen2.5-14b, review: gemma-4-12b, grounding: qwen2.5-14b, indepth: qwen2.5-14b}
     prompts: {answer: synthesis-answer, review: validation-rewrite, indepth: synthesis-indepth, orchestrator: orchestrator, expert: medical_expert}
     policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true}
-    capabilities: {staged: true, validation: true}
     visibility: product
     selection_priority: 100
     context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true}
@@ -226,7 +192,6 @@ profiles:
     models: {orchestrator: gemma-e4b-q8, answer: gemma-4-12b, review: qwen2.5-14b}
     prompts: {answer: synthesis-chartsearchai, review: validation-rewrite}
     policies: {output: bare, temporal_gate: "off"}
-    capabilities: {validation: true}
 
   med-agent-team-a4b-qwenval:
     label: A4B team with Qwen review
@@ -235,7 +200,6 @@ profiles:
     models: {orchestrator: gemma-e4b-q8, answer: gemma-26b, review: qwen2.5-14b}
     prompts: {answer: synthesis-chartsearchai, review: validation-rewrite}
     policies: {output: bare, temporal_gate: "off"}
-    capabilities: {validation: true}
 
   single-12b-coverage:
     label: Single 12B coverage prompt
@@ -252,7 +216,6 @@ profiles:
     models: {answer: gemma-4-12b, review: qwen2.5-14b}
     prompts: {answer: synthesis-chartsearchai, review: validation-rewrite}
     policies: {output: bare, temporal_gate: "off"}
-    capabilities: {validation: true}
 
   single-12b-coverage-rewrite:
     label: Single 12B coverage and review
@@ -261,7 +224,6 @@ profiles:
     models: {answer: gemma-4-12b, review: qwen2.5-14b}
     prompts: {answer: synthesis-coverage, review: validation-rewrite}
     policies: {output: bare, temporal_gate: "off"}
-    capabilities: {validation: true}
 
   single-a4b-coverage:
     label: Single A4B coverage prompt
@@ -278,7 +240,6 @@ profiles:
     models: {answer: gemma-26b, review: qwen2.5-14b}
     prompts: {answer: synthesis-chartsearchai, review: validation-rewrite}
     policies: {output: bare, temporal_gate: "off"}
-    capabilities: {validation: true}
 
   single-a4b-coverage-rewrite:
     label: Single A4B coverage and review
@@ -287,7 +248,6 @@ profiles:
     models: {answer: gemma-26b, review: qwen2.5-14b}
     prompts: {answer: synthesis-coverage, review: validation-rewrite}
     policies: {output: bare, temporal_gate: "off"}
-    capabilities: {validation: true}
 
   med-agent-team-12b-rewriteval:
     label: 12B team rewrite review
@@ -296,7 +256,6 @@ profiles:
     models: {orchestrator: gemma-e4b-q8, answer: gemma-4-12b, review: qwen2.5-14b}
     prompts: {answer: synthesis-chartsearchai, review: validation-rewrite}
     policies: {output: bare, temporal_gate: "off"}
-    capabilities: {validation: true}
 
   med-agent-team-12b-date-warn:
     label: 12B team date warning
@@ -305,7 +264,6 @@ profiles:
     models: {orchestrator: gemma-e4b-q8, answer: gemma-4-12b, review: qwen2.5-14b}
     prompts: {answer: synthesis-date-output-contract, review: validation-rewrite}
     policies: {output: bare, temporal_gate: warn}
-    capabilities: {validation: true}
 
   med-agent-team-high-date-warn:
     label: High team date warning
@@ -314,7 +272,6 @@ profiles:
     models: {orchestrator: gemma-31b, expert: medgemma-27b, answer: qwen3.6-35b-q6, review: gemma-31b}
     prompts: {answer: synthesis-date-output-contract, review: validation}
     policies: {output: bare, temporal_gate: warn}
-    capabilities: {validation: true}
 
   single-12b-cite-or-abstain:
     label: Single 12B cite or abstain

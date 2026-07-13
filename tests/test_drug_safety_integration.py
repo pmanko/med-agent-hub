@@ -137,7 +137,6 @@ def _product_profile(*, drug_safety=False):
         prompts={"answer": "synthesis-answer", "indepth": "synthesis-indepth"},
         output="product",
         policies={"drug_safety": drug_safety},
-        capabilities={"staged": True},
     )
 
 

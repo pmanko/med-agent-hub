@@ -148,7 +148,6 @@ def _run_review(
             models={"review": "REVIEWER"},
             prompts={"review": "validation-rewrite"},
             output="review",
-            capabilities={"validation": True},
         )
         out = asyncio.run(
             run_profile(
@@ -330,7 +329,6 @@ def test_answer_review_rewrite_reintroducing_temporal_error_is_caught():
         models={"review": "REVIEWER"},
         prompts={"review": "validation-rewrite"},
         output="review",
-        capabilities={"validation": True},
         policies={"temporal_gate": "enforce", "anchor": "2026-06-20"},
     )
     out = asyncio.run(
