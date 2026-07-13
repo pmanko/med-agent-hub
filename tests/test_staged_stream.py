@@ -86,12 +86,16 @@ def _stub_common(monkeypatch):
             out.append(r)
         return out
 
+    async def clean_answer_review(*_args, **_kwargs):
+        return {"answer_ok": True, "errors": []}
+
     monkeypatch.setattr(team, "_apply_temporal_gate", fake_gate)
     monkeypatch.setattr(team, "_gen_indepth", fake_indepth)
     monkeypatch.setattr(team, "_synthesize_indepth", fake_unreviewed_indepth)
     monkeypatch.setattr(team, "_merge_temporal_gate_conf", lambda conf, _gate: conf)
     monkeypatch.setattr(team, "_write_trace", lambda *_a, **_k: None)
     monkeypatch.setattr(team, "_ground_references", fake_ground)
+    monkeypatch.setattr(team, "_validate_answer_rewrite", clean_answer_review)
 
 
 def _product_profile(
@@ -199,8 +203,8 @@ def test_staged_stream_with_validator_emits_full_phase_sequence(monkeypatch):
     ]
 
     ev = dict(events)
-    # answer_done: fast answer, marked "validating", references RESOLVED by the hub (not indices)
-    assert ev["answer_done"]["answerValidation"]["status"] == "validating"
+    # answer_done: fast answer, marked "checking", references RESOLVED by the hub (not indices)
+    assert ev["answer_done"]["answerValidation"]["status"] == "checking"
     fast_ref = ev["answer_done"]["references"][0]
     assert fast_ref["index"] == 1
     assert fast_ref["sourceId"] == "test:obs:u1"
@@ -269,7 +273,7 @@ def test_post_review_punctuation_rewrite_preserves_usable_answer_and_needs_revie
     assert events["done"]["confidence"]["answer"]["level"] == "red"
 
 
-def test_preliminary_problem_stays_validating_until_configured_review_finishes(
+def test_preliminary_problem_stays_checking_until_configured_review_finishes(
     monkeypatch,
 ):
     _stub_common(monkeypatch)
@@ -295,7 +299,7 @@ def test_preliminary_problem_stays_validating_until_configured_review_finishes(
     events = dict(_collect(_product_profile(review_model="V")))
 
     fast_validation = events["answer_done"]["answerValidation"]
-    assert fast_validation["status"] == "validating"
+    assert fast_validation["status"] == "checking"
     assert any(issue["id"] == "citation_resolution" for issue in fast_validation["issues"])
     assert events["answer_validation"]["answerValidation"]["status"] == "needs_review"
 
@@ -355,7 +359,7 @@ def test_staged_stream_without_validator_skips_validation_phase(monkeypatch):
     names = [n for n, _ in events]
     assert names == ["answer_done", "indepth_pending", "indepth_done", "done"]
     # No LLM review event, but final grounding still completes before the answer settles.
-    assert dict(events)["answer_done"]["answerValidation"]["status"] == "validating"
+    assert dict(events)["answer_done"]["answerValidation"]["status"] == "checking"
     assert dict(events)["answer_done"]["references"][0]["groundingStatus"] == "checking"
     assert dict(events)["indepth_pending"]["answerValidation"]["status"] == "checked"
     assert dict(events)["indepth_pending"]["references"][0]["groundingStatus"] == "verified"
@@ -531,7 +535,6 @@ def test_non_substantive_product_answer_withholds_indepth(monkeypatch):
     events = _collect(_product_profile())
     assert [name for name, _payload in events] == [
         "answer_done",
-        "indepth_pending",
         "indepth_error",
         "done",
     ]
@@ -1658,12 +1661,19 @@ def test_final_unsupported_grounding_marks_answer_needs_review(monkeypatch):
     monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
     monkeypatch.setattr(team, "_ground_references", unsupported)
 
+    async def unexpected_indepth(*_args, **_kwargs):
+        raise AssertionError("In-Depth must not use an Answer that needs review")
+
+    monkeypatch.setattr(team, "_synthesize_indepth", unexpected_indepth)
+
     events = dict(_collect(_product_profile()))
-    pending = events["indepth_pending"]
+    assert "indepth_pending" not in events
+    assert events["indepth_error"]["inDepth"]["status"] == "needs_review"
     final = events["done"]
-    assert pending["references"][0]["groundingStatus"] == "unsupported"
-    assert pending["answerValidation"]["status"] == "needs_review"
+    assert final["references"][0]["groundingStatus"] == "unsupported"
     assert final["answerValidation"]["status"] == "needs_review"
+    assert final["inDepth"]["status"] == "needs_review"
+    assert "final Answer needs review" in final["inDepth"]["error"]
     assert final["answerValidation"]["issues"][-1]["id"] == "citation_grounding"
     assert final["confidence"]["answer"]["level"] == "red"
 
@@ -1733,8 +1743,16 @@ def test_final_unchecked_grounding_cannot_leave_answer_checked(monkeypatch):
     monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
     monkeypatch.setattr(team, "_ground_references", unchecked)
 
-    final = dict(_collect(_product_profile()))["done"]
+    async def unexpected_indepth(*_args, **_kwargs):
+        raise AssertionError("In-Depth must not use an Answer with unavailable checks")
+
+    monkeypatch.setattr(team, "_synthesize_indepth", unexpected_indepth)
+
+    events = dict(_collect(_product_profile()))
+    assert "indepth_pending" not in events
+    final = events["done"]
     assert final["answerValidation"]["status"] == "unavailable"
+    assert final["inDepth"]["status"] == "needs_review"
     assert final["answerValidation"]["issues"][-1]["id"] == (
         "citation_grounding_unavailable"
     )

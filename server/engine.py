@@ -1239,7 +1239,7 @@ async def _execute_stages(
                         for reference in unresolved
                     )
                     fast_status = (
-                        "validating" if has_review or has_final_grounding else "checked"
+                        "checking" if has_review or has_final_grounding else "checked"
                     )
                     if (
                         state.answer_conf.get("level") == "red"
@@ -1523,15 +1523,6 @@ async def _execute_stages(
                     continue
 
                 if stage == "indepth":
-                    if product:
-                        yield (
-                            "indepth_pending",
-                            _stream_payload(
-                                state,
-                                request,
-                                in_depth={"status": "pending", "answer": ""},
-                            ),
-                        )
                     if product and not stages._is_substantive_answer(state.answer_text):
                         state.indepth_error = (
                             "In-Depth was withheld because the final Answer was not substantive."
@@ -1544,6 +1535,33 @@ async def _execute_stages(
                         )
                         record_stage_timing()
                         continue
+                    answer_status = str(
+                        (state.answer_validation or {}).get("status") or ""
+                    )
+                    if product and answer_status not in {"checked", "edited"}:
+                        state.indepth_error = (
+                            "In-Depth was withheld because the final Answer needs review."
+                            if answer_status == "needs_review"
+                            else "In-Depth was withheld because the final Answer check is unavailable."
+                        )
+                        state.steps.append(
+                            {
+                                "role": "indepth_withheld",
+                                "reason": "answer-validation-status",
+                                "answer_validation_status": answer_status,
+                            }
+                        )
+                        record_stage_timing()
+                        continue
+                    if product:
+                        yield (
+                            "indepth_pending",
+                            _stream_payload(
+                                state,
+                                request,
+                                in_depth={"status": "pending", "answer": ""},
+                            ),
+                        )
                     prior_answer = (
                         stages._latest_assistant_text(state.messages)
                         if request.profile.output_mode == "indepth"

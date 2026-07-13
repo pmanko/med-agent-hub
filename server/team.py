@@ -1212,7 +1212,7 @@ def _assemble_envelope(
 
 
 _ANSWER_VALIDATION_LABELS = {
-    "validating": "Checking answer",
+    "checking": "Checking answer",
     "checked": "Checked",
     "edited": "Updated after check",
     "needs_review": "Needs review",
