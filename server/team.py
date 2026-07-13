@@ -276,10 +276,10 @@ def _enforce_product_citation_contract(
     """Canonicalize explicit citation usage for product envelopes.
 
     Inline markers and cell refs are unambiguous usage declarations, so they are authoritative over
-    a conflicting top-level array. A single unscoped citation can be attached to the prose claim and
-    then semantically grounded. Multiple unscoped citations cannot be mapped to claims safely; keep
-    them visible for inspection but prevent the answer from reporting a checked lifecycle state.
-    Low-level legs do not call this helper and retain byte-exact behavior.
+    a conflicting top-level array. An unscoped source set can be attached when the answer contains
+    exactly one prose claim, then grounded collectively. A source set cannot be distributed across
+    multiple claims safely; keep it visible for inspection but prevent the answer from reporting a
+    checked lifecycle state. Low-level legs do not call this helper and retain byte-exact behavior.
     """
     declared = _citation_indices(citations)
     inline = _citation_indices([], answer)
@@ -292,14 +292,25 @@ def _enforce_product_citation_contract(
         for fragment in re.split(r"(?<=[.!?])\s+|\n+", answer.strip())
         if fragment.strip()
     ]
-    if len(declared) == 1 and len(prose_claims) == 1:
-        marker = f"[{declared[0]}]"
+    has_independent_clause_boundary = bool(
+        re.search(
+            r";|,\s*(?:and|but|for|nor|or|so|yet|while|whereas)\b",
+            answer,
+            re.I,
+        )
+    )
+    single_claim = len(prose_claims) == 1 and (
+        not has_independent_clause_boundary
+        or temporal.is_safe_no_upcoming_claim(answer)
+    )
+    if declared and single_claim:
+        markers = "".join(f"[{index}]" for index in declared)
         stripped = answer.rstrip()
         match = re.search(r"([.!?])$", stripped)
         if match:
-            stripped = stripped[: match.start()] + f" {marker}" + match.group(1)
+            stripped = stripped[: match.start()] + f" {markers}" + match.group(1)
         else:
-            stripped += f" {marker}"
+            stripped += f" {markers}"
         return stripped, declared, []
     if declared:
         return answer, declared, [

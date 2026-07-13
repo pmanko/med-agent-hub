@@ -8,6 +8,8 @@ asserts which model each compiled stage targets
 import asyncio
 import json
 
+import pytest
+
 from server import config, team
 from tests.factories import run_profile, team_profile
 
@@ -271,12 +273,35 @@ def test_product_citation_contract_does_not_scope_one_source_over_two_claims():
     assert issues[0]["id"] == "citation_scope"
 
 
-def test_product_citation_contract_blocks_unscoped_multi_source_set():
+def test_product_citation_contract_scopes_multi_source_set_to_one_prose_claim():
     answer, citations, issues = team._enforce_product_citation_contract(
         "The documented visit was on 2006-06-06.", [4, 1, 2], []
     )
 
-    assert answer == "The documented visit was on 2006-06-06."
+    assert answer == "The documented visit was on 2006-06-06 [4][1][2]."
+    assert citations == [4, 1, 2]
+    assert issues == []
+
+
+@pytest.mark.parametrize(
+    "answer",
+    (
+        "The visit was on 2006-06-06. The weight was 71 kg.",
+        "The visit was on 2006-06-06; the weight was 71 kg.",
+        "The visit was on 2006-06-06, and the weight was 71 kg.",
+        "The visit was on 2006-06-06, but the weight was 71 kg.",
+        "The visit was on 2006-06-06, for the weight was 71 kg.",
+        "The visit was on 2006-06-06, nor was the weight 71 kg.",
+        "The visit was on 2006-06-06, or the weight was 71 kg.",
+        "The visit was on 2006-06-06, so the weight was 71 kg.",
+        "The visit was on 2006-06-06, yet the weight was 71 kg.",
+    ),
+)
+def test_product_citation_contract_blocks_multi_source_set_over_two_claims(answer):
+    answer, citations, issues = team._enforce_product_citation_contract(
+        answer, [4, 1, 2], []
+    )
+
     assert citations == [4, 1, 2]
     assert issues[0]["id"] == "citation_scope"
     assert issues[0]["severity"] == "block"

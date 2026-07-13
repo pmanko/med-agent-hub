@@ -777,6 +777,35 @@ def test_no_upcoming_pass_carries_all_candidate_source_indices():
     )
 
 
+def test_no_upcoming_pass_accepts_strict_scheduled_return_visit_summary():
+    chart = """Patient records (most recent first):
+[4] (2026-01-26) Encounter: Adult Visit at Clinic A
+[22] Return visit date: 2026-02-23
+[55] Return visit date: 2026-01-14
+"""
+    facts = temporal.build_temporal_facts(chart, "2026-06-20")
+    answer = (
+        "The record does not show any upcoming appointments; all scheduled return visits "
+        "are in the past."
+    )
+
+    gate = temporal.run_temporal_gate(
+        "Does this patient have any upcoming appointments?",
+        answer,
+        [22, 55],
+        facts,
+        "enforce",
+    )
+
+    check = next(
+        check
+        for check in gate["checks"]
+        if check["id"] == "upcoming_date" and check["status"] == "pass"
+    )
+    assert check["source_indices"] == [22, 55]
+    assert check["claim"] == answer
+
+
 def test_no_upcoming_pass_claim_excludes_an_unrelated_coordinated_claim():
     chart = """Patient records (most recent first):
 [22] Return visit date: 2026-02-23
@@ -803,6 +832,33 @@ def test_no_upcoming_pass_claim_excludes_an_unrelated_coordinated_claim():
     )
     assert "diabetes" not in check["claim"]
     assert check["claim"] in answer
+
+
+def test_scheduled_no_upcoming_pass_excludes_an_unrelated_semicolon_claim():
+    chart = """Patient records (most recent first):
+[22] Return visit date: 2026-02-23
+[55] Return visit date: 2026-01-14
+"""
+    facts = temporal.build_temporal_facts(chart, "2026-06-20")
+    answer = (
+        "The record does not show any upcoming appointments; all scheduled return visits "
+        "are in the past; the patient has diabetes."
+    )
+
+    gate = temporal.run_temporal_gate(
+        "Does this patient have any upcoming appointments?",
+        answer,
+        [22, 55],
+        facts,
+        "enforce",
+    )
+
+    check = next(
+        check
+        for check in gate["checks"]
+        if check["id"] == "upcoming_date" and check["status"] == "pass"
+    )
+    assert "diabetes" not in check["claim"]
 
 
 def test_no_upcoming_pass_claim_excludes_unrelated_claim_with_visit_word():

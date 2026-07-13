@@ -72,7 +72,8 @@ _SAFE_NO_UPCOMING_CLAIM_RE = re.compile(
     r"(?:(?:the )?(?:record|chart) (?:does not|doesn't) (?:show|document) any|no) "
     r"(?:upcoming|future) (?:appointments?|visits?)"
     r"(?: (?:are )?(?:documented|shown))?"
-    r"(?:; all listed (?:return[- ]visit|appointment|follow-?up) dates are "
+    r"(?:; (?:all listed (?:return[- ]visit|appointment|follow-?up) dates|"
+    r"all scheduled (?:return[- ]visits?|appointments?|follow-?ups?)) are "
     r"(?:in the )?(?:past|historical))?[.!]?",
     re.I,
 )
@@ -143,6 +144,13 @@ _CONCEPT_STOP_TOKENS = {
 # 2026-05-20 when the last clinical visit was 2026-01-07). These are labeled, never reported as a visit.
 _ADMIN_CLASSES = {"Program"}
 _ENCOUNTER_CLASSES = {"encounter", "visit"}
+
+
+def is_safe_no_upcoming_claim(value: str) -> bool:
+    """Return whether the entire value is the bounded deterministic no-upcoming claim."""
+    normalized = _CITATION_SEQUENCE_RE.sub("", (value or "").strip())
+    normalized = re.sub(r"\s+([.;!?])", r"\1", " ".join(normalized.split()))
+    return bool(_SAFE_NO_UPCOMING_CLAIM_RE.fullmatch(normalized))
 
 
 def _parse_iso_date(value: Optional[str]) -> Optional[_dt.date]:
@@ -881,9 +889,7 @@ def _no_upcoming_claim_scope(answer: str) -> str:
         match = _NO_UPCOMING_RE.search(sentence)
         if not match:
             continue
-        normalized = _CITATION_SEQUENCE_RE.sub("", sentence.strip())
-        normalized = re.sub(r"\s+([.;!?])", r"\1", " ".join(normalized.split()))
-        if _SAFE_NO_UPCOMING_CLAIM_RE.fullmatch(normalized):
+        if is_safe_no_upcoming_claim(sentence):
             return sentence.strip()[:240]
         return match.group(0)[:240]
     return (answer or "")[:240]

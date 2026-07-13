@@ -749,15 +749,22 @@ def test_ground_references_checks_a_multi_citation_claim_against_combined_source
     assert "[2] 2006-06-06 Weight (kg): 71 kg" in prompt
 
 
-def test_ground_references_accepts_matching_deterministic_temporal_source_set(monkeypatch):
+@pytest.mark.parametrize(
+    "statement",
+    (
+        "The record does not show any upcoming appointments; all listed return visit dates are "
+        "in the past [1][2].",
+        "The record does not show any upcoming appointments; all scheduled return visits are "
+        "in the past [1][2].",
+    ),
+)
+def test_ground_references_accepts_matching_deterministic_temporal_source_set(
+    monkeypatch, statement
+):
     async def should_not_call_semantic_grounding(*_args, **_kwargs):
         raise AssertionError("a matching deterministic temporal check should be authoritative")
 
     monkeypatch.setattr(team, "_bounded_entailment_verdicts", should_not_call_semantic_grounding)
-    statement = (
-        "The record does not show any upcoming appointments; all listed return visit dates are "
-        "in the past [1][2]."
-    )
     refs = [
         {
             "index": index,
@@ -1747,19 +1754,40 @@ def test_final_unchecked_grounding_cannot_leave_answer_checked(monkeypatch):
     assert final["confidence"]["answer"]["level"] == "yellow"
 
 
-def test_product_overdeclared_unscoped_citations_cannot_leave_answer_checked(
+def test_product_unscoped_citations_over_multiple_claims_cannot_leave_answer_checked(
     monkeypatch,
 ):
     _stub_common(monkeypatch)
 
     async def fake_answer(*_args, **_kwargs):
-        return "The documented visit was on 2025-01-01.", [1, 2], []
+        return (
+            "The documented visit was on 2025-01-01. A different order was on 2025-02-02.",
+            [1, 2],
+            [],
+        )
 
     monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
 
     final = dict(_collect(_product_profile()))["done"]
     assert final["answerValidation"]["status"] == "needs_review"
     assert any(
+        issue["id"] == "citation_scope"
+        for issue in final["answerValidation"]["issues"]
+    )
+
+
+def test_product_unscoped_source_set_on_one_claim_can_leave_answer_checked(monkeypatch):
+    _stub_common(monkeypatch)
+
+    async def fake_answer(*_args, **_kwargs):
+        return "The chart contains two relevant records.", [1, 2], []
+
+    monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
+
+    final = dict(_collect(_product_profile()))["done"]
+    assert final["answer"] == "The chart contains two relevant records [1][2]."
+    assert final["answerValidation"]["status"] == "checked"
+    assert not any(
         issue["id"] == "citation_scope"
         for issue in final["answerValidation"]["issues"]
     )
