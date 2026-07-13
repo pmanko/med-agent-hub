@@ -1415,13 +1415,29 @@ async def _execute_stages(
 
                 if stage == "ground_verdicts":
                     if state.mappings:
-                        state.references = await stages._ground_references(
-                            client,
-                            request.profile.models["grounding"],
-                            state.answer_text,
-                            state.references,
-                            state.mappings,
-                        )
+                        deterministic_checks = [
+                            check
+                            for check in (state.answer_gate or {}).get("checks", [])
+                            if check.get("status") == "pass"
+                            and check.get("source_indices")
+                        ]
+                        if deterministic_checks:
+                            state.references = await stages._ground_references(
+                                client,
+                                request.profile.models["grounding"],
+                                state.answer_text,
+                                state.references,
+                                state.mappings,
+                                deterministic_checks=deterministic_checks,
+                            )
+                        else:
+                            state.references = await stages._ground_references(
+                                client,
+                                request.profile.models["grounding"],
+                                state.answer_text,
+                                state.references,
+                                state.mappings,
+                            )
                     unsupported = [
                         reference
                         for reference in state.references
@@ -1436,24 +1452,24 @@ async def _execute_stages(
                     ]
                     if unsupported:
                         prior = state.answer_validation or {}
+                        state.answer_conf = {
+                            "level": "red",
+                            "note": "One or more cited source sets did not support the associated claim.",
+                        }
                         state.answer_validation = stages._answer_validation_wire(
                             "needs_review",
                             summary="One or more cited sources do not support the associated claim.",
                             issues=list(prior.get("issues") or [])
-                            + [
-                                {
-                                    "id": "citation_grounding",
-                                    "status": "fail",
-                                    "severity": "block",
-                                    "reason": f"Citation [{reference.get('index')}] was not fully supported by its source record.",
-                                    "source_indices": [reference.get("index")],
-                                }
-                                for reference in unsupported
-                            ],
+                            + stages._grounding_failure_issues(unsupported),
                             original_answer=prior.get("originalAnswer"),
                         )
                     elif unchecked:
                         prior = state.answer_validation or {}
+                        if state.answer_conf.get("level") == "green":
+                            state.answer_conf = {
+                                "level": "yellow",
+                                "note": "Citation support checking was unavailable for one or more sources.",
+                            }
                         if prior.get("status") != "needs_review":
                             state.answer_validation = stages._answer_validation_wire(
                                 "unavailable",

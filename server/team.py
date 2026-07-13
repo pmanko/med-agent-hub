@@ -547,6 +547,8 @@ async def _ground_references(
     answer: str,
     references: List[Dict[str, Any]],
     mappings: List[Dict[str, Any]],
+    *,
+    deterministic_checks: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
     """Ground final claims against their cited source sets in one bounded entailment call.
 
@@ -645,17 +647,50 @@ async def _ground_references(
         text = re.sub(r"(?<![\w.])(-?\d+)\.0+(?=\D|$)", r"\1", text)
         return " ".join(text.split())
 
-    deterministic_positions = {
-        position
+    deterministic_methods = {
+        position: "deterministic_exact"
         for position, group in enumerate(groups)
         if group["complete"]
         and group["location"] == "block"
+        and len(group["references"]) == 1
         and normalize_fact(group["claim"])
         and any(
             normalize_fact(group["claim"]) == normalize_fact(fact)
             for fact in group["source_facts"]
         )
     }
+    for position, group in enumerate(groups):
+        if not group["complete"] or position in deterministic_methods:
+            continue
+        source_indices = sorted(
+            {
+                references[reference_position].get("index")
+                for reference_position in group["references"]
+                if isinstance(references[reference_position].get("index"), int)
+            }
+        )
+        normalized_claim = normalize_fact(_INLINE_CITATION_RE.sub("", group["claim"]))
+        if not normalized_claim or not source_indices:
+            continue
+        for check in deterministic_checks or []:
+            check_indices = sorted(
+                {
+                    index
+                    for index in (check.get("source_indices") or [])
+                    if isinstance(index, int)
+                }
+            )
+            check_claim = normalize_fact(
+                _INLINE_CITATION_RE.sub("", str(check.get("claim") or ""))
+            )
+            if (
+                check.get("status") == "pass"
+                and check_claim == normalized_claim
+                and check_indices == source_indices
+            ):
+                deterministic_methods[position] = "deterministic_temporal"
+                break
+    deterministic_positions = set(deterministic_methods)
     checkable_positions = [
         position
         for position, group in enumerate(groups)
@@ -703,7 +738,7 @@ async def _ground_references(
                     ),
                 }
             if group_position in deterministic_positions:
-                grounding_check["method"] = "deterministic_exact"
+                grounding_check["method"] = deterministic_methods[group_position]
             grounding_checks.append(grounding_check)
         check_statuses = {check["status"] for check in grounding_checks}
         if not grounding_checks or "unchecked" in check_statuses:
@@ -736,6 +771,67 @@ async def _ground_references(
             out["groundingScope"] = "record"
         grounded_refs.append(out)
     return grounded_refs
+
+
+def _grounding_failure_issues(
+    references: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Collapse repeated per-reference failures into claim/source-set issues."""
+    issues: List[Dict[str, Any]] = []
+    seen: set[Tuple[str, str, str, Tuple[int, ...]]] = set()
+    for reference in references or []:
+        if reference.get("groundingStatus") not in {"unsupported", "mixed"}:
+            continue
+        failing_checks = [
+            check
+            for check in (reference.get("groundingChecks") or [])
+            if isinstance(check, dict) and check.get("status") == "unsupported"
+        ]
+        if not failing_checks:
+            failing_checks = [
+                {
+                    "claim": "",
+                    "location": "answer",
+                    "path": "",
+                    "source_indices": reference.get("groundingGroup")
+                    or [reference.get("index")],
+                }
+            ]
+        for check in failing_checks:
+            source_indices = tuple(
+                sorted(
+                    {
+                        index
+                        for index in (check.get("source_indices") or [])
+                        if isinstance(index, int)
+                    }
+                )
+            )
+            key = (
+                str(check.get("claim") or ""),
+                str(check.get("location") or ""),
+                str(check.get("path") or ""),
+                source_indices,
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            issues.append(
+                {
+                    "id": "citation_grounding",
+                    "status": "fail",
+                    "severity": "block",
+                    "reason": (
+                        "The cited source set did not fully support the associated claim."
+                        if len(source_indices) > 1
+                        else f"Citation [{source_indices[0]}] was not fully supported by its source record."
+                        if source_indices
+                        else "The cited evidence did not fully support the associated claim."
+                    ),
+                    "source_indices": list(source_indices),
+                }
+            )
+    return issues
 
 
 def _latest_user_text(messages: List[Dict[str, Any]]) -> str:
@@ -1141,13 +1237,21 @@ def _answer_validation_wire(
     issues: Optional[List[Any]] = None,
     original_answer: Optional[str] = None,
 ) -> Dict[str, Any]:
+    deduplicated_issues: List[Any] = []
+    seen_issues: set[str] = set()
+    for issue in issues or []:
+        key = json.dumps(issue, sort_keys=True, ensure_ascii=False, default=str)
+        if key in seen_issues:
+            continue
+        seen_issues.add(key)
+        deduplicated_issues.append(issue)
     wire: Dict[str, Any] = {
         "status": status,
         "label": _ANSWER_VALIDATION_LABELS.get(
             status, status.replace("_", " ").title()
         ),
         "summary": summary or "",
-        "issues": issues or [],
+        "issues": deduplicated_issues,
         "completedAt": datetime.now(timezone.utc).isoformat(),
     }
     if original_answer is not None:

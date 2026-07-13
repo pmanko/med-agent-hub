@@ -40,6 +40,24 @@ _MAPPINGS = [
 _TEST_SOURCE = patient_source_registry("[1] obs\n[2] order\n", _MAPPINGS)
 
 
+def test_answer_validation_wire_deduplicates_identical_issues():
+    issue = {
+        "id": "upcoming_date",
+        "status": "warn",
+        "severity": "warn",
+        "claim": "No upcoming appointment is documented.",
+        "reason": "The chart contains appointment-like observations only.",
+        "source_indices": [1, 2],
+    }
+
+    wire = team._answer_validation_wire(
+        "checked",
+        issues=[issue, dict(issue)],
+    )
+
+    assert wire["issues"] == [issue]
+
+
 def _stub_common(monkeypatch):
     def fake_gate(**k):
         return (
@@ -731,6 +749,101 @@ def test_ground_references_checks_a_multi_citation_claim_against_combined_source
     assert "[2] 2006-06-06 Weight (kg): 71 kg" in prompt
 
 
+def test_ground_references_accepts_matching_deterministic_temporal_source_set(monkeypatch):
+    async def should_not_call_semantic_grounding(*_args, **_kwargs):
+        raise AssertionError("a matching deterministic temporal check should be authoritative")
+
+    monkeypatch.setattr(team, "_bounded_entailment_verdicts", should_not_call_semantic_grounding)
+    statement = (
+        "The record does not show any upcoming appointments; all listed return visit dates are "
+        "in the past [1][2]."
+    )
+    refs = [
+        {
+            "index": index,
+            "usage": [{"location": "answer", "text": statement}],
+        }
+        for index in (1, 2)
+    ]
+    mappings = [
+        {"index": 1, "date": "2026-01-01", "text": "Return visit date: 2026-01-15"},
+        {"index": 2, "date": "2026-02-01", "text": "Return visit date: 2026-02-15"},
+    ]
+    deterministic_checks = [
+        {
+            "id": "upcoming_date",
+            "status": "pass",
+            "claim": statement,
+            "source_indices": [1, 2],
+        }
+    ]
+
+    grounded = asyncio.run(
+        team._ground_references(
+            None,
+            "M",
+            statement,
+            refs,
+            mappings,
+            deterministic_checks=deterministic_checks,
+        )
+    )
+
+    assert [item["groundingStatus"] for item in grounded] == ["verified", "verified"]
+    assert all(
+        item["groundingChecks"][0]["method"] == "deterministic_temporal"
+        for item in grounded
+    )
+
+
+def test_ground_references_does_not_apply_temporal_pass_to_a_larger_claim(monkeypatch):
+    calls = []
+
+    async def semantic_grounding(_client, _model, pairs):
+        calls.extend(pairs)
+        return [False]
+
+    monkeypatch.setattr(team, "_bounded_entailment_verdicts", semantic_grounding)
+    statement = (
+        "No upcoming appointments are documented [1][2], and the patient has diabetes [1][2]."
+    )
+    refs = [
+        {
+            "index": index,
+            "usage": [{"location": "answer", "text": statement}],
+        }
+        for index in (1, 2)
+    ]
+    mappings = [
+        {"index": 1, "date": "2026-01-01", "text": "Return visit date: 2026-01-15"},
+        {"index": 2, "date": "2026-02-01", "text": "Return visit date: 2026-02-15"},
+    ]
+
+    grounded = asyncio.run(
+        team._ground_references(
+            None,
+            "M",
+            statement,
+            refs,
+            mappings,
+            deterministic_checks=[
+                {
+                    "id": "upcoming_date",
+                    "status": "pass",
+                    "claim": "No upcoming appointments are documented [1][2]",
+                    "source_indices": [1, 2],
+                }
+            ],
+        )
+    )
+
+    assert len(calls) == 1
+    assert [item["groundingStatus"] for item in grounded] == [
+        "unsupported",
+        "unsupported",
+    ]
+
+
 def test_ground_references_does_not_silently_drop_sources_within_one_claim(monkeypatch):
     fake_chat, calls = _fake_chat_returning_verdicts([["YES"]])
     monkeypatch.setattr(team, "_chat", fake_chat)
@@ -858,6 +971,43 @@ def test_ground_references_verifies_literal_table_facts_without_an_llm(monkeypat
     assert {check["method"] for check in grounded[0]["groundingChecks"]} == {
         "deterministic_exact"
     }
+
+
+def test_ground_references_does_not_exact_verify_a_conflicting_multi_source_cell(
+    monkeypatch,
+):
+    async def semantic_grounding(_client, _model, _pairs):
+        return [False]
+
+    monkeypatch.setattr(team, "_bounded_entailment_verdicts", semantic_grounding)
+    blocks = [
+        {
+            "kind": "table",
+            "columns": [{"key": "weight", "label": "Weight"}],
+            "rows": [
+                {
+                    "cells": {
+                        "weight": {"text": "71 kg", "refs": [1, 2]},
+                    }
+                }
+            ],
+        }
+    ]
+    mappings = [
+        {"index": 1, "date": "2006-06-06", "text": "Weight (kg): 71 kg"},
+        {"index": 2, "date": "2006-06-06", "text": "Weight (kg): 80 kg"},
+    ]
+    refs = team._resolve_references(
+        [1, 2], mappings, blocks=blocks, grounding_status="checking"
+    )
+
+    grounded = asyncio.run(team._ground_references(None, "M", "", refs, mappings))
+
+    assert [item["groundingStatus"] for item in grounded] == [
+        "unsupported",
+        "unsupported",
+    ]
+    assert all("method" not in item["groundingChecks"][0] for item in grounded)
 
 
 def test_ground_references_exact_match_does_not_match_inside_another_word(monkeypatch):
@@ -1521,6 +1671,54 @@ def test_final_unsupported_grounding_marks_answer_needs_review(monkeypatch):
     assert pending["answerValidation"]["status"] == "needs_review"
     assert final["answerValidation"]["status"] == "needs_review"
     assert final["answerValidation"]["issues"][-1]["id"] == "citation_grounding"
+    assert final["confidence"]["answer"]["level"] == "red"
+
+
+def test_final_source_set_grounding_failure_is_reported_once(monkeypatch):
+    _stub_common(monkeypatch)
+
+    async def fake_answer(*_args, **_kwargs):
+        return "Collective unsupported claim [1][2].", [1, 2], []
+
+    async def unsupported_set(_client, _model, _answer, references, _mappings):
+        output = []
+        for reference in references:
+            item = dict(reference)
+            item["grounded"] = False
+            item["groundingStatus"] = "unsupported"
+            item["groundingScope"] = "source_set"
+            item["groundingGroup"] = [1, 2]
+            item["groundingChecks"] = [
+                {
+                    "status": "unsupported",
+                    "claim": "Collective unsupported claim .",
+                    "location": "answer",
+                    "path": "",
+                    "source_indices": [1, 2],
+                }
+            ]
+            output.append(item)
+        return output
+
+    monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
+    monkeypatch.setattr(team, "_ground_references", unsupported_set)
+
+    final = dict(_collect(_product_profile()))["done"]
+    issues = [
+        issue
+        for issue in final["answerValidation"]["issues"]
+        if issue["id"] == "citation_grounding"
+    ]
+    assert issues == [
+        {
+            "id": "citation_grounding",
+            "status": "fail",
+            "severity": "block",
+            "reason": "The cited source set did not fully support the associated claim.",
+            "source_indices": [1, 2],
+        }
+    ]
+    assert final["confidence"]["answer"]["level"] == "red"
 
 
 def test_final_unchecked_grounding_cannot_leave_answer_checked(monkeypatch):
@@ -1546,6 +1744,7 @@ def test_final_unchecked_grounding_cannot_leave_answer_checked(monkeypatch):
     assert final["answerValidation"]["issues"][-1]["id"] == (
         "citation_grounding_unavailable"
     )
+    assert final["confidence"]["answer"]["level"] == "yellow"
 
 
 def test_product_overdeclared_unscoped_citations_cannot_leave_answer_checked(

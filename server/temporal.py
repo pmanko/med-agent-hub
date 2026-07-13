@@ -51,7 +51,10 @@ _FUTURE_EVENT_PATTERN = r"(?:appointment|visit|follow-?up|return[- ]visit)"
 _FUTURE_DATE_PREFIX_RE = re.compile(
     rf"(?:\b(?:(?:next|upcoming|future)\s+)+{_FUTURE_EVENT_PATTERN}(?:\s+date)?\b"
     rf"(?:\s+(?:is|will be|on|for))?|"
-    rf"\b{_FUTURE_EVENT_PATTERN}(?:\s+date)?\b\s+is\s+scheduled\s+for)\s*$",
+    rf"\b{_FUTURE_EVENT_PATTERN}(?:\s+date)?\b\s+is\s+scheduled\s+for|"
+    rf"(?:\bhas\s+(?:a\s+)?|^\s*(?:(?:the|a)\s+)?)"
+    rf"scheduled\s+{_FUTURE_EVENT_PATTERN}(?:\s+date)?\b"
+    rf"(?:\s+(?:is|will be|on|for))?)\s*$",
     re.I,
 )
 _FUTURE_DATE_SUFFIX_RE = re.compile(
@@ -62,6 +65,15 @@ _FUTURE_DATE_SUFFIX_RE = re.compile(
 _NO_UPCOMING_RE = re.compile(
     r"\b(no|none|not|without|does not|doesn't|isn't|not documented|no documented)"
     r"\b.{0,90}\b(upcoming|future|next|appointment|follow-?up|return visit)\b",
+    re.I,
+)
+_CITATION_SEQUENCE_RE = re.compile(r"(?:\s*,?\s*\[\d+\])+", re.I)
+_SAFE_NO_UPCOMING_CLAIM_RE = re.compile(
+    r"(?:(?:the )?(?:record|chart) (?:does not|doesn't) (?:show|document) any|no) "
+    r"(?:upcoming|future) (?:appointments?|visits?)"
+    r"(?: (?:are )?(?:documented|shown))?"
+    r"(?:; all listed (?:return[- ]visit|appointment|follow-?up) dates are "
+    r"(?:in the )?(?:past|historical))?[.!]?",
     re.I,
 )
 _LAST_VISIT_RE = re.compile(
@@ -864,6 +876,19 @@ def _date_has_future_framing(sentence: str, date_match: re.Match) -> bool:
     return bool(_FUTURE_DATE_SUFFIX_RE.search(suffix))
 
 
+def _no_upcoming_claim_scope(answer: str) -> str:
+    for sentence in _SENTENCE_RE.split(answer or ""):
+        match = _NO_UPCOMING_RE.search(sentence)
+        if not match:
+            continue
+        normalized = _CITATION_SEQUENCE_RE.sub("", sentence.strip())
+        normalized = re.sub(r"\s+([.;!?])", r"\1", " ".join(normalized.split()))
+        if _SAFE_NO_UPCOMING_CLAIM_RE.fullmatch(normalized):
+            return sentence.strip()[:240]
+        return match.group(0)[:240]
+    return (answer or "")[:240]
+
+
 def _latest_candidate(cands: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     return max(
         (c for c in cands if c.get("date")), key=lambda c: c["date"], default=None
@@ -1515,9 +1540,15 @@ def run_temporal_gate(
                 "upcoming_date",
                 "pass",
                 "warn",
-                a[:240],
+                _no_upcoming_claim_scope(a),
                 "No future appointment candidates are present after the reference date.",
-                [],
+                sorted(
+                    {
+                        candidate.get("index")
+                        for candidate in all_candidates
+                        if isinstance(candidate.get("index"), int)
+                    }
+                ),
             )
         for sentence in _SENTENCE_RE.split(a):
             for date_match in _ISO_TOKEN_RE.finditer(sentence):

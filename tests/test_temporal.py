@@ -746,6 +746,119 @@ def test_historical_return_visit_date_is_not_treated_as_last_clinical_visit():
     assert gate["patch_answer"] is None
 
 
+def test_no_upcoming_pass_carries_all_candidate_source_indices():
+    chart = """Patient records (most recent first):
+[4] (2026-01-26) Encounter: Adult Visit at Clinic A
+[22] Return visit date: 2026-02-23
+[55] Return visit date: 2026-01-14
+"""
+    facts = temporal.build_temporal_facts(chart, "2026-06-20")
+
+    gate = temporal.run_temporal_gate(
+        "Does this patient have any upcoming appointments?",
+        (
+            "The record does not show any upcoming appointments; all listed return visit dates "
+            "are in the past [22][55]."
+        ),
+        [22, 55],
+        facts,
+        "enforce",
+    )
+
+    check = next(
+        check
+        for check in gate["checks"]
+        if check["id"] == "upcoming_date" and check["status"] == "pass"
+    )
+    assert check["source_indices"] == [22, 55]
+    assert check["claim"] == (
+        "The record does not show any upcoming appointments; all listed return visit dates "
+        "are in the past [22][55]."
+    )
+
+
+def test_no_upcoming_pass_claim_excludes_an_unrelated_coordinated_claim():
+    chart = """Patient records (most recent first):
+[22] Return visit date: 2026-02-23
+[55] Return visit date: 2026-01-14
+"""
+    facts = temporal.build_temporal_facts(chart, "2026-06-20")
+    answer = (
+        "No upcoming appointments are documented [22][55], and the patient has diabetes "
+        "[22][55]."
+    )
+
+    gate = temporal.run_temporal_gate(
+        "Does this patient have any upcoming appointments?",
+        answer,
+        [22, 55],
+        facts,
+        "enforce",
+    )
+
+    check = next(
+        check
+        for check in gate["checks"]
+        if check["id"] == "upcoming_date" and check["status"] == "pass"
+    )
+    assert "diabetes" not in check["claim"]
+    assert check["claim"] in answer
+
+
+def test_no_upcoming_pass_claim_excludes_unrelated_claim_with_visit_word():
+    chart = """Patient records (most recent first):
+[22] Return visit date: 2026-02-23
+[55] Return visit date: 2026-01-14
+"""
+    facts = temporal.build_temporal_facts(chart, "2026-06-20")
+    answer = (
+        "No upcoming appointments are documented [22][55], and diabetes was diagnosed at the "
+        "last visit [22][55]."
+    )
+
+    gate = temporal.run_temporal_gate(
+        "Does this patient have any upcoming appointments?",
+        answer,
+        [22, 55],
+        facts,
+        "enforce",
+    )
+
+    check = next(
+        check
+        for check in gate["checks"]
+        if check["id"] == "upcoming_date" and check["status"] == "pass"
+    )
+    assert "diabetes" not in check["claim"]
+
+
+def test_no_upcoming_pass_claim_excludes_unrelated_subordinate_claim():
+    chart = """Patient records (most recent first):
+[22] Return visit date: 2026-02-23
+[55] Return visit date: 2026-01-14
+"""
+    facts = temporal.build_temporal_facts(chart, "2026-06-20")
+    answer = (
+        "No upcoming appointments are documented because diabetes was diagnosed at the last "
+        "visit [22][55]."
+    )
+
+    gate = temporal.run_temporal_gate(
+        "Does this patient have any upcoming appointments?",
+        answer,
+        [22, 55],
+        facts,
+        "enforce",
+    )
+
+    check = next(
+        check
+        for check in gate["checks"]
+        if check["id"] == "upcoming_date" and check["status"] == "pass"
+    )
+    assert "diabetes" not in check["claim"]
+
+
 def test_return_visit_short_answer_does_not_use_last_encounter_fallback():
     chart = """Patient records (most recent first):
 [4] (2026-01-26) Encounter: Adult Visit at Clinic A
@@ -813,6 +926,40 @@ def test_past_date_scheduled_as_appointment_is_framed_as_future():
     )
 
     assert any(
+        check["id"] == "upcoming_date" and check["status"] == "fail"
+        for check in gate["checks"]
+    )
+
+
+def test_scheduled_return_visit_on_past_date_is_framed_as_future():
+    facts = temporal.build_temporal_facts(_CHART, "2006-06-01")
+
+    gate = temporal.run_temporal_gate(
+        "Does this patient have any upcoming appointments?",
+        "The patient has a scheduled return visit on 2006-05-18 [5].",
+        [5],
+        facts,
+        "enforce",
+    )
+
+    assert any(
+        check["id"] == "upcoming_date" and check["status"] == "fail"
+        for check in gate["checks"]
+    )
+
+
+def test_historical_scheduled_return_visit_is_not_framed_as_future():
+    facts = temporal.build_temporal_facts(_CHART, "2006-06-01")
+
+    gate = temporal.run_temporal_gate(
+        "What appointment history is documented?",
+        "The patient had a scheduled return visit on 2006-05-18 [5].",
+        [5],
+        facts,
+        "enforce",
+    )
+
+    assert not any(
         check["id"] == "upcoming_date" and check["status"] == "fail"
         for check in gate["checks"]
     )
