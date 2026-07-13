@@ -40,7 +40,8 @@ class ChatCompletionRequest(BaseModel):
     patient: Optional[str] = None
 
 
-def _served_backend_models() -> set[str]:
+def _served_backend_models() -> Optional[set[str]]:
+    """Return the router catalog, or ``None`` when discovery itself fails."""
     headers = {}
     if llm_config.api_key:
         headers["Authorization"] = f"Bearer {llm_config.api_key}"
@@ -57,13 +58,15 @@ def _served_backend_models() -> set[str]:
             if item.get("id")
         }
     except Exception:
-        return set()
+        return None
 
 
 @router.get("/v1/models")
 def list_models() -> Dict[str, Any]:
     created = int(time.time())
-    served = _served_backend_models()
+    discovered = _served_backend_models()
+    backend_reachable = discovered is not None
+    served = discovered or set()
     profiles = [get_profile(profile_id) for profile_id in profile_ids()]
     readiness = []
     for profile in profiles:
@@ -74,7 +77,7 @@ def list_models() -> Dict[str, Any]:
         ]
         unavailable_reasons = (
             ("model_backend_unreachable",)
-            if not served
+            if not backend_reachable
             else tuple(f"model_not_loaded:{model}" for model in missing)
         )
         readiness.append((profile, not missing, unavailable_reasons))

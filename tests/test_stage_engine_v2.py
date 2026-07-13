@@ -153,23 +153,43 @@ def test_product_context_resolves_temporal_date_once_for_drug_safety_and_facts(
     assert state.reference_date == "2026-07-10"
 
 
-def test_blocking_adapter_drains_the_same_async_stage_engine(monkeypatch):
+def test_streaming_and_blocking_adapters_use_the_same_stage_engine(monkeypatch):
     request = engine.ExecutionRequest(
         profile=get_profile("answer:gemma-4-12b"),
         messages=[{"role": "user", "content": "Question"}],
     )
     calls = []
 
-    async def fake_engine(actual_request, _budget_policy=None):
-        calls.append(actual_request)
-        yield "result", '{"answer":"ok","citations":[],"blocks":[]}'
+    class RecordingEngine:
+        async def events(self, actual_request):
+            calls.append(("events", actual_request))
+            yield "result", '{"answer":"stream","citations":[],"blocks":[]}'
 
-    monkeypatch.setattr(engine, "_execute_stages", fake_engine)
+        async def drain(self, actual_request):
+            calls.append(("drain", actual_request))
+            result = None
+            async for name, data in self.events(actual_request):
+                if name in {"result", "done"}:
+                    result = data
+            return result
 
+    shared = RecordingEngine()
+    monkeypatch.setattr(engine, "_ENGINE", shared)
+
+    async def collect():
+        return [event async for event in engine.execute_profile(request)]
+
+    assert asyncio.run(collect()) == [
+        ("result", '{"answer":"stream","citations":[],"blocks":[]}')
+    ]
     assert asyncio.run(engine.drain_profile(request)) == (
-        '{"answer":"ok","citations":[],"blocks":[]}'
+        '{"answer":"stream","citations":[],"blocks":[]}'
     )
-    assert calls == [request]
+    assert calls == [
+        ("events", request),
+        ("drain", request),
+        ("events", request),
+    ]
 
 
 def test_duplicate_legacy_execution_entrypoints_are_removed():

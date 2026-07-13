@@ -555,6 +555,31 @@ def test_backend_model_discovery_omits_auth_when_api_key_is_blank():
     )
 
 
+def test_backend_model_discovery_returns_none_when_router_is_unreachable():
+    backend = SimpleNamespace(base_url="http://router", api_key="")
+    with patch.object(openai_compat, "llm_config", backend), patch.object(
+        openai_compat.httpx, "get", side_effect=ConnectionError("offline")
+    ):
+        assert openai_compat._served_backend_models() is None
+
+
+def test_v1_models_distinguishes_empty_catalog_from_unreachable_router():
+    with patch.object(openai_compat, "_served_backend_models", return_value=set()):
+        empty = TestClient(app).get("/v1/models").json()["data"]
+    with patch.object(openai_compat, "_served_backend_models", return_value=None):
+        unreachable = TestClient(app).get("/v1/models").json()["data"]
+
+    assert all(
+        item["unavailable_reasons"]
+        and all(reason.startswith("model_not_loaded:") for reason in item["unavailable_reasons"])
+        for item in empty
+    )
+    assert all(
+        item["unavailable_reasons"] == ["model_backend_unreachable"]
+        for item in unreachable
+    )
+
+
 def test_v1_models_advertises_staged_capability_not_just_id_prefix():
     # Gate 10: clients must route by this field, never by pattern-matching the id string.
     with patch.object(openai_compat, "_served_backend_models", return_value={"gemma-e4b"}):
