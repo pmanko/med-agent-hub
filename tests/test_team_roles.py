@@ -11,7 +11,12 @@ import json
 import pytest
 
 from server import config, team
-from tests.factories import run_profile, team_profile
+from tests.factories import (
+    TEST_EXPERT_MODEL,
+    TEST_ORCHESTRATOR_MODEL,
+    run_profile,
+    team_profile,
+)
 
 
 def _fake_chat_factory(calls):
@@ -56,7 +61,7 @@ def test_synthesis_uses_synthesizer_model_loop_uses_orchestrator(monkeypatch):
     monkeypatch.setattr(team, "_chat", _fake_chat_factory(calls))
     profile = team_profile(
         orchestrator="ORCH-MODEL",
-        expert=team.llm_config.med_model,
+        expert=TEST_EXPERT_MODEL,
         answer="SYNTH-MODEL",
         indepth="SYNTH-MODEL",
         output="combined",
@@ -106,7 +111,7 @@ def test_synthesis_applies_anti_degeneration_params(monkeypatch):
     monkeypatch.setattr(team, "_chat", fake_chat)
     profile = team_profile(
         orchestrator="ORCH-MODEL",
-        expert=team.llm_config.med_model,
+        expert=TEST_EXPERT_MODEL,
         answer="SYNTH-MODEL",
         indepth="SYNTH-MODEL",
         output="combined",
@@ -156,7 +161,7 @@ def test_synthesis_reads_reasoning_content_when_content_empty(monkeypatch):
     monkeypatch.setattr(team, "_chat", fake_chat)
     profile = team_profile(
         orchestrator="ORCH-MODEL",
-        expert=team.llm_config.med_model,
+        expert=TEST_EXPERT_MODEL,
         answer="SYNTH-MODEL",
         indepth="SYNTH-MODEL",
         output="combined",
@@ -198,8 +203,8 @@ def test_synthesis_normalizes_literal_newline_and_reconciles_citations(monkeypat
 
     monkeypatch.setattr(team, "_chat", fake_chat)
     profile = team_profile(
-        orchestrator=team.llm_config.orchestrator_model,
-        expert=team.llm_config.med_model,
+        orchestrator=TEST_ORCHESTRATOR_MODEL,
+        expert=TEST_EXPERT_MODEL,
         answer="S",
         indepth="S",
         output="combined",

@@ -13,6 +13,10 @@ from server.context_sources import (
 )
 from server.levels_loader import Profile, compile_profile
 
+TEST_ORCHESTRATOR_MODEL = "test-orchestrator"
+TEST_EXPERT_MODEL = "test-expert"
+TEST_ANSWER_MODEL = "test-answer"
+
 
 class _StaticPatientSource:
     name = "test-patient"

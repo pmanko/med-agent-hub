@@ -19,11 +19,6 @@ class LLMConfig:
 
     base_url: str = os.getenv("LLM_BASE_URL", "http://localhost:8077")
     api_key: str = os.getenv("LLM_API_KEY", "")
-    orchestrator_model: str = os.getenv("ORCHESTRATOR_MODEL", "google/gemma-4-e4b")
-    synthesizer_model: str = os.getenv(
-        "SYNTHESIZER_MODEL", os.getenv("ORCHESTRATOR_MODEL", "google/gemma-4-e4b")
-    )
-    med_model: str = os.getenv("MED_MODEL", "medgemma-1.5-4b-it")
     temperature: float = float(os.getenv("LLM_TEMPERATURE", "0.2"))
     max_tokens: int = int(os.getenv("LLM_MAX_TOKENS", "2000"))
 

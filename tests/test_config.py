@@ -11,9 +11,9 @@ from server import config
 
 def test_llm_backend_is_openai_compatible_router_configuration():
     assert config.llm_config.base_url.startswith(("http://", "https://"))
-    assert config.llm_config.orchestrator_model
-    assert config.llm_config.synthesizer_model
-    assert config.llm_config.med_model
+    assert not hasattr(config.llm_config, "orchestrator_model")
+    assert not hasattr(config.llm_config, "synthesizer_model")
+    assert not hasattr(config.llm_config, "med_model")
     config.validate_config()
 
 

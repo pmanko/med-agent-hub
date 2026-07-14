@@ -15,7 +15,13 @@ from fastapi.testclient import TestClient
 
 from server import levels_loader, openai_compat, team
 from server.main import app
-from tests.factories import make_profile, run_profile
+from tests.factories import (
+    TEST_ANSWER_MODEL,
+    TEST_EXPERT_MODEL,
+    TEST_ORCHESTRATOR_MODEL,
+    make_profile,
+    run_profile,
+)
 
 ENVELOPE = json.dumps(
     {"answer": "Lisinopril 10 mg [1]", "citations": [1], "blocks": []}
@@ -38,9 +44,9 @@ def run(coro):
 def _team_profile(*, output="combined", answer_prompt="synthesis-answer", indepth=True):
     stages = ["context", "gather", "answer", "gate"]
     models = {
-        "orchestrator": team.llm_config.orchestrator_model,
-        "expert": team.llm_config.med_model,
-        "answer": team.llm_config.synthesizer_model,
+        "orchestrator": TEST_ORCHESTRATOR_MODEL,
+        "expert": TEST_EXPERT_MODEL,
+        "answer": TEST_ANSWER_MODEL,
     }
     prompts = {
         "orchestrator": "orchestrator",
@@ -49,7 +55,7 @@ def _team_profile(*, output="combined", answer_prompt="synthesis-answer", indept
     }
     if indepth:
         stages.append("indepth")
-        models["indepth"] = team.llm_config.synthesizer_model
+        models["indepth"] = TEST_ANSWER_MODEL
         prompts["indepth"] = "synthesis-indepth"
     return make_profile(
         topology="team",
@@ -64,7 +70,7 @@ def _indepth_leg():
     return make_profile(
         topology="leg",
         stages=("context", "indepth"),
-        models={"indepth": team.llm_config.synthesizer_model},
+        models={"indepth": TEST_ANSWER_MODEL},
         prompts={"indepth": "synthesis-indepth"},
         output="indepth",
     )
@@ -402,7 +408,7 @@ def test_orchestrator_consults_the_medical_expert_on_a_tool_call():
             return {"content": ENVELOPE}
         # First orchestrator turn emits a tool call; later turns are done.
         orchestrator_turns = sum(
-            1 for m in calls if m == team.llm_config.orchestrator_model
+            1 for m in calls if m == TEST_ORCHESTRATOR_MODEL
         )
         if tools is not None and orchestrator_turns == 1:
             return {
@@ -425,7 +431,7 @@ def test_orchestrator_consults_the_medical_expert_on_a_tool_call():
 
     json.loads(out)  # still a valid envelope
     # The medgemma expert was actually called (a _chat to the med model).
-    assert team.llm_config.med_model in calls
+    assert TEST_EXPERT_MODEL in calls
 
 
 def test_normalized_kb_records_are_threaded_into_the_medical_expert():
@@ -447,7 +453,7 @@ def test_normalized_kb_records_are_threaded_into_the_medical_expert():
     ):
         if response_format is not None:
             return {"content": ENVELOPE}
-        if model == team.llm_config.med_model:
+        if model == TEST_EXPERT_MODEL:
             captured["expert_user"] = messages[-1]["content"]
             return {"content": "the chart's regimen is outdated per the guidance"}
         # Orchestrator: consult the expert once, then stop.

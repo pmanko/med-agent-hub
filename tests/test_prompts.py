@@ -17,7 +17,13 @@ from unittest.mock import patch
 import pytest
 
 from server import prompt_loader, team
-from tests.factories import run_profile, team_profile
+from tests.factories import (
+    TEST_ANSWER_MODEL,
+    TEST_EXPERT_MODEL,
+    TEST_ORCHESTRATOR_MODEL,
+    run_profile,
+    team_profile,
+)
 
 PROMPTS_DIR = Path(team.__file__).parent / "prompts"
 
@@ -41,10 +47,10 @@ MESSAGES = [
 
 def _profile():
     return team_profile(
-        orchestrator=team.llm_config.orchestrator_model,
-        expert=team.llm_config.med_model,
-        answer=team.llm_config.synthesizer_model,
-        indepth=team.llm_config.synthesizer_model,
+        orchestrator=TEST_ORCHESTRATOR_MODEL,
+        expert=TEST_EXPERT_MODEL,
+        answer=TEST_ANSWER_MODEL,
+        indepth=TEST_ANSWER_MODEL,
         output="combined",
     )
 

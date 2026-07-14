@@ -983,7 +983,7 @@ async def _run_medical_expert(
     query: str,
     chart_context: str,
     expert_system: str,
-    model: Optional[str] = None,
+    model: str,
     temperature: float = 0.1,
     repeat_penalty: Optional[float] = None,
     dry_multiplier: float = EXPERT_DRY_MULTIPLIER,
@@ -997,7 +997,7 @@ async def _run_medical_expert(
     try:
         msg = await _chat(
             client,
-            model or llm_config.med_model,
+            model,
             messages,
             temperature=temperature,
             max_tokens=800,
