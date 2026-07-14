@@ -49,6 +49,35 @@ def test_product_profiles_temporal_cannot_weaken_enforce():
     ) == (True, "enforce")
 
 
+@pytest.mark.parametrize(
+    ("profile_id", "model", "temporal_gate"),
+    [
+        ("eval-e4b-answer-only", "gemma-e4b", "off"),
+        ("eval-e4b-temporal-enforce", "gemma-e4b", "enforce"),
+        ("eval-12b-answer-only", "gemma-4-12b", "off"),
+        ("eval-12b-temporal-enforce", "gemma-4-12b", "enforce"),
+    ],
+)
+def test_answer_path_evaluation_profiles_have_matched_exact_context(
+    profile_id: str, model: str, temporal_gate: str
+):
+    profile = get_profile(profile_id)
+
+    assert profile.visibility == "evaluation"
+    assert profile.default is False
+    assert profile.topology == "single"
+    assert profile.stages == ("context", "answer", "gate")
+    assert profile.models == {"answer": model}
+    assert profile.prompts == {"answer": "synthesis-answer"}
+    assert profile.policies["output"] == "bare"
+    assert profile.policies["temporal_gate"] == temporal_gate
+    assert profile.policies["temporal_render"] == "full"
+    assert profile.context_window == 24576
+    assert profile.reserved_output_tokens == 4096
+    assert profile.exact_tokenizer is True
+    assert profile.knobs["answer"]["temperature"] == 0
+
+
 def test_non_advertised_product_envelope_temporal_cannot_weaken_enforce():
     profile = get_profile("med-agent-team-low-validated-12b")
 
