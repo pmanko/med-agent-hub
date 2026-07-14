@@ -5,8 +5,83 @@ import json
 from dataclasses import replace
 
 from server import engine
+from server.context_sources import (
+    ContextBudget,
+    ContextView,
+    EvidenceLedger,
+    EvidenceRecord,
+    IncludedRecord,
+)
 from server.levels_loader import get_profile
 from tests.factories import patient_source_registry
+
+
+def test_conversation_history_summary_proves_priors_without_plaintext():
+    messages = [
+        {"role": "system", "content": "instructions"},
+        {"role": "user", "content": "First clinical question"},
+        {"role": "assistant", "content": "First clinical answer"},
+        {"role": "user", "content": "Follow-up question"},
+    ]
+
+    summary = engine._conversation_history_summary(messages)
+
+    assert summary["prior_message_count"] == 2
+    assert summary["prior_turn_count"] == 1
+    assert summary["prior_roles"] == ["user", "assistant"]
+    assert len(summary["prior_messages_sha256"]) == 64
+    assert "clinical" not in json.dumps(summary)
+    assert summary == engine._conversation_history_summary(messages)
+    assert summary != engine._conversation_history_summary(messages[-1:])
+
+
+def test_stage_engine_uses_injected_context_selector():
+    record = EvidenceRecord(
+        source="alternate",
+        source_priority=20,
+        stable_id="alternate:1",
+        resource_type="Observation",
+        resource_uuid="obs-1",
+        date="2026-01-01",
+        text="(2026-01-01) Observation - Weight: 70 kg",
+    )
+    calls = []
+
+    async def selector(ledger, **kwargs):
+        calls.append((ledger, kwargs))
+        return ContextView(
+            records=(record,),
+            record_indices=(1,),
+            mode="selected",
+            included=(IncludedRecord(record.stable_id, "alternate_selector"),),
+            excluded=(),
+            input_tokens=1,
+            input_limit=99,
+        )
+
+    class Counter:
+        async def count(self, _model, _text):
+            return 1
+
+    request = engine.ExecutionRequest(
+        profile=get_profile("single-e4b-checked"),
+        messages=[{"role": "user", "content": "What is the weight?"}],
+        context_selector=selector,
+    )
+    state = engine._State(
+        messages=[{"role": "user", "content": "What is the weight?"}],
+        ledger=EvidenceLedger((record,)),
+        token_counter=Counter(),
+        context_budget=ContextBudget(100, 1),
+    )
+
+    asyncio.run(engine._select_answer_context(request, state))
+
+    assert len(calls) == 1
+    assert calls[0][0] == state.ledger
+    assert calls[0][1]["question"] == "What is the weight?"
+    assert calls[0][1]["model"] == request.profile.models["answer"]
+    assert "[1]" in state.chart
 
 
 def test_product_profile_defaults_temporal_anchor_to_wall_clock(monkeypatch):

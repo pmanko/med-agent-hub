@@ -202,6 +202,21 @@ class ContextView:
         ]
 
 
+class ContextSelector(Protocol):
+    async def __call__(
+        self,
+        ledger: EvidenceLedger,
+        *,
+        question: str,
+        model: str,
+        budget: ContextBudget,
+        counter: TokenCounter,
+        fixed_text: str = "",
+        input_measure: Optional[Callable[[str], Awaitable[int]]] = None,
+    ) -> ContextView:
+        ...
+
+
 @dataclass(frozen=True)
 class HistoryView:
     messages: Tuple[Mapping[str, Any], ...]

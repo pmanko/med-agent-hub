@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import time
@@ -33,6 +34,7 @@ from .config import (
 from .context_sources import (
     ContextBudget,
     ContextRequest,
+    ContextSelector,
     ContextSourceError,
     ContextView,
     EvidenceLedger,
@@ -64,6 +66,7 @@ class ExecutionRequest:
     is_disconnected: Optional[Callable[[], Awaitable[bool]]] = None
     source_registry: Optional[SourceRegistry] = None
     token_counter: Optional[TokenCounter] = None
+    context_selector: Optional[ContextSelector] = None
 
 
 def _chart_answer_response_format() -> Dict[str, Any]:
@@ -164,6 +167,38 @@ class _State:
     drug_context: Any = None
     raw_review_content: Optional[str] = None
     history: Optional[HistoryView] = None
+
+
+def _conversation_history_summary(
+    messages: Sequence[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    """Describe prior conversational context without storing clinical plaintext."""
+    conversational = [
+        {
+            "role": str(message.get("role") or ""),
+            "content": message.get("content"),
+        }
+        for message in messages
+        if message.get("role") in {"user", "assistant"}
+    ]
+    current_user_index = next(
+        (
+            index
+            for index in range(len(conversational) - 1, -1, -1)
+            if conversational[index]["role"] == "user"
+        ),
+        len(conversational),
+    )
+    prior = conversational[:current_user_index]
+    encoded = json.dumps(
+        prior, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("utf-8")
+    return {
+        "prior_message_count": len(prior),
+        "prior_turn_count": sum(item["role"] == "user" for item in prior),
+        "prior_roles": [item["role"] for item in prior],
+        "prior_messages_sha256": hashlib.sha256(encoded).hexdigest(),
+    }
 
 
 def _prompt(profile: Profile, role: str, fallback: str) -> str:
@@ -423,7 +458,8 @@ async def _select_answer_context(
             "The profile requires exact context selection.",
             source="llama-router",
         )
-    state.view = await select_context(
+    selector = request.context_selector or select_context
+    state.view = await selector(
         state.ledger,
         question=stages._latest_user_text(state.messages),
         model=request.profile.models["answer"],
@@ -484,7 +520,8 @@ async def _select_indepth_context(
             "The profile requires exact context selection.",
             source="llama-router",
         )
-    view = await select_context(
+    selector = request.context_selector or select_context
+    view = await selector(
         state.ledger,
         question=stages._latest_user_text(state.messages),
         model=request.profile.models["indepth"],
@@ -563,7 +600,8 @@ async def _select_answer_review_context(
         )
         return await counter.count(reviewer_model, rendered)
 
-    view = await select_context(
+    selector = request.context_selector or select_context
+    view = await selector(
         state.ledger,
         question=stages._latest_user_text(state.messages),
         model=reviewer_model,
@@ -632,7 +670,8 @@ async def _select_indepth_review_context(
         )
         return await counter.count(reviewer_model, rendered)
 
-    view = await select_context(
+    selector = request.context_selector or select_context
+    view = await selector(
         state.ledger,
         question=stages._latest_user_text(state.messages),
         model=reviewer_model,
@@ -910,6 +949,9 @@ async def _execute_stages(
 ) -> AsyncIterator[Tuple[str, str]]:
     """Execute the profile stage list and emit public phase events as stages complete."""
     state = _State(messages=[dict(message) for message in request.messages])
+    state.steps.append(
+        {"role": "conversation_history", **_conversation_history_summary(request.messages)}
+    )
     sampling = _sampling(request)
     answer_response_format = _answer_response_format(request)
     temporal_enabled, temporal_mode = resolve_temporal_policy(

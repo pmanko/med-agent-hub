@@ -32,6 +32,8 @@ _ALLOWED_STAGES = {
     "indepth_gate",
 }
 
+StagePlan = Tuple[str, ...]
+
 
 class ModelNotFoundError(KeyError):
     code = "model_not_found"
@@ -49,7 +51,7 @@ class Profile:
     id: str
     label: str
     topology: str
-    stages: Tuple[str, ...]
+    stages: StagePlan
     models: Mapping[str, str]
     prompts: Mapping[str, str]
     policies: Mapping[str, Any]
