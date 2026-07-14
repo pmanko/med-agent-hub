@@ -70,6 +70,7 @@ def test_answer_path_evaluation_profiles_have_matched_exact_context(
     assert profile.models == {"answer": model}
     assert profile.prompts == {"answer": "synthesis-answer"}
     assert profile.policies["output"] == "bare"
+    assert profile.policies["answer_contract"] == "chart_answer"
     assert profile.policies["temporal_gate"] == temporal_gate
     assert profile.policies["temporal_render"] == "full"
     assert profile.context_window == 24576
@@ -109,11 +110,20 @@ def test_low_level_answer_leg_remains_minimal_and_experimental():
 
     assert profile.low_level_leg is True
     assert profile.stages == ("context", "answer", "gate")
+    assert "answer_contract" not in profile.policies
     assert profile.policies["temporal_gate"] == "warn"
     assert profile.knobs["answer"]["temperature"] == 0.0
     assert resolve_temporal_policy(
         profile, {"temporal": False, "temporal_gate": "off"}
     ) == (False, "off")
+
+
+def test_invalid_answer_contract_is_rejected_at_compile_time():
+    profile = get_profile("eval-e4b-answer-only")
+    bad = replace(profile, policies={**profile.policies, "answer_contract": "typo"})
+
+    with pytest.raises(ValueError, match="invalid answer contract"):
+        compile_profile(bad)
 
 
 def test_invalid_grounding_order_is_rejected_at_compile_time():

@@ -19,6 +19,7 @@ _PROMPTS = Path(__file__).parent / "prompts"
 _TEMPORAL_GATE_MODES = {"off", "warn", "enforce"}
 _TOPOLOGIES = {"single", "team", "leg"}
 _OUTPUT_MODES = {"bare", "combined", "product", "review", "indepth"}
+_ANSWER_CONTRACTS = {"caller", "chart_answer"}
 _ALLOWED_STAGES = {
     "context",
     "gather",
@@ -234,6 +235,20 @@ def compile_profile(profile: Profile) -> Profile:
     if profile.output_mode not in _OUTPUT_MODES:
         raise ValueError(
             f"profile {profile.id!r} has invalid output mode {profile.output_mode!r}"
+        )
+    answer_contract = str(
+        profile.policies.get(
+            "answer_contract",
+            "chart_answer" if profile.output_mode == "product" else "caller",
+        )
+    )
+    if answer_contract not in _ANSWER_CONTRACTS:
+        raise ValueError(
+            f"profile {profile.id!r} has invalid answer contract {answer_contract!r}"
+        )
+    if profile.output_mode == "product" and answer_contract != "chart_answer":
+        raise ValueError(
+            f"product profile {profile.id!r} must use the chart_answer contract"
         )
 
     stages = profile.stages

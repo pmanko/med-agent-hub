@@ -133,6 +133,18 @@ def test_product_profile_owns_answer_schema_when_client_omits_it():
     ]
 
 
+def test_evaluation_profile_owns_answer_schema_when_client_omits_it():
+    request = engine.ExecutionRequest(
+        profile=get_profile("eval-e4b-answer-only"),
+        messages=[{"role": "user", "content": "Question"}],
+    )
+
+    response_format = engine._answer_response_format(request)
+
+    assert response_format is not None
+    assert response_format["json_schema"]["name"] == "chart_answer"
+
+
 def test_low_level_leg_does_not_gain_product_answer_schema():
     request = engine.ExecutionRequest(
         profile=get_profile("answer:gemma-4-12b"),
@@ -146,6 +158,17 @@ def test_product_profile_ignores_conflicting_client_answer_schema():
     explicit = {"type": "json_schema", "json_schema": {"name": "client_contract"}}
     request = engine.ExecutionRequest(
         profile=get_profile("single-e4b-checked"),
+        messages=[{"role": "user", "content": "Question"}],
+        response_format=explicit,
+    )
+
+    assert engine._answer_response_format(request)["json_schema"]["name"] == "chart_answer"
+
+
+def test_evaluation_profile_ignores_conflicting_client_answer_schema():
+    explicit = {"type": "json_schema", "json_schema": {"name": "client_contract"}}
+    request = engine.ExecutionRequest(
+        profile=get_profile("eval-e4b-answer-only"),
         messages=[{"role": "user", "content": "Question"}],
         response_format=explicit,
     )

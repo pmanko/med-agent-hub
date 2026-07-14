@@ -120,8 +120,11 @@ def _chart_answer_response_format() -> Dict[str, Any]:
 
 
 def _answer_response_format(request: ExecutionRequest) -> Optional[Dict[str, Any]]:
-    """Product profiles own their contract; low-level legs remain caller-controlled."""
-    if request.profile.output_mode == "product":
+    """Complete profiles own their contract; low-level legs remain caller-controlled."""
+    if (
+        request.profile.output_mode == "product"
+        or request.profile.policies.get("answer_contract") == "chart_answer"
+    ):
         return _chart_answer_response_format()
     return request.response_format
 

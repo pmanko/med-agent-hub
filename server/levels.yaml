@@ -162,16 +162,16 @@ profiles:
     context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true}
     knobs: {answer: {temperature: 0}}
 
-  # Controlled harness profiles: same exact context and prompt as the product
-  # singles, but fewer stages. `evaluation` visibility keeps them out of the
-  # OpenMRS product picker while allowing direct hub comparisons.
+  # Controlled harness profiles: same exact context, prompt, and answer contract
+  # as the product singles, but fewer stages. `evaluation` visibility keeps them
+  # out of the OpenMRS product picker while allowing direct hub comparisons.
   eval-e4b-answer-only:
     label: E4B answer only
     topology: single
     stages: *single_bare
     models: {answer: gemma-e4b}
     prompts: {answer: synthesis-answer}
-    policies: {output: bare, temporal_gate: "off", temporal_render: full}
+    policies: {output: bare, answer_contract: chart_answer, temporal_gate: "off", temporal_render: full}
     visibility: evaluation
     context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true}
     knobs: {answer: {temperature: 0}}
@@ -182,7 +182,7 @@ profiles:
     stages: *single_bare
     models: {answer: gemma-e4b}
     prompts: {answer: synthesis-answer}
-    policies: {output: bare, temporal_gate: enforce, temporal_render: full}
+    policies: {output: bare, answer_contract: chart_answer, temporal_gate: enforce, temporal_render: full}
     visibility: evaluation
     context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true}
     knobs: {answer: {temperature: 0}}
@@ -193,7 +193,7 @@ profiles:
     stages: *single_bare
     models: {answer: gemma-4-12b}
     prompts: {answer: synthesis-answer}
-    policies: {output: bare, temporal_gate: "off", temporal_render: full}
+    policies: {output: bare, answer_contract: chart_answer, temporal_gate: "off", temporal_render: full}
     visibility: evaluation
     context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true}
     knobs: {answer: {temperature: 0}}
@@ -204,7 +204,7 @@ profiles:
     stages: *single_bare
     models: {answer: gemma-4-12b}
     prompts: {answer: synthesis-answer}
-    policies: {output: bare, temporal_gate: enforce, temporal_render: full}
+    policies: {output: bare, answer_contract: chart_answer, temporal_gate: enforce, temporal_render: full}
     visibility: evaluation
     context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true}
     knobs: {answer: {temperature: 0}}
