@@ -529,6 +529,14 @@ def test_v1_models_advertises_the_levels():
     assert ids == levels_loader.profile_ids()
 
 
+def test_root_status_does_not_duplicate_authoritative_profile_metadata():
+    response = TestClient(app).get("/")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "Server is running"
+    assert "default_profile" not in response.json()
+
+
 def test_backend_model_discovery_uses_configured_bearer_auth():
     backend = SimpleNamespace(base_url="https://router.example", api_key="secret")
     with patch.object(openai_compat, "llm_config", backend), patch.object(

@@ -21,7 +21,7 @@ OpenAI-compatible model router at LLM_BASE_URL
 
 Streaming and blocking requests execute the same asynchronous engine in `server/engine.py`. Blocking requests drain the engine's events into the response envelope. Product profiles stream `answer_done`, optional `answer_validation`, `indepth_pending`, `indepth_done` or `indepth_error`, and `done`.
 
-Product terminal events carry the complete assistant envelope. In-Depth state is emitted only in the nested `inDepth` object so its `answer` cannot overwrite the direct clinical Answer. Java and ESM clients may still accept historical flattened In-Depth events as input compatibility, but the hub does not emit that colliding shape.
+Product terminal events carry the complete assistant envelope. In-Depth state is emitted only in the nested `inDepth` object so its `answer` cannot overwrite the direct clinical Answer. Java and ESM clients reject the retired flattened In-Depth shape.
 
 ## Profiles
 
