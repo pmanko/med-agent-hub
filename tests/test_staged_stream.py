@@ -273,6 +273,54 @@ def test_post_review_punctuation_rewrite_preserves_usable_answer_and_needs_revie
     assert events["done"]["confidence"]["answer"]["level"] == "red"
 
 
+def test_deterministic_answer_patch_keeps_earliest_draft_and_its_references(
+    monkeypatch,
+):
+    _stub_common(monkeypatch)
+
+    async def fake_answer(*_args, **_kwargs):
+        return "Wrong dated answer [1].", [1], []
+
+    def patch_first_answer(**kwargs):
+        return (
+            "Correct dated answer [2].",
+            [2],
+            [],
+            {
+                "mode": "enforce",
+                "status": "fail",
+                "applied": "patch",
+                "checks": [],
+            },
+            kwargs["answer_text"],
+        )
+
+    monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
+    monkeypatch.setattr(team, "_apply_temporal_gate", patch_first_answer)
+
+    events = dict(_collect(_product_profile(review_model="V")))
+    final = events["done"]
+
+    assert final["answer"] == "Correct dated answer [2]."
+    assert final["answerValidation"]["status"] == "edited"
+    assert final["answerValidation"]["originalAnswer"] == "Wrong dated answer [1]."
+    assert [
+        reference["index"]
+        for reference in final["answerValidation"]["originalReferences"]
+    ] == [1]
+    assert final["answerValidation"]["originalReferences"][0]["usage"][0][
+        "location"
+    ] == "answer_review_draft"
+    assert [
+        reference["index"]
+        for reference in final["references"]
+        if any(
+            usage.get("location") == "answer"
+            for usage in reference.get("usage") or []
+        )
+    ] == [2]
+
+
 def test_preliminary_problem_stays_checking_until_configured_review_finishes(
     monkeypatch,
 ):
@@ -1613,6 +1661,25 @@ def test_nested_references_resolve_against_current_source_ledger():
     assert references[1]["groundingStatus"] == "unchecked"
 
 
+def test_unresolved_final_citation_is_needs_review_and_low_confidence(monkeypatch):
+    _stub_common(monkeypatch)
+
+    async def fake_answer(*_args, **_kwargs):
+        return "Claim with an unknown source [99].", [99], []
+
+    monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
+
+    final = dict(_collect(_product_profile()))["done"]
+
+    assert final["answerValidation"]["status"] == "needs_review"
+    assert final["confidence"]["answer"]["level"] == "red"
+    assert final["references"][0]["resolutionStatus"] == "unresolved"
+    assert any(
+        issue["id"] == "citation_resolution"
+        for issue in final["answerValidation"]["issues"]
+    )
+
+
 def test_temporal_block_rendering_keeps_each_table_date_with_its_row_values():
     blocks = [
         {
@@ -1779,6 +1846,7 @@ def test_product_unscoped_citations_over_multiple_claims_cannot_leave_answer_che
         issue["id"] == "citation_scope"
         for issue in final["answerValidation"]["issues"]
     )
+    assert final["confidence"]["answer"]["level"] == "red"
 
 
 def test_product_unscoped_source_set_on_one_claim_can_leave_answer_checked(monkeypatch):
@@ -1791,7 +1859,10 @@ def test_product_unscoped_source_set_on_one_claim_can_leave_answer_checked(monke
 
     final = dict(_collect(_product_profile()))["done"]
     assert final["answer"] == "The chart contains two relevant records [1][2]."
-    assert final["answerValidation"]["status"] == "checked"
+    assert final["answerValidation"]["status"] == "edited"
+    assert final["answerValidation"]["originalAnswer"] == (
+        "The chart contains two relevant records."
+    )
     assert not any(
         issue["id"] == "citation_scope"
         for issue in final["answerValidation"]["issues"]
@@ -1843,6 +1914,30 @@ def test_withheld_malformed_table_remains_needs_review_after_llm_review(monkeypa
 
     assert final["blocks"] == []
     assert final["answerValidation"]["status"] == "needs_review"
+    assert final["answerValidation"]["originalAnswer"] == (
+        "The documented weight is shown below [1]."
+    )
+    assert final["answerValidation"]["originalBlocks"] == [
+        {
+            "kind": "table",
+            "title": "Weight",
+            "columns": [
+                {"key": "date", "label": "Date"},
+                {"key": "weight", "label": "Weight"},
+            ],
+            "rows": [
+                {
+                    "cells": {
+                        "unexpected": {"text": "2025-01-01", "refs": [1]}
+                    }
+                }
+            ],
+        }
+    ]
+    assert [
+        reference["index"]
+        for reference in final["answerValidation"]["originalReferences"]
+    ] == [1]
     assert any(
         issue["id"] == "table_contract"
         for issue in final["answerValidation"]["issues"]
@@ -1870,7 +1965,10 @@ def test_product_single_unscoped_citation_is_scoped_and_grounded(monkeypatch):
     ]
     assert [reference["index"] for reference in answer_references] == [1]
     assert answer_references[0]["groundingStatus"] == "verified"
-    assert final["answerValidation"]["status"] == "checked"
+    assert final["answerValidation"]["status"] == "edited"
+    assert final["answerValidation"]["originalAnswer"] == (
+        "The documented visit was on 2025-01-01."
+    )
 
 
 def test_temporal_patch_is_citation_canonicalized_after_gate(monkeypatch):
@@ -1897,7 +1995,178 @@ def test_temporal_patch_is_citation_canonicalized_after_gate(monkeypatch):
         issue["id"] == "citation_scope"
         for issue in final["answerValidation"]["issues"]
     )
-    assert final["answerValidation"]["status"] == "checked"
+    assert final["answerValidation"]["status"] == "edited"
+    assert final["answerValidation"]["originalAnswer"] == (
+        "Unsafe draft without markers."
+    )
+
+
+def test_citation_contract_edit_preserves_the_first_model_answer(monkeypatch):
+    _stub_common(monkeypatch)
+
+    async def fake_answer(*_args, **_kwargs):
+        return "Single clinical claim.", [1], []
+
+    monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
+
+    final = dict(_collect(_product_profile()))["done"]
+
+    assert final["answer"] == "Single clinical claim [1]."
+    assert final["answerValidation"]["status"] == "edited"
+    assert final["answerValidation"]["originalAnswer"] == "Single clinical claim."
+    assert final["answerValidation"]["originalReferences"][0]["index"] == 1
+
+
+def test_citation_only_edit_preserves_original_sources_for_review(monkeypatch):
+    _stub_common(monkeypatch)
+
+    async def fake_answer(*_args, **_kwargs):
+        return "Single clinical claim [1].", [1], []
+
+    def change_citation_list(answer, _citations, blocks):
+        return answer, [1, 2], []
+
+    monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
+    monkeypatch.setattr(team, "_enforce_product_citation_contract", change_citation_list)
+
+    final = dict(_collect(_product_profile()))["done"]
+
+    assert final["answer"] == "Single clinical claim [1]."
+    assert [reference["index"] for reference in final["references"]] == [1, 2]
+    assert final["answerValidation"]["status"] == "edited"
+    assert final["answerValidation"]["originalAnswer"] == final["answer"]
+    assert [
+        reference["index"]
+        for reference in final["answerValidation"]["originalReferences"]
+    ] == [1]
+
+
+def test_late_stage_failure_preserves_the_already_emitted_answer(monkeypatch):
+    _stub_common(monkeypatch)
+
+    async def fake_answer(*_args, **_kwargs):
+        return "Visible fast answer [1].", [1], []
+
+    async def failed_grounding(*_args, **_kwargs):
+        raise RuntimeError("grounding unavailable")
+
+    monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
+    monkeypatch.setattr(team, "_ground_references", failed_grounding)
+
+    events = dict(_collect(_product_profile()))
+
+    assert events["answer_done"]["answer"] == "Visible fast answer [1]."
+    assert events["done"]["answer"] == "Visible fast answer [1]."
+    assert events["done"]["answerValidation"]["status"] == "needs_review"
+    assert events["done"]["confidence"]["answer"]["level"] == "red"
+    assert events["done"]["inDepth"]["status"] == "needs_review"
+
+
+def test_post_review_failure_restores_exact_emitted_answer_state(monkeypatch):
+    _stub_common(monkeypatch)
+
+    async def fake_answer(*_args, **_kwargs):
+        return "Visible fast answer [1].", [1], []
+
+    review_calls = 0
+
+    async def rewrite_answer(*_args, **_kwargs):
+        nonlocal review_calls
+        review_calls += 1
+        if review_calls == 1:
+            return {
+                "answer_ok": False,
+                "errors": [{"chart": "Use record 2."}],
+                "corrected_answer": "Reviewed answer [2].",
+            }
+        return {"answer_ok": True, "errors": []}
+
+    async def failed_grounding(*_args, **_kwargs):
+        raise RuntimeError("grounding unavailable")
+
+    monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
+    monkeypatch.setattr(team, "_validate_answer_rewrite", rewrite_answer)
+    monkeypatch.setattr(team, "_ground_references", failed_grounding)
+
+    events = dict(_collect(_product_profile(review_model="V")))
+    emitted = events["answer_done"]
+    final = events["done"]
+
+    assert final["answer"] == emitted["answer"]
+    assert final["blocks"] == emitted["blocks"]
+    assert final["references"] == emitted["references"]
+    assert final["answerValidation"]["status"] == "needs_review"
+    assert final["confidence"]["answer"]["level"] == "red"
+
+
+def test_indepth_failure_preserves_latest_validated_answer_state(monkeypatch):
+    _stub_common(monkeypatch)
+
+    async def fake_answer(*_args, **_kwargs):
+        return "Visible fast answer [1].", [1], []
+
+    review_calls = 0
+
+    async def rewrite_answer(*_args, **_kwargs):
+        nonlocal review_calls
+        review_calls += 1
+        if review_calls == 1:
+            return {
+                "answer_ok": False,
+                "errors": [{"chart": "Use record 2."}],
+                "corrected_answer": "Reviewed answer [2].",
+            }
+        return {"answer_ok": True, "errors": []}
+
+    def failed_indepth_gate(*_args, **_kwargs):
+        raise RuntimeError("in-depth gate unavailable")
+
+    monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
+    monkeypatch.setattr(team, "_validate_answer_rewrite", rewrite_answer)
+    monkeypatch.setattr(engine.temporal, "gate_indepth_claims", failed_indepth_gate)
+
+    events = dict(_collect(_product_profile(review_model="V")))
+    validated = events["answer_validation"]
+    final = events["done"]
+
+    assert validated["answer"] == "Reviewed answer [2]."
+    assert final["answer"] == validated["answer"]
+    assert final["blocks"] == validated["blocks"]
+    assert final["references"] == validated["references"]
+    assert final["answerValidation"]["status"] == "needs_review"
+    assert final["confidence"]["answer"]["level"] == "red"
+
+
+def test_review_can_recover_from_initial_unresolved_citation(monkeypatch):
+    _stub_common(monkeypatch)
+
+    async def fake_answer(*_args, **_kwargs):
+        return "Wrong source [99].", [99], []
+
+    review_calls = 0
+
+    async def rewrite_answer(*_args, **_kwargs):
+        nonlocal review_calls
+        review_calls += 1
+        if review_calls == 1:
+            return {
+                "answer_ok": False,
+                "errors": [{"chart": "Use record 1."}],
+                "corrected_answer": "Correct source [1].",
+            }
+        return {"answer_ok": True, "errors": []}
+
+    monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
+    monkeypatch.setattr(team, "_validate_answer_rewrite", rewrite_answer)
+
+    events = dict(_collect(_product_profile(review_model="V")))
+
+    assert events["answer_done"]["confidence"]["answer"]["level"] == "red"
+    final = events["done"]
+    assert final["answer"] == "Correct source [1]."
+    assert final["answerValidation"]["status"] == "edited"
+    assert final["confidence"]["answer"]["level"] != "red"
+    assert final["references"][0]["index"] == 1
 
 
 def test_final_mixed_grounding_cannot_leave_answer_checked(monkeypatch):
@@ -2007,6 +2276,31 @@ def test_unavailable_indepth_reviewer_is_withheld_in_product_envelope(monkeypatc
     assert final["inDepth"]["validation"]["review_status"] == "unavailable"
 
 
+def test_failed_indepth_retry_preserves_the_first_model_draft(monkeypatch):
+    _stub_common(monkeypatch)
+
+    async def fake_answer(*_args, **_kwargs):
+        return "Supported answer [1].", [1], []
+
+    async def failed_retry(*_args, **kwargs):
+        kwargs["steps"].append(
+            {
+                "role": "indepth_synth",
+                "claims": ["Rejected first In-Depth draft [1]."],
+            }
+        )
+        raise RuntimeError("retry failed")
+
+    monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
+    monkeypatch.setattr(team, "_gen_indepth", failed_retry)
+
+    final = dict(_collect(_product_profile(review_model="review")))["done"]
+
+    assert final["inDepth"]["status"] == "needs_review"
+    assert final["inDepth"]["reviewDraft"] == "- Rejected first In-Depth draft [1]."
+    assert final["inDepth"]["reviewReferences"][0]["index"] == 1
+
+
 def test_partial_indepth_review_is_reported_as_edited(monkeypatch):
     _stub_common(monkeypatch)
 
@@ -2014,6 +2308,15 @@ def test_partial_indepth_review_is_reported_as_edited(monkeypatch):
         return "Supported answer [1].", [1], []
 
     async def edited(*_args, **_kwargs):
+        _kwargs["steps"].append(
+            {
+                "role": "indepth_synth",
+                "claims": [
+                    "The supported claim remains [1].",
+                    "The unsupported draft claim [2].",
+                ],
+            }
+        )
         return ["The supported claim remains [1]."], {
             "level": "red",
             "status": "edited",
@@ -2029,12 +2332,71 @@ def test_partial_indepth_review_is_reported_as_edited(monkeypatch):
     final = dict(_collect(_product_profile(review_model="review")))["done"]
     assert final["inDepth"]["status"] == "complete"
     assert final["inDepth"]["answer"] == "- The supported claim remains [1]."
+    assert final["inDepth"]["reviewDraft"] == (
+        "- The supported claim remains [1].\n"
+        "- The unsupported draft claim [2]."
+    )
+    assert [reference["index"] for reference in final["inDepth"]["reviewReferences"]] == [1, 2]
+    assert [reference["index"] for reference in final["references"]] == [1]
+    assert all(
+        reference["usage"][0]["location"] == "indepth_review_draft"
+        for reference in final["inDepth"]["reviewReferences"]
+    )
+    assert {
+        reference["usage"][0]["text"]
+        for reference in final["inDepth"]["reviewReferences"]
+    } == {
+        "- The supported claim remains [1].",
+        "- The unsupported draft claim [2].",
+    }
     validation = final["inDepth"]["validation"]
     assert validation["status"] == "edited"
     assert validation["review_status"] == "edited"
     assert validation["review_removed"] == 1
     assert validation["review_issues"] == "The second claim was unsupported."
     assert validation["review_attempts"] == 1
+
+
+def test_successful_indepth_retry_keeps_first_rejected_draft(monkeypatch):
+    _stub_common(monkeypatch)
+
+    async def fake_answer(*_args, **_kwargs):
+        return "Supported answer [1].", [1], []
+
+    async def retry_success(*_args, **kwargs):
+        kwargs["steps"].extend(
+            [
+                {
+                    "role": "indepth_synth",
+                    "claims": ["First rejected claim [2]."],
+                },
+                {
+                    "role": "indepth_resynth",
+                    "claims": ["Accepted retry claim [1]."],
+                },
+            ]
+        )
+        return ["Accepted retry claim [1]."], {
+            "level": "yellow",
+            "status": "edited",
+            "removed": 1,
+            "issues": "The first draft was unsupported.",
+            "review_attempts": 2,
+            "note": "The draft was replaced.",
+        }
+
+    monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
+    monkeypatch.setattr(team, "_gen_indepth", retry_success)
+
+    final = dict(_collect(_product_profile(review_model="review")))["done"]
+
+    assert final["inDepth"]["answer"] == "- Accepted retry claim [1]."
+    assert final["inDepth"]["reviewDraft"] == "- First rejected claim [2]."
+    assert [
+        reference["index"]
+        for reference in final["inDepth"]["reviewReferences"]
+    ] == [2]
+    assert final["confidence"]["in_depth"]["level"] == "yellow"
 
 
 @pytest.mark.parametrize(
@@ -2144,6 +2506,14 @@ def test_indepth_citation_cannot_inherit_answer_verified_verdict(monkeypatch):
     assert indepth_done["references"][0]["groundingStatus"] == "verified"
     assert final["inDepth"]["status"] == "needs_review"
     assert final["inDepth"]["answer"] == ""
+    assert final["inDepth"]["reviewDraft"] == "- Unsupported In-Depth claim [1]."
+    assert final["inDepth"]["reviewReferences"][0]["index"] == 1
+    assert final["inDepth"]["reviewReferences"][0]["groundingStatus"] == "unchecked"
+    assert final["inDepth"]["reviewReferences"][0]["usage"][0]["location"] == (
+        "indepth_review_draft"
+    )
+    assert final["confidence"]["in_depth"]["level"] == "red"
+    assert "withheld" in final["confidence"]["in_depth"]["note"]
     assert final["inDepth"]["validation"]["citation_checks"][0]["status"] == "fail"
     assert "evidence checks rejected every claim" in final["inDepth"]["error"]
     assert final["references"][0]["groundingStatus"] == "verified"
@@ -2343,6 +2713,8 @@ def test_uncited_indepth_claim_is_withheld_and_cannot_report_complete(monkeypatc
 
     assert final["inDepth"]["status"] == "needs_review"
     assert final["inDepth"]["answer"] == ""
+    assert final["inDepth"]["reviewDraft"] == "- Uncited clinical interpretation."
+    assert final["inDepth"]["reviewReferences"] == []
     check = final["inDepth"]["validation"]["citation_checks"][0]
     assert check["status"] == "fail"
     assert "no source citation" in check["reason"]

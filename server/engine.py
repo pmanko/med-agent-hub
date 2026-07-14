@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import json
 import os
@@ -154,12 +155,21 @@ class _State:
     answer_validation: Optional[Dict[str, Any]] = None
     answer_gate: Optional[Dict[str, Any]] = None
     original_answer: Optional[str] = None
+    initial_answer_text: Optional[str] = None
+    initial_answer_citations: List[int] = field(default_factory=list)
+    initial_answer_blocks: List[Any] = field(default_factory=list)
+    original_answer_references: List[Dict[str, Any]] = field(default_factory=list)
+    answer_check_edited: bool = False
+    answer_emitted: bool = False
+    stable_answer_snapshot: Optional[Dict[str, Any]] = None
     review_draft: Optional[str] = None
     review_draft_citations: List[int] = field(default_factory=list)
     review_draft_blocks: List[Any] = field(default_factory=list)
     review_edited: bool = False
     references: List[Dict[str, Any]] = field(default_factory=list)
     claims: List[str] = field(default_factory=list)
+    indepth_review_draft: str = ""
+    indepth_review_references: List[Dict[str, Any]] = field(default_factory=list)
     indepth_conf: Dict[str, Any] = field(
         default_factory=lambda: {"level": "green", "note": ""}
     )
@@ -862,6 +872,67 @@ async def _disconnected(request: ExecutionRequest) -> bool:
         return False
 
 
+def _initial_answer_changed(state: _State) -> bool:
+    initial = state.initial_answer_text
+    _initial_block_text, initial_block_refs = stages._block_temporal_text_and_refs(
+        state.initial_answer_blocks
+    )
+    _current_block_text, current_block_refs = stages._block_temporal_text_and_refs(
+        state.blocks
+    )
+    initial_sources = stages._citation_indices(
+        list(state.initial_answer_citations) + initial_block_refs,
+        initial or "",
+    )
+    current_sources = stages._citation_indices(
+        list(state.citations) + current_block_refs,
+        state.answer_text,
+    )
+    return (state.answer_check_edited or state.review_edited) and initial is not None and (
+        initial.strip() != state.answer_text.strip()
+        or initial_sources != current_sources
+        or state.initial_answer_blocks != state.blocks
+    )
+
+
+def _snapshot_stable_answer(state: _State) -> Dict[str, Any]:
+    """Capture the latest coherent Answer state already shown to the client."""
+    return copy.deepcopy(
+        {
+            "answer_text": state.answer_text,
+            "citations": state.citations,
+            "blocks": state.blocks,
+            "references": state.references,
+            "answer_conf": state.answer_conf,
+            "answer_validation": state.answer_validation,
+            "answer_gate": state.answer_gate,
+            "citation_issues": state.citation_issues,
+            "table_issues": state.table_issues,
+            "original_answer_references": state.original_answer_references,
+            "answer_check_edited": state.answer_check_edited,
+            "review_edited": state.review_edited,
+        }
+    )
+
+
+def _restore_stable_answer(state: _State) -> None:
+    """Restore the last stable Answer after a later stage fails partway through."""
+    snapshot = state.stable_answer_snapshot
+    if not snapshot:
+        return
+    for name, value in snapshot.items():
+        setattr(state, name, copy.deepcopy(value))
+
+
+def _mark_answer_low_confidence(state: _State, note: str) -> None:
+    """Keep lifecycle and confidence aligned for deterministic blocking issues."""
+    existing = str(state.answer_conf.get("note") or "").strip()
+    notes = [existing] if existing else []
+    if note and note not in notes:
+        notes.append(note)
+    state.answer_conf = {"level": "red", "note": " ".join(notes)}
+
+
 def _stream_payload(
     state: _State,
     request: ExecutionRequest,
@@ -877,8 +948,29 @@ def _stream_payload(
         payload["model"] = request.model_label or request.profile.id
     if state.answer_conf:
         payload["confidence"] = {"answer": state.answer_conf}
+        if (
+            in_depth is not None
+            and in_depth.get("status") != "pending"
+            and state.indepth_conf
+        ):
+            payload["confidence"]["in_depth"] = state.indepth_conf
     if state.answer_validation is not None:
-        payload["answerValidation"] = state.answer_validation
+        validation = dict(state.answer_validation)
+        initial = state.initial_answer_text
+        initial_changed = _initial_answer_changed(state)
+        if initial_changed:
+            validation["originalAnswer"] = initial
+            validation["originalReferences"] = list(
+                state.original_answer_references
+            )
+            validation["originalBlocks"] = copy.deepcopy(
+                state.initial_answer_blocks
+            )
+        elif initial is not None:
+            validation.pop("originalAnswer", None)
+            validation.pop("originalReferences", None)
+            validation.pop("originalBlocks", None)
+        payload["answerValidation"] = validation
     if state.answer_gate is not None:
         payload["temporalGate"] = state.answer_gate
     if in_depth is not None:
@@ -893,6 +985,53 @@ def _stream_payload(
         payload["safetyWarnings"] = warnings
     payload["context"] = _context_summary(state)
     return json.dumps(payload)
+
+
+def _initial_indepth_draft_claims(state: _State) -> List[str]:
+    """Return the first model draft later review/gates had an opportunity to change."""
+    for step in state.steps:
+        if step.get("role") not in {"indepth", "indepth_synth", "indepth_resynth"}:
+            continue
+        claims = step.get("original_claims") or step.get("claims") or []
+        if isinstance(claims, list):
+            return [str(claim) for claim in claims if str(claim).strip()]
+    return [str(claim) for claim in state.claims if str(claim).strip()]
+
+
+def _capture_indepth_review_artifact(state: _State) -> None:
+    claims = _initial_indepth_draft_claims(state)
+    if not claims:
+        return
+    state.indepth_review_draft = "\n".join("- " + claim for claim in claims)
+    state.indepth_review_references = stages._resolve_references(
+        stages._extract_citations(state.indepth_review_draft),
+        state.mappings,
+        answer=state.indepth_review_draft,
+        grounding_status="unchecked",
+        answer_usage_location="indepth_review_draft",
+    )
+
+
+def _in_depth_payload(state: _State) -> Dict[str, Any]:
+    final_answer = (
+        "" if state.indepth_error else "\n".join("- " + claim for claim in state.claims)
+    )
+    payload: Dict[str, Any] = {
+        "status": "needs_review" if state.indepth_error else "complete",
+        "answer": final_answer,
+        "error": state.indepth_error or "",
+        "validation": state.indepth_gate,
+    }
+    if state.indepth_error_code:
+        payload["errorCode"] = state.indepth_error_code
+        payload["mandatorySourceIds"] = list(state.indepth_mandatory_source_ids)
+    if (
+        state.indepth_review_draft
+        and state.indepth_review_draft.strip() != final_answer.strip()
+    ):
+        payload["reviewDraft"] = state.indepth_review_draft
+        payload["reviewReferences"] = list(state.indepth_review_references)
+    return payload
 
 
 def _raw_result(request: ExecutionRequest, state: _State) -> str:
@@ -1014,9 +1153,14 @@ async def _execute_stages(
             reference_date=state.reference_date,
             temporal_facts=state.temporal_facts,
             temporal_gate=state.answer_gate,
-            original_answer_text=state.original_answer,
+            original_answer_text=(
+                state.initial_answer_text
+                if _initial_answer_changed(state)
+                else state.original_answer
+            ),
             answer_validation=state.answer_validation,
             context_summary=_context_summary(state),
+            request_context=request.context,
             indepth_temporal_gate=state.indepth_gate,
             final_references=state.references,
             sampling={
@@ -1103,12 +1247,16 @@ async def _execute_stages(
                         repeat_penalty=sampling["answer_repeat_penalty"],
                         dry=sampling["answer_dry"],
                     )
+                    state.initial_answer_text = state.answer_text
+                    state.initial_answer_citations = list(state.citations)
+                    state.initial_answer_blocks = copy.deepcopy(state.blocks)
                     state.steps.append(
                         {
                             "role": "answer_synth",
                             "model": request.profile.models["answer"],
                             "output": state.answer_text,
                             "citations": state.citations,
+                            "blocks": copy.deepcopy(state.blocks),
                         }
                     )
                     # Substance checking is part of the deterministic answer gate, not
@@ -1136,6 +1284,11 @@ async def _execute_stages(
                         max_tokens=request.max_tokens,
                         max_loops=int(request.profile.policies.get("review_loops", 1)),
                         steps=state.steps,
+                    )
+                    state.answer_check_edited = (
+                        state.answer_text != state.initial_answer_text
+                        or state.citations != state.initial_answer_citations
+                        or state.blocks != state.initial_answer_blocks
                     )
                     record_stage_timing()
                     continue
@@ -1172,6 +1325,10 @@ async def _execute_stages(
                             )
                         if gate_count > 1 and state.blocks != before_blocks:
                             state.review_edited = True
+                        if gate_count == 1 and (
+                            state.blocks != before_blocks or block_issues
+                        ):
+                            state.answer_check_edited = True
                     if gate_count == 1:
                         (
                             state.answer_text,
@@ -1193,6 +1350,9 @@ async def _execute_stages(
                         state.answer_conf = stages._merge_temporal_gate_conf(
                             state.answer_conf, state.answer_gate
                         )
+                        state.answer_check_edited = state.answer_check_edited or (
+                            state.answer_gate.get("applied") in {"patch", "fallback"}
+                        )
                     elif state.review_edited:
                         (
                             state.answer_text,
@@ -1213,6 +1373,9 @@ async def _execute_stages(
                             steps=state.steps,
                             answer_conf=state.answer_conf,
                             prior_original_answer=state.original_answer,
+                        )
+                        state.answer_check_edited = state.answer_check_edited or (
+                            state.answer_gate.get("applied") in {"patch", "fallback"}
                         )
                     else:
                         state.answer_conf = stages._merge_temporal_gate_conf(
@@ -1238,6 +1401,8 @@ async def _execute_stages(
                             or state.citations != before_gate_citations
                         ):
                             state.review_edited = True
+                        if gate_count == 1 and contract_changed:
+                            state.answer_check_edited = True
                         if contract_changed or state.citation_issues:
                             state.steps.append(
                                 {
@@ -1249,10 +1414,24 @@ async def _execute_stages(
                                     "after": list(state.citations),
                                 }
                             )
+                        if state.citation_issues:
+                            _mark_answer_low_confidence(
+                                state,
+                                "The answer has a blocking citation-format or citation-scope issue.",
+                            )
                     record_stage_timing()
                     continue
 
                 if stage == "resolve_refs":
+                    if state.initial_answer_text is not None:
+                        state.original_answer_references = stages._resolve_references(
+                            state.initial_answer_citations,
+                            state.mappings,
+                            answer=state.initial_answer_text,
+                            blocks=state.initial_answer_blocks,
+                            grounding_status="unchecked",
+                            answer_usage_location="answer_review_draft",
+                        )
                     state.references = stages._resolve_references(
                         state.citations,
                         state.mappings,
@@ -1283,6 +1462,11 @@ async def _execute_stages(
                         }
                         for reference in unresolved
                     )
+                    if unresolved:
+                        _mark_answer_low_confidence(
+                            state,
+                            "One or more citations do not resolve to the current evidence ledger.",
+                        )
                     fast_status = (
                         "checking" if has_review or has_final_grounding else "checked"
                     )
@@ -1300,6 +1484,8 @@ async def _execute_stages(
                     prior_validation = state.answer_validation
                     state.answer_validation = fast_validation
                     record_stage_timing()
+                    state.answer_emitted = True
+                    state.stable_answer_snapshot = _snapshot_stable_answer(state)
                     yield (
                         "answer_done",
                         _stream_payload(
@@ -1353,7 +1539,7 @@ async def _execute_stages(
                         state.answer_text,
                         state.answer_validation,
                         reviewed_gate,
-                        state.original_answer,
+                        reviewed_original_answer,
                     ) = await stages._review_existing_answer(
                         client,
                         messages=state.messages,
@@ -1378,6 +1564,8 @@ async def _execute_stages(
                     )
                     if reviewed_gate is not None:
                         state.answer_gate = reviewed_gate
+                    if state.original_answer is None:
+                        state.original_answer = reviewed_original_answer
                     reviewed = json.loads(state.raw_review_content or "{}")
                     state.citations = [
                         value
@@ -1413,6 +1601,16 @@ async def _execute_stages(
                             reference.get("resolutionStatus") == "unresolved"
                             for reference in state.references
                         )
+                        if unresolved_final:
+                            _mark_answer_low_confidence(
+                                state,
+                                "One or more citations do not resolve to the current evidence ledger.",
+                            )
+                        if state.citation_issues:
+                            _mark_answer_low_confidence(
+                                state,
+                                "The answer has a blocking citation-format or citation-scope issue.",
+                            )
                         if (
                             state.answer_conf.get("level") == "red"
                             or unresolved_final
@@ -1422,7 +1620,7 @@ async def _execute_stages(
                             status = "needs_review"
                         elif prior_status == "unavailable":
                             status = "unavailable"
-                        elif state.review_edited:
+                        elif state.review_edited or _initial_answer_changed(state):
                             status = "edited"
                         else:
                             status = "checked"
@@ -1538,12 +1736,26 @@ async def _execute_stages(
                             reference.get("resolutionStatus") == "unresolved"
                             for reference in state.references
                         )
+                        if unresolved:
+                            _mark_answer_low_confidence(
+                                state,
+                                "One or more citations do not resolve to the current evidence ledger.",
+                            )
+                        if state.citation_issues:
+                            _mark_answer_low_confidence(
+                                state,
+                                "The answer has a blocking citation-format or citation-scope issue.",
+                            )
                         status = (
                             "needs_review"
                             if unresolved
                             or state.citation_issues
                             or state.answer_conf.get("level") == "red"
-                            else "checked"
+                            else (
+                                "edited"
+                                if _initial_answer_changed(state)
+                                else "checked"
+                            )
                         )
                         state.answer_validation = stages._answer_validation_wire(
                             status,
@@ -1555,6 +1767,7 @@ async def _execute_stages(
                         )
                     record_stage_timing()
                     if "review" in request.profile.stages:
+                        state.stable_answer_snapshot = _snapshot_stable_answer(state)
                         yield (
                             "answer_validation",
                             _stream_payload(
@@ -1599,6 +1812,7 @@ async def _execute_stages(
                         record_stage_timing()
                         continue
                     if product:
+                        state.stable_answer_snapshot = _snapshot_stable_answer(state)
                         yield (
                             "indepth_pending",
                             _stream_payload(
@@ -1713,11 +1927,13 @@ async def _execute_stages(
                                     "claims": list(state.claims),
                                 }
                             )
+                        _capture_indepth_review_artifact(state)
                         if state.indepth_conf.get("status") == "unavailable":
                             state.indepth_error = (
                                 "In-Depth was withheld because review was unavailable."
                             )
                     except InsufficientContextError as exc:
+                        _capture_indepth_review_artifact(state)
                         state.indepth_error = str(exc)
                         state.indepth_error_code = exc.code
                         state.indepth_mandatory_source_ids = list(
@@ -1733,6 +1949,7 @@ async def _execute_stages(
                             }
                         )
                     except Exception as exc:
+                        _capture_indepth_review_artifact(state)
                         state.indepth_error = str(exc)
                     record_stage_timing()
                     continue
@@ -1894,20 +2111,16 @@ async def _execute_stages(
                         state.indepth_error = (
                             "In-Depth was withheld because evidence checks rejected every claim."
                         )
+                    if state.indepth_error:
+                        state.indepth_conf = {
+                            **state.indepth_conf,
+                            "level": "red",
+                            "note": state.indepth_error,
+                        }
                     if product:
                         record_stage_timing()
+                        indepth = _in_depth_payload(state)
                         if state.indepth_error:
-                            indepth = {
-                                "status": "needs_review",
-                                "answer": "",
-                                "error": state.indepth_error,
-                                "validation": state.indepth_gate,
-                            }
-                            if state.indepth_error_code:
-                                indepth["errorCode"] = state.indepth_error_code
-                                indepth["mandatorySourceIds"] = list(
-                                    state.indepth_mandatory_source_ids
-                                )
                             payload = json.loads(
                                 _stream_payload(state, request, in_depth=indepth)
                             )
@@ -1916,14 +2129,6 @@ async def _execute_stages(
                                 json.dumps(payload),
                             )
                         else:
-                            indepth = {
-                                "status": "complete",
-                                "answer": "\n".join(
-                                    "- " + claim for claim in state.claims
-                                ),
-                                "error": "",
-                                "validation": state.indepth_gate,
-                            }
                             payload = json.loads(
                                 _stream_payload(state, request, in_depth=indepth)
                             )
@@ -1936,23 +2141,9 @@ async def _execute_stages(
                     continue
 
         if product:
-            indepth_status = "needs_review" if state.indepth_error else "complete"
-            indepth = {
-                "status": indepth_status,
-                "answer": (
-                    ""
-                    if state.indepth_error
-                    else "\n".join("- " + claim for claim in state.claims)
-                ),
-                "error": state.indepth_error or "",
-                "validation": state.indepth_gate,
-            }
-            if state.indepth_error_code:
-                indepth["errorCode"] = state.indepth_error_code
-                indepth["mandatorySourceIds"] = list(
-                    state.indepth_mandatory_source_ids
-                )
-            yield "done", _stream_payload(state, request, in_depth=indepth)
+            yield "done", _stream_payload(
+                state, request, in_depth=_in_depth_payload(state)
+            )
         else:
             yield "result", _raw_result(request, state)
 
@@ -1967,6 +2158,33 @@ async def _execute_stages(
         raise
     except Exception as exc:
         record_stage_timing("failed")
+        state.steps.append(
+            {
+                "role": "pipeline_error",
+                "error": type(exc).__name__,
+            }
+        )
+        if product and state.answer_emitted and (
+            state.stable_answer_snapshot or state.answer_text.strip()
+        ):
+            _restore_stable_answer(state)
+            note = "The hub could not safely complete the remaining checks."
+            state.answer_conf = {"level": "red", "note": note}
+            prior_validation = state.answer_validation or {}
+            state.answer_validation = stages._answer_validation_wire(
+                "needs_review",
+                summary=note,
+                issues=list(prior_validation.get("issues") or []),
+                original_answer=prior_validation.get("originalAnswer"),
+            )
+            state.indepth_error = "In-Depth was not generated."
+            state.indepth_conf = {"level": "red", "note": state.indepth_error}
+            payload = _stream_payload(
+                state, request, in_depth=_in_depth_payload(state)
+            )
+            write_execution_trace(answer_text=state.answer_text)
+            yield "done", payload
+            return
         fallback = stages._fallback_envelope(
             "I could not produce a complete answer for this turn. Please try again."
         )
@@ -1985,13 +2203,7 @@ async def _execute_stages(
                 "level": "red",
                 "note": "The hub could not safely complete the configured stages.",
             }
-            state.steps.append(
-                {
-                    "role": "pipeline_error",
-                    "error": type(exc).__name__,
-                    "temporal_gate": fallback_gate,
-                }
-            )
+            state.steps[-1]["temporal_gate"] = fallback_gate
             payload["temporalGate"] = fallback_gate
             payload["answerValidation"] = stages._answer_validation_wire(
                 "needs_review",

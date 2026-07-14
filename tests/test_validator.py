@@ -380,9 +380,17 @@ def test_trace_carries_structured_package(tmp_path, monkeypatch):
         output="combined",
         profile_id="med-agent-team-low-validated",
     )
-    asyncio.run(run_profile(profile, _MESSAGES, response_format=_RF))
+    asyncio.run(
+        run_profile(
+            profile,
+            _MESSAGES,
+            response_format=_RF,
+            context={"session": "trace-session"},
+        )
+    )
     entry = json.loads((tmp_path / "trace.jsonl").read_text().splitlines()[0])
     assert entry["level_id"] == "med-agent-team-low-validated"
+    assert entry["correlation"] == {"session": "trace-session"}
     assert entry["answer_confidence"]["level"] == "green"
     assert entry["indepth_confidence"]["level"] == "green"
     assert "ans-v0" in entry["answer_text"]

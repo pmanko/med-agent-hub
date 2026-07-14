@@ -21,7 +21,9 @@ OpenAI-compatible model router at LLM_BASE_URL
 
 Streaming and blocking requests execute the same asynchronous engine in `server/engine.py`. Blocking requests drain the engine's events into the response envelope. Product profiles stream `answer_done`, optional `answer_validation`, `indepth_pending`, `indepth_done` or `indepth_error`, and `done`.
 
-Product terminal events carry the complete assistant envelope. In-Depth state is emitted only in the nested `inDepth` object so its `answer` cannot overwrite the direct clinical Answer. Java and ESM clients reject the retired flattened In-Depth shape.
+Product terminal events carry the complete assistant envelope. In-Depth state is emitted only in the nested `inDepth` object so its `answer` cannot overwrite the direct clinical Answer. When review or deterministic gates remove model-generated claims, `inDepth.reviewDraft` renders the pre-check claim set for review and `inDepth.reviewReferences` resolves only that draft's citations. These review fields are explicitly not the shipped answer or final evidence set. Java and ESM clients reject the retired flattened In-Depth shape.
+
+When Answer checks change a model draft, `answerValidation.originalAnswer` preserves the earliest pre-check Answer and `answerValidation.originalReferences` resolves only that draft's citations. The final `references` field remains authoritative for the checked Answer and accepted In-Depth claims.
 
 ## Profiles
 
@@ -52,11 +54,12 @@ Small charts retain their original chart text. Oversized charts use stable manda
 - Every product Answer receives deterministic substance, date, temporal, date-value, and trend checks before `answer_done`.
 - Reviewer edits are checked again before they can ship.
 - Every product In-Depth claim receives deterministic temporal, citation-resolution, and citation-grounding results before display.
+- A rejected or edited In-Depth draft remains available as a separately labeled review artifact; it never enters final answer scoring or final evidence.
 - Citation grounding checks every claim group in stable, context-bounded sequential batches; a failed batch cannot erase verdicts from successful batches.
 - References resolve against the complete current evidence ledger and carry source id, resource metadata, source text, usage locations, resolution state, and final grounding state.
 - Citation count is metadata, not a confidence score.
 
-Trace packages are appended to `$TEAM_TRACE_DIR/trace.jsonl` (default `/app/trace`) and include the final answer, original draft when applicable, context selection, temporal facts summary, Answer and In-Depth gate results, final references, model roles, sampling settings, and ordered stage steps.
+Trace packages are appended to `$TEAM_TRACE_DIR/trace.jsonl` (default `/app/trace`) and include request correlation metadata, the final answer, original draft when applicable, context selection, temporal facts summary, Answer and In-Depth gate results, final references, model roles, sampling settings, and ordered stage steps.
 
 ### Drug-safety data
 

@@ -2527,10 +2527,8 @@ async def _ensure_substantive_answer(
 
 
 # Per-turn reasoning trace: the hub appends one structured line per turn to a writable mount so the
-# live dashboard can render the full LLM flow (orchestrator -> kb/expert -> answer synth -> answer
-# validator(+resynth) -> in-depth synth -> in-depth validator) + per-section confidence. The dashboard
-# correlates a trace line to a results.jsonl cell by level_id + the ts falling in the cell's
-# started_at..ended_at window (the runner is strictly sequential).
+# Reports can render the stage flow and per-section confidence from this trace. New requests carry
+# a session correlation key; historical runs fall back to level, exact question, and nearest time.
 _TRACE_DIR = os.environ.get("TEAM_TRACE_DIR", "/app/trace")
 
 
@@ -2579,6 +2577,7 @@ def _write_trace(
                  answer_validation: Optional[Dict[str, Any]] = None,
     sampling: Optional[Dict[str, Any]] = None,
     context_summary: Optional[Dict[str, Any]] = None,
+    request_context: Optional[Mapping[str, Any]] = None,
     indepth_temporal_gate: Optional[Dict[str, Any]] = None,
     final_references: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
@@ -2592,10 +2591,18 @@ def _write_trace(
                 c = m.get("content")
                 question = c if isinstance(c, str) else json.dumps(c)
                 break
+        request_context = request_context or {}
+        correlation = {
+            key: str(request_context.get(key))
+            for key in ("session", "request_id", "message_id")
+            if request_context.get(key) is not None
+            and str(request_context.get(key)).strip()
+        }
         entry = {
             "ts": datetime.now(timezone.utc).isoformat(),
             "level_id": level_id,
             "question": question[:2000],
+            "correlation": correlation,
             "reference_date": reference_date,
             "models": {
                 "orchestrator": orchestrator,
