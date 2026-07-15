@@ -1781,6 +1781,16 @@ async def _execute_stages(
                     continue
 
                 if stage == "indepth":
+                    if product:
+                        state.stable_answer_snapshot = _snapshot_stable_answer(state)
+                        yield (
+                            "indepth_pending",
+                            _stream_payload(
+                                state,
+                                request,
+                                in_depth={"status": "pending", "answer": ""},
+                            ),
+                        )
                     if product and not stages._is_substantive_answer(state.answer_text):
                         state.indepth_error = (
                             "In-Depth was withheld because the final Answer was not substantive."
@@ -1811,16 +1821,6 @@ async def _execute_stages(
                         )
                         record_stage_timing()
                         continue
-                    if product:
-                        state.stable_answer_snapshot = _snapshot_stable_answer(state)
-                        yield (
-                            "indepth_pending",
-                            _stream_payload(
-                                state,
-                                request,
-                                in_depth={"status": "pending", "answer": ""},
-                            ),
-                        )
                     prior_answer = (
                         stages._latest_assistant_text(state.messages)
                         if request.profile.output_mode == "indepth"

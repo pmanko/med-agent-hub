@@ -583,6 +583,7 @@ def test_non_substantive_product_answer_withholds_indepth(monkeypatch):
     events = _collect(_product_profile())
     assert [name for name, _payload in events] == [
         "answer_done",
+        "indepth_pending",
         "indepth_error",
         "done",
     ]
@@ -1733,8 +1734,15 @@ def test_final_unsupported_grounding_marks_answer_needs_review(monkeypatch):
 
     monkeypatch.setattr(team, "_synthesize_indepth", unexpected_indepth)
 
-    events = dict(_collect(_product_profile()))
-    assert "indepth_pending" not in events
+    collected = _collect(_product_profile(review_model="R"))
+    assert [name for name, _payload in collected] == [
+        "answer_done",
+        "answer_validation",
+        "indepth_pending",
+        "indepth_error",
+        "done",
+    ]
+    events = dict(collected)
     assert events["indepth_error"]["inDepth"]["status"] == "needs_review"
     final = events["done"]
     assert final["references"][0]["groundingStatus"] == "unsupported"
@@ -1815,8 +1823,14 @@ def test_final_unchecked_grounding_cannot_leave_answer_checked(monkeypatch):
 
     monkeypatch.setattr(team, "_synthesize_indepth", unexpected_indepth)
 
-    events = dict(_collect(_product_profile()))
-    assert "indepth_pending" not in events
+    collected = _collect(_product_profile())
+    assert [name for name, _payload in collected] == [
+        "answer_done",
+        "indepth_pending",
+        "indepth_error",
+        "done",
+    ]
+    events = dict(collected)
     final = events["done"]
     assert final["answerValidation"]["status"] == "unavailable"
     assert final["inDepth"]["status"] == "needs_review"
