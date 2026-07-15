@@ -601,8 +601,7 @@ def test_v1_models_advertises_staged_capability_not_just_id_prefix():
         r = client.get("/v1/models")
     by_id = {m["id"]: m for m in r.json()["data"]}
     assert by_id["single-12b-checked"]["staged"] is True
-    # parity is explicitly a single-shot (non-staged) relay target, never the phased engine
-    assert by_id["med-agent-team-parity"]["staged"] is False
+    assert by_id["eval-e4b-answer-only"]["staged"] is False
     assert by_id["single-e4b-checked"]["default"] is True
     assert by_id["single-e2b-checked"]["available"] is False
     assert by_id["single-e2b-checked"]["required_models"] == [
@@ -646,7 +645,7 @@ def test_chat_completions_profile_returns_openai_shape_with_the_envelope():
         # The API is only an adapter: it compiles the profile and drains the engine.
         assert execution.messages == MESSAGES
         assert execution.response_format == RESP_FORMAT
-        assert execution.profile.id == "med-agent-team-med"
+        assert execution.profile.id == "team-med-checked"
         return ENVELOPE
 
     with patch("server.openai_compat.drain_profile", side_effect=fake_drain):
@@ -654,7 +653,7 @@ def test_chat_completions_profile_returns_openai_shape_with_the_envelope():
         r = client.post(
             "/v1/chat/completions",
             json={
-                "model": "med-agent-team-med",
+                "model": "team-med-checked",
                 "messages": MESSAGES,
                 "response_format": RESP_FORMAT,
             },
@@ -662,7 +661,7 @@ def test_chat_completions_profile_returns_openai_shape_with_the_envelope():
 
     assert r.status_code == 200
     body = r.json()
-    assert body["model"] == "med-agent-team-med"
+    assert body["model"] == "team-med-checked"
     content = body["choices"][0]["message"]["content"]
     assert json.loads(content)["citations"] == [1]
 

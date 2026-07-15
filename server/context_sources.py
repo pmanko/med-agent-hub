@@ -32,6 +32,18 @@ _QUOTED = re.compile(r'["“]([^"”]+)["”]')
 _CITATION_TOKEN = re.compile(r"(?<!\w)\[\d+\](?!\w)")
 
 
+def _is_mandatory_safety_record(
+    resource_type: str, text: str, metadata: Mapping[str, Any]
+) -> bool:
+    if bool(metadata.get("mandatory_context")):
+        return True
+    normalized_type = re.sub(r"[^a-z]", "", resource_type.lower())
+    if normalized_type == "allergyintolerance":
+        return True
+    body = _DATE_PREFIX.sub("", text).lstrip()
+    return body.lower().startswith("allergy:")
+
+
 class ContextSourceError(RuntimeError):
     def __init__(self, code: str, message: str, *, source: str) -> None:
         self.code = code
@@ -262,6 +274,9 @@ class InlineChartSource:
                     resource_uuid=None,
                     date=carried_date,
                     text=text,
+                    mandatory=_is_mandatory_safety_record(
+                        "ChartRecord", text, {}
+                    ),
                 )
             )
         if not records:
@@ -396,16 +411,20 @@ class QueryStoreSource:
             )
             stable_id = f"querystore:{mapping.get('resourceType')}:{mapping.get('resourceUuid')}"
             metadata = raw.get("metadata") or {}
+            resource_type = str(mapping.get("resourceType") or "Record")
+            text = str(mapping.get("text") or "")
             records.append(
                 EvidenceRecord(
                     stable_id=stable_id,
                     source=self.name,
                     source_priority=self.priority,
-                    resource_type=str(mapping.get("resourceType") or "Record"),
+                    resource_type=resource_type,
                     resource_uuid=mapping.get("resourceUuid"),
                     date=mapping.get("date"),
-                    text=str(mapping.get("text") or ""),
-                    mandatory=bool(metadata.get("mandatory_context")),
+                    text=text,
+                    mandatory=_is_mandatory_safety_record(
+                        resource_type, text, metadata
+                    ),
                     metadata=metadata,
                     raw=raw,
                 )

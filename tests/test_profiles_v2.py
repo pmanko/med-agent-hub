@@ -15,6 +15,21 @@ from server.levels_loader import (
 )
 
 
+def test_configured_catalog_contains_only_current_product_eval_and_debug_profiles():
+    assert set(profile_ids()) == {
+        "single-e2b-checked",
+        "single-e4b-checked",
+        "single-12b-checked",
+        "single-a4b-checked",
+        "team-med-checked",
+        "debug-team-high-checked",
+        "eval-e4b-answer-only",
+        "eval-e4b-temporal-enforce",
+        "eval-12b-answer-only",
+        "eval-12b-temporal-enforce",
+    }
+
+
 def test_default_product_profile_is_human_readable_single_e4b():
     profile = get_profile("single-e4b-checked")
 
@@ -101,7 +116,7 @@ def test_answer_path_evaluation_profiles_have_matched_exact_context(
 
 
 def test_non_advertised_product_envelope_temporal_cannot_weaken_enforce():
-    profile = get_profile("med-agent-team-low-validated-12b")
+    profile = get_profile("debug-team-high-checked")
 
     assert profile.visibility != "product"
     assert profile.output_mode == "product"

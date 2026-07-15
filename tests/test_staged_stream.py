@@ -154,6 +154,48 @@ def _collect(profile):
     return asyncio.run(_run())
 
 
+def test_e2b_product_profile_routes_each_stage_to_its_declared_model(monkeypatch):
+    _stub_common(monkeypatch)
+    calls = []
+
+    async def fake_answer(_client, model, *_args, **_kwargs):
+        calls.append(("answer", model))
+        return ("Ans [1].", [1], [])
+
+    async def fake_review(_client, model, **_kwargs):
+        calls.append(("review", model))
+        return {"answer_ok": True, "errors": []}
+
+    async def fake_ground(_client, model, _answer, references, _mappings, **_kwargs):
+        calls.append(("grounding", model))
+        return [
+            {**reference, "grounded": True, "groundingStatus": "verified"}
+            for reference in references
+        ]
+
+    async def fake_indepth(_client, model, *_args, validator_model=None, **_kwargs):
+        calls.append(("indepth", model))
+        calls.append(("indepth_review", validator_model))
+        return (["Claim [1]."], {"level": "green", "note": ""})
+
+    monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
+    monkeypatch.setattr(team, "_validate_answer_rewrite", fake_review)
+    monkeypatch.setattr(team, "_ground_references", fake_ground)
+    monkeypatch.setattr(team, "_gen_indepth", fake_indepth)
+
+    events = dict(_collect(get_profile("single-e2b-checked")))
+
+    assert calls == [
+        ("answer", "gemma-e2b"),
+        ("review", "gemma-e4b"),
+        ("grounding", "gemma-e4b"),
+        ("indepth", "gemma-e4b"),
+        ("indepth_review", "gemma-e4b"),
+        ("grounding", "gemma-e4b"),
+    ]
+    assert events["done"]["inDepth"]["status"] == "complete"
+
+
 def test_staged_stream_with_validator_emits_full_phase_sequence(monkeypatch):
     _stub_common(monkeypatch)
 
@@ -3056,7 +3098,7 @@ def test_profile_stream_executes_gather_from_the_configured_stage_plan(monkeypat
 
     monkeypatch.setattr(team, "_chat", fake_chat)
 
-    _collect(get_profile("med-agent-team-med-validated"))
+    _collect(get_profile("team-med-checked"))
     assert (
         "gemma-e4b-q8" in calls
     ), "the orchestrator was never called even though the compiled profile declares gather"

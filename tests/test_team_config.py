@@ -9,7 +9,6 @@ def test_profile_ids_are_unique_and_include_supported_topologies():
     ids = levels_loader.profile_ids()
     assert len(ids) == len(set(ids))
     assert {
-        "med-agent-team-med",
         "single-e2b-checked",
         "single-e4b-checked",
         "team-med-checked",
@@ -17,11 +16,23 @@ def test_profile_ids_are_unique_and_include_supported_topologies():
 
 
 def test_configured_team_profile_resolves_explicit_roles_and_stages():
-    profile = levels_loader.get_profile("med-agent-team-med")
+    profile = levels_loader.get_profile("team-med-checked")
     assert profile.topology == "team"
     assert profile.models["orchestrator"] == "gemma-e4b-q8"
     assert profile.models["answer"] == "qwen2.5-14b"
-    assert profile.stages == ("context", "gather", "answer", "gate", "indepth")
+    assert profile.stages == (
+        "context",
+        "gather",
+        "answer",
+        "gate",
+        "resolve_refs",
+        "review",
+        "gate",
+        "final_resolve_refs",
+        "ground_verdicts",
+        "indepth",
+        "indepth_gate",
+    )
 
 
 def test_unknown_profile_fails_with_structured_model_not_found():

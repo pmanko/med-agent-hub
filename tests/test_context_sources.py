@@ -124,6 +124,21 @@ def test_inline_context_works_without_querystore_configuration():
     assert [record.stable_id for record in ledger.records] == ["inline:1", "inline:2"]
 
 
+def test_inline_allergy_record_is_mandatory_safety_evidence():
+    chart = (
+        "[1] (2026-01-01) Weight: 70 kg\n"
+        "[2] (2025-10-22) Allergy: Penicillins (drug allergen)\n"
+    )
+
+    ledger = asyncio.run(
+        SourceRegistry([InlineChartSource()]).build_ledger(
+            ContextRequest(messages=_messages(chart))
+        )
+    )
+
+    assert [record.mandatory for record in ledger.records] == [False, True]
+
+
 def test_patient_without_a_patient_source_or_inline_chart_fails_explicitly():
     registry = SourceRegistry([InlineChartSource()])
 
@@ -351,6 +366,27 @@ def test_querystore_mapping_keeps_the_matching_raw_record_when_invalid_rows_are_
     assert ledger.records[0].resource_uuid == "enc-1"
     assert ledger.records[0].mandatory is True
     assert ledger.records[0].raw["text"] == "Visit"
+
+
+def test_querystore_allergy_record_is_mandatory_without_source_metadata():
+    class FakeClient:
+        async def get_patient_chart(self, _patient):
+            return [
+                {
+                    "resourceType": "AllergyIntolerance",
+                    "resourceUuid": "allergy-1",
+                    "date": "2025-10-22",
+                    "text": "Allergy: Penicillins (drug allergen)",
+                }
+            ]
+
+    ledger = asyncio.run(
+        QueryStoreSource(FakeClient()).fetch(
+            ContextRequest(patient="patient-1", messages=_messages())
+        )
+    )
+
+    assert ledger.records[0].mandatory is True
 
 
 def test_querystore_failure_is_explicit_not_an_empty_chart():

@@ -1,154 +1,16 @@
 # Declarative execution profiles for med-agent-hub.
 #
-# Every configured id declares an ordered stage plan and the model assigned to
-# each role. Dynamic answer:, answer-review:, and indepth-only: legs are parsed
-# by levels_loader.py and intentionally are not advertised here.
+# This catalog contains current product profiles, matched evaluation controls,
+# and one quarantined high-team debug profile. Historical experiment ids remain
+# available from their pinned Git revisions and run manifests. Dynamic answer:,
+# answer-review:, and indepth-only: legs are parsed by levels_loader.py.
 
 stage_sets:
-  team_combined: &team_combined [context, gather, answer, gate, indepth]
-  team_reviewed: &team_reviewed [context, gather, answer, gate, review, gate, indepth]
-  team_bare: &team_bare [context, gather, answer, gate]
-  team_bare_reviewed: &team_bare_reviewed [context, gather, answer, gate, review, gate]
-  single_bare: &single_bare [context, answer, gate]
-  single_bare_reviewed: &single_bare_reviewed [context, answer, gate, review, gate]
-  single_combined: &single_combined [context, answer, gate, indepth]
+  single_answer: &single_answer [context, answer, gate]
   product: &product [context, answer, gate, resolve_refs, review, gate, final_resolve_refs, ground_verdicts, indepth, indepth_gate]
   team_product: &team_product [context, gather, answer, gate, resolve_refs, review, gate, final_resolve_refs, ground_verdicts, indepth, indepth_gate]
 
 profiles:
-  med-agent-team-low:
-    label: Low team
-    topology: team
-    stages: *team_combined
-    models: {orchestrator: gemma-e2b-q2, expert: medgemma-1.5-4b, answer: qwen3-4b, indepth: qwen3-4b}
-    policies: {output: combined, temporal_gate: "off"}
-
-  med-agent-team-low-validated:
-    label: Low team with E4B review
-    topology: team
-    stages: *team_reviewed
-    models: {orchestrator: gemma-e2b-q2, expert: medgemma-1.5-4b, answer: qwen3-4b, review: gemma-e4b-q8, indepth: qwen3-4b}
-    policies: {output: combined, temporal_gate: "off"}
-
-  med-agent-team-low-validated-12b:
-    label: Low team with 12B review
-    topology: team
-    stages: *team_product
-    models: {orchestrator: gemma-e2b-q2, expert: medgemma-1.5-4b, answer: qwen3-4b, review: gemma-4-12b, grounding: qwen3-4b, indepth: qwen3-4b}
-    prompts: {review: validation}
-    policies: {output: product, temporal_gate: enforce, temporal_render: full}
-    context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true}
-
-  med-agent-team-med:
-    label: Medium team
-    topology: team
-    stages: *team_combined
-    models: {orchestrator: gemma-e4b-q8, expert: medgemma-1.5-4b-q8, answer: qwen2.5-14b, indepth: qwen2.5-14b}
-    policies: {output: combined, temporal_gate: "off"}
-
-  med-agent-team-liquid:
-    label: Liquid team
-    topology: team
-    stages: *team_combined
-    models: {orchestrator: lfm2-2.6b, expert: lfm2-8b-a1b, answer: lfm2-24b-a2b, indepth: lfm2-24b-a2b}
-    policies: {output: combined, temporal_gate: "off"}
-
-  med-agent-team-med-liquid:
-    label: Liquid coordinator and writer
-    topology: team
-    stages: *team_combined
-    models: {orchestrator: lfm2-2.6b, expert: medgemma-1.5-4b-q8, answer: lfm2-24b-a2b, indepth: lfm2-24b-a2b}
-    policies: {output: combined, temporal_gate: "off"}
-
-  med-agent-team-med-liquid-validated:
-    label: Liquid team with 12B review
-    topology: team
-    stages: *team_reviewed
-    models: {orchestrator: lfm2-2.6b, expert: medgemma-1.5-4b-q8, answer: lfm2-24b-a2b, review: gemma-4-12b, indepth: lfm2-24b-a2b}
-    policies: {output: combined, temporal_gate: "off"}
-
-  med-agent-team-med-liquid-qwensynth:
-    label: Liquid coordinator with Qwen writer
-    topology: team
-    stages: *team_reviewed
-    models: {orchestrator: lfm2-2.6b, expert: medgemma-1.5-4b-q8, answer: qwen2.5-14b, review: gemma-4-12b, indepth: qwen2.5-14b}
-    policies: {output: combined, temporal_gate: "off"}
-
-  med-agent-team-med-validated:
-    label: Medium checked team
-    topology: team
-    stages: *team_product
-    models: {orchestrator: gemma-e4b-q8, expert: medgemma-1.5-4b-q8, answer: qwen2.5-14b, review: gemma-4-12b, grounding: qwen2.5-14b, indepth: qwen2.5-14b}
-    prompts: {review: validation}
-    policies: {output: product, temporal_gate: enforce, temporal_render: full}
-    context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true}
-
-  med-agent-team-med-liquidwriter-validated:
-    label: Liquid writer with 12B review
-    topology: team
-    stages: *team_reviewed
-    models: {orchestrator: gemma-e4b-q8, expert: medgemma-1.5-4b-q8, answer: lfm2-24b-a2b, review: gemma-4-12b, indepth: lfm2-24b-a2b}
-    policies: {output: combined, temporal_gate: "off"}
-
-  med-agent-team-high:
-    label: High team
-    topology: team
-    stages: *team_combined
-    models: {orchestrator: gemma-31b, expert: medgemma-27b, answer: qwen3.6-35b-q6, indepth: qwen3.6-35b-q6}
-    policies: {output: combined, temporal_gate: "off"}
-
-  med-agent-team-high-validated:
-    label: High checked team
-    topology: team
-    stages: *team_product
-    models: {orchestrator: gemma-31b, expert: medgemma-27b, answer: qwen3.6-35b-q6, review: gemma-31b, grounding: qwen3.6-35b-q6, indepth: qwen3.6-35b-q6}
-    prompts: {review: validation}
-    policies: {output: product, temporal_gate: enforce, temporal_render: full}
-    context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true}
-
-  med-agent-team-12b:
-    label: 12B orchestrated team
-    topology: team
-    stages: *team_combined
-    models: {orchestrator: gemma-4-12b, expert: medgemma-1.5-4b-q8, answer: qwen2.5-14b, indepth: qwen2.5-14b}
-    policies: {output: combined, temporal_gate: "off"}
-
-  med-agent-team-parity:
-    label: Team parity answer
-    topology: team
-    stages: *team_bare
-    models: {orchestrator: gemma-e4b-q8, expert: medgemma-1.5-4b-q8, answer: qwen2.5-14b}
-    prompts: {answer: synthesis-chartsearchai}
-    policies: {output: bare, temporal_gate: "off"}
-
-  med-agent-team-parity-indepth:
-    label: Team parity with In-Depth
-    topology: team
-    stages: [context, gather, answer, gate, indepth]
-    models: {orchestrator: gemma-e4b-q8, expert: medgemma-1.5-4b-q8, answer: qwen2.5-14b, indepth: qwen2.5-14b}
-    prompts: {answer: synthesis-chartsearchai, indepth: synthesis-indepth}
-    policies: {output: combined, temporal_gate: "off"}
-
-  single-12b-indepth:
-    label: Single 12B with In-Depth
-    topology: single
-    stages: *single_combined
-    models: {answer: gemma-4-12b, indepth: gemma-4-12b}
-    prompts: {answer: synthesis-chartsearchai, indepth: synthesis-indepth}
-    policies: {output: combined, temporal_gate: "off"}
-
-  single-12b-checked:
-    label: Checked answer (12B)
-    topology: single
-    stages: *product
-    models: {answer: gemma-4-12b, review: gemma-4-12b, grounding: gemma-4-12b, indepth: gemma-4-12b}
-    prompts: {answer: synthesis-answer, review: validation-rewrite, indepth: synthesis-indepth}
-    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true}
-    visibility: product
-    selection_priority: 30
-    context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true}
-    knobs: {answer: {temperature: 0}}
-
   single-e4b-checked:
     label: Fast checked answer (E4B)
     topology: single
@@ -174,53 +36,6 @@ profiles:
     context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true}
     knobs: {answer: {temperature: 0}}
 
-  # Controlled harness profiles: same exact context, prompt, and answer contract
-  # as the product singles, but fewer stages. `evaluation` visibility keeps them
-  # out of the OpenMRS product picker while allowing direct hub comparisons.
-  eval-e4b-answer-only:
-    label: E4B answer only
-    topology: single
-    stages: *single_bare
-    models: {answer: gemma-e4b}
-    prompts: {answer: synthesis-answer}
-    policies: {output: bare, answer_contract: chart_answer, temporal_gate: "off", temporal_render: full}
-    visibility: evaluation
-    context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true}
-    knobs: {answer: {temperature: 0}}
-
-  eval-e4b-temporal-enforce:
-    label: E4B deterministic temporal check
-    topology: single
-    stages: *single_bare
-    models: {answer: gemma-e4b}
-    prompts: {answer: synthesis-answer}
-    policies: {output: bare, answer_contract: chart_answer, temporal_gate: enforce, temporal_render: full}
-    visibility: evaluation
-    context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true}
-    knobs: {answer: {temperature: 0}}
-
-  eval-12b-answer-only:
-    label: 12B answer only
-    topology: single
-    stages: *single_bare
-    models: {answer: gemma-4-12b}
-    prompts: {answer: synthesis-answer}
-    policies: {output: bare, answer_contract: chart_answer, temporal_gate: "off", temporal_render: full}
-    visibility: evaluation
-    context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true}
-    knobs: {answer: {temperature: 0}}
-
-  eval-12b-temporal-enforce:
-    label: 12B deterministic temporal check
-    topology: single
-    stages: *single_bare
-    models: {answer: gemma-4-12b}
-    prompts: {answer: synthesis-answer}
-    policies: {output: bare, answer_contract: chart_answer, temporal_gate: enforce, temporal_render: full}
-    visibility: evaluation
-    context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true}
-    knobs: {answer: {temperature: 0}}
-
   single-a4b-checked:
     label: Efficient checked answer (A4B)
     topology: single
@@ -230,6 +45,18 @@ profiles:
     policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true}
     visibility: product
     selection_priority: 20
+    context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true}
+    knobs: {answer: {temperature: 0}}
+
+  single-12b-checked:
+    label: Checked answer (12B)
+    topology: single
+    stages: *product
+    models: {answer: gemma-4-12b, review: gemma-4-12b, grounding: gemma-4-12b, indepth: gemma-4-12b}
+    prompts: {answer: synthesis-answer, review: validation-rewrite, indepth: synthesis-indepth}
+    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true}
+    visibility: product
+    selection_priority: 30
     context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true}
     knobs: {answer: {temperature: 0}}
 
@@ -244,98 +71,61 @@ profiles:
     selection_priority: 100
     context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true}
 
-  med-agent-team-12b-qwenval:
-    label: 12B team with Qwen review
+  # Quarantined from product discovery and publishable candidate runs. This one
+  # explicit profile preserves targeted high-team failure analysis without
+  # retaining the historical experiment matrix in the runtime catalog.
+  debug-team-high-checked:
+    label: Debug high-capacity checked team
     topology: team
-    stages: *team_bare_reviewed
-    models: {orchestrator: gemma-e4b-q8, answer: gemma-4-12b, review: qwen2.5-14b}
-    prompts: {answer: synthesis-chartsearchai, review: validation-rewrite}
-    policies: {output: bare, temporal_gate: "off"}
+    stages: *team_product
+    models: {orchestrator: gemma-31b, expert: medgemma-27b, answer: qwen3.6-35b-q6, review: gemma-31b, grounding: qwen3.6-35b-q6, indepth: qwen3.6-35b-q6}
+    prompts: {answer: synthesis-answer, review: validation-rewrite, indepth: synthesis-indepth, orchestrator: orchestrator, expert: medical_expert}
+    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true}
+    visibility: debug
+    context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true}
 
-  med-agent-team-a4b-qwenval:
-    label: A4B team with Qwen review
-    topology: team
-    stages: *team_bare_reviewed
-    models: {orchestrator: gemma-e4b-q8, answer: gemma-26b, review: qwen2.5-14b}
-    prompts: {answer: synthesis-chartsearchai, review: validation-rewrite}
-    policies: {output: bare, temporal_gate: "off"}
-
-  single-12b-coverage:
-    label: Single 12B coverage prompt
+  # Matched controls for the current small-model Answer-path comparison. These
+  # are hidden from product clients and differ only in model or gate policy.
+  eval-e4b-answer-only:
+    label: E4B answer only
     topology: single
-    stages: *single_bare
+    stages: *single_answer
+    models: {answer: gemma-e4b}
+    prompts: {answer: synthesis-answer}
+    policies: {output: bare, answer_contract: chart_answer, temporal_gate: "off", temporal_render: full}
+    visibility: evaluation
+    context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true}
+    knobs: {answer: {temperature: 0}}
+
+  eval-e4b-temporal-enforce:
+    label: E4B deterministic temporal check
+    topology: single
+    stages: *single_answer
+    models: {answer: gemma-e4b}
+    prompts: {answer: synthesis-answer}
+    policies: {output: bare, answer_contract: chart_answer, temporal_gate: enforce, temporal_render: full}
+    visibility: evaluation
+    context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true}
+    knobs: {answer: {temperature: 0}}
+
+  eval-12b-answer-only:
+    label: 12B answer only
+    topology: single
+    stages: *single_answer
     models: {answer: gemma-4-12b}
-    prompts: {answer: synthesis-coverage}
-    policies: {output: bare, temporal_gate: "off"}
+    prompts: {answer: synthesis-answer}
+    policies: {output: bare, answer_contract: chart_answer, temporal_gate: "off", temporal_render: full}
+    visibility: evaluation
+    context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true}
+    knobs: {answer: {temperature: 0}}
 
-  single-12b-rewriteval:
-    label: Single 12B with Qwen review
+  eval-12b-temporal-enforce:
+    label: 12B deterministic temporal check
     topology: single
-    stages: *single_bare_reviewed
-    models: {answer: gemma-4-12b, review: qwen2.5-14b}
-    prompts: {answer: synthesis-chartsearchai, review: validation-rewrite}
-    policies: {output: bare, temporal_gate: "off"}
-
-  single-12b-coverage-rewrite:
-    label: Single 12B coverage and review
-    topology: single
-    stages: *single_bare_reviewed
-    models: {answer: gemma-4-12b, review: qwen2.5-14b}
-    prompts: {answer: synthesis-coverage, review: validation-rewrite}
-    policies: {output: bare, temporal_gate: "off"}
-
-  single-a4b-coverage:
-    label: Single A4B coverage prompt
-    topology: single
-    stages: *single_bare
-    models: {answer: gemma-26b}
-    prompts: {answer: synthesis-coverage}
-    policies: {output: bare, temporal_gate: "off"}
-
-  single-a4b-rewriteval:
-    label: Single A4B with Qwen review
-    topology: single
-    stages: *single_bare_reviewed
-    models: {answer: gemma-26b, review: qwen2.5-14b}
-    prompts: {answer: synthesis-chartsearchai, review: validation-rewrite}
-    policies: {output: bare, temporal_gate: "off"}
-
-  single-a4b-coverage-rewrite:
-    label: Single A4B coverage and review
-    topology: single
-    stages: *single_bare_reviewed
-    models: {answer: gemma-26b, review: qwen2.5-14b}
-    prompts: {answer: synthesis-coverage, review: validation-rewrite}
-    policies: {output: bare, temporal_gate: "off"}
-
-  med-agent-team-12b-rewriteval:
-    label: 12B team rewrite review
-    topology: team
-    stages: *team_bare_reviewed
-    models: {orchestrator: gemma-e4b-q8, answer: gemma-4-12b, review: qwen2.5-14b}
-    prompts: {answer: synthesis-chartsearchai, review: validation-rewrite}
-    policies: {output: bare, temporal_gate: "off"}
-
-  med-agent-team-12b-date-warn:
-    label: 12B team date warning
-    topology: team
-    stages: *team_bare_reviewed
-    models: {orchestrator: gemma-e4b-q8, answer: gemma-4-12b, review: qwen2.5-14b}
-    prompts: {answer: synthesis-date-output-contract, review: validation-rewrite}
-    policies: {output: bare, temporal_gate: warn}
-
-  med-agent-team-high-date-warn:
-    label: High team date warning
-    topology: team
-    stages: *team_bare_reviewed
-    models: {orchestrator: gemma-31b, expert: medgemma-27b, answer: qwen3.6-35b-q6, review: gemma-31b}
-    prompts: {answer: synthesis-date-output-contract, review: validation}
-    policies: {output: bare, temporal_gate: warn}
-
-  single-12b-cite-or-abstain:
-    label: Single 12B cite or abstain
-    topology: single
-    stages: *single_bare
+    stages: *single_answer
     models: {answer: gemma-4-12b}
-    prompts: {answer: synthesis-cite-or-abstain}
-    policies: {output: bare, temporal_gate: "off"}
+    prompts: {answer: synthesis-answer}
+    policies: {output: bare, answer_contract: chart_answer, temporal_gate: enforce, temporal_render: full}
+    visibility: evaluation
+    context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true}
+    knobs: {answer: {temperature: 0}}
