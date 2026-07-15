@@ -162,6 +162,18 @@ profiles:
     context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true}
     knobs: {answer: {temperature: 0}}
 
+  single-e2b-checked:
+    label: Experimental fast answer (E2B, E4B check)
+    topology: single
+    stages: *product
+    models: {answer: gemma-e2b, review: gemma-e4b, grounding: gemma-e4b, indepth: gemma-e4b}
+    prompts: {answer: synthesis-answer, review: validation-rewrite, indepth: synthesis-indepth}
+    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true}
+    visibility: product
+    selection_priority: 15
+    context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true}
+    knobs: {answer: {temperature: 0}}
+
   # Controlled harness profiles: same exact context, prompt, and answer contract
   # as the product singles, but fewer stages. `evaluation` visibility keeps them
   # out of the OpenMRS product picker while allowing direct hub comparisons.

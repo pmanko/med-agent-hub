@@ -604,7 +604,28 @@ def test_v1_models_advertises_staged_capability_not_just_id_prefix():
     # parity is explicitly a single-shot (non-staged) relay target, never the phased engine
     assert by_id["med-agent-team-parity"]["staged"] is False
     assert by_id["single-e4b-checked"]["default"] is True
+    assert by_id["single-e2b-checked"]["available"] is False
+    assert by_id["single-e2b-checked"]["required_models"] == [
+        "gemma-e2b",
+        "gemma-e4b",
+    ]
     assert "answer-review:qwen2.5-14b" not in by_id
+
+
+def test_v1_models_advertises_e2b_comparison_when_writer_and_checker_are_available():
+    with patch.object(
+        openai_compat,
+        "_served_backend_models",
+        return_value={"gemma-e2b", "gemma-e4b"},
+    ):
+        r = TestClient(app).get("/v1/models")
+
+    by_id = {model["id"]: model for model in r.json()["data"]}
+    e2b = by_id["single-e2b-checked"]
+    assert e2b["label"] == "Experimental fast answer (E2B, E4B check)"
+    assert e2b["available"] is True
+    assert e2b["default"] is False
+    assert e2b["temporal_enforcement"] == "enforce"
 
 
 def test_v1_models_selects_available_fallback_default_in_the_hub():

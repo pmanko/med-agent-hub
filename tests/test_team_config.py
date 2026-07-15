@@ -8,7 +8,12 @@ from server import levels_loader, team
 def test_profile_ids_are_unique_and_include_supported_topologies():
     ids = levels_loader.profile_ids()
     assert len(ids) == len(set(ids))
-    assert {"med-agent-team-med", "single-e4b-checked", "team-med-checked"} <= set(ids)
+    assert {
+        "med-agent-team-med",
+        "single-e2b-checked",
+        "single-e4b-checked",
+        "team-med-checked",
+    } <= set(ids)
 
 
 def test_configured_team_profile_resolves_explicit_roles_and_stages():

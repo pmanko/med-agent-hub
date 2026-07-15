@@ -37,6 +37,27 @@ def test_default_product_profile_is_human_readable_single_e4b():
     )
 
 
+def test_experimental_e2b_profile_changes_only_the_fast_answer_writer():
+    profile = get_profile("single-e2b-checked")
+
+    assert profile.label == "Experimental fast answer (E2B, E4B check)"
+    assert profile.default is False
+    assert profile.topology == "single"
+    assert "orchestrator" not in profile.models
+    assert profile.models == {
+        "answer": "gemma-e2b",
+        "review": "gemma-e4b",
+        "grounding": "gemma-e4b",
+        "indepth": "gemma-e4b",
+    }
+    assert profile.stages == get_profile("single-e4b-checked").stages
+    assert profile.policies == get_profile("single-e4b-checked").policies
+    assert profile.context_window == 24576
+    assert profile.reserved_output_tokens == 4096
+    assert profile.exact_tokenizer is True
+    assert profile.knobs["answer"]["temperature"] == 0
+
+
 def test_product_profiles_temporal_cannot_weaken_enforce():
     profile = get_profile("single-e4b-checked")
 
