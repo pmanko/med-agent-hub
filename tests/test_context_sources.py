@@ -33,26 +33,25 @@ class WordTokenCounter:
         return len(text.split())
 
 
-def test_router_chat_counter_falls_back_to_template_then_tokenize(monkeypatch):
-    calls = []
+class _RouterResponse:
+    def __init__(self, status, body):
+        self.status_code = status
+        self._body = body
+        self.request = httpx.Request("POST", "http://router/test")
 
-    class Response:
-        def __init__(self, status, body):
-            self.status_code = status
-            self._body = body
-            self.request = httpx.Request("POST", "http://router/test")
+    def json(self):
+        return self._body
 
-        def json(self):
-            return self._body
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise httpx.HTTPStatusError(
+                "failed",
+                request=self.request,
+                response=httpx.Response(self.status_code, request=self.request),
+            )
 
-        def raise_for_status(self):
-            if self.status_code >= 400:
-                raise httpx.HTTPStatusError(
-                    "failed",
-                    request=self.request,
-                    response=httpx.Response(self.status_code, request=self.request),
-                )
 
+def _patch_router_client(monkeypatch, post):
     class Client:
         def __init__(self, **_kwargs):
             pass
@@ -64,14 +63,23 @@ def test_router_chat_counter_falls_back_to_template_then_tokenize(monkeypatch):
             return None
 
         async def post(self, url, *, json, headers):
-            calls.append((url, json, headers))
-            if url.endswith("/v1/chat/completions/input_tokens"):
-                return Response(404, {})
-            if url.endswith("/apply-template"):
-                return Response(200, {"prompt": "<turn>user hello<turn>model"})
-            return Response(200, {"tokens": [1, 2, 3, 4]})
+            return await post(url, json=json, headers=headers)
 
     monkeypatch.setattr("server.context_sources.httpx.AsyncClient", Client)
+
+
+def test_router_chat_counter_falls_back_to_template_then_tokenize(monkeypatch):
+    calls = []
+
+    async def post(url, *, json, headers):
+        calls.append((url, json, headers))
+        if url.endswith("/v1/chat/completions/input_tokens"):
+            return _RouterResponse(404, {})
+        if url.endswith("/apply-template"):
+            return _RouterResponse(200, {"prompt": "<turn>user hello<turn>model"})
+        return _RouterResponse(200, {"tokens": [1, 2, 3, 4]})
+
+    _patch_router_client(monkeypatch, post)
     counter = RouterTokenCounter("http://router")
 
     count = asyncio.run(
@@ -96,6 +104,96 @@ def test_router_chat_counter_falls_back_to_template_then_tokenize(monkeypatch):
     assert calls[0][1]["response_format"]["json_schema"]["name"] == "chart_answer"
     assert set(calls[1][1]) == {"model", "messages"}
     assert calls[-1][1]["parse_special"] is True
+
+
+@pytest.mark.parametrize(
+    "failing_endpoint",
+    ("input_tokens", "apply-template", "tokenize"),
+)
+def test_router_chat_counter_retries_one_transient_transport_failure(
+    monkeypatch, failing_endpoint
+):
+    attempts = {}
+
+    async def post(url, *, json, headers):
+        endpoint = url.rsplit("/", 1)[-1]
+        attempts[endpoint] = attempts.get(endpoint, 0) + 1
+        if endpoint == failing_endpoint and attempts[endpoint] == 1:
+            raise httpx.RemoteProtocolError(
+                "Server disconnected without sending a response.",
+                request=httpx.Request("POST", url),
+            )
+        if endpoint == "input_tokens":
+            return _RouterResponse(404, {})
+        if endpoint == "apply-template":
+            return _RouterResponse(200, {"prompt": "<turn>user hello<turn>model"})
+        return _RouterResponse(200, {"tokens": [1, 2, 3, 4]})
+
+    _patch_router_client(monkeypatch, post)
+    counter = RouterTokenCounter("http://router")
+
+    count = asyncio.run(
+        counter.count_chat(
+            "gemma-e4b", {"messages": [{"role": "user", "content": "hello"}]}
+        )
+    )
+
+    assert count == 4
+    assert attempts[failing_endpoint] == 2
+
+
+def test_router_token_counter_stops_after_one_transport_retry(monkeypatch):
+    attempts = 0
+
+    async def post(url, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        raise httpx.RemoteProtocolError(
+            "Server disconnected without sending a response.",
+            request=httpx.Request("POST", url),
+        )
+
+    _patch_router_client(monkeypatch, post)
+    counter = RouterTokenCounter("http://router")
+
+    with pytest.raises(ContextSourceError, match="Exact tokenizer unavailable"):
+        asyncio.run(counter.count("gemma-e4b", "hello"))
+
+    assert attempts == 2
+
+
+def test_router_token_counter_does_not_retry_http_errors(monkeypatch):
+    attempts = 0
+
+    async def post(_url, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        return _RouterResponse(400, {})
+
+    _patch_router_client(monkeypatch, post)
+    counter = RouterTokenCounter("http://router")
+
+    with pytest.raises(ContextSourceError, match="Exact tokenizer unavailable"):
+        asyncio.run(counter.count("gemma-e4b", "hello"))
+
+    assert attempts == 1
+
+
+def test_router_token_counter_propagates_cancellation_without_retry(monkeypatch):
+    attempts = 0
+
+    async def post(_url, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        raise asyncio.CancelledError
+
+    _patch_router_client(monkeypatch, post)
+    counter = RouterTokenCounter("http://router")
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(counter.count("gemma-e4b", "hello"))
+
+    assert attempts == 1
 
 
 def _messages(chart: str = "") -> list[dict[str, str]]:

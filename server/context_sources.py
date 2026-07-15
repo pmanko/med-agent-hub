@@ -526,6 +526,17 @@ class RouterTokenCounter:
         self.api_key = api_key if api_key is not None else llm_config.api_key
         self.timeout = timeout
 
+    @staticmethod
+    async def _post_token_request(client, url, *, json, headers):
+        """Retry one dropped connection across idempotent token-count requests."""
+        for attempt in range(2):
+            try:
+                return await client.post(url, json=json, headers=headers)
+            except httpx.TransportError:
+                if attempt == 1:
+                    raise
+        raise AssertionError("unreachable")
+
     async def count(self, model: str, text: str) -> int:
         headers = {"Content-Type": "application/json"}
         if self.api_key:
@@ -533,7 +544,8 @@ class RouterTokenCounter:
         payload = {"model": model, "content": text, "add_special": False}
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.post(
+                response = await self._post_token_request(
+                    client,
                     f"{self.base_url}/tokenize", json=payload, headers=headers
                 )
                 response.raise_for_status()
@@ -570,7 +582,8 @@ class RouterTokenCounter:
         body["model"] = model
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.post(
+                response = await self._post_token_request(
+                    client,
                     f"{self.base_url}/v1/chat/completions/input_tokens",
                     json=body,
                     headers=headers,
@@ -585,7 +598,8 @@ class RouterTokenCounter:
                         for key in ("model", "messages", "tools", "tool_choice")
                         if key in body
                     }
-                    template = await client.post(
+                    template = await self._post_token_request(
+                        client,
                         f"{self.base_url}/apply-template",
                         json=template_body,
                         headers=headers,
@@ -594,7 +608,8 @@ class RouterTokenCounter:
                     prompt = template.json().get("prompt")
                     if not isinstance(prompt, str):
                         raise ValueError("apply-template response had no prompt")
-                    tokenized = await client.post(
+                    tokenized = await self._post_token_request(
+                        client,
                         f"{self.base_url}/tokenize",
                         json={
                             "model": model,
