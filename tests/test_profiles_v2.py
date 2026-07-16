@@ -38,6 +38,7 @@ def test_default_product_profile_is_human_readable_single_e4b():
     assert profile.topology == "single"
     assert "orchestrator" not in profile.models
     assert profile.models["answer"] == "gemma-e4b"
+    assert profile.supplemental_sources == ("knowledge-base",)
     assert profile.stages == (
         "context",
         "answer",

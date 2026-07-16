@@ -21,7 +21,7 @@ profiles:
     visibility: product
     default: true
     selection_priority: 10
-    context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true}
+    context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true, supplemental_sources: [knowledge-base]}
     knobs: {answer: {temperature: 0}}
 
   single-e2b-checked:
@@ -33,7 +33,7 @@ profiles:
     policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true}
     visibility: product
     selection_priority: 15
-    context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true}
+    context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true, supplemental_sources: [knowledge-base]}
     knobs: {answer: {temperature: 0}}
 
   single-a4b-checked:
@@ -45,7 +45,7 @@ profiles:
     policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true}
     visibility: product
     selection_priority: 20
-    context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true}
+    context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true, supplemental_sources: [knowledge-base]}
     knobs: {answer: {temperature: 0}}
 
   single-12b-checked:
@@ -57,7 +57,7 @@ profiles:
     policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true}
     visibility: product
     selection_priority: 30
-    context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true}
+    context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true, supplemental_sources: [knowledge-base]}
     knobs: {answer: {temperature: 0}}
 
   team-med-checked:
@@ -69,7 +69,7 @@ profiles:
     policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true}
     visibility: product
     selection_priority: 100
-    context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true}
+    context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true, supplemental_sources: [knowledge-base]}
 
   # Quarantined from product discovery and publishable candidate runs. This one
   # explicit profile preserves targeted high-team failure analysis without
@@ -82,7 +82,7 @@ profiles:
     prompts: {answer: synthesis-answer, review: validation-rewrite, indepth: synthesis-indepth, orchestrator: orchestrator, expert: medical_expert}
     policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true}
     visibility: debug
-    context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true}
+    context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true, supplemental_sources: [knowledge-base]}
 
   # Matched controls for the current small-model Answer-path comparison. These
   # are hidden from product clients and differ only in model or gate policy.

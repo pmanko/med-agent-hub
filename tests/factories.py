@@ -86,6 +86,7 @@ def make_profile(
     prompts: Optional[Mapping[str, str]] = None,
     policies: Optional[Mapping[str, Any]] = None,
     knobs: Optional[Mapping[str, Any]] = None,
+    supplemental_sources: Sequence[str] = (),
     profile_id: str = "test-profile",
 ) -> Profile:
     merged_policies = {
@@ -103,6 +104,7 @@ def make_profile(
             models=dict(models),
             prompts=dict(prompts or {}),
             policies=merged_policies,
+            supplemental_sources=tuple(supplemental_sources),
             knobs=dict(knobs or {}),
             context_window=24576 if output == "product" else 0,
             reserved_output_tokens=4096 if output == "product" else 0,
@@ -123,6 +125,7 @@ def team_profile(
     review_prompt: str = "validation-rewrite",
     knobs: Optional[Mapping[str, Any]] = None,
     policies: Optional[Mapping[str, Any]] = None,
+    supplemental_sources: Sequence[str] = ("knowledge-base",),
     profile_id: str = "test-team-profile",
 ) -> Profile:
     stages = ["context", "gather", "answer", "gate"]
@@ -147,6 +150,7 @@ def team_profile(
         output=output,
         knobs=knobs,
         policies=policies,
+        supplemental_sources=supplemental_sources,
         profile_id=profile_id,
     )
 

@@ -335,6 +335,7 @@ def test_prompt_selection_does_not_shrink_temporal_gate_evidence():
     )
     profile = replace(
         get_profile("single-e4b-checked"),
+        supplemental_sources=(),
         context_window=3,
         reserved_output_tokens=1,
     )

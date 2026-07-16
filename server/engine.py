@@ -731,9 +731,7 @@ async def _prepare_context(request: ExecutionRequest, state: _State) -> None:
                 messages=state.messages,
                 source=str(context.get("source")) if context.get("source") else None,
                 sources=tuple(str(item) for item in requested_sources),
-                supplemental_sources=(
-                    ("knowledge-base",) if "gather" in request.profile.stages else ()
-                ),
+                supplemental_sources=request.profile.supplemental_sources,
                 question=stages._latest_user_text(state.messages),
             )
         )

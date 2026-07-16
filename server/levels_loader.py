@@ -56,6 +56,7 @@ class Profile:
     models: Mapping[str, str]
     prompts: Mapping[str, str]
     policies: Mapping[str, Any]
+    supplemental_sources: Tuple[str, ...] = ()
     knobs: Mapping[str, Any] = field(default_factory=dict)
     visibility: str = "experimental"
     default: bool = False
@@ -178,6 +179,13 @@ def _load_raw() -> Dict[str, dict]:
 
 def _from_spec(profile_id: str, spec: Mapping[str, Any]) -> Profile:
     context = spec.get("context") or {}
+    supplemental_sources = context.get("supplemental_sources") or ()
+    if isinstance(supplemental_sources, str):
+        supplemental_sources = (supplemental_sources,)
+    elif not isinstance(supplemental_sources, (list, tuple)):
+        raise ValueError(
+            f"profile {profile_id!r} context.supplemental_sources must be a list"
+        )
     profile = Profile(
         id=profile_id,
         label=str(spec.get("label") or "").strip(),
@@ -186,6 +194,7 @@ def _from_spec(profile_id: str, spec: Mapping[str, Any]) -> Profile:
         models=dict(spec.get("models") or {}),
         prompts=dict(spec.get("prompts") or {}),
         policies=dict(spec.get("policies") or {}),
+        supplemental_sources=tuple(supplemental_sources),
         knobs=dict(spec.get("knobs") or {}),
         visibility=str(spec.get("visibility") or "experimental"),
         default=bool(spec.get("default", False)),
@@ -203,6 +212,17 @@ def compile_profile(profile: Profile) -> Profile:
     if profile.topology not in _TOPOLOGIES:
         raise ValueError(
             f"profile {profile.id!r} has invalid topology {profile.topology!r}"
+        )
+    supplemental_sources = tuple(
+        str(source).strip() for source in profile.supplemental_sources
+    )
+    if any(not source for source in supplemental_sources):
+        raise ValueError(
+            f"profile {profile.id!r} has an empty supplemental context source"
+        )
+    if len(set(supplemental_sources)) != len(supplemental_sources):
+        raise ValueError(
+            f"profile {profile.id!r} repeats a supplemental context source"
         )
     if not profile.stages or profile.stages[0] != "context":
         raise ValueError(f"profile {profile.id!r} must start with context")
@@ -356,6 +376,7 @@ def compile_profile(profile: Profile) -> Profile:
         models=_freeze_mapping(profile.models),
         prompts=_freeze_mapping(profile.prompts),
         policies=_freeze_mapping(profile.policies),
+        supplemental_sources=supplemental_sources,
         knobs=_freeze_mapping(profile.knobs),
         visibility=profile.visibility,
         default=profile.default,

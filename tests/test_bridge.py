@@ -63,6 +63,7 @@ def _team_profile(*, output="combined", answer_prompt="synthesis-answer", indept
         models=models,
         prompts=prompts,
         output=output,
+        supplemental_sources=("knowledge-base",),
     )
 
 

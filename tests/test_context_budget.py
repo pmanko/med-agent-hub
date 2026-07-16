@@ -305,6 +305,52 @@ def test_team_derived_context_triggers_exact_answer_context_reselection():
     assert len(state.view.records) < before
 
 
+def test_single_product_profile_supplies_knowledge_to_answer_and_indepth():
+    mappings = [
+        {
+            "resourceType": "DrugOrder",
+            "resourceUuid": "stavudine-order",
+            "date": "2026-01-07",
+            "text": "(2026-01-07) Drug order: Stavudine",
+        }
+    ]
+    registry = patient_source_registry("[1] (2026-01-07) Drug order: Stavudine\n", mappings)
+    messages = [
+        {"role": "user", "content": "What medications is this patient taking?"},
+        {
+            "role": "assistant",
+            "content": "The patient is taking stavudine, nevirapine, and lamivudine [1].",
+        },
+        {
+            "role": "user",
+            "content": "How does the regimen compare with WHO recommendations?",
+        },
+    ]
+    profile = get_profile("single-12b-checked")
+    state = engine._State(messages=messages)
+    request = engine.ExecutionRequest(
+        profile=profile,
+        messages=state.messages,
+        patient="patient-1",
+        source_registry=registry,
+        token_counter=ExactWordCounter(),
+    )
+
+    asyncio.run(engine._prepare_context(request, state))
+
+    assert state.ledger.source_names == ("test-patient", "knowledge-base")
+    assert "Stavudine (d4T) is no longer recommended" in state.chart
+
+    _view, _messages, indepth_chart = asyncio.run(
+        engine._select_indepth_context(
+            request,
+            state,
+            "The checked answer compares the regimen with WHO guidance.",
+        )
+    )
+    assert "Stavudine (d4T) is no longer recommended" in indepth_chart
+
+
 def test_indepth_refits_context_without_mutating_answer_view_or_ledger():
     mappings = [
         {
@@ -339,6 +385,7 @@ def test_indepth_refits_context_without_mutating_answer_view_or_ledger():
 
     profile = replace(
         get_profile("single-e4b-checked"),
+        supplemental_sources=(),
         context_window=5,
         reserved_output_tokens=1,
     )
@@ -430,6 +477,7 @@ def test_indepth_synthesis_review_and_retry_match_the_exact_backend_guard():
     base_profile = get_profile("single-e4b-checked")
     profile = replace(
         base_profile,
+        supplemental_sources=(),
         models={
             **base_profile.models,
             "indepth": "writer-model",

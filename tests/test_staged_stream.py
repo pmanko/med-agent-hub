@@ -134,6 +134,7 @@ def _product_profile(
         models=models,
         prompts=prompts,
         output="product",
+        supplemental_sources=("knowledge-base",),
     )
 
 
