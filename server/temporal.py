@@ -1760,9 +1760,14 @@ def _canonicalize_grouped_citations(claim: str) -> Tuple[str, List[int]]:
     return _GROUPED_CITATION_RE.sub(replacement, claim or ""), source_indices
 
 
-def canonicalize_indepth_citations(claim: str) -> Tuple[str, List[int]]:
+def canonicalize_citations(claim: str) -> Tuple[str, List[int]]:
     """Canonicalize only complete, standalone numeric citation groups."""
     return _canonicalize_grouped_citations(claim)
+
+
+def canonicalize_indepth_citations(claim: str) -> Tuple[str, List[int]]:
+    """Backward-compatible In-Depth entry point for grouped citation canonicalization."""
+    return canonicalize_citations(claim)
 
 
 def _has_malformed_citation_syntax(claim: str) -> bool:

@@ -258,6 +258,20 @@ def test_product_citation_contract_uses_explicit_markers_over_declared_extras():
     assert issues == []
 
 
+def test_product_citation_contract_canonicalizes_grouped_numeric_markers():
+    answer, citations, issues = team._enforce_product_citation_contract(
+        "The chart documents three medications [2, 3, 4], and WHO guidance applies [116].",
+        [2, 3, 4, 116],
+        [],
+    )
+
+    assert answer == (
+        "The chart documents three medications [2][3][4], and WHO guidance applies [116]."
+    )
+    assert citations == [2, 3, 4, 116]
+    assert issues == []
+
+
 def test_product_citation_contract_scopes_one_declared_source_to_prose():
     answer, citations, issues = team._enforce_product_citation_contract(
         "The documented visit was on 2006-06-06.", [4], []

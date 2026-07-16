@@ -281,6 +281,7 @@ def _enforce_product_citation_contract(
     multiple claims safely; keep it visible for inspection but prevent the answer from reporting a
     checked lifecycle state. Low-level legs do not call this helper and retain byte-exact behavior.
     """
+    answer, _grouped_indices = temporal.canonicalize_citations(answer)
     declared = _citation_indices(citations)
     inline = _citation_indices([], answer)
     block_refs = _block_temporal_text_and_refs(blocks or [])[1]
