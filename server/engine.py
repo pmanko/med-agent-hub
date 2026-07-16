@@ -1309,7 +1309,10 @@ async def _execute_stages(
                         state.blocks, block_issues = stages._normalize_product_blocks(
                             state.blocks
                         )
-                        if block_issues:
+                        if block_issues or gate_count == 1 or state.review_edited:
+                            # Preserve table failures when review changes nothing.
+                            # untouched. Once a rewrite removes that block, only current
+                            # envelope issues remain lifecycle blockers.
                             state.table_issues = block_issues
                         if state.blocks != before_blocks or block_issues:
                             state.steps.append(

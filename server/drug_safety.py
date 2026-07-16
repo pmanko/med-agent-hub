@@ -9,6 +9,7 @@ matching (allergy/condition/active-drug tokens) is substring `in`.
 """
 
 import json
+import math
 import os
 import re
 import threading
@@ -40,6 +41,10 @@ _ATC_SUBGROUP_PREFIX_LENGTH = 5
 # A level-5 ATC substance code is 7 chars: one letter, two digits, two letters, two digits
 # (e.g. M01AE01). Guards against a non-ATC/malformed file turning any 7-char token into a drug.
 _ATC_LEVEL5 = re.compile(r"[A-Z]\d{2}[A-Z]{2}\d{2}")
+# Curated cross-reactivity groups may target ATC levels 2-5, but never the
+# one-letter anatomical level: that would turn one bad value into a very broad
+# clinical match.
+_ATC_GROUP_PREFIX = re.compile(r"[A-Z]\d{2}(?:[A-Z](?:[A-Z](?:\d{2})?)?)?")
 # Parent-group code lengths to try for a substance's drug_class, longest first: level 4, 3, 2.
 _ATC_PARENT_LENGTHS = (5, 4, 3)
 
@@ -73,7 +78,25 @@ def _clean_text(value: Any) -> Optional[str]:
 
 
 def _clean_text_list(values: Any) -> List[str]:
+    if not isinstance(values, list):
+        return []
     return [cleaned for value in (values or []) if (cleaned := _clean_text(value))]
+
+
+def _finite_number(value: Any) -> float:
+    if isinstance(value, bool):
+        raise ValueError("boolean is not a numeric clinical value")
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError("clinical value must be finite")
+    return parsed
+
+
+def _whole_year(value: Any) -> int:
+    parsed = _finite_number(value)
+    if not parsed.is_integer():
+        raise ValueError("age-band bounds must be whole years")
+    return int(parsed)
 
 
 @dataclass
@@ -157,8 +180,12 @@ class CrossReactivityGroup:
     note: Optional[str] = None
 
     def normalized_prefixes(self) -> Set[str]:
-        return {prefix.strip().upper() for prefix in self.atc_prefixes
-                if isinstance(prefix, str) and prefix.strip()}
+        normalized = {
+            prefix.strip().upper()
+            for prefix in self.atc_prefixes
+            if isinstance(prefix, str) and prefix.strip()
+        }
+        return {prefix for prefix in normalized if _ATC_GROUP_PREFIX.fullmatch(prefix)}
 
     def contains_code(self, code: Optional[str]) -> bool:
         if not isinstance(code, str) or not code.strip():
@@ -176,14 +203,26 @@ def _entry_from_dict(d: Dict[str, Any]) -> DrugReferenceEntry:
         if not isinstance(band, dict) or "minYears" not in band or "maxYears" not in band:
             continue
         try:
-            age_bands.append(AgeBand(
-                min_years=band["minYears"], max_years=band["maxYears"],
-                mg_per_kg_min=band.get("mgPerKgMin", 0.0),
-                mg_per_kg_max=band.get("mgPerKgMax", 0.0),
-                max_daily_dose_mg=band.get("maxDailyDoseMg", 0.0),
-            ))
+            parsed = AgeBand(
+                min_years=_whole_year(band["minYears"]),
+                max_years=_whole_year(band["maxYears"]),
+                mg_per_kg_min=_finite_number(band.get("mgPerKgMin", 0.0)),
+                mg_per_kg_max=_finite_number(band.get("mgPerKgMax", 0.0)),
+                max_daily_dose_mg=_finite_number(
+                    band.get("maxDailyDoseMg", 0.0)
+                ),
+            )
         except (TypeError, ValueError):
             continue
+        if (
+            parsed.min_years < 0
+            or parsed.max_years < parsed.min_years
+            or parsed.mg_per_kg_min < 0
+            or parsed.mg_per_kg_max < 0
+            or parsed.max_daily_dose_mg < 0
+        ):
+            continue
+        age_bands.append(parsed)
     return DrugReferenceEntry(
         id=_clean_text(d.get("id")) or "",
         name=_clean_text(d.get("name")) or "",
@@ -191,10 +230,24 @@ def _entry_from_dict(d: Dict[str, Any]) -> DrugReferenceEntry:
         aliases=_clean_text_list(d.get("aliases")),
         atc_codes=_clean_text_list(d.get("atcCodes")),
         age_bands=age_bands,
-        interactions=[Interaction(token=i.get("token"), atc=i.get("atc"), note=i.get("note"))
-                      for i in (d.get("interactions") or []) if isinstance(i, dict)],
-        contraindications=[Contraindication(type=c.get("type", ""), token=c.get("token", ""), note=c.get("note"))
-                            for c in (d.get("contraindications") or []) if isinstance(c, dict)],
+        interactions=[
+            Interaction(
+                token=_clean_text(item.get("token")),
+                atc=_clean_text(item.get("atc")),
+                note=_clean_text(item.get("note")),
+            )
+            for item in (d.get("interactions") or [])
+            if isinstance(item, dict)
+        ],
+        contraindications=[
+            Contraindication(
+                type=_clean_text(item.get("type")) or "",
+                token=_clean_text(item.get("token")) or "",
+                note=_clean_text(item.get("note")),
+            )
+            for item in (d.get("contraindications") or [])
+            if isinstance(item, dict)
+        ],
         warnings=_clean_text_list(d.get("warnings")),
         source=_clean_text(d.get("source")),
     )
@@ -289,8 +342,8 @@ def _load_cross_reactivity_groups(path: Optional[str]) -> List[CrossReactivityGr
         name = item.get("name")
         group = CrossReactivityGroup(
             name=name.strip() if isinstance(name, str) else "",
-            atc_prefixes=list(item.get("atcPrefixes") or []),
-            note=item.get("note"),
+            atc_prefixes=_clean_text_list(item.get("atcPrefixes")),
+            note=_clean_text(item.get("note")),
         )
         if group.name and group.normalized_prefixes():
             groups.append(group)

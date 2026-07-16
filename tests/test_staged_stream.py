@@ -2000,6 +2000,70 @@ def test_withheld_malformed_table_remains_needs_review_after_llm_review(monkeypa
     )
 
 
+def test_reviewed_prose_correction_clears_withheld_table_blocker(monkeypatch):
+    _stub_common(monkeypatch)
+
+    malformed_block = {
+        "kind": "table",
+        "title": "Weight",
+        "columns": [
+            {"key": "date", "label": "Date"},
+            {"key": "weight", "label": "Weight"},
+        ],
+        "rows": [
+            {
+                "cells": {"unexpected": {"text": "2025-01-01", "refs": [1]}}
+            }
+        ],
+    }
+
+    async def fake_answer(*_args, **_kwargs):
+        return "The documented weight is shown below [1].", [1], [malformed_block]
+
+    async def keep_answer(_client, **kwargs):
+        return (
+            kwargs["answer_text"],
+            kwargs["citations"],
+            kwargs["blocks"],
+            {"level": "green", "note": ""},
+        )
+
+    review_calls = 0
+
+    async def correct_prose(*_args, **_kwargs):
+        nonlocal review_calls
+        review_calls += 1
+        if review_calls == 1:
+            return {
+                "answer_ok": False,
+                "errors": [
+                    {
+                        "chart": (
+                            "The withheld table is not available to support this "
+                            "wording."
+                        )
+                    }
+                ],
+                "corrected_answer": "The documented weight record is available [1].",
+            }
+        return {"answer_ok": True, "errors": []}
+
+    monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
+    monkeypatch.setattr(team, "_ensure_substantive_answer", keep_answer)
+    monkeypatch.setattr(team, "_validate_answer_rewrite", correct_prose)
+
+    final = dict(_collect(_product_profile(review_model="V")))["done"]
+
+    assert final["answer"] == "The documented weight record is available [1]."
+    assert final["blocks"] == []
+    assert final["answerValidation"]["status"] == "edited"
+    assert final["answerValidation"]["originalBlocks"] == [malformed_block]
+    assert not any(
+        issue.get("id") == "table_contract"
+        for issue in final["answerValidation"]["issues"]
+    )
+
+
 def test_product_single_unscoped_citation_is_scoped_and_grounded(monkeypatch):
     _stub_common(monkeypatch)
 

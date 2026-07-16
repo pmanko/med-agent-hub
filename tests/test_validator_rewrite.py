@@ -77,7 +77,7 @@ def _factory(calls, rewrite_verdicts):
                 else {"answer_ok": True}
             )
             state["rw"] += 1
-            return {"content": json.dumps(v)}
+            return {"content": v if isinstance(v, str) else json.dumps(v)}
         if name == "indepth_verdict":
             return {"content": json.dumps({"drop": [], "issues": ""})}
         return {"content": "", "tool_calls": None}
@@ -270,6 +270,34 @@ def test_answer_review_derives_failure_from_localized_errors_when_flag_is_incons
     assert env["answer"] == "The patient is taking aspirin [1]."
     assert env["answerValidation"]["status"] == "needs_review"
     assert len(env["answerValidation"]["issues"]) == 1
+
+
+@pytest.mark.parametrize("malformed_verdict", ["{not-json", []])
+def test_answer_review_does_not_mark_malformed_reviewer_output_checked(
+    malformed_verdict,
+):
+    _calls, env = _run_review([malformed_verdict])
+
+    assert env["answer"] == "The patient is taking aspirin [1]."
+    assert env["answerValidation"]["status"] == "unavailable"
+    assert env["confidence"]["answer"]["level"] == "yellow"
+
+
+def test_answer_review_does_not_adopt_correction_when_recheck_is_malformed():
+    _calls, env = _run_review(
+        [
+            {
+                "answer_ok": False,
+                "errors": [_err("aspirin", "lisinopril [1]", "lisinopril")],
+                "corrected_answer": "The patient is taking lisinopril [1].",
+            },
+            "{not-json",
+        ]
+    )
+
+    assert env["answer"] == "The patient is taking aspirin [1]."
+    assert env["answerValidation"]["status"] == "needs_review"
+    assert env["confidence"]["answer"]["level"] == "red"
 
 
 def _dated_review_messages(answer):

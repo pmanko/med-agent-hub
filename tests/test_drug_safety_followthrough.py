@@ -219,3 +219,92 @@ def test_null_rule_elements_render_best_effort_without_literal_null(tmp_path):
     assert "test condition" in text
     assert "note-only interaction" in text
     assert "null" not in text.lower()
+
+
+def test_scalar_list_fields_and_broad_atc_prefixes_are_rejected(tmp_path):
+    drugs = tmp_path / "scalar-lists.json"
+    groups = tmp_path / "scalar-groups.json"
+    drugs.write_text(
+        json.dumps(
+            {
+                "entries": [
+                    {
+                        "id": "mangled",
+                        "name": "Mangled",
+                        "aliases": "ibuprofen",
+                        "atcCodes": "M01AE01",
+                        "warnings": "not a list",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    groups.write_text(
+        json.dumps(
+            {
+                "groups": [
+                    {"name": "scalar", "atcPrefixes": "M01AE"},
+                    {"name": "too broad", "atcPrefixes": ["M"]},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    dataset = ds.load_dataset(
+        str(drugs), source_format="json", cross_reactivity_path=str(groups)
+    )
+
+    assert dataset.entries[0].aliases == []
+    assert dataset.entries[0].atc_codes == []
+    assert dataset.entries[0].warnings == []
+    assert dataset.cross_reactivity_groups == []
+    assert dataset.find_by_query("Can I use ibuprofen?") == []
+
+
+def test_malformed_age_band_cannot_erase_an_independent_interaction_warning(tmp_path):
+    path = tmp_path / "bad-age-band.json"
+    path.write_text(
+        json.dumps(
+            {
+                "entries": [
+                    {
+                        "id": "ibuprofen",
+                        "name": "Ibuprofen",
+                        "aliases": ["ibuprofen"],
+                        "ageBands": [
+                            {
+                                "minYears": "not-a-number",
+                                "maxYears": 120,
+                                "mgPerKgMax": 10,
+                            }
+                        ],
+                        "interactions": [
+                            {
+                                "token": "warfarin",
+                                "note": "increased bleeding risk",
+                            }
+                        ],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    dataset = ds.load_dataset(
+        str(path), source_format="json", cross_reactivity_path="none"
+    )
+    context = ds.PatientClinicalContext(
+        age_years=40,
+        active_drug_names={"warfarin"},
+    )
+
+    warnings = ds.validate_answer(
+        "Ibuprofen 600 mg may be used.", None, context, dataset
+    )
+
+    assert dataset.entries[0].age_bands == []
+    assert len(warnings) == 1
+    assert warnings[0].type == ds.TYPE_INTERACTION
+    assert warnings[0].drug == "Ibuprofen"

@@ -1634,9 +1634,11 @@ async def _validate_answer_rewrite(
     dry: Optional[float],
     validation_prompt: str = _REWRITE_VALIDATOR_PROMPT,
 ) -> Dict[str, Any]:
-    """Rewrite-mode audit: localize each chart contradiction AND return the corrected answer. Returns
-    {answer_ok, errors:[{wrong,chart,fix}], corrected_answer}. FAIL-OPEN: {answer_ok: True, errors: []}
-    on any parse failure so a flaky validator never blocks the run."""
+    """Rewrite-mode audit: localize each chart contradiction and return a correction.
+
+    A malformed reviewer response is an unavailable check, never evidence that the
+    answer passed review.
+    """
     messages = _answer_validation_messages(
         chart=chart,
         gathered=gathered,
@@ -1658,18 +1660,30 @@ async def _validate_answer_rewrite(
         verdict = json.loads(raw)
     except (json.JSONDecodeError, TypeError):
         logger.warning(
-            "rewrite-validator[%s] verdict UNPARSEABLE -> FAIL-OPEN (pass); raw=%r",
+            "rewrite-validator[%s] verdict UNPARSEABLE -> unavailable; raw=%r",
             validator_model,
             raw[:240],
         )
-        return {"answer_ok": True, "errors": []}
+        return {
+            "answer_ok": False,
+            "errors": [],
+            "corrected_answer": "",
+            "unavailable": True,
+            "reason": "The answer reviewer returned malformed output.",
+        }
     if not isinstance(verdict, dict):
         logger.warning(
-            "rewrite-validator[%s] verdict not an object -> FAIL-OPEN; raw=%r",
+            "rewrite-validator[%s] verdict not an object -> unavailable; raw=%r",
             validator_model,
             raw[:240],
         )
-        return {"answer_ok": True, "errors": []}
+        return {
+            "answer_ok": False,
+            "errors": [],
+            "corrected_answer": "",
+            "unavailable": True,
+            "reason": "The answer reviewer returned an invalid result.",
+        }
     raw_errors = [e for e in (verdict.get("errors") or []) if isinstance(e, dict)]
 
     def normalize_fragment(value: Any) -> str:
@@ -1743,8 +1757,11 @@ async def _validate_indepth_verdict(
     dry: Optional[float],
     validation_prompt: str = "validation",
 ) -> Dict[str, Any]:
-    """Audit the In-Depth claims claim-by-claim. Returns {drop: [1-based claim numbers, clamped to
-    1..len(claims)], issues: str}. FAIL-OPEN: returns {drop: [], issues: ""} on any parse failure.
+    """Audit the In-Depth claims claim-by-claim.
+
+    Returns ``{drop: [1-based claim numbers], issues: str}``, with drops clamped
+    to the claim list. A malformed result marks review unavailable so unreviewed
+    claims cannot ship as checked.
     """
     messages = _indepth_validation_messages(
         chart=chart,
@@ -1768,18 +1785,26 @@ async def _validate_indepth_verdict(
         verdict = json.loads(raw)
     except (json.JSONDecodeError, TypeError):
         logger.warning(
-            "indepth-validator[%s] verdict UNPARSEABLE -> FAIL-OPEN (keep all); raw=%r",
+            "indepth-validator[%s] verdict UNPARSEABLE -> unavailable; raw=%r",
             validator_model,
             raw[:240],
         )
-        return {"drop": [], "issues": ""}
+        return {
+            "drop": list(range(1, len(claims) + 1)),
+            "issues": "In-Depth review returned malformed output.",
+            "unavailable": True,
+        }
     if not isinstance(verdict, dict):
         logger.warning(
-            "indepth-validator[%s] verdict not an object -> FAIL-OPEN; raw=%r",
+            "indepth-validator[%s] verdict not an object -> unavailable; raw=%r",
             validator_model,
             raw[:240],
         )
-        return {"drop": [], "issues": ""}
+        return {
+            "drop": list(range(1, len(claims) + 1)),
+            "issues": "In-Depth review returned an invalid result.",
+            "unavailable": True,
+        }
     drop = [
         d
         for d in (verdict.get("drop") or [])
@@ -2000,14 +2025,30 @@ async def _review_existing_answer(
             )
         except Exception as e:
             logger.warning("answer-review validator call failed: %s", e)
+            verdict = {
+                "answer_ok": False,
+                "errors": [],
+                "corrected_answer": "",
+                "unavailable": True,
+                "reason": str(e),
+            }
+
+        if verdict.get("unavailable"):
+            reason = str(verdict.get("reason") or "Answer review was unavailable.")
             validation = _answer_validation_wire(
                 "unavailable",
-                summary="Answer check unavailable; the review model call failed.",
-                issues=[{"reason": str(e)}],
+                summary=(
+                    "Answer check unavailable; the review model did not return a "
+                    "usable result."
+                ),
+                issues=[{"id": "answer_review_unavailable", "reason": reason}],
+                original_answer=(
+                    original_answer if original_answer != answer_text else None
+                ),
             )
             answer_conf = {
                 "level": "yellow",
-                "note": "Answer check unavailable because the review model failed.",
+                "note": "Answer check unavailable; verify against the chart.",
             }
             content = _assemble_answer_envelope(
                 answer_text, citations, blocks, answer_conf, validation
@@ -2017,6 +2058,7 @@ async def _review_existing_answer(
                     "role": "answer_review",
                     "model": reviewer_model,
                     "status": "unavailable",
+                    "reason": reason,
                 }
             )
             return (
@@ -2025,7 +2067,7 @@ async def _review_existing_answer(
                 answer_text,
                 validation,
                 temporal_gate_result,
-                original_answer,
+                original_answer if original_answer != answer_text else None,
             )
 
         errs = (verdict or {}).get("errors") or []
@@ -2059,18 +2101,28 @@ async def _review_existing_answer(
                     if review_chart_selector is not None
                     else chart
                 )
-                recheck = await _validate_answer_rewrite(
-                    client,
-                    reviewer_model,
-                    chart=recheck_chart,
-                    gathered=gathered,
-                    answer_text=corrected,
-                    max_tokens=max_tokens,
-                    temperature=validator_temperature,
-                    repeat_penalty=validator_repeat_penalty,
-                    dry=validator_dry,
-                    validation_prompt=reviewer_prompt or _REWRITE_VALIDATOR_PROMPT,
-                )
+                try:
+                    recheck = await _validate_answer_rewrite(
+                        client,
+                        reviewer_model,
+                        chart=recheck_chart,
+                        gathered=gathered,
+                        answer_text=corrected,
+                        max_tokens=max_tokens,
+                        temperature=validator_temperature,
+                        repeat_penalty=validator_repeat_penalty,
+                        dry=validator_dry,
+                        validation_prompt=reviewer_prompt
+                        or _REWRITE_VALIDATOR_PROMPT,
+                    )
+                except Exception as e:
+                    logger.warning("answer-review correction recheck failed: %s", e)
+                    recheck = {
+                        "answer_ok": False,
+                        "errors": [],
+                        "unavailable": True,
+                        "reason": str(e),
+                    }
                 steps.append(
                     {
                         "role": "answer_review",
@@ -2078,11 +2130,34 @@ async def _review_existing_answer(
                         "model": reviewer_model,
                         "attempt": 1,
                         "answer_ok": recheck.get("answer_ok", True),
-                              "n_errors": len(recheck.get("errors") or []),
+                        "n_errors": len(recheck.get("errors") or []),
                         "errors": recheck.get("errors") or [],
+                        "status": (
+                            "unavailable" if recheck.get("unavailable") else "checked"
+                        ),
                     }
                 )
-                if recheck.get("answer_ok", True) or not recheck.get("errors"):
+                if recheck.get("unavailable"):
+                    reason = str(
+                        recheck.get("reason")
+                        or "The corrected answer could not be rechecked."
+                    )
+                    issues.append(
+                        {"id": "answer_review_unavailable", "reason": reason}
+                    )
+                    status = "needs_review"
+                    summary = (
+                        "The answer check found an issue, but the proposed correction "
+                        "could not be safely rechecked."
+                    )
+                    answer_conf = {
+                        "level": "red",
+                        "note": (
+                            "A proposed correction could not be rechecked. Verify "
+                            "against the chart."
+                        ),
+                    }
+                elif recheck.get("answer_ok", True) or not recheck.get("errors"):
                     answer_text = corrected
                     citations = _extract_citations(corrected) or citations
                     status = "edited"

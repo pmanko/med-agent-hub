@@ -11,7 +11,7 @@ rejection permits one bounded fresh synthesis.
 
 Mocks only the model boundary (`_chat`) and exercises the compiled stages end-to-end. The mock
 branches on the response_format json_schema name so the four call sites (chart_answer synth, in_depth
-synth, answer_verdict, indepth_verdict) are served independently.
+synth, rewrite_verdict, indepth_verdict) are served independently.
 Run: pytest tests/test_validator.py
 """
 
@@ -44,7 +44,7 @@ def _factory(calls, verdicts, iv_drops=None):
     """Mock _chat. Branches on the response_format json_schema name:
     "chart_answer"    (Answer synth)      -> {answer: ans-vN, ...} (N = answer-synth call index);
     "in_depth"        (In-Depth synth)    -> {claims: [claim-A-vN, claim-B-vN]};
-    "answer_verdict"  (Answer validator)  -> the Nth entry of `verdicts` ({answer_ok, answer_issues});
+    "rewrite_verdict" (Answer validator)  -> the Nth `{answer_ok, errors}` verdict;
     "indepth_verdict" (In-Depth validator)-> {drop} = the Nth entry of `iv_drops` (a list of drop-
                         lists per In-Depth audit attempt); falls back to verdicts[0].drop / [].
     no response_format (orchestrator)     -> no tools (break to synthesis)."""
@@ -82,21 +82,14 @@ def _factory(calls, verdicts, iv_drops=None):
                 "content": json.dumps({"claims": [f"claim-A-v{n}", f"claim-B-v{n}"]})
             }
 
-        if name == "answer_verdict":
+        if name == "rewrite_verdict":
             v = (
                 verdicts[min(state["answer_val"], len(verdicts) - 1)]
                 if verdicts
                 else {"answer_ok": True}
             )
             state["answer_val"] += 1
-            return {
-                "content": json.dumps(
-                    {
-                        "answer_ok": v["answer_ok"],
-                        "answer_issues": v.get("answer_issues", ""),
-                    }
-                )
-            }
+            return {"content": json.dumps({"answer_ok": v["answer_ok"], "errors": []})}
 
         if name == "indepth_verdict":
             if iv_drops is not None:
@@ -117,7 +110,7 @@ def _counts(calls):
     return (
         sum(1 for _m, n in calls if n == "chart_answer"),
         sum(1 for _m, n in calls if n == "in_depth"),
-        sum(1 for _m, n in calls if n == "answer_verdict"),
+        sum(1 for _m, n in calls if n == "rewrite_verdict"),
         sum(1 for _m, n in calls if n == "indepth_verdict"),
     )
 
@@ -356,6 +349,50 @@ def test_unavailable_indepth_reviewer_cannot_ship_complete(monkeypatch):
     assert confidence["level"] == "red"
     assert confidence["status"] == "unavailable"
     assert "unavailable" in confidence["note"].lower()
+    validator_step = next(
+        step for step in steps if step["role"] == "indepth_validator"
+    )
+    assert validator_step["status"] == "unavailable"
+
+
+@pytest.mark.parametrize("review_content", ["{not-json", "[]"])
+def test_invalid_indepth_reviewer_cannot_ship_complete(monkeypatch, review_content):
+    async def synthesize(*_args, **_kwargs):
+        return ["A claim whose review result was malformed."]
+
+    async def malformed_review(*_args, **_kwargs):
+        return {"content": review_content}
+
+    monkeypatch.setattr(team, "_synthesize_indepth", synthesize)
+    monkeypatch.setattr(team, "_chat", malformed_review)
+    steps = []
+
+    claims, confidence = asyncio.run(
+        team._gen_indepth(
+            None,
+            "SYNTH",
+            [],
+            "instruction",
+            "gathered",
+            "answer",
+            validator_model="VALIDATOR",
+            validator_prompt="validation",
+            chart="chart",
+            synth_temperature=0.0,
+            synth_repeat_penalty=None,
+            synth_dry=None,
+            validator_temperature=0.0,
+            validator_repeat_penalty=None,
+            validator_dry=None,
+            max_tokens=128,
+            max_loops=1,
+            steps=steps,
+        )
+    )
+
+    assert claims == []
+    assert confidence["level"] == "red"
+    assert confidence["status"] == "unavailable"
     validator_step = next(step for step in steps if step["role"] == "indepth_validator")
     assert validator_step["status"] == "unavailable"
 
