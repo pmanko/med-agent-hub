@@ -69,7 +69,12 @@ class QueryStoreClient:
                         )
                     resource_type = record.get("resourceType")
                     resource_uuid = record.get("resourceUuid")
-                    if not isinstance(resource_type, str) or not isinstance(resource_uuid, str):
+                    if (
+                        not isinstance(resource_type, str)
+                        or not resource_type.strip()
+                        or not isinstance(resource_uuid, str)
+                        or not resource_uuid.strip()
+                    ):
                         raise ValueError(
                             "Querystore returned a patient chart record without a stable identity"
                         )

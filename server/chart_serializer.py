@@ -27,8 +27,9 @@ def render_chart(records: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any
 
     Each well-formed record becomes one line ``[N] (date) text (part of: <panel>)`` (the date and group
     label are omitted when absent). ``mappings[k]`` = ``{index, resourceType, resourceUuid, date, text}``
-    for the grounding / citation layer (its ``text`` carries the full rendered body). Records missing a
-    ``resourceType`` or ``resourceUuid`` are skipped so the numbering stays dense over valid records.
+    for the grounding / citation layer (its ``text`` carries the full rendered body). Complete source
+    adapters validate stable identities before calling this renderer; malformed inline/debug records
+    remain omitted so numbering stays dense.
     """
     lines: list[str] = []
     mappings: list[dict[str, Any]] = []

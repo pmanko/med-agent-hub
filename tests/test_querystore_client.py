@@ -105,6 +105,50 @@ def test_full_chart_accepts_exact_complete_envelope(monkeypatch):
     assert records == [{"resourceType": "obs", "resourceUuid": "one"}]
 
 
+@pytest.mark.parametrize(
+    "record",
+    [
+        {"resourceType": "", "resourceUuid": "one"},
+        {"resourceType": "   ", "resourceUuid": "one"},
+        {"resourceType": "obs", "resourceUuid": ""},
+        {"resourceType": "obs", "resourceUuid": "\t"},
+    ],
+)
+def test_full_chart_rejects_blank_record_identity(monkeypatch, record):
+    request = httpx.Request("GET", "http://openmrs/querystore")
+
+    class Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, _url, *, params):
+            return httpx.Response(
+                200,
+                json={
+                    "results": [record],
+                    "totalCount": 1,
+                    "complete": True,
+                    "snapshotId": "snapshot-1",
+                },
+                request=request,
+            )
+
+    monkeypatch.setattr("server.querystore_client.httpx.AsyncClient", Client)
+
+    with pytest.raises(ValueError, match="stable identity"):
+        asyncio.run(
+            QueryStoreClient("http://openmrs", "service", "secret").get_patient_chart(
+                "patient-1"
+            )
+        )
+
+
 def test_full_chart_accepts_multiple_pages_from_one_snapshot(monkeypatch):
     request = httpx.Request("GET", "http://openmrs/querystore")
 
