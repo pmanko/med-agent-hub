@@ -298,7 +298,9 @@ def test_duplicate_legacy_execution_entrypoints_are_removed():
     assert not hasattr(team, "run_team_stage_drain")
 
 
-def test_prompt_selection_does_not_shrink_temporal_gate_evidence():
+def test_prompt_selection_does_not_shrink_temporal_or_safety_evidence(monkeypatch):
+    from server import team
+
     class EvidenceCounter:
         async def count(self, _model, text):
             return sum(
@@ -349,6 +351,24 @@ def test_prompt_selection_does_not_shrink_temporal_gate_evidence():
         source_registry=registry,
         token_counter=EvidenceCounter(),
     )
+    safety_inputs = []
+
+    def capture_safety_input(
+        chart, mappings, records, question, reference_date, enabled
+    ):
+        safety_inputs.append(
+            {
+                "chart": chart,
+                "mappings": mappings,
+                "records": records,
+                "question": question,
+                "reference_date": reference_date,
+                "enabled": enabled,
+            }
+        )
+        return chart, mappings, None
+
+    monkeypatch.setattr(team, "_prepare_drug_safety", capture_safety_input)
 
     asyncio.run(engine._prepare_context(request, state))
 
@@ -360,6 +380,8 @@ def test_prompt_selection_does_not_shrink_temporal_gate_evidence():
     assert all(item["reason"] for item in summary["included"])
     assert state.view.record_indices == (1, 3)
     assert "[1]" in state.chart and "[3]" in state.chart and "[2]" not in state.chart
+    assert len(safety_inputs) == 1
+    assert all(item["text"] in safety_inputs[0]["chart"] for item in mappings)
     assert [mapping["index"] for mapping in state.mappings] == [1, 2, 3]
     assert state.temporal_facts is not None
     weight_series = next(

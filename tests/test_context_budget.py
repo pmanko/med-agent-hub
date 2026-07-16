@@ -58,18 +58,36 @@ def test_oversized_selection_preserves_canonical_indices_and_trace_reasons():
     ledger = EvidenceLedger(
         (
             _record("safety", "allergy evidence", mandatory=True),
-            _record("large", "unrelated words that do not fit"),
+            EvidenceRecord(
+                "large",
+                "knowledge-base",
+                1,
+                "KnowledgeReference",
+                "large",
+                None,
+                "unrelated words that do not fit",
+            ),
             _record("target", "code WT-71"),
+            EvidenceRecord(
+                "relevant-large",
+                "knowledge-base",
+                1,
+                "KnowledgeReference",
+                "relevant-large",
+                None,
+                "weight " * 20,
+            ),
         )
     )
     view = asyncio.run(
         select_context(
             ledger,
-            question="Find WT-71",
+            question="Find weight WT-71",
             model="fixture-model",
             budget=ContextBudget(context_window=8, reserved_output_tokens=1),
             counter=ExactWordCounter(),
             fixed_text="fixed",
+            recent_core_limit=0,
         )
     )
     assert view.mode == "selected"
@@ -78,8 +96,116 @@ def test_oversized_selection_preserves_canonical_indices_and_trace_reasons():
     assert "[3] code WT-71" in view.render()
     assert view.input_tokens <= view.input_limit
     assert [(item.stable_id, item.reason) for item in view.excluded] == [
-        ("large", "token_budget_after_ranked")
+        ("large", "zero_relevance"),
+        ("relevant-large", "token_budget_after_meaningful_overlap"),
     ]
+
+
+def test_input_limit_is_a_ceiling_not_a_target_to_fill():
+    ledger = EvidenceLedger(
+        (
+            _record("safety", "allergy evidence", mandatory=True),
+            EvidenceRecord(
+                "relevant",
+                "knowledge-base",
+                1,
+                "KnowledgeReference",
+                "relevant",
+                None,
+                "Metformin medication guidance",
+            ),
+            EvidenceRecord(
+                "irrelevant-1",
+                "knowledge-base",
+                1,
+                "KnowledgeReference",
+                "irrelevant-1",
+                None,
+                "OpenMRS data model",
+            ),
+            EvidenceRecord(
+                "irrelevant-2",
+                "knowledge-base",
+                1,
+                "KnowledgeReference",
+                "irrelevant-2",
+                None,
+                "Childhood malaria treatment",
+            ),
+        )
+    )
+
+    view = asyncio.run(
+        select_context(
+            ledger,
+            question="What medication guidance applies to metformin?",
+            model="fixture-model",
+            budget=ContextBudget(context_window=1000, reserved_output_tokens=10),
+            counter=ExactWordCounter(),
+            fixed_text="fixed",
+            recent_core_limit=0,
+        )
+    )
+
+    assert view.mode == "selected"
+    assert view.input_tokens < view.input_limit
+    assert [(item.stable_id, item.reason) for item in view.included] == [
+        ("safety", "mandatory"),
+        ("relevant", "meaningful_overlap"),
+    ]
+    assert [(item.stable_id, item.reason) for item in view.excluded] == [
+        ("irrelevant-1", "zero_relevance"),
+        ("irrelevant-2", "zero_relevance"),
+    ]
+
+
+def test_selected_records_render_in_canonical_chart_order():
+    ledger = EvidenceLedger(
+        (
+            EvidenceRecord(
+                "recent",
+                "inline",
+                1,
+                "ChartRecord",
+                "recent",
+                "2026-01-01",
+                "Recent observation",
+            ),
+            EvidenceRecord(
+                "active-condition",
+                "inline",
+                1,
+                "ChartRecord",
+                "active-condition",
+                "2025-01-01",
+                "Condition: Chronic disease. Status: ACTIVE.",
+            ),
+            EvidenceRecord(
+                "irrelevant",
+                "knowledge-base",
+                1,
+                "KnowledgeReference",
+                "irrelevant",
+                None,
+                "Unrelated material",
+            ),
+        )
+    )
+
+    view = asyncio.run(
+        select_context(
+            ledger,
+            question="",
+            model="fixture-model",
+            budget=ContextBudget(context_window=100, reserved_output_tokens=10),
+            counter=ExactWordCounter(),
+            recent_core_limit=2,
+        )
+    )
+
+    assert view.mode == "selected"
+    assert view.record_indices == (1, 2)
+    assert view.render().index("[1]") < view.render().index("[2]")
 
 
 def test_mandatory_overflow_returns_insufficient_context():
@@ -297,7 +423,8 @@ def test_team_derived_context_triggers_exact_answer_context_reselection():
     asyncio.run(engine._prepare_context(request, state))
     before = len(state.view.records)
     assert "knowledge-base" in state.ledger.source_names
-    assert before == len(state.ledger.records)
+    assert before < len(state.ledger.records)
+    assert any(item.reason == "zero_relevance" for item in state.view.excluded)
     extra_words = state.view.input_limit - state.view.input_tokens + 5
     state.gathered += "\n\n" + ("derived " * extra_words)
     asyncio.run(engine._select_answer_context(request, state))

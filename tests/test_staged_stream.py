@@ -138,12 +138,12 @@ def _product_profile(
     )
 
 
-def _collect(profile):
+def _collect(profile, *, question="q?"):
     async def _run():
         out = []
         async for name, data in stream_profile(
             profile,
-            [{"role": "user", "content": "q?"}],
+            [{"role": "user", "content": question}],
             patient="p",
             context={"temporal": False},
             model_label="lvl",
@@ -2758,7 +2758,8 @@ def test_product_review_and_final_event_preserve_grounded_knowledge_reference(mo
                 review_model="review",
                 orchestrator_model="orchestrator",
                 expert_model="expert",
-            )
+            ),
+            question="What monitoring does Examplemed require?",
         )
     )
     final = events["done"]

@@ -30,6 +30,58 @@ _DATE_PREFIX = re.compile(r"^\((\d{4}-\d{2}-\d{2})\)\s*")
 _QUERY_TOKEN = re.compile(r"[A-Za-z0-9]+(?:[-_.:/][A-Za-z0-9]+)*")
 _QUOTED = re.compile(r'["“]([^"”]+)["”]')
 _CITATION_TOKEN = re.compile(r"(?<!\w)\[\d+\](?!\w)")
+# A small chart remains whole; larger charts keep this bounded clinical baseline.
+_RECENT_CLINICAL_CORE_LIMIT = 32
+_COMMON_QUERY_TERMS = frozenset("""
+    a about all also am an and any are as at be been before by can chart code codes
+    could current currently did do does find for from give has have how i in is it
+    latest list me most of on or patient please record records show summarize summary
+    that the their them this to was were what when where which who why with would
+    """.split())
+_CLINICAL_TERM_ALIASES = {
+    "allergies": "allergy",
+    "allergic": "allergy",
+    "appointment": "encounter",
+    "appointments": "encounter",
+    "art": "antiretroviral",
+    "diagnoses": "diagnosis",
+    "conditions": "diagnosis",
+    "condition": "diagnosis",
+    "drug": "medication",
+    "drugs": "medication",
+    "drugorder": "medication",
+    "encounters": "encounter",
+    "guideline": "guidance",
+    "guidelines": "guidance",
+    "immunizations": "immunization",
+    "laboratory": "lab",
+    "labs": "lab",
+    "medications": "medication",
+    "medicines": "medication",
+    "medicine": "medication",
+    "orders": "order",
+    "ordered": "order",
+    "prescription": "medication",
+    "prescriptions": "medication",
+    "problems": "diagnosis",
+    "recommend": "guidance",
+    "recommendation": "guidance",
+    "recommendations": "guidance",
+    "recommended": "guidance",
+    "regimen": "medication",
+    "regimens": "medication",
+    "results": "result",
+    "tests": "test",
+    "therapies": "therapy",
+    "tuberculosis": "tb",
+    "vaccination": "immunization",
+    "vaccinations": "immunization",
+    "vaccine": "immunization",
+    "vaccines": "immunization",
+    "visits": "encounter",
+    "visit": "encounter",
+    "weights": "weight",
+}
 
 
 def _is_mandatory_safety_record(
@@ -110,15 +162,19 @@ def _render_records(
     if not records:
         return ""
     record_indices = indices or range(1, len(records) + 1)
+
     def rendered_text(record: EvidenceRecord) -> str:
         if record.resource_type == "KnowledgeReference":
             return f"KnowledgeReference (source: {record.source}): {record.text}"
         return record.text
 
-    return "\n".join(
-        f"[{index}] {rendered_text(record)}"
-        for index, record in zip(record_indices, records)
-    ) + "\n"
+    return (
+        "\n".join(
+            f"[{index}] {rendered_text(record)}"
+            for index, record in zip(record_indices, records)
+        )
+        + "\n"
+    )
 
 
 @dataclass(frozen=True)
@@ -150,18 +206,15 @@ class ContextSource(Protocol):
     priority: int
     supports_patient: bool
 
-    async def fetch(self, request: ContextRequest) -> EvidenceLedger:
-        ...
+    async def fetch(self, request: ContextRequest) -> EvidenceLedger: ...
 
 
 class TokenCounter(Protocol):
-    async def count(self, model: str, text: str) -> int:
-        ...
+    async def count(self, model: str, text: str) -> int: ...
 
 
 class ChatTokenCounter(TokenCounter, Protocol):
-    async def count_chat(self, model: str, payload: Mapping[str, Any]) -> int:
-        ...
+    async def count_chat(self, model: str, payload: Mapping[str, Any]) -> int: ...
 
 
 @dataclass(frozen=True)
@@ -225,8 +278,7 @@ class ContextSelector(Protocol):
         counter: TokenCounter,
         fixed_text: str = "",
         input_measure: Optional[Callable[[str], Awaitable[int]]] = None,
-    ) -> ContextView:
-        ...
+    ) -> ContextView: ...
 
 
 @dataclass(frozen=True)
@@ -274,9 +326,7 @@ class InlineChartSource:
                     resource_uuid=None,
                     date=carried_date,
                     text=text,
-                    mandatory=_is_mandatory_safety_record(
-                        "ChartRecord", text, {}
-                    ),
+                    mandatory=_is_mandatory_safety_record("ChartRecord", text, {}),
                 )
             )
         if not records:
@@ -545,8 +595,7 @@ class RouterTokenCounter:
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 response = await self._post_token_request(
-                    client,
-                    f"{self.base_url}/tokenize", json=payload, headers=headers
+                    client, f"{self.base_url}/tokenize", json=payload, headers=headers
                 )
                 response.raise_for_status()
                 body = response.json()
@@ -773,8 +822,16 @@ async def fit_message_history(
     )
 
 
+def _normalized_terms(text: str) -> set[str]:
+    return {
+        _CLINICAL_TERM_ALIASES.get(token, token)
+        for token in (item.lower() for item in _QUERY_TOKEN.findall(text or ""))
+        if token not in _COMMON_QUERY_TERMS
+    }
+
+
 def _query_features(question: str) -> tuple[set[str], set[str]]:
-    tokens = {token.lower() for token in _QUERY_TOKEN.findall(question or "")}
+    tokens = _normalized_terms(question)
     exact = {
         token.lower()
         for token in _QUERY_TOKEN.findall(question or "")
@@ -785,15 +842,28 @@ def _query_features(question: str) -> tuple[set[str], set[str]]:
     return tokens, {item for item in exact if item}
 
 
+def _is_active_condition(record: EvidenceRecord) -> bool:
+    normalized_type = re.sub(r"[^a-z]", "", record.resource_type.lower())
+    body = _DATE_PREFIX.sub("", record.text).strip().lower()
+    is_condition = normalized_type == "condition" or body.startswith("condition:")
+    return is_condition and "status: active" in body
+
+
 def _ranked_records(
-    records: Sequence[EvidenceRecord], question: str
+    records: Sequence[EvidenceRecord],
+    question: str,
+    *,
+    recent_core_limit: int = _RECENT_CLINICAL_CORE_LIMIT,
 ) -> list[tuple[EvidenceRecord, str]]:
+    if recent_core_limit < 0:
+        raise ValueError("recent_core_limit cannot be negative")
     query_tokens, exact_terms = _query_features(question)
 
     def features(record: EvidenceRecord) -> tuple[int, int]:
-        text = record.text.lower()
+        title = str(record.metadata.get("title") or "")
+        text = f"{record.resource_type} {title} {record.text}".lower()
         ordered_record_tokens = [token.lower() for token in _QUERY_TOKEN.findall(text)]
-        record_tokens = set(ordered_record_tokens)
+        record_tokens = _normalized_terms(text)
 
         def exact_match(term: str) -> bool:
             term_tokens = [token.lower() for token in _QUERY_TOKEN.findall(term)]
@@ -805,9 +875,7 @@ def _ranked_records(
                 for index in range(len(ordered_record_tokens) - width + 1)
             )
 
-        exact = int(
-            any(exact_match(term) for term in exact_terms)
-        )
+        exact = int(any(exact_match(term) for term in exact_terms))
         overlap = len(query_tokens & record_tokens)
         return exact, overlap
 
@@ -817,30 +885,52 @@ def _ranked_records(
         except ValueError:
             return 0
 
+    def rank_key(record: EvidenceRecord) -> tuple[int, int, int, str]:
+        return (
+            -features(record)[1],
+            -recency(record),
+            -record.source_priority,
+            record.stable_id,
+        )
+
     mandatory = [(record, "mandatory") for record in records if record.mandatory]
     remaining = [record for record in records if not record.mandatory]
     exact = [record for record in remaining if features(record)[0]]
-    rest = [record for record in remaining if record not in exact]
-    exact.sort(
+    exact_ids = {record.stable_id for record in exact}
+    rest = [record for record in remaining if record.stable_id not in exact_ids]
+    recent_candidates = [
+        record
+        for record in rest
+        if record.date and record.resource_type.lower() != "knowledgereference"
+    ]
+    recent_candidates.sort(
         key=lambda record: (
-            -features(record)[1],
+            -int(_is_active_condition(record)),
             -recency(record),
             -record.source_priority,
             record.stable_id,
         )
     )
-    rest.sort(
-        key=lambda record: (
-            -features(record)[1],
-            -recency(record),
-            -record.source_priority,
-            record.stable_id,
-        )
-    )
+    recent = recent_candidates[:recent_core_limit]
+    recent_ids = {record.stable_id for record in recent}
+    rest = [record for record in rest if record.stable_id not in recent_ids]
+    relevant = [record for record in rest if features(record)[1] > 0]
+    relevant_ids = {record.stable_id for record in relevant}
+    zero_relevance = [record for record in rest if record.stable_id not in relevant_ids]
+    exact.sort(key=rank_key)
+    relevant.sort(key=rank_key)
     return (
         mandatory
         + [(record, "exact_match") for record in exact]
-        + [(record, "ranked") for record in rest]
+        + [
+            (
+                record,
+                "active_condition" if _is_active_condition(record) else "recent_core",
+            )
+            for record in recent
+        ]
+        + [(record, "meaningful_overlap") for record in relevant]
+        + [(record, "zero_relevance") for record in zero_relevance]
     )
 
 
@@ -853,6 +943,7 @@ async def select_context(
     counter: TokenCounter,
     fixed_text: str = "",
     input_measure: Optional[Callable[[str], Awaitable[int]]] = None,
+    recent_core_limit: int = _RECENT_CLINICAL_CORE_LIMIT,
 ) -> ContextView:
     if budget.input_limit <= 0:
         raise InsufficientContextError(
@@ -862,36 +953,47 @@ async def select_context(
             ),
         )
 
-    full_text = (
-        fixed_text + ("\n" if fixed_text and ledger.render() else "") + ledger.render()
+    ranked = _ranked_records(
+        ledger.records, question, recent_core_limit=recent_core_limit
     )
-    full_tokens = (
-        await input_measure(ledger.render())
-        if input_measure is not None
-        else await counter.count(model, full_text)
-    )
-    if full_tokens <= budget.input_limit:
-        return ContextView(
-            records=ledger.records,
-            record_indices=tuple(range(1, len(ledger.records) + 1)),
-            mode="full",
-            included=tuple(
-                IncludedRecord(record.stable_id, "full_context")
-                for record in ledger.records
-            ),
-            excluded=(),
-            input_tokens=full_tokens,
-            input_limit=budget.input_limit,
-            original_text=ledger.render(),
-            preamble=ledger.preamble,
+    zero_relevance_ids = {
+        record.stable_id for record, reason in ranked if reason == "zero_relevance"
+    }
+    eligible = [
+        (record, reason) for record, reason in ranked if reason != "zero_relevance"
+    ]
+    if not zero_relevance_ids:
+        full_text = (
+            fixed_text
+            + ("\n" if fixed_text and ledger.render() else "")
+            + ledger.render()
         )
+        full_tokens = (
+            await input_measure(ledger.render())
+            if input_measure is not None
+            else await counter.count(model, full_text)
+        )
+        if full_tokens <= budget.input_limit:
+            return ContextView(
+                records=ledger.records,
+                record_indices=tuple(range(1, len(ledger.records) + 1)),
+                mode="full",
+                included=tuple(
+                    IncludedRecord(record.stable_id, "full_context")
+                    for record in ledger.records
+                ),
+                excluded=(),
+                input_tokens=full_tokens,
+                input_limit=budget.input_limit,
+                original_text=ledger.render(),
+                preamble=ledger.preamble,
+            )
 
-    ranked = _ranked_records(ledger.records, question)
-    ranked_reasons = {record.stable_id: reason for record, reason in ranked}
+    ranked_reasons = {record.stable_id: reason for record, reason in eligible}
     source_indices = {
         id(record): index for index, record in enumerate(ledger.records, 1)
     }
-    mandatory = [record for record, reason in ranked if reason == "mandatory"]
+    mandatory = [record for record, reason in eligible if reason == "mandatory"]
     mandatory_text = ledger.preamble + _render_records(
         mandatory, [source_indices[id(record)] for record in mandatory]
     )
@@ -910,13 +1012,19 @@ async def select_context(
         )
 
     selected = list(mandatory)
-    excluded: list[ExcludedRecord] = []
+    excluded_reasons = {
+        record.stable_id: "zero_relevance"
+        for record in ledger.records
+        if record.stable_id in zero_relevance_ids
+    }
     current_tokens = mandatory_tokens
     mandatory_ids = {record.stable_id for record in mandatory}
-    for record, reason in ranked:
+    for record, reason in eligible:
         if record.stable_id in mandatory_ids:
             continue
-        trial_records = selected + [record]
+        trial_records = sorted(
+            selected + [record], key=lambda item: source_indices[id(item)]
+        )
         trial_chart = ledger.preamble + _render_records(
             trial_records, [source_indices[id(item)] for item in trial_records]
         )
@@ -929,15 +1037,16 @@ async def select_context(
             else await counter.count(model, trial_input)
         )
         if trial_tokens <= budget.input_limit:
-            selected.append(record)
+            selected = trial_records
             current_tokens = trial_tokens
         else:
-            excluded.append(
-                ExcludedRecord(
-                    record.stable_id,
-                    f"token_budget_after_{reason}",
-                )
-            )
+            excluded_reasons[record.stable_id] = f"token_budget_after_{reason}"
+
+    excluded = tuple(
+        ExcludedRecord(record.stable_id, excluded_reasons[record.stable_id])
+        for record in ledger.records
+        if record.stable_id in excluded_reasons
+    )
 
     return ContextView(
         records=tuple(selected),
@@ -947,7 +1056,7 @@ async def select_context(
             IncludedRecord(record.stable_id, ranked_reasons[record.stable_id])
             for record in selected
         ),
-        excluded=tuple(excluded),
+        excluded=excluded,
         input_tokens=current_tokens,
         input_limit=budget.input_limit,
         preamble=ledger.preamble,

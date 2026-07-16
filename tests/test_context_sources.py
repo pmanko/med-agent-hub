@@ -598,11 +598,13 @@ def test_exact_identifier_matching_does_not_use_numeric_substrings():
         EvidenceRecord("right", "inline", 1, "Obs", "r", "2026-01-01", "Code 12 relevant"),
     )
 
-    ranked = _ranked_records(records, "What happened for code 12?")
+    ranked = _ranked_records(
+        records, "What happened for code 12?", recent_core_limit=0
+    )
 
     assert [(record.stable_id, reason) for record, reason in ranked] == [
         ("right", "exact_match"),
-        ("wrong", "ranked"),
+        ("wrong", "zero_relevance"),
     ]
 
 
@@ -612,11 +614,139 @@ def test_exact_quoted_phrase_matching_uses_token_boundaries():
         EvidenceRecord("right", "inline", 1, "Obs", "r", "2026-01-01", "Code 12 relevant"),
     )
 
-    ranked = _ranked_records(records, 'What happened for "code 12"?')
+    ranked = _ranked_records(
+        records, 'What happened for "code 12"?', recent_core_limit=0
+    )
 
     assert [(record.stable_id, reason) for record, reason in ranked] == [
         ("right", "exact_match"),
-        ("wrong", "ranked"),
+        ("wrong", "zero_relevance"),
+    ]
+
+
+def test_common_question_words_do_not_make_a_record_relevant():
+    records = (
+        EvidenceRecord(
+            "irrelevant",
+            "inline",
+            1,
+            "Observation",
+            "i",
+            "2026-01-02",
+            "The patient is stable",
+        ),
+        EvidenceRecord(
+            "medication",
+            "inline",
+            1,
+            "DrugOrder",
+            "m",
+            "2026-01-01",
+            "Drug order: Metformin 500 mg",
+        ),
+    )
+
+    ranked = _ranked_records(
+        records,
+        "What medications is the patient taking?",
+        recent_core_limit=0,
+    )
+
+    assert [(record.stable_id, reason) for record, reason in ranked] == [
+        ("medication", "meaningful_overlap"),
+        ("irrelevant", "zero_relevance"),
+    ]
+
+
+def test_appointment_question_matches_return_visit_evidence():
+    record = EvidenceRecord(
+        "return-visit",
+        "inline",
+        1,
+        "Observation",
+        "return-visit",
+        "2026-01-01",
+        "Return visit date: 2026-02-01",
+    )
+
+    ranked = _ranked_records(
+        (record,), "Is there an upcoming appointment?", recent_core_limit=0
+    )
+
+    assert [(item.stable_id, reason) for item, reason in ranked] == [
+        ("return-visit", "meaningful_overlap")
+    ]
+
+
+def test_recent_clinical_core_is_bounded_and_deterministic():
+    records = (
+        EvidenceRecord(
+            "old", "inline", 1, "Encounter", "o", "2020-01-01", "Routine visit"
+        ),
+        EvidenceRecord(
+            "new-b", "inline", 1, "Encounter", "b", "2026-01-03", "Routine visit"
+        ),
+        EvidenceRecord(
+            "new-a", "inline", 1, "Encounter", "a", "2026-01-03", "Routine visit"
+        ),
+        EvidenceRecord(
+            "kb",
+            "knowledge-base",
+            1,
+            "KnowledgeReference",
+            "k",
+            "2027-01-01",
+            "Unrelated guidance",
+        ),
+    )
+
+    ranked = _ranked_records(records, "", recent_core_limit=2)
+
+    assert [(record.stable_id, reason) for record, reason in ranked] == [
+        ("new-a", "recent_core"),
+        ("new-b", "recent_core"),
+        ("old", "zero_relevance"),
+        ("kb", "zero_relevance"),
+    ]
+
+
+def test_active_conditions_have_priority_within_the_bounded_clinical_core():
+    records = (
+        EvidenceRecord(
+            "newest",
+            "inline",
+            1,
+            "ChartRecord",
+            "newest",
+            "2026-02-01",
+            "Routine observation",
+        ),
+        EvidenceRecord(
+            "second-newest",
+            "inline",
+            1,
+            "ChartRecord",
+            "second-newest",
+            "2026-01-31",
+            "Routine observation",
+        ),
+        EvidenceRecord(
+            "active-condition",
+            "inline",
+            1,
+            "ChartRecord",
+            "active-condition",
+            "2025-01-01",
+            "Condition: Chronic disease. Status: ACTIVE.",
+        ),
+    )
+
+    ranked = _ranked_records(records, "", recent_core_limit=2)
+
+    assert [(record.stable_id, reason) for record, reason in ranked] == [
+        ("active-condition", "active_condition"),
+        ("newest", "recent_core"),
+        ("second-newest", "zero_relevance"),
     ]
 
 
