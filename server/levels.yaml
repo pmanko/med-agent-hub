@@ -94,7 +94,7 @@ profiles:
     prompts: {answer: synthesis-answer}
     policies: {output: bare, answer_contract: chart_answer, temporal_gate: "off", temporal_render: full}
     visibility: evaluation
-    context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true}
+    context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true, supplemental_sources: [knowledge-base]}
     knobs: {answer: {temperature: 0}}
 
   eval-e4b-temporal-enforce:
@@ -105,7 +105,7 @@ profiles:
     prompts: {answer: synthesis-answer}
     policies: {output: bare, answer_contract: chart_answer, temporal_gate: enforce, temporal_render: full}
     visibility: evaluation
-    context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true}
+    context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true, supplemental_sources: [knowledge-base]}
     knobs: {answer: {temperature: 0}}
 
   eval-12b-answer-only:
@@ -116,7 +116,7 @@ profiles:
     prompts: {answer: synthesis-answer}
     policies: {output: bare, answer_contract: chart_answer, temporal_gate: "off", temporal_render: full}
     visibility: evaluation
-    context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true}
+    context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true, supplemental_sources: [knowledge-base]}
     knobs: {answer: {temperature: 0}}
 
   eval-12b-temporal-enforce:
@@ -127,5 +127,5 @@ profiles:
     prompts: {answer: synthesis-answer}
     policies: {output: bare, answer_contract: chart_answer, temporal_gate: enforce, temporal_render: full}
     visibility: evaluation
-    context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true}
+    context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true, supplemental_sources: [knowledge-base]}
     knobs: {answer: {temperature: 0}}

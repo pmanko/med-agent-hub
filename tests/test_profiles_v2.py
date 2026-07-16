@@ -71,6 +71,7 @@ def test_experimental_e2b_profile_changes_only_the_fast_answer_writer():
     assert profile.context_window == 24576
     assert profile.reserved_output_tokens == 4096
     assert profile.exact_tokenizer is True
+    assert profile.supplemental_sources == ("knowledge-base",)
     assert profile.knobs["answer"]["temperature"] == 0
 
 
@@ -113,6 +114,7 @@ def test_answer_path_evaluation_profiles_have_matched_exact_context(
     assert profile.context_window == 24576
     assert profile.reserved_output_tokens == 4096
     assert profile.exact_tokenizer is True
+    assert profile.supplemental_sources == ("knowledge-base",)
     assert profile.knobs["answer"]["temperature"] == 0
 
 
