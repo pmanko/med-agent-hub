@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import re
-from collections import Counter
+from collections import Counter, OrderedDict
 from dataclasses import dataclass, field
 from typing import (
     Any,
     Awaitable,
     Callable,
+    ClassVar,
     Iterable,
     Mapping,
     Optional,
@@ -312,7 +315,7 @@ class HistoryView:
     messages: Tuple[Mapping[str, Any], ...]
     dropped_turns: Tuple[str, ...]
     stripped_citation_tokens: int
-    fixed_input_tokens: int
+    fixed_input_tokens: Optional[int]
 
 
 class InlineChartSource:
@@ -591,6 +594,9 @@ class SourceRegistry:
 class RouterTokenCounter:
     """Exact token count from the configured llama.cpp-compatible router."""
 
+    _chat_count_modes: ClassVar[dict[str, str]] = {}
+    _CHAT_COUNT_CACHE_SIZE = 32
+
     def __init__(
         self,
         base_url: Optional[str] = None,
@@ -601,12 +607,73 @@ class RouterTokenCounter:
         self.base_url = (base_url or llm_config.base_url).rstrip("/")
         self.api_key = api_key if api_key is not None else llm_config.api_key
         self.timeout = timeout
+        self._client: Optional[httpx.AsyncClient] = None
+        self._chat_counts: OrderedDict[str, int] = OrderedDict()
+        self._http_requests = 0
+        self._chat_cache_hits = 0
+        self._chat_counts_performed = 0
+
+    @classmethod
+    def reset_capability_cache(cls) -> None:
+        """Clear process-level endpoint discovery (primarily for isolated tests)."""
+        cls._chat_count_modes.clear()
+
+    def _http_client(self) -> httpx.AsyncClient:
+        if self._client is None:
+            self._client = httpx.AsyncClient(timeout=self.timeout)
+        return self._client
+
+    async def aclose(self) -> None:
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
+
+    def stats(self) -> Mapping[str, Any]:
+        return {
+            "http_requests": self._http_requests,
+            "chat_counts_performed": self._chat_counts_performed,
+            "chat_cache_hits": self._chat_cache_hits,
+            "chat_count_mode": self._chat_count_modes.get(self.base_url, "unknown"),
+            "cached_prompt_counts": len(self._chat_counts),
+        }
 
     @staticmethod
-    async def _post_token_request(client, url, *, json, headers):
+    def _chat_count_key(model: str, payload: Mapping[str, Any]) -> str:
+        # Only fields that can affect the rendered input belong in this key.
+        # Generation knobs and output limits do not change prompt tokens.
+        input_payload = {
+            "model": model,
+            **{
+                key: payload[key]
+                for key in (
+                    "messages",
+                    "tools",
+                    "tool_choice",
+                    "chat_template_kwargs",
+                )
+                if key in payload
+            },
+        }
+        encoded = json.dumps(
+            input_payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    def _remember_chat_count(self, key: str, count: int) -> int:
+        self._chat_counts[key] = count
+        self._chat_counts.move_to_end(key)
+        while len(self._chat_counts) > self._CHAT_COUNT_CACHE_SIZE:
+            self._chat_counts.popitem(last=False)
+        return count
+
+    async def _post_token_request(self, client, url, *, json, headers):
         """Retry one dropped connection across idempotent token-count requests."""
         for attempt in range(2):
             try:
+                self._http_requests += 1
                 return await client.post(url, json=json, headers=headers)
             except httpx.TransportError:
                 if attempt == 1:
@@ -619,12 +686,14 @@ class RouterTokenCounter:
             headers["Authorization"] = f"Bearer {self.api_key}"
         payload = {"model": model, "content": text, "add_special": False}
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await self._post_token_request(
-                    client, f"{self.base_url}/tokenize", json=payload, headers=headers
-                )
-                response.raise_for_status()
-                body = response.json()
+            response = await self._post_token_request(
+                self._http_client(),
+                f"{self.base_url}/tokenize",
+                json=payload,
+                headers=headers,
+            )
+            response.raise_for_status()
+            body = response.json()
         except Exception as exc:
             raise ContextSourceError(
                 "tokenization_unavailable",
@@ -672,23 +741,22 @@ class RouterTokenCounter:
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await self._post_token_request(
-                    client,
-                    f"{self.base_url}/tokenize",
-                    json={
-                        "model": model,
-                        "content": content,
-                        "add_special": False,
-                        "parse_special": False,
-                        "with_pieces": True,
-                    },
-                    headers=headers,
-                )
-                response.raise_for_status()
-                tokens = response.json().get("tokens")
-                if not isinstance(tokens, list):
-                    raise ValueError("tokenize response had no tokens")
+            response = await self._post_token_request(
+                self._http_client(),
+                f"{self.base_url}/tokenize",
+                json={
+                    "model": model,
+                    "content": content,
+                    "add_special": False,
+                    "parse_special": False,
+                    "with_pieces": True,
+                },
+                headers=headers,
+            )
+            response.raise_for_status()
+            tokens = response.json().get("tokens")
+            if not isinstance(tokens, list):
+                raise ValueError("tokenize response had no tokens")
 
             reconstructed = bytearray()
             spans: list[tuple[int, int]] = []
@@ -741,66 +809,72 @@ class RouterTokenCounter:
             headers["Authorization"] = f"Bearer {self.api_key}"
         body = dict(payload)
         body["model"] = model
+        count_key = self._chat_count_key(model, body)
+        cached = self._chat_counts.get(count_key)
+        if cached is not None:
+            self._chat_cache_hits += 1
+            self._chat_counts.move_to_end(count_key)
+            return cached
+        self._chat_counts_performed += 1
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
+            client = self._http_client()
+            mode = self._chat_count_modes.get(self.base_url)
+            if mode != "template":
                 response = await self._post_token_request(
                     client,
                     f"{self.base_url}/v1/chat/completions/input_tokens",
                     json=body,
                     headers=headers,
                 )
-                if response.status_code == 404:
-                    # ``response_format`` is an out-of-band generation grammar in
-                    # llama.cpp, not chat-template input. /apply-template accepts only
-                    # the fields below; excluding the schema therefore preserves the
-                    # exact prompt-token count rather than approximating it.
-                    template_body = {
-                        key: body[key]
-                        for key in ("model", "messages", "tools", "tool_choice")
-                        if key in body
-                    }
-                    template = await self._post_token_request(
-                        client,
-                        f"{self.base_url}/apply-template",
-                        json=template_body,
-                        headers=headers,
-                    )
-                    template.raise_for_status()
-                    prompt = template.json().get("prompt")
-                    if not isinstance(prompt, str):
-                        raise ValueError("apply-template response had no prompt")
-                    tokenized = await self._post_token_request(
-                        client,
-                        f"{self.base_url}/tokenize",
-                        json={
-                            "model": model,
-                            "content": prompt,
-                            "add_special": False,
-                            "parse_special": True,
-                        },
-                        headers=headers,
-                    )
-                    tokenized.raise_for_status()
-                    tokens = tokenized.json().get("tokens")
-                    if isinstance(tokens, list):
-                        return len(tokens)
-                    raise ValueError("tokenize response had no tokens")
-                response.raise_for_status()
-                result = response.json()
+                if response.status_code != 404:
+                    response.raise_for_status()
+                    result = response.json()
+                    count = result.get("input_tokens")
+                    if isinstance(count, int) and count >= 0:
+                        self._chat_count_modes[self.base_url] = "direct"
+                        return self._remember_chat_count(count_key, count)
+                    raise ValueError("chat token-count response had no input_tokens")
+                self._chat_count_modes[self.base_url] = "template"
+
+            # ``response_format`` is an out-of-band generation grammar in llama.cpp,
+            # not chat-template input. /apply-template accepts only these fields.
+            template_body = {
+                key: body[key]
+                for key in ("model", "messages", "tools", "tool_choice")
+                if key in body
+            }
+            template = await self._post_token_request(
+                client,
+                f"{self.base_url}/apply-template",
+                json=template_body,
+                headers=headers,
+            )
+            template.raise_for_status()
+            prompt = template.json().get("prompt")
+            if not isinstance(prompt, str):
+                raise ValueError("apply-template response had no prompt")
+            tokenized = await self._post_token_request(
+                client,
+                f"{self.base_url}/tokenize",
+                json={
+                    "model": model,
+                    "content": prompt,
+                    "add_special": False,
+                    "parse_special": True,
+                },
+                headers=headers,
+            )
+            tokenized.raise_for_status()
+            tokens = tokenized.json().get("tokens")
+            if isinstance(tokens, list):
+                return self._remember_chat_count(count_key, len(tokens))
+            raise ValueError("tokenize response had no tokens")
         except Exception as exc:
             raise ContextSourceError(
                 "tokenization_unavailable",
                 f"Exact chat-template token count unavailable for model {model!r}: {exc}",
                 source="llama-router",
             ) from exc
-        count = result.get("input_tokens")
-        if isinstance(count, int) and count >= 0:
-            return count
-        raise ContextSourceError(
-            "tokenization_unavailable",
-            f"Chat token-count response for model {model!r} had no input_tokens.",
-            source="llama-router",
-        )
 
 
 def _inline_chart(messages: Sequence[Mapping[str, Any]]) -> str:
@@ -841,6 +915,7 @@ async def fit_message_history(
     input_measure: Optional[
         Callable[[Sequence[Mapping[str, Any]]], Awaitable[int]]
     ] = None,
+    defer_when_no_droppable: bool = False,
 ) -> HistoryView:
     """Fit prior turns while preserving the current question and latest completed turn."""
 
@@ -895,15 +970,24 @@ async def fit_message_history(
         fixed = fixed_renderer(candidate)
         return fixed + ("\n" if fixed and mandatory_text else "") + mandatory_text
 
+    removed: set[int] = set()
+    dropped: list[str] = []
+    droppable = completed[:-1]
+    if defer_when_no_droppable and not droppable:
+        return HistoryView(
+            messages=tuple(normalized),
+            dropped_turns=(),
+            stripped_citation_tokens=stripped,
+            fixed_input_tokens=None,
+        )
+
     current_tokens = (
         await input_measure(normalized)
         if input_measure is not None
         else await counter.count(model, input_text(normalized))
     )
-    removed: set[int] = set()
-    dropped: list[str] = []
     # The most recent completed turn is protected. Older complete turns are dropped oldest-first.
-    for turn_id, indices in completed[:-1]:
+    for turn_id, indices in droppable:
         if current_tokens <= budget.input_limit:
             break
         removed.update(indices)

@@ -51,10 +51,11 @@ class _RouterResponse:
             )
 
 
-def _patch_router_client(monkeypatch, post):
+def _patch_router_client(monkeypatch, post, lifecycle=None):
     class Client:
         def __init__(self, **_kwargs):
-            pass
+            if lifecycle is not None:
+                lifecycle["created"] = lifecycle.get("created", 0) + 1
 
         async def __aenter__(self):
             return self
@@ -62,10 +63,111 @@ def _patch_router_client(monkeypatch, post):
         async def __aexit__(self, *_args):
             return None
 
+        async def aclose(self):
+            if lifecycle is not None:
+                lifecycle["closed"] = lifecycle.get("closed", 0) + 1
+
         async def post(self, url, *, json, headers):
             return await post(url, json=json, headers=headers)
 
     monkeypatch.setattr("server.context_sources.httpx.AsyncClient", Client)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_router_capability_cache():
+    RouterTokenCounter.reset_capability_cache()
+    yield
+    RouterTokenCounter.reset_capability_cache()
+
+
+def test_router_chat_counter_reuses_one_exact_count_and_client(monkeypatch):
+    calls = []
+    lifecycle = {}
+
+    async def post(url, *, json, headers):
+        calls.append((url, json, headers))
+        if url.endswith("/v1/chat/completions/input_tokens"):
+            return _RouterResponse(404, {})
+        if url.endswith("/apply-template"):
+            return _RouterResponse(200, {"prompt": "<turn>user hello<turn>model"})
+        return _RouterResponse(200, {"tokens": [1, 2, 3, 4]})
+
+    _patch_router_client(monkeypatch, post, lifecycle)
+    counter = RouterTokenCounter("http://router-cache-test")
+
+    async def exercise():
+        first = await counter.count_chat(
+            "gemma-e4b",
+            {
+                "messages": [{"role": "user", "content": "hello"}],
+                "response_format": {"type": "json_schema"},
+            },
+        )
+        second = await counter.count_chat(
+            "gemma-e4b",
+            {
+                "messages": [{"role": "user", "content": "hello"}],
+                "response_format": {"type": "different_generation_grammar"},
+                "temperature": 0.0,
+                "max_tokens": 512,
+                "repeat_penalty": 1.1,
+            },
+        )
+        await counter.aclose()
+        return first, second
+
+    assert asyncio.run(exercise()) == (4, 4)
+    assert [url.rsplit("/", 1)[-1] for url, _json, _headers in calls] == [
+        "input_tokens",
+        "apply-template",
+        "tokenize",
+    ]
+    assert lifecycle == {"created": 1, "closed": 1}
+    assert counter.stats() == {
+        "http_requests": 3,
+        "chat_counts_performed": 1,
+        "chat_cache_hits": 1,
+        "chat_count_mode": "template",
+        "cached_prompt_counts": 1,
+    }
+
+
+def test_router_chat_counter_caches_detected_fallback_across_instances(monkeypatch):
+    calls = []
+
+    async def post(url, *, json, headers):
+        calls.append(url.rsplit("/", 1)[-1])
+        if url.endswith("/v1/chat/completions/input_tokens"):
+            return _RouterResponse(404, {})
+        if url.endswith("/apply-template"):
+            return _RouterResponse(200, {"prompt": json["messages"][0]["content"]})
+        return _RouterResponse(200, {"tokens": [1, 2]})
+
+    _patch_router_client(monkeypatch, post)
+
+    async def exercise():
+        first = RouterTokenCounter("http://router-capability-test")
+        second = RouterTokenCounter("http://router-capability-test")
+        try:
+            await first.count_chat(
+                "gemma-e4b", {"messages": [{"role": "user", "content": "one"}]}
+            )
+            await second.count_chat(
+                "gemma-e4b", {"messages": [{"role": "user", "content": "two"}]}
+            )
+        finally:
+            await first.aclose()
+            await second.aclose()
+
+    asyncio.run(exercise())
+
+    assert calls == [
+        "input_tokens",
+        "apply-template",
+        "tokenize",
+        "apply-template",
+        "tokenize",
+    ]
 
 
 def test_router_chat_counter_falls_back_to_template_then_tokenize(monkeypatch):
@@ -1101,6 +1203,35 @@ def test_multiturn_minimum_overflow_abstains_without_dropping_latest_turn():
                 mandatory_ids=("safety",),
             )
         )
+
+
+def test_history_measurement_defers_when_no_old_turn_can_be_dropped():
+    messages = [
+        {"role": "user", "content": "latest question"},
+        {"role": "assistant", "content": "latest answer [1]"},
+        {"role": "user", "content": "current question"},
+    ]
+    counter = WordTokenCounter()
+
+    view = asyncio.run(
+        fit_message_history(
+            messages,
+            model="gemma-e4b",
+            budget=ContextBudget(context_window=4, reserved_output_tokens=1),
+            counter=counter,
+            fixed_renderer=lambda items: " ".join(
+                str(item["content"]) for item in items
+            ),
+            mandatory_text="mandatory evidence",
+            mandatory_ids=("safety",),
+            defer_when_no_droppable=True,
+        )
+    )
+
+    assert counter.calls == []
+    assert view.fixed_input_tokens is None
+    assert view.dropped_turns == ()
+    assert view.stripped_citation_tokens == 1
 
 
 def test_drug_injection_preserves_inline_record_provenance():

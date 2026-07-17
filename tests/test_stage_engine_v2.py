@@ -84,6 +84,53 @@ def test_stage_engine_uses_injected_context_selector():
     assert "[1]" in state.chart
 
 
+def test_context_preparation_reuses_stage_counter_and_counts_normal_prompt_once():
+    class Counter:
+        def __init__(self):
+            self.calls = []
+
+        async def count(self, model, text):
+            self.calls.append((model, text))
+            return len(text.split())
+
+    registry = patient_source_registry(
+        "[1] (2026-01-01) Observation - Weight: 70 kg\n",
+        [
+            {
+                "resourceType": "Observation",
+                "resourceUuid": "obs-1",
+                "date": "2026-01-01",
+                "text": "(2026-01-01) Observation - Weight: 70 kg",
+            }
+        ],
+    )
+    profile = replace(
+        get_profile("single-e4b-checked"),
+        context_window=2048,
+        reserved_output_tokens=64,
+    )
+    request = engine.ExecutionRequest(
+        profile=profile,
+        messages=[{"role": "user", "content": "What is the weight?"}],
+        patient="patient-1",
+        source_registry=registry,
+    )
+    counter = Counter()
+    state = engine._State(
+        messages=[dict(item) for item in request.messages], token_counter=counter
+    )
+
+    asyncio.run(engine._prepare_context(request, state))
+
+    assert state.token_counter is counter
+    assert len(counter.calls) == 1
+    assert state.history.fixed_input_tokens is None
+    timing = next(
+        step for step in state.steps if step["role"] == "context_preparation_timing"
+    )
+    assert timing["total_ms"] >= timing["selection_ms"]
+
+
 def test_product_profile_defaults_temporal_anchor_to_wall_clock(monkeypatch):
     monkeypatch.delenv("HUB_ANCHOR", raising=False)
     request = engine.ExecutionRequest(

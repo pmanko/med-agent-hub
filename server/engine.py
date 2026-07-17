@@ -713,6 +713,8 @@ async def _select_indepth_review_context(
 
 
 async def _prepare_context(request: ExecutionRequest, state: _State) -> None:
+    context_started = time.perf_counter()
+    timing: Dict[str, int] = {}
     registry = request.source_registry or SourceRegistry.default()
     context = request.context or {}
     requested_sources = context.get("sources") or ()
@@ -739,6 +741,7 @@ async def _prepare_context(request: ExecutionRequest, state: _State) -> None:
         if request.patient or context.get("source") or requested_sources:
             raise
         ledger = EvidenceLedger(())
+    timing["source_fetch_ms"] = round((time.perf_counter() - context_started) * 1000)
 
     state.ledger = ledger
     full_chart = ledger.render()
@@ -754,6 +757,7 @@ async def _prepare_context(request: ExecutionRequest, state: _State) -> None:
             timezone_name=os.environ.get("HUB_TIMEZONE"),
         )
     if request.profile.policies.get("drug_safety") and full_chart:
+        drug_started = time.perf_counter()
         full_chart, mappings, state.drug_context = stages._prepare_drug_safety(
             full_chart,
             mappings,
@@ -764,9 +768,13 @@ async def _prepare_context(request: ExecutionRequest, state: _State) -> None:
         )
         ledger = _ledger_after_drug_injection(ledger, full_chart, mappings)
         state.ledger = ledger
+        timing["drug_safety_ms"] = round((time.perf_counter() - drug_started) * 1000)
+    else:
+        timing["drug_safety_ms"] = 0
 
     temporal_block = ""
     if temporal_enabled:
+        temporal_started = time.perf_counter()
         state.reference_date = resolved_reference_date
         state.temporal_facts = temporal.build_temporal_facts(
             full_chart,
@@ -777,10 +785,18 @@ async def _prepare_context(request: ExecutionRequest, state: _State) -> None:
             state.temporal_facts,
             profile=str(request.profile.policies.get("temporal_render") or "full"),
         )
+        timing["temporal_facts_ms"] = round(
+            (time.perf_counter() - temporal_started) * 1000
+        )
+    else:
+        timing["temporal_facts_ms"] = 0
     state.gathered = temporal_block
 
     if request.profile.exact_tokenizer:
-        counter = request.token_counter or RouterTokenCounter()
+        # StageEngine installs one request-scoped counter before context preparation.
+        # Reusing it lets the final dispatch consume the exact count already measured
+        # for the identical prompt instead of tokenizing that prompt again.
+        counter = state.token_counter or request.token_counter or RouterTokenCounter()
         budget = ContextBudget(
             context_window=request.profile.context_window,
             reserved_output_tokens=request.profile.reserved_output_tokens,
@@ -789,6 +805,7 @@ async def _prepare_context(request: ExecutionRequest, state: _State) -> None:
         state.context_budget = budget
         mandatory = tuple(record for record in ledger.records if record.mandatory)
         mandatory_text = ledger.preamble + EvidenceLedger(mandatory).render()
+        history_started = time.perf_counter()
         state.history = await fit_message_history(
             state.messages,
             model=request.profile.models["answer"],
@@ -802,10 +819,16 @@ async def _prepare_context(request: ExecutionRequest, state: _State) -> None:
             input_measure=lambda messages: _count_answer_input(
                 request, state, mandatory_text, messages=messages
             ),
+            defer_when_no_droppable=True,
         )
+        timing["history_fit_ms"] = round((time.perf_counter() - history_started) * 1000)
         state.messages = [dict(message) for message in state.history.messages]
+        selection_started = time.perf_counter()
         await _select_answer_context(request, state)
+        timing["selection_ms"] = round((time.perf_counter() - selection_started) * 1000)
     else:
+        timing["history_fit_ms"] = 0
+        timing["selection_ms"] = 0
         state.view = ContextView(
             records=ledger.records,
             record_indices=tuple(range(1, len(ledger.records) + 1)),
@@ -831,6 +854,8 @@ async def _prepare_context(request: ExecutionRequest, state: _State) -> None:
         or state.ledger.source_names != ("inline",)
     ):
         state.messages = _replace_chart_message(state.messages, state.chart)
+    timing["total_ms"] = round((time.perf_counter() - context_started) * 1000)
+    state.steps.append({"role": "context_preparation_timing", **timing})
     state.steps.append({"role": "context", **_context_summary(state)})
 
 
@@ -1128,10 +1153,12 @@ async def _execute_stages(
         if budget_policy is not None and not any(
             step.get("role") == "exact_request_budgets" for step in state.steps
         ):
+            stats = getattr(budget_policy.counter, "stats", None)
             state.steps.append(
                 {
                     "role": "exact_request_budgets",
                     "measurements": list(budget_policy.measurements),
+                    "token_counter": stats() if callable(stats) else None,
                 }
             )
         stages._write_trace(
@@ -2260,6 +2287,12 @@ class StageEngine:
             raise
         finally:
             await events.aclose()
+            if (
+                request.token_counter is None
+                and budget_policy is not None
+                and isinstance(budget_policy.counter, RouterTokenCounter)
+            ):
+                await budget_policy.counter.aclose()
             if cancelled:
                 stages._write_cancellation_trace(
                     request.profile.id,
