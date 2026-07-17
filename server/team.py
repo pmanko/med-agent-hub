@@ -856,6 +856,47 @@ _ROUTER_LOCK = asyncio.Lock()
 
 
 @dataclass
+class RouterSlotEvidence:
+    """Request-local ownership evidence for calls serialized by the shared router lock."""
+
+    acquisitions: int = 0
+    releases: int = 0
+    active: int = 0
+
+    def acquired(self) -> None:
+        self.acquisitions += 1
+        self.active += 1
+
+    def released(self) -> None:
+        self.releases += 1
+        self.active -= 1
+
+    @property
+    def fully_released(self) -> bool:
+        return self.active == 0 and self.acquisitions == self.releases
+
+    def snapshot(self) -> Dict[str, int]:
+        return {
+            "acquisitions": self.acquisitions,
+            "releases": self.releases,
+            "active": self.active,
+        }
+
+
+_ROUTER_SLOT_EVIDENCE: ContextVar[Optional[RouterSlotEvidence]] = ContextVar(
+    "med_agent_hub_router_slot_evidence", default=None
+)
+
+
+def activate_router_slot_evidence(evidence: RouterSlotEvidence) -> Token:
+    return _ROUTER_SLOT_EVIDENCE.set(evidence)
+
+
+def reset_router_slot_evidence(token: Token) -> None:
+    _ROUTER_SLOT_EVIDENCE.reset(token)
+
+
+@dataclass
 class ChatBudgetPolicy:
     counter: ChatTokenCounter
     context_window: int
@@ -955,8 +996,16 @@ async def _chat(
     # Hold the lock for the WHOLE request (load + generate) so the router never sees a second
     # request while it is loading/evicting a model. Timeout covers a cold big-model load + a long
     # thinking generation. The lock makes loads strictly sequential — no eviction-vs-serve race.
-    async with _ROUTER_LOCK:
+    slot_evidence = _ROUTER_SLOT_EVIDENCE.get()
+    await _ROUTER_LOCK.acquire()
+    if slot_evidence is not None:
+        slot_evidence.acquired()
+    try:
         resp = await client.post(url, json=payload, headers=headers, timeout=600.0)
+    finally:
+        _ROUTER_LOCK.release()
+        if slot_evidence is not None:
+            slot_evidence.released()
     if resp.status_code >= 400:
         # Surface the backend's reason (context overflow, bad schema, model-load failure) — bare
         # status codes are not actionable.
@@ -2613,8 +2662,9 @@ def _write_cancellation_trace(
     messages: List[Dict[str, Any]],
     *,
     router_lock_released: bool,
+    router_slot_evidence: Optional[Mapping[str, int]] = None,
 ) -> None:
-    """Record positive preemption evidence after the active model slot unwinds."""
+    """Record request-local preemption evidence after the active model slot unwinds."""
     try:
         question = _latest_user_text(messages)
         entry = {
@@ -2624,6 +2674,8 @@ def _write_cancellation_trace(
             "question": question[:2000],
             "router_lock_released": router_lock_released,
         }
+        if router_slot_evidence is not None:
+            entry["router_slot_evidence"] = dict(router_slot_evidence)
         os.makedirs(_TRACE_DIR, exist_ok=True)
         with open(
             os.path.join(_TRACE_DIR, "cancellations.jsonl"), "a", encoding="utf-8"

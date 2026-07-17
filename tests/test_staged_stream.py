@@ -2991,7 +2991,7 @@ def test_profile_stream_client_disconnect_mid_indepth_frees_router_lock(monkeypa
     monkeypatch.setattr(
         team,
         "_write_cancellation_trace",
-        lambda level_id, messages, *, router_lock_released: cancellations.append(
+        lambda level_id, messages, *, router_lock_released, **_evidence: cancellations.append(
             {
                 "level_id": level_id,
                 "messages": messages,
@@ -3079,6 +3079,99 @@ def test_profile_stream_client_disconnect_mid_indepth_frees_router_lock(monkeypa
             if step["role"] == "stage_timing" and step["stage"] == "indepth"
         )
         assert timing["status"] == "cancelled"
+
+    asyncio.run(_run())
+
+
+def test_cancellation_trace_tracks_the_cancelled_request_not_the_next_lock_owner(
+    monkeypatch,
+):
+    """A replacement may acquire the shared router lock before cancellation telemetry is written.
+
+    The cancelled request still released its own slot. Its evidence must therefore remain true even
+    while the replacement legitimately holds the global lock.
+    """
+    cancellations = []
+    request_started = asyncio.Event()
+    replacement_acquired = asyncio.Event()
+    release_replacement = asyncio.Event()
+
+    monkeypatch.setattr(
+        team,
+        "_write_cancellation_trace",
+        lambda level_id, messages, *, router_lock_released, **evidence: cancellations.append(
+            {
+                "level_id": level_id,
+                "router_lock_released": router_lock_released,
+                **evidence,
+            }
+        ),
+    )
+
+    class YieldingCounter:
+        async def count_chat(self, _model, _payload):
+            return 1
+
+        async def aclose(self):
+            # Reproduce the real persistent-client cleanup yield added after stream teardown.
+            await replacement_acquired.wait()
+
+        def stats(self):
+            return {}
+
+    monkeypatch.setattr(engine, "RouterTokenCounter", YieldingCounter)
+
+    class HangingClient:
+        async def post(self, *_args, **_kwargs):
+            request_started.set()
+            await asyncio.sleep(3600)
+
+    async def fake_execute(_request, _budget_policy):
+        await team._chat(
+            HangingClient(),
+            "old-request-model",
+            [{"role": "user", "content": "old request"}],
+        )
+        yield "done", "{}"  # unreachable
+
+    monkeypatch.setattr(engine, "_execute_stages", fake_execute)
+
+    async def _run():
+        profile = _product_profile(answer_model="old-request-model")
+        request = engine.ExecutionRequest(
+            profile=profile,
+            messages=[{"role": "user", "content": "old request"}],
+        )
+        stream = engine.StageEngine().events(request).__aiter__()
+        old_step = asyncio.create_task(stream.__anext__())
+        await request_started.wait()
+        assert team._ROUTER_LOCK.locked()
+
+        async def hold_replacement_slot():
+            async with team._ROUTER_LOCK:
+                replacement_acquired.set()
+                await release_replacement.wait()
+
+        replacement = asyncio.create_task(hold_replacement_slot())
+        old_step.cancel()
+        try:
+            await old_step
+        except asyncio.CancelledError:
+            pass
+
+        try:
+            assert replacement_acquired.is_set()
+            assert team._ROUTER_LOCK.locked(), "the replacement should now own the shared lock"
+            assert cancellations[0]["router_lock_released"] is True
+            assert cancellations[0]["router_slot_evidence"] == {
+                "acquisitions": 1,
+                "releases": 1,
+                "active": 0,
+            }
+        finally:
+            release_replacement.set()
+            await replacement
+            await stream.aclose()
 
     asyncio.run(_run())
 

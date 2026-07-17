@@ -2266,9 +2266,13 @@ class StageEngine:
     async def events(self, request: ExecutionRequest) -> AsyncIterator[Tuple[str, str]]:
         cancelled = False
         budget_policy = _chat_budget_policy(request)
+        router_slot_evidence = stages.RouterSlotEvidence()
         events = _execute_stages(request, budget_policy).__aiter__()
         try:
             while True:
+                router_slot_token = stages.activate_router_slot_evidence(
+                    router_slot_evidence
+                )
                 budget_token = (
                     stages.activate_chat_budget(budget_policy)
                     if budget_policy is not None
@@ -2281,24 +2285,32 @@ class StageEngine:
                 finally:
                     if budget_token is not None:
                         stages.reset_chat_budget(budget_token)
+                    stages.reset_router_slot_evidence(router_slot_token)
                 yield event
         except asyncio.CancelledError:
             cancelled = True
             raise
         finally:
-            await events.aclose()
-            if (
-                request.token_counter is None
-                and budget_policy is not None
-                and isinstance(budget_policy.counter, RouterTokenCounter)
-            ):
-                await budget_policy.counter.aclose()
-            if cancelled:
-                stages._write_cancellation_trace(
-                    request.profile.id,
-                    [dict(message) for message in request.messages],
-                    router_lock_released=not stages._ROUTER_LOCK.locked(),
-                )
+            router_slot_token = stages.activate_router_slot_evidence(
+                router_slot_evidence
+            )
+            try:
+                await events.aclose()
+            finally:
+                if cancelled:
+                    stages._write_cancellation_trace(
+                        request.profile.id,
+                        [dict(message) for message in request.messages],
+                        router_lock_released=router_slot_evidence.fully_released,
+                        router_slot_evidence=router_slot_evidence.snapshot(),
+                    )
+                stages.reset_router_slot_evidence(router_slot_token)
+                if (
+                    request.token_counter is None
+                    and budget_policy is not None
+                    and isinstance(budget_policy.counter, RouterTokenCounter)
+                ):
+                    await budget_policy.counter.aclose()
 
     async def drain(self, request: ExecutionRequest) -> str:
         result: Optional[str] = None
