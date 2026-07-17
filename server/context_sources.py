@@ -47,13 +47,15 @@ _EXPLICIT_ID = re.compile(
 _RECENT_CLINICAL_CORE_LIMIT = 32
 _CONTEXT_FIT_BACKOFF_RATIO = 0.95
 _MAX_CONTEXT_FIT_ATTEMPTS = 3
-_COMMON_QUERY_TERMS = frozenset("""
+_COMMON_QUERY_TERMS = frozenset(
+    """
     a about all also am an and any are as at be been before by can chart code codes
     could current currently did do does find for from give has have how i in is it
     day days latest last list me mo month months mos most of on or over past patient please
     record records s show summarize summary that the their them this to was week weeks
     were what when where which who why with wk wks would year years yr yrs
-    """.split())
+    """.split()
+)
 _CLINICAL_TERM_ALIASES = {
     "allergies": "allergy",
     "allergic": "allergy",
@@ -226,15 +228,18 @@ class ContextSource(Protocol):
     priority: int
     supports_patient: bool
 
-    async def fetch(self, request: ContextRequest) -> EvidenceLedger: ...
+    async def fetch(self, request: ContextRequest) -> EvidenceLedger:
+        ...
 
 
 class TokenCounter(Protocol):
-    async def count(self, model: str, text: str) -> int: ...
+    async def count(self, model: str, text: str) -> int:
+        ...
 
 
 class ChatTokenCounter(TokenCounter, Protocol):
-    async def count_chat(self, model: str, payload: Mapping[str, Any]) -> int: ...
+    async def count_chat(self, model: str, payload: Mapping[str, Any]) -> int:
+        ...
 
 
 @dataclass(frozen=True)
@@ -298,7 +303,8 @@ class ContextSelector(Protocol):
         counter: TokenCounter,
         fixed_text: str = "",
         input_measure: Optional[Callable[[str], Awaitable[int]]] = None,
-    ) -> ContextView: ...
+    ) -> ContextView:
+        ...
 
 
 @dataclass(frozen=True)
