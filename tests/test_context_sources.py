@@ -196,6 +196,33 @@ def test_router_token_counter_propagates_cancellation_without_retry(monkeypatch)
     assert attempts == 1
 
 
+def test_router_record_counter_tokenizes_all_records_in_one_request(monkeypatch):
+    calls = []
+
+    async def post(url, *, json, headers):
+        calls.append((url, json, headers))
+        return _RouterResponse(
+            200,
+            {
+                "tokens": [
+                    {"id": index, "piece": character}
+                    for index, character in enumerate(json["content"])
+                ]
+            },
+        )
+
+    _patch_router_client(monkeypatch, post)
+    counter = RouterTokenCounter("http://router")
+
+    costs = asyncio.run(counter.count_records("gemma-e4b", ("ab", "cde")))
+
+    assert costs == (2, 3)
+    assert len(calls) == 1
+    assert calls[0][0].endswith("/tokenize")
+    assert calls[0][1]["with_pieces"] is True
+    assert calls[0][1]["parse_special"] is False
+
+
 def _messages(chart: str = "") -> list[dict[str, str]]:
     messages = [{"role": "system", "content": "system"}]
     if chart:
@@ -397,7 +424,9 @@ def test_knowledge_source_uses_latest_completed_answer_for_followup_recall(monke
     ]
 
 
-def test_knowledge_source_protects_current_topic_from_prior_answer_pollution(monkeypatch):
+def test_knowledge_source_protects_current_topic_from_prior_answer_pollution(
+    monkeypatch,
+):
     def fake_search(query, k=3):
         if "Prior answer context" in query:
             return [
@@ -425,8 +454,14 @@ def test_knowledge_source_protects_current_topic_from_prior_answer_pollution(mon
         StaticKnowledgeSource().fetch(
             ContextRequest(
                 messages=(
-                    {"role": "assistant", "content": "The prior regimen used stavudine [7]."},
-                    {"role": "user", "content": "What monitoring does metformin require?"},
+                    {
+                        "role": "assistant",
+                        "content": "The prior regimen used stavudine [7].",
+                    },
+                    {
+                        "role": "user",
+                        "content": "What monitoring does metformin require?",
+                    },
                 ),
                 question="What monitoring does metformin require?",
             )
@@ -594,13 +629,45 @@ def test_oversized_selection_is_stable_and_records_reasons():
 
 def test_exact_identifier_matching_does_not_use_numeric_substrings():
     records = (
-        EvidenceRecord("wrong", "inline", 1, "Obs", "w", "2026-01-02", "Code 312 unrelated"),
-        EvidenceRecord("right", "inline", 1, "Obs", "r", "2026-01-01", "Code 12 relevant"),
+        EvidenceRecord(
+            "wrong", "inline", 1, "Obs", "w", "2026-01-02", "Code 312 unrelated"
+        ),
+        EvidenceRecord(
+            "right", "inline", 1, "Obs", "r", "2026-01-01", "Code 12 relevant"
+        ),
     )
 
-    ranked = _ranked_records(
-        records, "What happened for code 12?", recent_core_limit=0
+    ranked = _ranked_records(records, "What happened for code 12?", recent_core_limit=0)
+
+    assert [(record.stable_id, reason) for record, reason in ranked] == [
+        ("right", "exact_match"),
+        ("wrong", "zero_relevance"),
+    ]
+
+
+def test_explicit_identifier_does_not_match_an_unlabeled_numeric_value():
+    records = (
+        EvidenceRecord(
+            "wrong",
+            "inline",
+            1,
+            "Observation",
+            "wrong",
+            "2026-01-02",
+            "Potassium: 12 mmol/L",
+        ),
+        EvidenceRecord(
+            "right",
+            "inline",
+            1,
+            "Observation",
+            "right",
+            "2026-01-01",
+            "Code 12: relevant finding",
+        ),
     )
+
+    ranked = _ranked_records(records, "What happened for code 12?", recent_core_limit=0)
 
     assert [(record.stable_id, reason) for record, reason in ranked] == [
         ("right", "exact_match"),
@@ -610,8 +677,12 @@ def test_exact_identifier_matching_does_not_use_numeric_substrings():
 
 def test_exact_quoted_phrase_matching_uses_token_boundaries():
     records = (
-        EvidenceRecord("wrong", "inline", 1, "Obs", "w", "2026-01-02", "Code 123 unrelated"),
-        EvidenceRecord("right", "inline", 1, "Obs", "r", "2026-01-01", "Code 12 relevant"),
+        EvidenceRecord(
+            "wrong", "inline", 1, "Obs", "w", "2026-01-02", "Code 123 unrelated"
+        ),
+        EvidenceRecord(
+            "right", "inline", 1, "Obs", "r", "2026-01-01", "Code 12 relevant"
+        ),
     )
 
     ranked = _ranked_records(
@@ -655,6 +726,203 @@ def test_common_question_words_do_not_make_a_record_relevant():
     assert [(record.stable_id, reason) for record, reason in ranked] == [
         ("medication", "meaningful_overlap"),
         ("irrelevant", "zero_relevance"),
+    ]
+
+
+def test_age_question_matches_a_birth_record_without_literal_word_overlap():
+    record = EvidenceRecord(
+        "demographics",
+        "inline",
+        1,
+        "Patient",
+        "patient-1",
+        None,
+        "Patient: Test Person. Born 1984-04-09.",
+    )
+
+    ranked = _ranked_records((record,), "How old is this patient?", recent_core_limit=0)
+
+    assert [(item.stable_id, reason) for item, reason in ranked] == [
+        ("demographics", "meaningful_overlap")
+    ]
+
+
+def test_direct_relevance_precedes_the_bounded_recent_core():
+    routine = tuple(
+        EvidenceRecord(
+            f"routine-{index:02d}",
+            "inline",
+            1,
+            "Observation",
+            f"routine-{index:02d}",
+            f"2026-{index // 28 + 1:02d}-{index % 28 + 1:02d}",
+            "Routine visit observation",
+        )
+        for index in range(32)
+    )
+    relevant = EvidenceRecord(
+        "metformin-monitoring",
+        "inline",
+        1,
+        "Observation",
+        "metformin-monitoring",
+        "2020-01-01",
+        "Metformin monitoring requires renal function assessment",
+    )
+
+    ranked = _ranked_records(
+        (*routine, relevant),
+        "What monitoring does metformin require?",
+        recent_core_limit=32,
+    )
+
+    assert ranked[0] == (relevant, "meaningful_overlap")
+
+
+def test_temporal_window_number_is_not_an_exact_identifier():
+    stage = EvidenceRecord(
+        "stage-3",
+        "inline",
+        1,
+        "Observation",
+        "stage-3",
+        "2026-01-02",
+        "Current WHO HIV stage: 3",
+    )
+    weight = EvidenceRecord(
+        "weight",
+        "inline",
+        1,
+        "Observation",
+        "weight",
+        "2026-01-01",
+        "Weight: 70 kg",
+    )
+
+    ranked = _ranked_records(
+        (stage, weight),
+        "Show weight over the last 3 months",
+        recent_core_limit=0,
+    )
+
+    assert [(record.stable_id, reason) for record, reason in ranked] == [
+        ("weight", "meaningful_overlap"),
+        ("stage-3", "zero_relevance"),
+    ]
+
+
+def test_decimal_temporal_window_is_not_numeric_evidence():
+    potassium = EvidenceRecord(
+        "potassium",
+        "inline",
+        1,
+        "Observation",
+        "potassium",
+        "2026-01-02",
+        "Potassium: 3.5 mmol/L",
+    )
+    weight = EvidenceRecord(
+        "weight",
+        "inline",
+        1,
+        "Observation",
+        "weight",
+        "2026-01-01",
+        "Weight: 70 kg",
+    )
+
+    ranked = _ranked_records(
+        (potassium, weight),
+        "Show weight over the last 3.5 months",
+        recent_core_limit=0,
+    )
+
+    assert [(record.stable_id, reason) for record, reason in ranked] == [
+        ("weight", "meaningful_overlap"),
+        ("potassium", "zero_relevance"),
+    ]
+
+
+def test_bare_order_does_not_turn_a_time_window_into_an_identifier():
+    stage = EvidenceRecord(
+        "stage-3",
+        "inline",
+        1,
+        "Observation",
+        "stage-3",
+        "2026-01-02",
+        "Current WHO HIV stage: 3",
+    )
+    medication = EvidenceRecord(
+        "metformin",
+        "inline",
+        1,
+        "DrugOrder",
+        "metformin",
+        "2026-01-01",
+        "Metformin medication order",
+    )
+
+    ranked = _ranked_records(
+        (stage, medication),
+        "Order 3 months of metformin",
+        recent_core_limit=0,
+    )
+
+    assert [(record.stable_id, reason) for record, reason in ranked] == [
+        ("metformin", "meaningful_overlap"),
+        ("stage-3", "zero_relevance"),
+    ]
+
+
+@pytest.mark.parametrize("window", ("6-month", "6mo", "6MO", "3.5-month"))
+def test_compact_time_window_is_not_relevance_evidence(window):
+    interval = EvidenceRecord(
+        "interval",
+        "inline",
+        1,
+        "Observation",
+        "interval",
+        "2026-01-02",
+        f"Follow-up interval: {window}",
+    )
+    weight = EvidenceRecord(
+        "weight",
+        "inline",
+        1,
+        "Observation",
+        "weight",
+        "2026-01-01",
+        "Weight: 70 kg",
+    )
+
+    ranked = _ranked_records(
+        (interval, weight),
+        f"Show weight over the last {window} window",
+        recent_core_limit=0,
+    )
+
+    assert [(record.stable_id, reason) for record, reason in ranked] == [
+        ("weight", "meaningful_overlap"),
+        ("interval", "zero_relevance"),
+    ]
+
+
+def test_authority_name_can_select_a_knowledge_reference():
+    record = EvidenceRecord(
+        "who-guidance",
+        "knowledge-base",
+        1,
+        "KnowledgeReference",
+        "who-guidance",
+        None,
+        "WHO preferred first-line antiretroviral therapy",
+    )
+
+    ranked = _ranked_records((record,), "What does WHO recommend?", recent_core_limit=0)
+
+    assert [(item.stable_id, reason) for item, reason in ranked] == [
+        ("who-guidance", "meaningful_overlap")
     ]
 
 
