@@ -60,6 +60,24 @@ profiles:
     visibility: product
     knobs: {query_generate: {temperature: 0, dry: 0}, query_review: {temperature: 0, dry: 0}}
 
+  catalyst-query-qwen-2.5-14b:
+    label: Catalyst query — Qwen 2.5 14B writer + Gemma 4 12B reviewer
+    topology: single
+    stages: *catalyst_query
+    models: {query_generate: qwen2.5-14b, query_review: gemma-4-12b}
+    prompts: {query_generate: catalyst-query-generate, query_review: catalyst-query-review}
+    policies:
+      output: query
+      temporal_gate: "off"
+      allowed_operation: select
+      generation_attempts: 1
+      collaborative_review: true
+      model_classes: {query_generate: qwen-2.5, query_review: gemma-4}
+    capabilities: {staged: false, validation: true}
+    outputContracts: [catalyst.query.v1]
+    visibility: product
+    knobs: {query_generate: {temperature: 0, dry: 0}, query_review: {temperature: 0, dry: 0}}
+
   catalyst-query-qwen-coder-1.5b:
     label: Catalyst governed query — Qwen 2.5 Coder 1.5B
     topology: single

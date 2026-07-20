@@ -474,6 +474,50 @@ def test_gemma_12b_query_profile_is_truthful_available_and_provenanced():
     )
 
 
+def test_qwen_14b_query_profile_is_truthful_available_and_revision_capable():
+    profile = get_profile("catalyst-query-qwen-2.5-14b")
+    gemma_writer = get_profile("catalyst-query-gemma-4-12b")
+
+    assert dict(profile.models) == {
+        "query_generate": "qwen2.5-14b",
+        "query_review": "gemma-4-12b",
+    }
+    assert profile.policies["collaborative_review"] is True
+    assert profile.policies["generation_attempts"] == 1
+    assert profile.policies["model_classes"] == {
+        "query_generate": "qwen-2.5",
+        "query_review": "gemma-4",
+    }
+    assert profile.stages == gemma_writer.stages
+    assert profile.output_contracts == ("catalyst.query.v1",)
+    assert dict(profile.knobs) == dict(gemma_writer.knobs)
+
+    with patch(
+        "server.openai_compat._served_backend_model_metadata",
+        return_value={
+            "gemma-4-12b": {"id": "gemma-4-12b", "status": {"value": "loaded"}},
+            "qwen2.5-14b": {"id": "qwen2.5-14b", "status": {"value": "loaded"}},
+        },
+    ):
+        response = TestClient(app).get("/v1/models")
+
+    assert response.status_code == 200
+    by_id = {item["id"]: item for item in response.json()["data"]}
+    advertised = by_id["catalyst-query-qwen-2.5-14b"]
+    assert advertised["available"] is True
+    assert advertised["unavailable_reasons"] == []
+    assert advertised["required_models"] == ["gemma-4-12b", "qwen2.5-14b"]
+    assert advertised["revisionCapable"] is True
+    assert advertised["profileEvidence"]["writer"]["modelId"] == "qwen2.5-14b"
+    assert advertised["profileEvidence"]["writer"]["modelClass"] == "qwen-2.5"
+    assert advertised["profileEvidence"]["reviewer"]["modelId"] == "gemma-4-12b"
+    assert advertised["profileEvidence"]["reviewer"]["modelClass"] == "gemma-4"
+    assert advertised["role_knobs"] == {
+        "query_generate": {"temperature": 0, "dry": 0},
+        "query_review": {"temperature": 0, "dry": 0},
+    }
+
+
 def test_bundled_qwen_query_profile_uses_truthful_router_model_id():
     profile = get_profile("catalyst-query-qwen-coder-1.5b")
 

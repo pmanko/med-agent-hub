@@ -728,3 +728,22 @@ def test_every_model_invocation_has_reproducible_role_model_config_and_timing():
         ],
     }
     _assert_shipped_contract(evidenced_payload)
+
+
+def test_reverse_cross_family_profile_switches_writer_and_reviewer_roles():
+    request = _v2_request()
+    request["model"] = "catalyst-query-qwen-2.5-14b"
+
+    response, calls = _post_v2([_ready_candidate(), _review()], request)
+
+    envelope = _completion(response)
+    assert [call["model"] for call in calls] == ["qwen2.5-14b", "gemma-4-12b"]
+    assert [item["modelId"] for item in envelope["modelInvocations"]] == [
+        "qwen2.5-14b",
+        "gemma-4-12b",
+    ]
+    profile = envelope["profileEvidence"]
+    assert profile["profileId"] == "catalyst-query-qwen-2.5-14b"
+    assert profile["writer"]["modelClass"] == "qwen-2.5"
+    assert profile["reviewer"]["modelClass"] == "gemma-4"
+    assert profile["writer"]["modelClass"] != profile["reviewer"]["modelClass"]
