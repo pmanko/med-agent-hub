@@ -642,6 +642,24 @@ def test_backend_model_discovery_preserves_metadata_and_redacts_secrets():
     assert "password" not in json.dumps(backend_metadata)
 
 
+def test_backend_metadata_sanitizes_url_values_in_sequences():
+    metadata = openai_compat._sanitize_backend_metadata(
+        {
+            "download_url": [
+                "https://user:pass@models.example/gemma?sig=secret#fragment"
+            ],
+            "endpoint": ("https://token@router.example/v1/models?api_key=secret",),
+            "api_key": ["metadata-secret"],
+        }
+    )
+
+    assert metadata == {
+        "download_url": ["https://models.example/gemma"],
+        "endpoint": ["https://router.example/v1/models"],
+        "api_key": "[redacted]",
+    }
+
+
 def test_backend_model_discovery_includes_on_demand_unloaded_router_entries():
     backend = SimpleNamespace(base_url="http://router", api_key="")
     with (

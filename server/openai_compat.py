@@ -363,9 +363,9 @@ def _sanitize_backend_metadata(value: Any, *, key: str = "") -> Any:
             for item_key, item in value.items()
         }
     if isinstance(value, list):
-        return [_sanitize_backend_metadata(item) for item in value]
+        return [_sanitize_backend_metadata(item, key=key) for item in value]
     if isinstance(value, tuple):
-        return [_sanitize_backend_metadata(item) for item in value]
+        return [_sanitize_backend_metadata(item, key=key) for item in value]
     if isinstance(value, str) and normalized_key in _URL_METADATA_KEYS:
         return _public_url(value)
     return value

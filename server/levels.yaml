@@ -36,7 +36,7 @@ profiles:
     stages: *catalyst_query
     models: {query_generate: gemma-e4b, query_review: gemma-e4b}
     prompts: {query_generate: catalyst-query-generate, query_review: catalyst-query-review}
-    policies: {output: query, temporal_gate: "off", allowed_operation: select, generation_attempts: 3, model_classes: {query_generate: gemma-e4b, query_review: gemma-e4b}}
+    policies: {output: query, temporal_gate: "off", allowed_operation: select, generation_attempts: 3, model_classes: {query_generate: gemma-4, query_review: gemma-4}}
     capabilities: {staged: false, validation: true}
     outputContracts: [catalyst.query.v1]
     visibility: product

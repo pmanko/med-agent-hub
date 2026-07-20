@@ -322,6 +322,10 @@ def test_gemma_query_profile_uses_router_model_id_and_is_available():
 
     assert profile.models["query_generate"] == "gemma-e4b"
     assert profile.models["query_review"] == "gemma-e4b"
+    assert profile.policies["model_classes"] == {
+        "query_generate": "gemma-4",
+        "query_review": "gemma-4",
+    }
     assert "require_preview" not in profile.policies
 
     with patch(
@@ -334,6 +338,16 @@ def test_gemma_query_profile_uses_router_model_id_and_is_available():
     by_id = {item["id"]: item for item in response.json()["data"]}
     advertised = by_id["catalyst-query-gemma-e4b"]
     assert advertised["available"] is True
+    assert advertised["role_models"] == {
+        "query_generate": "gemma-e4b",
+        "query_review": "gemma-e4b",
+    }
+    assert advertised["role_model_classes"] == {
+        "query_generate": "gemma-4",
+        "query_review": "gemma-4",
+    }
+    assert advertised["profileEvidence"]["writer"]["modelClass"] == "gemma-4"
+    assert advertised["profileEvidence"]["reviewer"]["modelClass"] == "gemma-4"
     assert "unavailableReasons" not in advertised
 
 
