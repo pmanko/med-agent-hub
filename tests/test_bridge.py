@@ -660,6 +660,34 @@ def test_backend_metadata_sanitizes_url_values_in_sequences():
     }
 
 
+def test_backend_metadata_redacts_camel_case_compound_secrets_and_all_urls():
+    metadata = openai_compat._sanitize_backend_metadata(
+        {
+            "routerApiKey": "api-secret",
+            "nested": {
+                "clientSecret": "client-secret",
+                "serviceAccessToken": "access-secret",
+                "base_url": "https://user:pass@router.example/v1?token=secret",
+                "artifactUrl": "https://models.example/file?signature=secret",
+                "homepage": "https://user:pass@example.org/model?token=secret",
+                "tokenizer": "gemma",
+            },
+        }
+    )
+
+    assert metadata == {
+        "routerApiKey": "[redacted]",
+        "nested": {
+            "clientSecret": "[redacted]",
+            "serviceAccessToken": "[redacted]",
+            "base_url": "https://router.example/v1",
+            "artifactUrl": "https://models.example/file",
+            "homepage": "https://example.org/model",
+            "tokenizer": "gemma",
+        },
+    }
+
+
 def test_backend_model_discovery_includes_on_demand_unloaded_router_entries():
     backend = SimpleNamespace(base_url="http://router", api_key="")
     with (

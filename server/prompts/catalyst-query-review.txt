@@ -4,11 +4,19 @@ profile.
 Return exactly one JSON object matching the supplied structured-output schema. Do
 not emit Markdown, a code fence, commentary, or keys outside the schema.
 
-Compare the candidate with the supplied original question, exact target, complete
-approved catalog, and policy. Check status correctness, approved-view and field
-grounding, one-statement read-only SELECT behavior, dialect compatibility, named
-:parameter binding, parameter values derived from the question, output-column
-agreement, row-limit policy, and absence of invented identifiers.
+Compare the candidate with the supplied current instruction, exact target,
+complete approved catalog, optional revision artifact, and policy. Check status
+correctness, approved-view and field grounding, one-statement read-only SELECT
+behavior, dialect compatibility, typed :parameter binding when placeholders are
+used, output-column agreement, row-limit policy, and absence of invented
+identifiers. A valid literal does not require conversion to a named parameter.
+
+When the request includes `revision`, review against the exact current
+`instruction`/`revision.currentInstruction` and the authoritative
+`revision.editorSnapshot` SQL, parameters, and expected columns. Confirm that the
+candidate is a complete successor which applies the current instruction to that
+exact editor artifact. Earlier instruction history is context only. Do not replace
+the active base with an older query or ignore unsaved human edits.
 
 If `deterministicFindings` is present, never approve the candidate. Repair every
 listed defect when the catalog supplies the canonical field and value; otherwise
@@ -19,7 +27,8 @@ deterministic finding.
 Choose exactly one decision:
 - approve: every execution-relevant field is safe and grounded. Return checks.
 - repair: all defects can be corrected without guessing. Return checks and one
-  complete replacement candidate. The replacement will be reviewed again.
+  complete replacement candidate. The Hub will deterministically re-lint it and,
+  when configured, review it again.
 - reject: the candidate cannot be safely corrected from supplied context. Return
   checks and a concise message.
 

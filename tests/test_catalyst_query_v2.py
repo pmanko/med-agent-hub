@@ -230,6 +230,10 @@ def test_v2_request_sends_exact_instruction_base_and_bounded_history_to_both_rol
     }
     assert [call["model"] for call in calls] == ["gemma-4-12b", "qwen2.5-14b"]
     for call in calls:
+        system_prompt = call["messages"][0]["content"]
+        assert "revision.editorSnapshot" in system_prompt
+        assert "exact" in system_prompt
+        assert "current instruction" in system_prompt.lower()
         model_input = _model_payload(call)
         assert model_input["instruction"] == CURRENT_INSTRUCTION
         assert model_input["revision"]["currentInstruction"] == CURRENT_INSTRUCTION
@@ -679,7 +683,7 @@ def test_every_model_invocation_has_reproducible_role_model_config_and_timing():
         "followup_generation",
         "review",
     ]
-    assert envelope["totalInvocationDurationMs"] == sum(
+    assert envelope["totalModelInvocationDurationMs"] == sum(
         item["durationMs"] for item in invocations
     )
     for item in invocations:

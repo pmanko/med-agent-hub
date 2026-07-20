@@ -143,6 +143,106 @@ def test_subquery_projection_alias_is_not_treated_as_an_invented_catalog_column(
     assert lint_candidate(candidate, _extension()) == []
 
 
+def test_cte_star_projection_preserves_catalog_fields_for_outer_scope():
+    candidate = _candidate()
+    candidate["sql"] = (
+        f"WITH all_results AS (SELECT * FROM {VIEW}) "
+        "SELECT patient_id, result_value, observed_at FROM all_results "
+        "WHERE test_name = :analyte AND observed_at >= :since LIMIT 100"
+    )
+
+    assert lint_candidate(candidate, _extension()) == []
+
+
+def test_qualified_column_must_belong_to_its_referenced_relation():
+    extension = _extension()
+    extension["catalog"]["views"].append(
+        {
+            "name": "public.patient_flat_v1",
+            "fields": [{"name": "id"}, {"name": "name_display"}],
+        }
+    )
+    candidate = _candidate()
+    candidate["sql"] = (
+        f"SELECT lab.name_display FROM {VIEW} AS lab "
+        "WHERE lab.test_name = :analyte LIMIT 100"
+    )
+    candidate["parameters"] = [candidate["parameters"][0]]
+    candidate["expectedColumns"] = [{"name": "name_display"}]
+
+    findings = lint_candidate(candidate, extension)
+
+    unknown = next(
+        item for item in findings if item["code"] == "catalog.unknown_column"
+    )
+    assert unknown["evidence"] == "lab.name_display"
+
+
+def test_unqualified_column_must_belong_to_a_referenced_relation():
+    extension = _extension()
+    extension["catalog"]["views"].append(
+        {
+            "name": "public.patient_flat_v1",
+            "fields": [{"name": "id"}, {"name": "name_display"}],
+        }
+    )
+    candidate = _candidate()
+    candidate["sql"] = (
+        f"SELECT name_display FROM {VIEW} "
+        "WHERE test_name = :analyte LIMIT 100"
+    )
+    candidate["parameters"] = [candidate["parameters"][0]]
+    candidate["expectedColumns"] = [{"name": "name_display"}]
+
+    findings = lint_candidate(candidate, extension)
+
+    unknown = next(
+        item for item in findings if item["code"] == "catalog.unknown_column"
+    )
+    assert unknown["evidence"] == "name_display"
+
+
+def test_joined_relation_columns_are_resolved_per_alias():
+    extension = _extension()
+    extension["catalog"]["views"].append(
+        {
+            "name": "public.patient_flat_v1",
+            "fields": [{"name": "id"}, {"name": "name_display"}],
+        }
+    )
+    candidate = _candidate()
+    candidate["sql"] = (
+        "SELECT patient.name_display, lab.result_value "
+        "FROM public.patient_flat_v1 AS patient "
+        f"JOIN {VIEW} AS lab ON patient.id = lab.patient_id "
+        "WHERE lab.test_name = :analyte LIMIT 100"
+    )
+    candidate["parameters"] = [candidate["parameters"][0]]
+    candidate["expectedColumns"] = [
+        {"name": "name_display"},
+        {"name": "result_value"},
+    ]
+
+    assert lint_candidate(candidate, extension) == []
+
+
+def test_schema_qualified_relation_is_not_hidden_by_same_named_cte():
+    candidate = _candidate()
+    candidate["sql"] = (
+        f"WITH secret_results AS (SELECT patient_id FROM {VIEW}) "
+        "SELECT patient_id FROM analytics.secret_results LIMIT 100"
+    )
+    candidate["parameters"] = []
+    candidate["expectedColumns"] = [{"name": "patient_id"}]
+
+    findings = lint_candidate(candidate, _extension())
+
+    unapproved = next(
+        item for item in findings if item["code"] == "catalog.unapproved_view"
+    )
+    assert "analytics.secret_results" in unapproved["evidence"]
+
+
 def test_literal_limit_is_allowed_by_gateway_parity_rule():
     assert lint_candidate(_candidate(), _extension()) == []
 

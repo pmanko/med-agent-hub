@@ -217,19 +217,7 @@ _BACKEND_GENERATION_SCHEMA: Dict[str, Any] = {
     "$defs": deepcopy(_CANDIDATE_SCHEMA["$defs"]),
 }
 _BACKEND_GENERATION_SCHEMA["$defs"]["parameter"]["required"] = ["type", "value"]
-_BACKEND_REVIEW_SCHEMA: Dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["decision", "checks"],
-    "properties": {
-        "decision": {"const": "approve"},
-        "checks": {
-            "type": "array",
-            "minItems": 1,
-            "items": deepcopy(_CHECK_SCHEMA),
-        },
-    },
-}
+_BACKEND_REVIEW_SCHEMA: Dict[str, Any] = deepcopy(_REVIEW_SCHEMA)
 _BACKEND_REPAIR_SCHEMA: Dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
@@ -266,9 +254,6 @@ _GENERATION_FORMAT = _structured_format(
 )
 _REVIEW_FORMAT = _structured_format("catalyst_query_review", _BACKEND_REVIEW_SCHEMA)
 _REPAIR_FORMAT = _structured_format("catalyst_query_repair", _BACKEND_REPAIR_SCHEMA)
-_COLLABORATIVE_REVIEW_FORMAT = _structured_format(
-    "catalyst_query_collaborative_review", _REVIEW_SCHEMA
-)
 
 _PATCH_OPERATION_SCHEMA: Dict[str, Any] = {
     "oneOf": [
@@ -511,6 +496,19 @@ def _normalize_single_date_binding(
     dates = list(dict.fromkeys(_ISO_DATE_LITERAL.findall(question)))
     if len(placeholders) != 1 or len(dates) != 1:
         return normalized, False
+    parameters = normalized.get("parameters")
+    if (
+        not isinstance(parameters, list)
+        or len(parameters) != 1
+        or not isinstance(parameters[0], Mapping)
+    ):
+        return normalized, False
+    parameter = parameters[0]
+    if (
+        parameter.get("type") != "date"
+        or str(parameter.get("value", "")) != dates[0]
+    ):
+        return normalized, False
     expected = {
         "name": placeholders[0],
         "type": "date",
@@ -731,6 +729,28 @@ _GENERIC_RESULT_SUBJECTS = {
     "test",
     "tests",
 }
+_GENERIC_RESULT_WORDS = {
+    "abnormal",
+    "all",
+    "available",
+    "final",
+    "flagged",
+    "lab",
+    "laboratory",
+    "latest",
+    "negative",
+    "non-numeric",
+    "normal",
+    "numeric",
+    "patient",
+    "patients",
+    "pending",
+    "positive",
+    "recent",
+    "released",
+    "test",
+    "tests",
+}
 _RESULT_SUBJECT_MODIFIERS = re.compile(
     r"^(?:(?:top|first|last|most\s+recent|latest|recent|all)\s+|\d+\s+)+",
     re.IGNORECASE,
@@ -752,7 +772,13 @@ def _unknown_result_analyte(question: str, extension: Mapping[str, Any]) -> str 
     if not match:
         return None
     subject = _RESULT_SUBJECT_MODIFIERS.sub("", match.group(1).strip()).strip()
-    if not subject or subject.casefold() in _GENERIC_RESULT_SUBJECTS:
+    normalized_subject = subject.casefold()
+    subject_words = set(re.findall(r"[a-z]+(?:-[a-z]+)?", normalized_subject))
+    if (
+        not subject
+        or normalized_subject in _GENERIC_RESULT_SUBJECTS
+        or (subject_words and subject_words <= _GENERIC_RESULT_WORDS)
+    ):
         return None
     return subject
 
@@ -2013,11 +2039,7 @@ async def _review(
     response_format = (
         _REPAIR_FORMAT
         if deterministic_findings
-        else (
-            _COLLABORATIVE_REVIEW_FORMAT
-            if profile.policies.get("collaborative_review") is True
-            else _REVIEW_FORMAT
-        )
+        else _REVIEW_FORMAT
     )
     content = await _invoke_backend(
         client,
@@ -2284,7 +2306,7 @@ def _attach_model_evidence(
     result["_hubEvidence"] = {
         "profileEvidence": _profile_evidence(request),
         "modelInvocations": deepcopy(invocations),
-        "totalInvocationDurationMs": sum(
+        "totalModelInvocationDurationMs": sum(
             int(item["durationMs"]) for item in invocations
         ),
     }

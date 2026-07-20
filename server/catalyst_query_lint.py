@@ -9,6 +9,7 @@ from typing import Any, Mapping
 import sqlglot
 from sqlglot import exp
 from sqlglot.errors import ParseError
+from sqlglot.optimizer.scope import Scope, traverse_scope
 
 
 @dataclass(frozen=True)
@@ -71,12 +72,14 @@ def _table_name(table: exp.Table) -> str:
     return ".".join(part for part in parts if part)
 
 
-def _catalog_fields(extension: Mapping[str, Any]) -> set[str]:
+def _catalog_relations(extension: Mapping[str, Any]) -> dict[str, set[str]]:
     return {
-        str(field["name"]).casefold()
+        str(view["name"]).casefold(): {
+            str(field["name"]).casefold()
+            for field in view.get("fields", [])
+            if field.get("name")
+        }
         for view in extension["catalog"]["views"]
-        for field in view.get("fields", [])
-        if field.get("name")
     }
 
 
@@ -90,17 +93,73 @@ def _literal_limit(statement: exp.Expression) -> int | None:
     return int(expression.this)
 
 
-def _derived_projection_aliases(statement: exp.Expression) -> set[str]:
-    """Return explicit fields introduced by a CTE or derived-table projection."""
-    return {
-        alias.alias.casefold()
-        for alias in statement.find_all(exp.Alias)
-        if alias.alias
-        and (
-            alias.find_ancestor(exp.CTE) is not None
-            or alias.find_ancestor(exp.Subquery) is not None
-        )
-    }
+def _scope_source_fields(
+    source: exp.Expression | Scope,
+    catalog_relations: Mapping[str, set[str]],
+) -> set[str]:
+    if isinstance(source, exp.Table):
+        return set(catalog_relations.get(_table_name(source).casefold(), set()))
+    if isinstance(source, Scope):
+        projected = source.outer_columns or source.expression.named_selects
+        fields = {str(name).casefold() for name in projected if name}
+        if "*" in fields:
+            fields.remove("*")
+            for nested_source in source.sources.values():
+                fields.update(_scope_source_fields(nested_source, catalog_relations))
+        return fields
+    return set()
+
+
+def _unknown_columns(
+    statement: exp.Expression,
+    catalog_relations: Mapping[str, set[str]],
+) -> set[str]:
+    """Resolve each column against the relation or derived source in its SQL scope."""
+
+    def fields_for(scope: Scope) -> dict[str, set[str]]:
+        return {
+            str(alias).casefold(): _scope_source_fields(source, catalog_relations)
+            for alias, source in scope.sources.items()
+        }
+
+    def resolves_in_parent(scope: Scope, column: exp.Column) -> bool:
+        parent = scope.parent
+        while parent is not None:
+            parent_fields = fields_for(parent)
+            if column.table:
+                allowed = parent_fields.get(column.table.casefold())
+                if allowed is not None:
+                    return column.name.casefold() in allowed
+            elif column.name.casefold() in set().union(
+                *parent_fields.values(), set()
+            ):
+                return True
+            parent = parent.parent
+        return False
+
+    invalid: set[str] = set()
+    for scope in traverse_scope(statement):
+        source_fields = fields_for(scope)
+        all_source_fields = set().union(*source_fields.values(), set())
+        local_projection_names = {
+            projection.alias.casefold()
+            for projection in scope.expression.expressions
+            if isinstance(projection, exp.Alias) and projection.alias
+        }
+        external_ids = {id(column) for column in scope.external_columns}
+        for column in scope.columns:
+            if not column.name:
+                continue
+            if id(column) in external_ids and resolves_in_parent(scope, column):
+                continue
+            name = column.name.casefold()
+            if column.table:
+                allowed = source_fields.get(column.table.casefold())
+                if allowed is None or name not in allowed:
+                    invalid.add(column.sql())
+            elif name not in all_source_fields and name not in local_projection_names:
+                invalid.add(column.sql())
+    return invalid
 
 
 def turnaround_threshold(question: str) -> tuple[str, float] | None:
@@ -244,19 +303,15 @@ def lint_candidate(
             )
         )
 
-    cte_names = {
-        cte.alias_or_name.casefold()
-        for cte in statement.find_all(exp.CTE)
-        if cte.alias_or_name
-    }
+    scopes = list(traverse_scope(statement))
     referenced_views = {
-        _table_name(table)
-        for table in statement.find_all(exp.Table)
-        if table.name.casefold() not in cte_names
+        _table_name(source)
+        for scope in scopes
+        for source in scope.sources.values()
+        if isinstance(source, exp.Table)
     }
-    approved_views = {
-        str(view["name"]).casefold() for view in extension["catalog"]["views"]
-    }
+    catalog_relations = _catalog_relations(extension)
+    approved_views = set(catalog_relations)
     invalid_views = sorted(
         view for view in referenced_views if view.casefold() not in approved_views
     )
@@ -273,14 +328,7 @@ def lint_candidate(
             )
         )
 
-    allowed_fields = _catalog_fields(extension) | _derived_projection_aliases(statement)
-    invalid_columns = sorted(
-        {
-            column.name
-            for column in statement.find_all(exp.Column)
-            if column.name and column.name.casefold() not in allowed_fields
-        }
-    )
+    invalid_columns = sorted(_unknown_columns(statement, catalog_relations))
     if invalid_columns:
         findings.append(
             LintFinding(

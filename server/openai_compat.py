@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 import time
 import uuid
 from collections.abc import Mapping
@@ -328,12 +329,47 @@ _SENSITIVE_METADATA_KEYS = {
     "secret",
 }
 _URL_METADATA_KEYS = {
+    "base_url",
     "download_url",
     "endpoint",
     "model_url",
     "uri",
     "url",
 }
+
+
+def _normalized_metadata_key(key: str) -> tuple[str, tuple[str, ...]]:
+    snake_case = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", key.strip())
+    normalized = re.sub(r"[^a-z0-9]+", "_", snake_case.lower()).strip("_")
+    return normalized, tuple(part for part in normalized.split("_") if part)
+
+
+def _is_sensitive_metadata_key(normalized: str, parts: tuple[str, ...]) -> bool:
+    if normalized in _SENSITIVE_METADATA_KEYS:
+        return True
+    if any(
+        part in {"credential", "credentials", "password", "secret"}
+        for part in parts
+    ):
+        return True
+    pairs = set(zip(parts, parts[1:]))
+    return bool(
+        pairs
+        & {
+            ("access", "token"),
+            ("api", "key"),
+            ("auth", "token"),
+            ("bearer", "token"),
+            ("client", "secret"),
+            ("refresh", "token"),
+        }
+    )
+
+
+def _is_url_metadata_key(normalized: str, parts: tuple[str, ...]) -> bool:
+    return normalized in _URL_METADATA_KEYS or bool(
+        parts and parts[-1] in {"endpoint", "uri", "url"}
+    )
 
 
 def _public_url(value: str) -> str:
@@ -354,8 +390,8 @@ def _public_url(value: str) -> str:
 
 def _sanitize_backend_metadata(value: Any, *, key: str = "") -> Any:
     """Preserve backend model metadata while removing conventional secrets."""
-    normalized_key = key.strip().lower().replace("-", "_")
-    if normalized_key in _SENSITIVE_METADATA_KEYS:
+    normalized_key, key_parts = _normalized_metadata_key(key)
+    if _is_sensitive_metadata_key(normalized_key, key_parts):
         return "[redacted]"
     if isinstance(value, Mapping):
         return {
@@ -366,8 +402,12 @@ def _sanitize_backend_metadata(value: Any, *, key: str = "") -> Any:
         return [_sanitize_backend_metadata(item, key=key) for item in value]
     if isinstance(value, tuple):
         return [_sanitize_backend_metadata(item, key=key) for item in value]
-    if isinstance(value, str) and normalized_key in _URL_METADATA_KEYS:
-        return _public_url(value)
+    if isinstance(value, str):
+        if _is_url_metadata_key(normalized_key, key_parts):
+            return _public_url(value)
+        parsed = urlsplit(value)
+        if parsed.scheme in {"http", "https"} and parsed.hostname:
+            return _public_url(value)
     return value
 
 

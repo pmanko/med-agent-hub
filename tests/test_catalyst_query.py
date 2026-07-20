@@ -587,6 +587,9 @@ def test_unknown_named_analyte_is_unsupported_without_model_generation():
         "Show the 10 most recent laboratory results since 2026-01-01",
         "Show latest lab test results since 2026-01-01",
         "List all tests results since 2026-01-01",
+        "Show abnormal laboratory results since 2026-01-01",
+        "List all available numeric test results since 2026-01-01",
+        "Find flagged patient results since 2026-01-01",
     ],
 )
 def test_generic_result_subject_reaches_model_generation(question):
@@ -663,8 +666,41 @@ def test_query_roles_receive_dedicated_prompts_and_strict_backend_schemas():
     )
     assert "name" in shipped_schema["$defs"]["parameter"]["required"]
     review_schema = calls[1]["response_format"]["json_schema"]["schema"]
-    assert review_schema["properties"]["decision"] == {"const": "approve"}
+    assert review_schema["properties"]["decision"] == {
+        "enum": ["approve", "repair", "reject"]
+    }
     assert set(review_schema["required"]) == {"decision", "checks"}
+
+
+def test_single_date_normalization_never_rewrites_an_unrelated_parameter():
+    request = _request()
+    candidate = _ready_candidate()
+    candidate["sql"] = (
+        f"SELECT viral_load_value FROM {VIEW_NAME} "
+        "WHERE viral_load_value > :threshold"
+    )
+    candidate["parameters"] = [
+        {"type": "integer", "source": "question", "value": 1000}
+    ]
+    candidate["expectedColumns"] = [
+        {"name": "viral_load_value", "logicalType": "decimal", "nullable": True}
+    ]
+
+    parsed, _normalized = _parse_candidate(
+        json.dumps(candidate),
+        "Show results above 1000 since 2026-01-01",
+        request["catalystQuery"],
+        label="numeric threshold candidate",
+    )
+
+    assert parsed["parameters"] == [
+        {
+            "name": "threshold",
+            "type": "integer",
+            "source": "question",
+            "value": 1000,
+        }
+    ]
 
 
 def test_12b_writer_findings_go_to_distinct_reviewer_as_complete_candidate():
@@ -1325,6 +1361,9 @@ def test_repair_is_strictly_parsed_and_re_reviewed_before_shipping():
     assert payload["sql"] == repaired["sql"]
     assert payload["validation"]["status"] == "passed"
     assert len(calls) == 3
+    assert calls[1]["response_format"]["json_schema"]["schema"]["properties"][
+        "decision"
+    ] == {"enum": ["approve", "repair", "reject"]}
     re_review_payload = json.loads(calls[2]["messages"][1]["content"])
     assert re_review_payload["candidate"] == repaired
     assert re_review_payload["reviewAttempt"] == 2
