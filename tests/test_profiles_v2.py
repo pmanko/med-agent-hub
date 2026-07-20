@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import replace
 
 import pytest
@@ -13,6 +14,7 @@ from server.levels_loader import (
     resolve_temporal_policy,
     validate_profiles,
 )
+from server.prompt_loader import load_prompt
 
 
 def test_default_product_profile_is_human_readable_single_e4b():
@@ -157,6 +159,8 @@ def test_discovery_metadata_is_authoritative_and_dynamic_legs_are_not_advertised
     assert all(not model_id.startswith("answer:") for model_id in ids)
 
     metadata = profile_metadata(get_profile("single-e4b-checked"), available=True)
+    configuration_digest = metadata.pop("profile_configuration_digest")
+    prompt_digests = metadata.pop("role_prompt_digests")
     assert metadata == {
         "id": "single-e4b-checked",
         "label": "Fast checked answer (E4B)",
@@ -169,10 +173,48 @@ def test_discovery_metadata_is_authoritative_and_dynamic_legs_are_not_advertised
         "visibility": "product",
         "stages": list(get_profile("single-e4b-checked").stages),
         "required_models": ["gemma-e4b"],
+        "role_models": {
+            "answer": "gemma-e4b",
+            "review": "gemma-e4b",
+            "grounding": "gemma-e4b",
+            "indepth": "gemma-e4b",
+        },
+        "role_knobs": {"answer": {"temperature": 0}},
         "context_window": 24576,
         "exact_tokenizer": True,
         "unavailable_reasons": [],
     }
+    assert configuration_digest.startswith("sha256:")
+    assert len(configuration_digest) == len("sha256:") + 64
+    answer_digest = (
+        "sha256:"
+        + hashlib.sha256(load_prompt("synthesis-answer").encode("utf-8")).hexdigest()
+    )
+    assert prompt_digests["answer"] == {
+        "configured_prompt": "synthesis-answer",
+        "system_prompt_sha256": {"synthesis-answer": answer_digest},
+    }
+    assert set(prompt_digests["review"]["system_prompt_sha256"]) == {
+        "validation-rewrite-answer",
+        "validation-rewrite-indepth",
+    }
+
+
+def test_profile_and_prompt_digests_are_deterministic_and_separate():
+    profile = get_profile("single-e4b-checked")
+
+    first = profile_metadata(profile, available=True)
+    second = profile_metadata(profile, available=False)
+    renamed = profile_metadata(replace(profile, label="Changed label"), available=True)
+
+    assert (
+        first["profile_configuration_digest"] == second["profile_configuration_digest"]
+    )
+    assert first["role_prompt_digests"] == second["role_prompt_digests"]
+    assert (
+        first["profile_configuration_digest"] != renamed["profile_configuration_digest"]
+    )
+    assert first["role_prompt_digests"] == renamed["role_prompt_digests"]
 
 
 def test_only_one_configured_profile_is_default():

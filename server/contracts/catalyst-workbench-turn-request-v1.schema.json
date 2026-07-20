@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openelis-global.org/contracts/catalyst-workbench-turn-request-v1.schema.json",
+  "title": "Catalyst workbench follow-up turn request v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contractVersion",
+    "instruction",
+    "profileId",
+    "observedBase",
+    "editorSnapshot"
+  ],
+  "properties": {
+    "contractVersion": {
+      "const": "catalyst.workbench.turn.request.v1"
+    },
+    "instruction": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 8000
+    },
+    "profileId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 500
+    },
+    "observedBase": {
+      "description": "The browser's compare-and-swap observation of the session current version, not necessarily the effective generation base.",
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/versionRef"}
+      ]
+    },
+    "editorSnapshot": {
+      "$ref": "catalyst-workbench-editor-snapshot-v1.schema.json"
+    }
+  },
+  "$defs": {
+    "versionRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["versionId", "queryDigest"],
+      "properties": {
+        "versionId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "queryDigest": {
+          "$ref": "catalyst-workbench-editor-snapshot-v1.schema.json#/$defs/digest"
+        }
+      }
+    }
+  }
+}

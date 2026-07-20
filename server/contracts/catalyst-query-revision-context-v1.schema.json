@@ -1,0 +1,456 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openelis-global.org/contracts/catalyst-query-revision-context-v1.schema.json",
+  "title": "Catalyst query revision context v1",
+  "description": "Bounded deterministic context supplied to both Hub model roles for one follow-up turn.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contractVersion",
+    "turnId",
+    "currentInstruction",
+    "instructionDigest",
+    "baseClassification",
+    "observedBase",
+    "effectiveBaseVersion",
+    "editorSnapshot",
+    "instructionHistory",
+    "validationContext",
+    "executionContext",
+    "selection",
+    "contextDigest"
+  ],
+  "properties": {
+    "contractVersion": {
+      "const": "catalyst.query.revision-context.v1"
+    },
+    "turnId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "currentInstruction": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 8000
+    },
+    "instructionDigest": {
+      "$ref": "catalyst-workbench-editor-snapshot-v1.schema.json#/$defs/digest"
+    },
+    "baseClassification": {
+      "enum": ["reused", "promoted_human", "unresolved"]
+    },
+    "observedBase": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "catalyst-workbench-turn-request-v1.schema.json#/$defs/versionRef"}
+      ]
+    },
+    "effectiveBaseVersion": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "catalyst-workbench-turn-request-v1.schema.json#/$defs/versionRef"}
+      ]
+    },
+    "editorSnapshot": {
+      "$ref": "catalyst-workbench-editor-snapshot-v1.schema.json"
+    },
+    "instructionHistory": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 6,
+      "items": {"$ref": "#/$defs/historyItem"}
+    },
+    "validationContext": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/validationContext"}
+      ]
+    },
+    "executionContext": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/executionContext"}
+      ]
+    },
+    "selection": {
+      "$ref": "#/$defs/selection"
+    },
+    "contextDigest": {
+      "$ref": "catalyst-workbench-editor-snapshot-v1.schema.json#/$defs/digest"
+    }
+  },
+  "$defs": {
+    "historyItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["turnId", "ordinal", "kind", "instruction", "instructionDigest"],
+      "properties": {
+        "turnId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "ordinal": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "kind": {
+          "enum": ["initial", "followup"]
+        },
+        "instruction": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100000
+        },
+        "instructionDigest": {
+          "$ref": "catalyst-workbench-editor-snapshot-v1.schema.json#/$defs/digest"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {"kind": {"const": "followup"}},
+            "required": ["kind"]
+          },
+          "then": {
+            "properties": {"instruction": {"maxLength": 8000}}
+          }
+        }
+      ]
+    },
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["findingId", "ruleCode", "severity", "stage", "path", "message"],
+      "properties": {
+        "findingId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "ruleCode": {
+          "type": "string",
+          "minLength": 1
+        },
+        "severity": {
+          "enum": ["error", "warning", "info"]
+        },
+        "stage": {
+          "type": "string",
+          "minLength": 1
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4000
+        }
+      }
+    },
+    "validationContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "validationId",
+        "versionId",
+        "queryDigest",
+        "status",
+        "validatorRevision",
+        "validatorDigest",
+        "findings"
+      ],
+      "properties": {
+        "validationId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "versionId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "queryDigest": {
+          "$ref": "catalyst-workbench-editor-snapshot-v1.schema.json#/$defs/digest"
+        },
+        "status": {
+          "enum": ["invalid", "warning", "valid"]
+        },
+        "validatorRevision": {
+          "type": "string",
+          "minLength": 1
+        },
+        "validatorDigest": {
+          "$ref": "catalyst-workbench-editor-snapshot-v1.schema.json#/$defs/digest"
+        },
+        "findings": {
+          "type": "array",
+          "maxItems": 50,
+          "items": {"$ref": "#/$defs/finding"}
+        }
+      }
+    },
+    "executionColumn": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ordinal", "name", "databaseType", "logicalType"],
+      "properties": {
+        "ordinal": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "databaseType": {
+          "type": "string",
+          "minLength": 1
+        },
+        "logicalType": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "rowCount": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["returned", "truncated", "truncationReason"],
+      "properties": {
+        "returned": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "truncated": {
+          "type": "boolean"
+        },
+        "truncationReason": {
+          "type": ["string", "null"],
+          "maxLength": 1000
+        }
+      }
+    },
+    "databaseDiagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sqlstate", "severity", "message", "detail", "hint", "position"],
+      "properties": {
+        "sqlstate": {
+          "type": ["string", "null"],
+          "maxLength": 5
+        },
+        "severity": {
+          "type": ["string", "null"],
+          "maxLength": 100
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 4000
+        },
+        "detail": {
+          "type": ["string", "null"],
+          "maxLength": 4000
+        },
+        "hint": {
+          "type": ["string", "null"],
+          "maxLength": 4000
+        },
+        "position": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        }
+      }
+    },
+    "executionContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "executionId",
+        "versionId",
+        "queryDigest",
+        "status",
+        "validationStatus",
+        "rowCount",
+        "columns",
+        "databaseDiagnostic",
+        "durationMs"
+      ],
+      "properties": {
+        "executionId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "versionId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "queryDigest": {
+          "$ref": "catalyst-workbench-editor-snapshot-v1.schema.json#/$defs/digest"
+        },
+        "status": {
+          "enum": ["succeeded", "failed", "timed_out", "cancelled"]
+        },
+        "validationStatus": {
+          "enum": ["not_run", "invalid", "warning", "valid"]
+        },
+        "rowCount": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/rowCount"}
+          ]
+        },
+        "columns": {
+          "type": "array",
+          "maxItems": 128,
+          "items": {"$ref": "#/$defs/executionColumn"}
+        },
+        "warnings": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          }
+        },
+        "databaseDiagnostic": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/databaseDiagnostic"}
+          ]
+        },
+        "durationMs": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "validationRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["validationId", "versionId", "queryDigest"],
+      "properties": {
+        "validationId": {"type": "string", "format": "uuid"},
+        "versionId": {"type": "string", "format": "uuid"},
+        "queryDigest": {
+          "$ref": "catalyst-workbench-editor-snapshot-v1.schema.json#/$defs/digest"
+        }
+      }
+    },
+    "executionRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["executionId", "versionId", "queryDigest"],
+      "properties": {
+        "executionId": {"type": "string", "format": "uuid"},
+        "versionId": {"type": "string", "format": "uuid"},
+        "queryDigest": {
+          "$ref": "catalyst-workbench-editor-snapshot-v1.schema.json#/$defs/digest"
+        }
+      }
+    },
+    "omissions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "historyInstructionsOmitted",
+        "validationFindingsOmitted",
+        "executionColumnsOmitted",
+        "diagnosticTextTruncated",
+        "prohibitedClasses",
+        "omittedHistory",
+        "omittedHistoryDigest"
+      ],
+      "properties": {
+        "historyInstructionsOmitted": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "validationFindingsOmitted": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "executionColumnsOmitted": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "diagnosticTextTruncated": {
+          "type": "boolean"
+        },
+        "prohibitedClasses": {
+          "const": [
+            "database_credentials",
+            "database_connection_details",
+            "database_dsn",
+            "execution_result_rows",
+            "hidden_reasoning",
+            "historical_sql_copies",
+            "raw_chat_transcript",
+            "raw_model_outputs",
+            "raw_reasoning_traces",
+            "unrelated_session_history",
+            "unrelated_historical_sql"
+          ]
+        },
+        "omittedHistory": {
+          "type": "array",
+          "maxItems": 1000,
+          "items": {"$ref": "#/$defs/omittedHistoryRef"}
+        },
+        "omittedHistoryDigest": {
+          "$ref": "catalyst-workbench-editor-snapshot-v1.schema.json#/$defs/digest"
+        }
+      }
+    },
+    "omittedHistoryRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["turnId", "ordinal", "kind", "instructionDigest"],
+      "properties": {
+        "turnId": {"type": "string", "format": "uuid"},
+        "ordinal": {"type": "integer", "minimum": 1},
+        "kind": {"enum": ["initial", "followup"]},
+        "instructionDigest": {
+          "$ref": "catalyst-workbench-editor-snapshot-v1.schema.json#/$defs/digest"
+        }
+      }
+    },
+    "selection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "includedHistoryTurnIds",
+        "validationRef",
+        "executionRef",
+        "omissions"
+      ],
+      "properties": {
+        "includedHistoryTurnIds": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 6,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "validationRef": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/validationRef"}
+          ]
+        },
+        "executionRef": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/executionRef"}
+          ]
+        },
+        "omissions": {
+          "$ref": "#/$defs/omissions"
+        }
+      }
+    }
+  }
+}

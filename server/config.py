@@ -15,6 +15,7 @@ class LLMConfig:
     """OpenAI-compatible backend used by hub stages."""
 
     base_url: str = os.getenv("LLM_BASE_URL", "http://localhost:8077")
+    provider: str = os.getenv("LLM_PROVIDER", "openai-compatible")
     api_key: str = os.getenv("LLM_API_KEY", "")
     orchestrator_model: str = os.getenv("ORCHESTRATOR_MODEL", "google/gemma-4-e4b")
     synthesizer_model: str = os.getenv(

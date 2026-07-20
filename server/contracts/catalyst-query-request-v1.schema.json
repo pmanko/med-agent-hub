@@ -1,0 +1,274 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openelis-global.org/catalyst/contracts/catalyst-query-request-v1.schema.json",
+  "title": "Catalyst query-profile request",
+  "description": "Planned OpenAI-compatible request extension for the med-agent-hub catalyst-query-checked profile.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "model",
+    "stream",
+    "messages",
+    "catalystQuery"
+  ],
+  "properties": {
+    "model": {
+      "type": "string",
+      "pattern": "^catalyst-query-",
+      "minLength": 1
+    },
+    "stream": {
+      "const": false
+    },
+    "messages": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1,
+      "prefixItems": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "role",
+            "content"
+          ],
+          "properties": {
+            "role": {
+              "const": "user"
+            },
+            "content": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        }
+      ],
+      "items": false
+    },
+    "catalystQuery": {
+      "$ref": "#/$defs/queryContext"
+    }
+  },
+  "$defs": {
+    "queryContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contractVersion",
+        "target",
+        "catalog",
+        "policy",
+        "correlation",
+        "requiredOutputContract"
+      ],
+      "properties": {
+        "contractVersion": {
+          "const": "catalyst.query.request.v1"
+        },
+        "requiredOutputContract": {
+          "const": "catalyst.query.v1"
+        },
+        "target": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "dataSource",
+            "catalogVersion",
+            "dialect"
+          ],
+          "properties": {
+            "dataSource": {
+              "type": "string",
+              "minLength": 1
+            },
+            "catalogVersion": {
+              "type": "string",
+              "minLength": 1
+            },
+            "dialect": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "catalog": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "contextSourceId",
+            "views"
+          ],
+          "properties": {
+            "contextSourceId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "views": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "$ref": "#/$defs/view"
+              }
+            }
+          }
+        },
+        "policy": {
+          "$ref": "#/$defs/policy"
+        },
+        "correlation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "requestId",
+            "traceId"
+          ],
+          "properties": {
+            "requestId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "traceId": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        }
+      }
+    },
+    "view": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "version",
+        "grain",
+        "fields"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[A-Za-z_][A-Za-z0-9_.]*$"
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "grain": {
+          "type": "string",
+          "minLength": 1
+        },
+        "fields": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "type",
+              "description"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+              },
+              "type": {
+                "type": "string",
+                "minLength": 1
+              },
+              "description": {
+                "type": "string",
+                "minLength": 1
+              },
+              "unit": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "relationships": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "semanticDimensions": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/semanticDimension"
+          }
+        }
+      }
+    },
+    "semanticDimension": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["field", "semanticType", "values"],
+      "properties": {
+        "field": {
+          "type": "string",
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+        },
+        "semanticType": {
+          "const": "analyte"
+        },
+        "values": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/semanticValue"
+          }
+        }
+      }
+    },
+    "semanticValue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["canonical", "aliases"],
+      "properties": {
+        "canonical": {
+          "type": "string",
+          "minLength": 1
+        },
+        "aliases": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "allowedOperation",
+        "requirePreview",
+        "maxRows",
+        "statementTimeoutMs"
+      ],
+      "properties": {
+        "allowedOperation": {
+          "const": "select"
+        },
+        "requirePreview": {
+          "const": true
+        },
+        "maxRows": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "statementTimeoutMs": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    }
+  }
+}

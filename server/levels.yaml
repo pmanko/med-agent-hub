@@ -15,8 +15,81 @@ stage_sets:
   product: &product [context, answer, gate, resolve_refs, review, gate, final_resolve_refs, ground_verdicts, indepth, indepth_gate]
   product_no_review: &product_no_review [context, answer, gate, resolve_refs, final_resolve_refs, ground_verdicts, indepth, indepth_gate]
   team_product: &team_product [context, gather, answer, gate, resolve_refs, review, gate, final_resolve_refs, ground_verdicts, indepth, indepth_gate]
+  catalyst_query: &catalyst_query [context, query_generate, query_lint, query_review, query_finalize]
 
 profiles:
+  catalyst-query-checked:
+    label: Catalyst governed query (checked)
+    topology: single
+    stages: *catalyst_query
+    models: {query_generate: qwen2.5-14b, query_review: qwen2.5-14b}
+    prompts: {query_generate: catalyst-query-generate, query_review: catalyst-query-review}
+    policies: {output: query, temporal_gate: "off", generation_attempts: 3, model_classes: {query_generate: qwen-2.5, query_review: qwen-2.5}}
+    capabilities: {staged: false, validation: true}
+    outputContracts: [catalyst.query.v1]
+    visibility: product
+    knobs: {query_generate: {temperature: 0, dry: 0}, query_review: {temperature: 0, dry: 0}}
+
+  catalyst-query-gemma-e4b:
+    label: Catalyst governed query — Gemma 4 E4B
+    topology: single
+    stages: *catalyst_query
+    models: {query_generate: gemma-e4b, query_review: gemma-e4b}
+    prompts: {query_generate: catalyst-query-generate, query_review: catalyst-query-review}
+    policies: {output: query, temporal_gate: "off", allowed_operation: select, generation_attempts: 3, model_classes: {query_generate: gemma-4, query_review: gemma-4}}
+    capabilities: {staged: false, validation: true}
+    outputContracts: [catalyst.query.v1]
+    visibility: product
+    knobs: {query_generate: {temperature: 0, dry: 0}, query_review: {temperature: 0, dry: 0}}
+
+  catalyst-query-gemma-4-12b:
+    label: Catalyst query — Gemma 4 12B writer + Qwen 2.5 14B reviewer
+    topology: single
+    stages: *catalyst_query
+    models: {query_generate: gemma-4-12b, query_review: qwen2.5-14b}
+    prompts: {query_generate: catalyst-query-generate, query_review: catalyst-query-review}
+    policies:
+      output: query
+      temporal_gate: "off"
+      allowed_operation: select
+      generation_attempts: 1
+      collaborative_review: true
+      model_classes: {query_generate: gemma-4, query_review: qwen-2.5}
+    capabilities: {staged: false, validation: true}
+    outputContracts: [catalyst.query.v1]
+    visibility: product
+    knobs: {query_generate: {temperature: 0, dry: 0}, query_review: {temperature: 0, dry: 0}}
+
+  catalyst-query-qwen-2.5-14b:
+    label: Catalyst query — Qwen 2.5 14B writer + Gemma 4 12B reviewer
+    topology: single
+    stages: *catalyst_query
+    models: {query_generate: qwen2.5-14b, query_review: gemma-4-12b}
+    prompts: {query_generate: catalyst-query-generate, query_review: catalyst-query-review}
+    policies:
+      output: query
+      temporal_gate: "off"
+      allowed_operation: select
+      generation_attempts: 1
+      collaborative_review: true
+      model_classes: {query_generate: qwen-2.5, query_review: gemma-4}
+    capabilities: {staged: false, validation: true}
+    outputContracts: [catalyst.query.v1]
+    visibility: product
+    knobs: {query_generate: {temperature: 0, dry: 0}, query_review: {temperature: 0, dry: 0}}
+
+  catalyst-query-qwen-coder-1.5b:
+    label: Catalyst governed query — Qwen 2.5 Coder 1.5B
+    topology: single
+    stages: *catalyst_query
+    models: {query_generate: qwen2.5-coder-1.5b-instruct-q4_k_m, query_review: qwen2.5-coder-1.5b-instruct-q4_k_m}
+    prompts: {query_generate: catalyst-query-generate, query_review: catalyst-query-review}
+    policies: {output: query, temporal_gate: "off", allowed_operation: select, generation_attempts: 3, model_classes: {query_generate: qwen-2.5-coder, query_review: qwen-2.5-coder}}
+    capabilities: {staged: false, validation: true}
+    outputContracts: [catalyst.query.v1]
+    visibility: product
+    knobs: {query_generate: {temperature: 0, dry: 0}, query_review: {temperature: 0, dry: 0}}
+
   med-agent-team-low:
     label: Low team
     topology: team

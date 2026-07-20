@@ -25,6 +25,17 @@ Streaming and blocking requests execute the same asynchronous engine in `server/
 
 Configured profiles live in `server/levels.yaml` and declare a human label, topology, ordered stages, role models, prompts, validation policies, and context budget. The default product profile is `single-e4b-checked`. Product profiles always enforce deterministic temporal validation and require exact tokenizer-backed context counting.
 
+Catalyst follow-up queries have two revision-capable profiles configured for
+the same model pair, with the writer and reviewer roles reversed for manual
+comparison:
+
+- `catalyst-query-gemma-4-12b`: Gemma 4 12B writer, Qwen 2.5 14B reviewer;
+- `catalyst-query-qwen-2.5-14b`: Qwen 2.5 14B writer, Gemma 4 12B reviewer.
+
+Both run one writer attempt followed by cross-family collaborative review with
+temperature and DRY sampling set to zero. Availability remains determined by
+the model router and is reported by `GET /v1/models`.
+
 Low-level experiment legs use these ids:
 
 - `answer:<model>@<prompt>~<gate>~temp<n>`
