@@ -770,8 +770,8 @@ def test_v1_models_attaches_required_backend_metadata_without_changing_availabil
     assert profile["backend_model_metadata"] == {"gemma-e4b": catalog["gemma-e4b"]}
     assert "not-required-by-profile" not in profile["backend_model_metadata"]
     assert profile["role_knobs"] == {
-        "query_generate": {"temperature": 0},
-        "query_review": {"temperature": 0},
+        "query_generate": {"temperature": 0, "dry": 0},
+        "query_review": {"temperature": 0, "dry": 0},
     }
     assert profile["profile_configuration_digest"].startswith("sha256:")
     assert set(profile["role_prompt_digests"]) == {

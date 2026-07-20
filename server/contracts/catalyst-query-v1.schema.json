@@ -799,6 +799,7 @@
           "required": ["temperature", "maxTokens", "responseFormat"],
           "properties": {
             "temperature": {"type": "number"},
+            "dryMultiplier": {"type": "number", "minimum": 0},
             "maxTokens": {"type": ["integer", "null"], "minimum": 1},
             "responseFormat": {"type": ["string", "null"]}
           }

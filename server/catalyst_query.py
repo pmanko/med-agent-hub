@@ -1542,6 +1542,7 @@ async def _backend_chat(
     *,
     response_format: Mapping[str, Any],
     temperature: float,
+    dry_multiplier: float,
     max_tokens: Optional[int],
 ) -> str:
     """Use the Hub's shared backend call and response extraction primitives."""
@@ -1551,6 +1552,7 @@ async def _backend_chat(
         messages,
         response_format=dict(response_format),
         temperature=temperature,
+        dry_multiplier=dry_multiplier,
         max_tokens=max_tokens,
     )
     content = message.get("content") if isinstance(message, Mapping) else None
@@ -1664,6 +1666,7 @@ async def _invoke_backend(
     *,
     response_format: Mapping[str, Any],
     temperature: float,
+    dry_multiplier: float,
     max_tokens: Optional[int],
     invocations: list[dict[str, Any]],
     role: str,
@@ -1675,6 +1678,7 @@ async def _invoke_backend(
     started = time.monotonic()
     configuration = {
         "temperature": temperature,
+        "dryMultiplier": dry_multiplier,
         "maxTokens": max_tokens,
         "responseFormat": (
             (response_format.get("json_schema") or {}).get("name")
@@ -1712,6 +1716,7 @@ async def _invoke_backend(
             messages,
             response_format=response_format,
             temperature=temperature,
+            dry_multiplier=dry_multiplier,
             max_tokens=max_tokens,
         )
     except asyncio.CancelledError as exc:
@@ -1787,6 +1792,7 @@ async def _generate(
             messages,
             response_format=response_format,
             temperature=float(profile.knobs["query_generate"]["temperature"]),
+            dry_multiplier=float(profile.knobs["query_generate"]["dry"]),
             max_tokens=request.max_tokens,
             invocations=invocations,
             role="writer",
@@ -2047,6 +2053,7 @@ async def _review(
         messages,
         response_format=response_format,
         temperature=float(profile.knobs["query_review"]["temperature"]),
+        dry_multiplier=float(profile.knobs["query_review"]["dry"]),
         max_tokens=request.max_tokens,
         invocations=invocations,
         role="reviewer",
@@ -2099,6 +2106,7 @@ async def _review(
             ],
             response_format=response_format,
             temperature=float(profile.knobs["query_review"]["temperature"]),
+            dry_multiplier=float(profile.knobs["query_review"]["dry"]),
             max_tokens=request.max_tokens,
             invocations=invocations,
             role="reviewer",

@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 
 from server.main import app
 from tests.test_catalyst_query import (
+    _assert_shipped_contract,
     _content,
     _flat_repair,
     _queued_backend,
@@ -589,6 +590,7 @@ def test_cancelled_model_call_still_closes_its_invocation_record():
                     [{"role": "user", "content": "instruction"}],
                     response_format={"type": "json_schema"},
                     temperature=0,
+                    dry_multiplier=0,
                     max_tokens=None,
                     invocations=invocations,
                     role="writer",
@@ -664,6 +666,7 @@ def test_catalyst_never_promotes_provider_reasoning_content_to_candidate_output(
                     [{"role": "user", "content": "instruction"}],
                     response_format={"type": "json_schema"},
                     temperature=0,
+                    dry_multiplier=0,
                     max_tokens=None,
                 )
 
@@ -690,6 +693,7 @@ def test_every_model_invocation_has_reproducible_role_model_config_and_timing():
         uuid.UUID(item["invocationId"])
         assert item["providerId"] == "openai-compatible"
         assert item["configuration"]["temperature"] == 0
+        assert item["configuration"]["dryMultiplier"] == 0
         assert item["endedAt"] >= item["startedAt"]
         assert item["durationMs"] >= 0
         assert len(item["requestDigest"]) == 64
@@ -708,5 +712,15 @@ def test_every_model_invocation_has_reproducible_role_model_config_and_timing():
     for role in (profile["writer"], profile["reviewer"]):
         assert role["providerId"] == "openai-compatible"
         assert role["config"]["temperature"] == 0
+        assert role["config"]["dry"] == 0
         assert role["systemPrompt"]["text"]
         assert len(role["systemPrompt"]["promptDigest"]) == 64
+
+    evidenced_payload = {
+        **payload,
+        "modelInvocations": invocations,
+        "totalModelInvocationDurationMs": envelope[
+            "totalModelInvocationDurationMs"
+        ],
+    }
+    _assert_shipped_contract(evidenced_payload)

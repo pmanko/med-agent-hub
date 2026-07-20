@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+from dataclasses import replace
 import json
 from pathlib import Path
 from unittest.mock import patch
@@ -16,7 +17,7 @@ from server.catalyst_query import (
     _parse_candidate,
     _patch_format,
 )
-from server.levels_loader import get_profile
+from server.levels_loader import compile_profile, get_profile
 from server.main import app
 
 QUESTION = (
@@ -228,6 +229,7 @@ def _queued_backend(responses: list[dict | str | BaseException], calls: list[dic
         *,
         response_format,
         temperature,
+        dry_multiplier,
         max_tokens,
     ):
         calls.append(
@@ -236,6 +238,7 @@ def _queued_backend(responses: list[dict | str | BaseException], calls: list[dic
                 "messages": messages,
                 "response_format": response_format,
                 "temperature": temperature,
+                "dry_multiplier": dry_multiplier,
                 "max_tokens": max_tokens,
             }
         )
@@ -300,6 +303,8 @@ def test_query_profile_has_dedicated_stages_models_and_discovery_contract():
     assert profile.models["query_review"] == "qwen2.5-14b"
     assert profile.knobs["query_generate"]["temperature"] == 0
     assert profile.knobs["query_review"]["temperature"] == 0
+    assert profile.knobs["query_generate"]["dry"] == 0
+    assert profile.knobs["query_review"]["dry"] == 0
     assert profile.output_contracts == ("catalyst.query.v1",)
     assert get_profile("single-e4b-checked").default is True
 
@@ -315,6 +320,21 @@ def test_query_profile_has_dedicated_stages_models_and_discovery_contract():
     assert by_id["catalyst-query-checked"]["available"] is True
     assert by_id["catalyst-query-checked"]["revisionCapable"] is False
     assert by_id["single-e4b-checked"]["default"] is True
+
+
+@pytest.mark.parametrize("dry", [None, 0.8])
+def test_query_profile_requires_router_dry_to_be_disabled(dry):
+    profile = get_profile("catalyst-query-gemma-4-12b")
+    knobs = {
+        role: dict(configured) for role, configured in profile.knobs.items()
+    }
+    if dry is None:
+        knobs["query_generate"].pop("dry")
+    else:
+        knobs["query_generate"]["dry"] = dry
+
+    with pytest.raises(ValueError, match="query_generate.*dry 0"):
+        compile_profile(replace(profile, knobs=knobs))
 
 
 def test_gemma_query_profile_uses_router_model_id_and_is_available():
@@ -380,6 +400,8 @@ def test_gemma_12b_query_profile_is_truthful_available_and_provenanced():
     assert dict(profile.knobs) == dict(e4b.knobs)
     assert profile.knobs["query_generate"]["temperature"] == 0
     assert profile.knobs["query_review"]["temperature"] == 0
+    assert profile.knobs["query_generate"]["dry"] == 0
+    assert profile.knobs["query_review"]["dry"] == 0
     assert profile.default is False
     assert e4b.default is False
     assert get_profile("single-e4b-checked").default is True
@@ -409,8 +431,8 @@ def test_gemma_12b_query_profile_is_truthful_available_and_provenanced():
     assert advertised["profileEvidence"]["reviewer"]["modelClass"] == "qwen-2.5"
     assert advertised["profileEvidence"]["writer"]["systemPrompt"]["text"]
     assert advertised["role_knobs"] == {
-        "query_generate": {"temperature": 0},
-        "query_review": {"temperature": 0},
+        "query_generate": {"temperature": 0, "dry": 0},
+        "query_review": {"temperature": 0, "dry": 0},
     }
     assert advertised["backend_model_metadata"] == {
         "gemma-4-12b": backend_model,
@@ -670,6 +692,26 @@ def test_query_roles_receive_dedicated_prompts_and_strict_backend_schemas():
         "enum": ["approve", "repair", "reject"]
     }
     assert set(review_schema["required"]) == {"decision", "checks"}
+
+
+def test_query_writer_and_reviewer_disable_router_dry():
+    request = _request()
+    request["model"] = "catalyst-query-gemma-4-12b"
+    responses = [
+        {"content": json.dumps(_ready_candidate())},
+        {"content": json.dumps(_review("passed"))},
+    ]
+    with patch("server.catalyst_query._chat", side_effect=responses) as router_chat:
+        response = TestClient(app).post("/v1/chat/completions", json=request)
+
+    assert _content(response)["status"] == "ready"
+    assert [call.args[1] for call in router_chat.call_args_list] == [
+        "gemma-4-12b",
+        "qwen2.5-14b",
+    ]
+    assert [
+        call.kwargs["dry_multiplier"] for call in router_chat.call_args_list
+    ] == [0.0, 0.0]
 
 
 def test_single_date_normalization_never_rewrites_an_unrelated_parameter():

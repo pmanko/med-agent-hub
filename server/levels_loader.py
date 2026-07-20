@@ -350,11 +350,13 @@ def compile_profile(profile: Profile) -> Profile:
         if profile.staged:
             raise ValueError(f"query profile {profile.id!r} cannot stream")
         for role in ("query_generate", "query_review"):
-            temperature = (profile.knobs.get(role) or {}).get("temperature")
-            if temperature != 0:
-                raise ValueError(
-                    f"query profile {profile.id!r} role {role!r} must use temperature 0"
-                )
+            for knob in ("temperature", "dry"):
+                value = (profile.knobs.get(role) or {}).get(knob)
+                if value != 0:
+                    raise ValueError(
+                        f"query profile {profile.id!r} role {role!r} "
+                        f"must use {knob} 0"
+                    )
         generation_attempts = profile.policies.get("generation_attempts", 2)
         if (
             not isinstance(generation_attempts, int)
