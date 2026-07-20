@@ -392,6 +392,7 @@ def test_v2_reviewer_contract_failure_gets_one_reviewer_only_correction():
         "qwen2.5-14b",
         "qwen2.5-14b",
     ]
+    assert [call["dry_multiplier"] for call in calls] == [0.0, 0.0, 0.0]
     correction_feedback = calls[2]["messages"][-1]["content"]
     assert "strict output contract" in correction_feedback
     assert "decision" in correction_feedback
@@ -406,6 +407,9 @@ def test_v2_reviewer_contract_failure_gets_one_reviewer_only_correction():
         "succeeded",
     ]
     assert [item["attempt"] for item in envelope["modelInvocations"]] == [1, 1, 2]
+    assert [
+        item["configuration"]["dryMultiplier"] for item in envelope["modelInvocations"]
+    ] == [0.0, 0.0, 0.0]
 
 
 def test_v2_reviewer_contract_correction_stops_after_one_retry():

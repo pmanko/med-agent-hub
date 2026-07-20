@@ -337,6 +337,28 @@ def test_query_profile_requires_router_dry_to_be_disabled(dry):
         compile_profile(replace(profile, knobs=knobs))
 
 
+@pytest.mark.parametrize("role", ["query_generate", "query_review"])
+@pytest.mark.parametrize(
+    ("knob", "value"),
+    [
+        ("temperature", False),
+        ("temperature", "0"),
+        ("dry", False),
+        ("dry", "0"),
+    ],
+)
+def test_query_profile_rejects_non_numeric_and_boolean_zero_knobs(role, knob, value):
+    profile = get_profile("catalyst-query-gemma-4-12b")
+    knobs = {
+        configured_role: dict(configured)
+        for configured_role, configured in profile.knobs.items()
+    }
+    knobs[role][knob] = value
+
+    with pytest.raises(ValueError, match=rf"{role!s}.*{knob!s} 0"):
+        compile_profile(replace(profile, knobs=knobs))
+
+
 def test_gemma_query_profile_uses_router_model_id_and_is_available():
     profile = get_profile("catalyst-query-gemma-e4b")
 

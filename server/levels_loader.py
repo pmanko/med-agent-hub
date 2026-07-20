@@ -352,7 +352,11 @@ def compile_profile(profile: Profile) -> Profile:
         for role in ("query_generate", "query_review"):
             for knob in ("temperature", "dry"):
                 value = (profile.knobs.get(role) or {}).get(knob)
-                if value != 0:
+                if (
+                    not isinstance(value, (int, float))
+                    or isinstance(value, bool)
+                    or value != 0
+                ):
                     raise ValueError(
                         f"query profile {profile.id!r} role {role!r} "
                         f"must use {knob} 0"
