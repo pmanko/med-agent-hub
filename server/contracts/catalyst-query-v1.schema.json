@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://openelis-global.org/catalyst/contracts/catalyst-query-v1.schema.json",
   "title": "Catalyst governed query response",
-  "description": "Structured output returned by the planned med-agent-hub catalyst-query-checked profile.",
+  "description": "Structured output returned by med-agent-hub Catalyst query profiles.",
   "type": "object",
   "additionalProperties": false,
   "required": [
