@@ -597,6 +597,70 @@ def test_backend_model_discovery_uses_configured_bearer_auth():
     )
 
 
+def test_backend_model_discovery_preserves_metadata_and_redacts_secrets():
+    backend = SimpleNamespace(
+        base_url="https://user:password@router.example:8443/openai?token=secret",
+        provider="llama.cpp",
+        api_key="request-secret",
+    )
+    advertised = {
+        "id": "gemma-e4b",
+        "object": "model",
+        "owned_by": "llamacpp",
+        "created": 1234,
+        "meta": {
+            "quantization": "Q4_K_M",
+            "physical_revision": "sha256:model-bytes",
+            "api_key": "metadata-secret",
+            "tokenizer": "gemma",
+            "download_url": "https://user:pass@models.example/gemma?sig=secret",
+        },
+    }
+    with patch.object(openai_compat, "llm_config", backend), patch.object(
+        openai_compat.httpx, "get"
+    ) as get:
+        get.return_value.json.return_value = {"data": [advertised]}
+
+        metadata = openai_compat._served_backend_model_metadata()
+        backend_metadata = openai_compat._backend_discovery_metadata()
+
+    assert metadata["gemma-e4b"] == {
+        **advertised,
+        "meta": {
+            **advertised["meta"],
+            "api_key": "[redacted]",
+            "download_url": "https://models.example/gemma",
+        },
+    }
+    assert backend_metadata == {
+        "provider": "llama.cpp",
+        "endpoint": "https://router.example:8443/openai",
+        "models_endpoint": "https://router.example:8443/openai/v1/models",
+    }
+    assert "request-secret" not in json.dumps(metadata)
+    assert "metadata-secret" not in json.dumps(metadata)
+    assert "password" not in json.dumps(backend_metadata)
+
+
+def test_backend_model_discovery_includes_on_demand_unloaded_router_entries():
+    backend = SimpleNamespace(base_url="http://router", api_key="")
+    with (
+        patch.object(openai_compat, "llm_config", backend),
+        patch.object(openai_compat.httpx, "get") as get,
+    ):
+        get.return_value.json.return_value = {
+            "data": [
+                {"id": "loaded", "status": {"value": "loaded"}},
+                {"id": "unloaded", "status": {"value": "unloaded"}},
+                {"id": "standard-openai-entry"},
+            ]
+        }
+
+        metadata = openai_compat._served_backend_model_metadata()
+
+    assert set(metadata) == {"loaded", "unloaded", "standard-openai-entry"}
+
+
 def test_backend_model_discovery_omits_auth_when_api_key_is_blank():
     backend = SimpleNamespace(base_url="http://router", api_key="")
     with patch.object(openai_compat, "llm_config", backend), patch.object(
@@ -623,6 +687,56 @@ def test_v1_models_advertises_staged_capability_not_just_id_prefix():
     assert by_id["med-agent-team-parity"]["staged"] is False
     assert by_id["single-e4b-checked"]["default"] is True
     assert "answer-review:qwen2.5-14b" not in by_id
+
+
+def test_v1_models_attaches_required_backend_metadata_without_changing_availability():
+    catalog = {
+        "gemma-e4b": {
+            "id": "gemma-e4b",
+            "object": "model",
+            "owned_by": "llamacpp",
+            "meta": {"n_params": 7_518_000_000, "quantization": "Q4_K_M"},
+        },
+        "not-required-by-profile": {"id": "not-required-by-profile"},
+    }
+    backend = SimpleNamespace(
+        base_url="http://router:8077", provider="llama.cpp", api_key=""
+    )
+    with (
+        patch.object(openai_compat, "llm_config", backend),
+        patch.object(
+            openai_compat,
+            "_served_backend_model_metadata",
+            return_value=catalog,
+        ),
+    ):
+        response = TestClient(app).get("/v1/models")
+
+    by_id = {item["id"]: item for item in response.json()["data"]}
+    profile = by_id["catalyst-query-gemma-e4b"]
+    assert profile["available"] is True
+    assert profile["unavailable_reasons"] == []
+    assert profile["backend"] == {
+        "provider": "llama.cpp",
+        "endpoint": "http://router:8077",
+        "models_endpoint": "http://router:8077/v1/models",
+    }
+    assert profile["backend_model_metadata"] == {"gemma-e4b": catalog["gemma-e4b"]}
+    assert "not-required-by-profile" not in profile["backend_model_metadata"]
+    assert profile["role_knobs"] == {
+        "query_generate": {"temperature": 0},
+        "query_review": {"temperature": 0},
+    }
+    assert profile["profile_configuration_digest"].startswith("sha256:")
+    assert set(profile["role_prompt_digests"]) == {
+        "query_generate",
+        "query_review",
+    }
+
+    unavailable = by_id["catalyst-query-checked"]
+    assert unavailable["available"] is False
+    assert unavailable["unavailable_reasons"] == ["model_not_loaded:qwen2.5-14b"]
+    assert unavailable["backend_model_metadata"] == {"qwen2.5-14b": None}
 
 
 def test_chat_completions_profile_returns_openai_shape_with_the_envelope():

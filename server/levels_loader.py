@@ -7,6 +7,8 @@ are intentionally absent from product discovery.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
@@ -18,7 +20,7 @@ _PATH = Path(__file__).parent / "levels.yaml"
 _PROMPTS = Path(__file__).parent / "prompts"
 _TEMPORAL_GATE_MODES = {"off", "warn", "enforce"}
 _TOPOLOGIES = {"single", "team", "leg"}
-_OUTPUT_MODES = {"bare", "combined", "product", "review", "indepth"}
+_OUTPUT_MODES = {"bare", "combined", "product", "query", "review", "indepth"}
 _ALLOWED_STAGES = {
     "context",
     "gather",
@@ -30,6 +32,10 @@ _ALLOWED_STAGES = {
     "ground_verdicts",
     "indepth",
     "indepth_gate",
+    "query_generate",
+    "query_lint",
+    "query_review",
+    "query_finalize",
 }
 
 
@@ -61,6 +67,7 @@ class Profile:
     reserved_output_tokens: int = 0
     exact_tokenizer: bool = False
     low_level_leg: bool = False
+    output_contracts: Tuple[str, ...] = ()
 
     @property
     def staged(self) -> bool:
@@ -195,6 +202,7 @@ def _from_spec(profile_id: str, spec: Mapping[str, Any]) -> Profile:
         context_window=int(context.get("window") or 0),
         reserved_output_tokens=int(context.get("reserved_output_tokens") or 0),
         exact_tokenizer=bool(context.get("exact_tokenizer", False)),
+        output_contracts=tuple(spec.get("outputContracts") or ()),
     )
     return compile_profile(profile)
 
@@ -229,6 +237,8 @@ def compile_profile(profile: Profile) -> Profile:
         ("review", "review"),
         ("ground_verdicts", "grounding"),
         ("indepth", "indepth"),
+        ("query_generate", "query_generate"),
+        ("query_review", "query_review"),
     ):
         if stage in profile.stages and role not in profile.models:
             raise ValueError(
@@ -318,6 +328,63 @@ def compile_profile(profile: Profile) -> Profile:
             raise ValueError(
                 f"product profile {profile.id!r} must ground before gated In-Depth"
             )
+    query_stages = {"query_generate", "query_lint", "query_review", "query_finalize"}
+    if profile.output_mode == "query":
+        expected = (
+            "context",
+            "query_generate",
+            "query_lint",
+            "query_review",
+            "query_finalize",
+        )
+        if profile.stages != expected:
+            raise ValueError(
+                f"query profile {profile.id!r} must use ordered stages {expected}"
+            )
+        if profile.topology != "single":
+            raise ValueError(f"query profile {profile.id!r} must use single topology")
+        if profile.output_contracts != ("catalyst.query.v1",):
+            raise ValueError(
+                f"query profile {profile.id!r} must advertise only catalyst.query.v1"
+            )
+        if profile.staged:
+            raise ValueError(f"query profile {profile.id!r} cannot stream")
+        for role in ("query_generate", "query_review"):
+            temperature = (profile.knobs.get(role) or {}).get("temperature")
+            if temperature != 0:
+                raise ValueError(
+                    f"query profile {profile.id!r} role {role!r} must use temperature 0"
+                )
+        generation_attempts = profile.policies.get("generation_attempts", 2)
+        if (
+            not isinstance(generation_attempts, int)
+            or isinstance(generation_attempts, bool)
+            or not 1 <= generation_attempts <= 3
+        ):
+            raise ValueError(
+                f"query profile {profile.id!r} generation_attempts must be 1..3"
+            )
+        if profile.policies.get("collaborative_review") is True:
+            model_classes = profile.policies.get("model_classes")
+            if not isinstance(model_classes, Mapping):
+                raise ValueError(
+                    f"collaborative query profile {profile.id!r} requires model_classes"
+                )
+            writer_class = str(model_classes.get("query_generate") or "")
+            reviewer_class = str(model_classes.get("query_review") or "")
+            if not writer_class or not reviewer_class or writer_class == reviewer_class:
+                raise ValueError(
+                    f"collaborative query profile {profile.id!r} requires different "
+                    "writer and reviewer model classes"
+                )
+    elif query_stages.intersection(profile.stages):
+        raise ValueError(
+            f"non-query profile {profile.id!r} cannot declare query stages"
+        )
+    elif profile.output_contracts:
+        raise ValueError(
+            f"non-query profile {profile.id!r} cannot advertise query output contracts"
+        )
 
     temporal_mode = str(profile.policies.get("temporal_gate", "off")).lower()
     if temporal_mode not in _TEMPORAL_GATE_MODES:
@@ -352,6 +419,7 @@ def compile_profile(profile: Profile) -> Profile:
         reserved_output_tokens=profile.reserved_output_tokens,
         exact_tokenizer=profile.exact_tokenizer,
         low_level_leg=profile.low_level_leg,
+        output_contracts=tuple(profile.output_contracts),
     )
 
 
@@ -435,13 +503,83 @@ def resolve_temporal_policy(
     return enabled, mode
 
 
+def _jsonable(value: Any) -> Any:
+    """Return immutable profile configuration as canonical JSON values."""
+    if isinstance(value, Mapping):
+        return {
+            str(key): _jsonable(item)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+        }
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(item) for item in value]
+    return value
+
+
+def _sha256(value: str) -> str:
+    return f"sha256:{hashlib.sha256(value.encode('utf-8')).hexdigest()}"
+
+
+def _profile_configuration_digest(profile: Profile) -> str:
+    configuration = {
+        "id": profile.id,
+        "label": profile.label,
+        "topology": profile.topology,
+        "stages": profile.stages,
+        "models": profile.models,
+        "prompts": profile.prompts,
+        "policies": profile.policies,
+        "capabilities": profile.capabilities,
+        "knobs": profile.knobs,
+        "visibility": profile.visibility,
+        "default": profile.default,
+        "context_window": profile.context_window,
+        "reserved_output_tokens": profile.reserved_output_tokens,
+        "exact_tokenizer": profile.exact_tokenizer,
+        "low_level_leg": profile.low_level_leg,
+        "output_contracts": profile.output_contracts,
+    }
+    canonical = json.dumps(
+        _jsonable(configuration),
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return _sha256(canonical)
+
+
+def _prompt_assets(profile: Profile, role: str, configured: str) -> Tuple[str, ...]:
+    if role != "review":
+        return (configured,)
+    assets = [configured + "-answer"]
+    if "indepth" in profile.stages:
+        assets.append(configured + "-indepth")
+    return tuple(assets)
+
+
+def _role_prompt_digests(profile: Profile) -> Dict[str, Any]:
+    digests: Dict[str, Any] = {}
+    for role, configured_value in sorted(profile.prompts.items()):
+        configured = str(configured_value)
+        system_prompts = {}
+        for name in _prompt_assets(profile, role, configured):
+            content = (
+                (_PROMPTS / f"{name}.txt").read_text(encoding="utf-8").rstrip("\n")
+            )
+            system_prompts[name] = _sha256(content)
+        digests[str(role)] = {
+            "configured_prompt": configured,
+            "system_prompt_sha256": system_prompts,
+        }
+    return digests
+
+
 def profile_metadata(
     profile: Profile,
     *,
     available: bool,
     unavailable_reasons: Tuple[str, ...] = (),
 ) -> Dict[str, Any]:
-    return {
+    metadata = {
         "id": profile.id,
         "label": profile.label,
         "staged": profile.staged,
@@ -453,7 +591,23 @@ def profile_metadata(
         "visibility": profile.visibility,
         "stages": list(profile.stages),
         "required_models": sorted(set(profile.models.values())),
+        "role_models": dict(profile.models),
+        "role_knobs": _jsonable(profile.knobs),
+        "profile_configuration_digest": _profile_configuration_digest(profile),
+        "role_prompt_digests": _role_prompt_digests(profile),
         "context_window": profile.context_window or None,
         "exact_tokenizer": profile.exact_tokenizer,
         "unavailable_reasons": list(unavailable_reasons),
     }
+    if profile.output_contracts:
+        metadata["outputContracts"] = list(profile.output_contracts)
+    model_classes = profile.policies.get("model_classes")
+    if isinstance(model_classes, Mapping):
+        metadata["role_model_classes"] = _jsonable(model_classes)
+    if profile.output_mode == "query":
+        metadata["revisionCapable"] = bool(
+            profile.policies.get("collaborative_review") is True
+            and isinstance(model_classes, Mapping)
+            and model_classes.get("query_generate") != model_classes.get("query_review")
+        )
+    return metadata

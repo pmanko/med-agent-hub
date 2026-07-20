@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openelis-global.org/contracts/catalyst-workbench-editor-snapshot-v1.schema.json",
+  "title": "Catalyst workbench editor snapshot v1",
+  "description": "The exact editor artifact used as a follow-up generation base. editorDigest is the content-addressed snapshot identity.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contractVersion",
+    "sql",
+    "parameters",
+    "expectedColumns",
+    "editorDigest"
+  ],
+  "properties": {
+    "contractVersion": {
+      "const": "catalyst.workbench.editor-snapshot.v1"
+    },
+    "sql": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2000000
+    },
+    "parameters": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/parameter"}
+    },
+    "expectedColumns": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/column"}
+    },
+    "editorDigest": {
+      "$ref": "#/$defs/digest"
+    }
+  },
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "parameter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "type", "source", "value"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "maxLength": 200,
+          "description": "May be blank in an unresolved editor snapshot; immutable versions apply the stricter identifier pattern."
+        },
+        "type": {
+          "enum": [
+            "string",
+            "integer",
+            "number",
+            "boolean",
+            "date",
+            "date-time",
+            "string-list",
+            "integer-list"
+          ]
+        },
+        "source": {
+          "enum": ["question", "human"]
+        },
+        "value": {}
+      }
+    },
+    "column": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "logicalType", "nullable"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "logicalType": {
+          "enum": ["string", "integer", "decimal", "boolean", "date", "date-time"]
+        },
+        "nullable": {
+          "type": "boolean"
+        },
+        "unit": {
+          "type": "string",
+          "maxLength": 100
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "contractVersion": "catalyst.workbench.editor-snapshot.v1",
+      "sql": "SELECT 1",
+      "parameters": [],
+      "expectedColumns": [],
+      "editorDigest": "82d9696f92e64acb0c4edba843633c97eb23fd3f22887d93755eb86971855105"
+    }
+  ]
+}

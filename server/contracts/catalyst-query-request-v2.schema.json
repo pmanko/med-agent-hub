@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openelis-global.org/catalyst/contracts/catalyst-query-request-v2.schema.json",
+  "title": "Catalyst query-profile revision request v2",
+  "description": "OpenAI-compatible Hub request for a follow-up query. The sole user message is the current instruction; bounded prior context is typed under catalystQuery.revision.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["model", "stream", "messages", "catalystQuery"],
+  "properties": {
+    "model": {
+      "type": "string",
+      "pattern": "^catalyst-query-",
+      "minLength": 1
+    },
+    "stream": {
+      "const": false
+    },
+    "messages": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1,
+      "prefixItems": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["role", "content"],
+          "properties": {
+            "role": {"const": "user"},
+            "content": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 8000
+            }
+          }
+        }
+      ],
+      "items": false
+    },
+    "catalystQuery": {
+      "$ref": "#/$defs/queryContext"
+    }
+  },
+  "$defs": {
+    "queryContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contractVersion",
+        "target",
+        "catalog",
+        "policy",
+        "correlation",
+        "requiredOutputContract",
+        "revision"
+      ],
+      "properties": {
+        "contractVersion": {
+          "const": "catalyst.query.request.v2"
+        },
+        "requiredOutputContract": {
+          "const": "catalyst.query.v1"
+        },
+        "target": {
+          "$ref": "https://openelis-global.org/catalyst/contracts/catalyst-query-request-v1.schema.json#/$defs/queryContext/properties/target"
+        },
+        "catalog": {
+          "$ref": "https://openelis-global.org/catalyst/contracts/catalyst-query-request-v1.schema.json#/$defs/queryContext/properties/catalog"
+        },
+        "policy": {
+          "$ref": "https://openelis-global.org/catalyst/contracts/catalyst-query-request-v1.schema.json#/$defs/policy"
+        },
+        "correlation": {
+          "$ref": "https://openelis-global.org/catalyst/contracts/catalyst-query-request-v1.schema.json#/$defs/queryContext/properties/correlation"
+        },
+        "revision": {
+          "$ref": "https://openelis-global.org/contracts/catalyst-query-revision-context-v1.schema.json"
+        }
+      }
+    }
+  }
+}

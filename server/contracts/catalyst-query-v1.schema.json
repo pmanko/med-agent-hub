@@ -1,0 +1,1037 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openelis-global.org/catalyst/contracts/catalyst-query-v1.schema.json",
+  "title": "Catalyst governed query response",
+  "description": "Structured output returned by the planned med-agent-hub catalyst-query-checked profile.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contractVersion",
+    "deploymentMode",
+    "status",
+    "question",
+    "validation",
+    "provenance"
+  ],
+  "properties": {
+    "contractVersion": {
+      "const": "catalyst.query.v1"
+    },
+    "deploymentMode": {
+      "const": "demo"
+    },
+    "status": {
+      "enum": [
+        "ready",
+        "needs_clarification",
+        "unsupported",
+        "rejected"
+      ]
+    },
+    "question": {
+      "type": "string",
+      "minLength": 1
+    },
+    "target": {
+      "$ref": "#/$defs/target"
+    },
+    "sql": {
+      "type": "string",
+      "minLength": 1,
+      "description": "One read-only statement using :name placeholders for every parameter."
+    },
+    "parameters": {
+      "type": "array",
+      "uniqueItems": true,
+      "description": "Parameter names must also be unique and match SQL placeholders exactly; Catalyst enforces that runtime invariant.",
+      "items": {
+        "$ref": "#/$defs/parameter"
+      }
+    },
+    "expectedColumns": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/column"
+      }
+    },
+    "clarification": {
+      "type": "string",
+      "minLength": 1
+    },
+    "message": {
+      "type": "string",
+      "minLength": 1
+    },
+    "diagnosticCandidate": {
+      "$ref": "#/$defs/diagnosticCandidate"
+    },
+    "modelCollaboration": {
+      "$ref": "#/$defs/modelCollaboration"
+    },
+    "modelInvocations": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {"$ref": "#/$defs/modelInvocation"}
+    },
+    "totalModelInvocationDurationMs": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "profileEvidence": {
+      "$ref": "#/$defs/profileEvidence"
+    },
+    "validation": {
+      "$ref": "#/$defs/validation"
+    },
+    "provenance": {
+      "$ref": "#/$defs/provenance"
+    }
+  },
+  "oneOf": [
+    {
+      "title": "Ready query",
+      "properties": {
+        "status": {
+          "const": "ready"
+        },
+        "validation": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/validation"
+            },
+            {
+              "properties": {
+                "status": {
+                  "enum": [
+                    "passed",
+                    "warned"
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      },
+      "required": [
+        "target",
+        "sql",
+        "parameters",
+        "expectedColumns"
+      ],
+      "not": {
+        "anyOf": [
+          {
+            "required": [
+              "clarification"
+            ]
+          },
+          {
+            "required": [
+              "message"
+            ]
+          },
+          {
+            "required": [
+              "diagnosticCandidate"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "title": "Clarification required",
+      "properties": {
+        "status": {
+          "const": "needs_clarification"
+        },
+        "validation": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/validation"
+            },
+            {
+              "properties": {
+                "status": {
+                  "const": "warned"
+                }
+              }
+            }
+          ]
+        }
+      },
+      "required": [
+        "clarification"
+      ],
+      "not": {
+        "anyOf": [
+          {
+            "required": [
+              "target"
+            ]
+          },
+          {
+            "required": [
+              "sql"
+            ]
+          },
+          {
+            "required": [
+              "parameters"
+            ]
+          },
+          {
+            "required": [
+              "expectedColumns"
+            ]
+          },
+          {
+            "required": [
+              "message"
+            ]
+          },
+          {
+            "required": [
+              "diagnosticCandidate"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "title": "Unsupported query",
+      "properties": {
+        "status": {
+          "const": "unsupported"
+        },
+        "validation": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/validation"
+            },
+            {
+              "properties": {
+                "status": {
+                  "const": "rejected"
+                }
+              }
+            }
+          ]
+        }
+      },
+      "required": [
+        "message"
+      ],
+      "not": {
+        "anyOf": [
+          {
+            "required": [
+              "target"
+            ]
+          },
+          {
+            "required": [
+              "sql"
+            ]
+          },
+          {
+            "required": [
+              "parameters"
+            ]
+          },
+          {
+            "required": [
+              "expectedColumns"
+            ]
+          },
+          {
+            "required": [
+              "clarification"
+            ]
+          },
+          {
+            "required": [
+              "diagnosticCandidate"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "title": "Rejected query",
+      "properties": {
+        "status": {
+          "const": "rejected"
+        },
+        "validation": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/validation"
+            },
+            {
+              "properties": {
+                "status": {
+                  "const": "rejected"
+                }
+              }
+            }
+          ]
+        }
+      },
+      "required": [
+        "message"
+      ],
+      "not": {
+        "anyOf": [
+          {
+            "required": [
+              "target"
+            ]
+          },
+          {
+            "required": [
+              "sql"
+            ]
+          },
+          {
+            "required": [
+              "parameters"
+            ]
+          },
+          {
+            "required": [
+              "expectedColumns"
+            ]
+          },
+          {
+            "required": [
+              "clarification"
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "$defs": {
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "dataSource",
+        "catalogVersion",
+        "dialect",
+        "approvedViews"
+      ],
+      "properties": {
+        "dataSource": {
+          "type": "string",
+          "minLength": 1
+        },
+        "catalogVersion": {
+          "type": "string",
+          "minLength": 1
+        },
+        "dialect": {
+          "type": "string",
+          "minLength": 1
+        },
+        "approvedViews": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z_][A-Za-z0-9_.]*$"
+          }
+        }
+      }
+    },
+    "parameter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "type",
+        "source"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$"
+        },
+        "type": {
+          "enum": [
+            "string",
+            "integer",
+            "number",
+            "boolean",
+            "date",
+            "date-time",
+            "string-list",
+            "integer-list"
+          ]
+        },
+        "source": {
+          "const": "question"
+        },
+        "value": {}
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "source": {
+              "const": "question"
+            },
+            "type": {
+              "const": "string"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "value"
+          ]
+        },
+        {
+          "properties": {
+            "source": {
+              "const": "question"
+            },
+            "type": {
+              "const": "integer"
+            },
+            "value": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "value"
+          ]
+        },
+        {
+          "properties": {
+            "source": {
+              "const": "question"
+            },
+            "type": {
+              "const": "number"
+            },
+            "value": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "value"
+          ]
+        },
+        {
+          "properties": {
+            "source": {
+              "const": "question"
+            },
+            "type": {
+              "const": "boolean"
+            },
+            "value": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "value"
+          ]
+        },
+        {
+          "properties": {
+            "source": {
+              "const": "question"
+            },
+            "type": {
+              "const": "date"
+            },
+            "value": {
+              "type": "string",
+              "format": "date"
+            }
+          },
+          "required": [
+            "value"
+          ]
+        },
+        {
+          "properties": {
+            "source": {
+              "const": "question"
+            },
+            "type": {
+              "const": "date-time"
+            },
+            "value": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          "required": [
+            "value"
+          ]
+        },
+        {
+          "properties": {
+            "source": {
+              "const": "question"
+            },
+            "type": {
+              "const": "string-list"
+            },
+            "value": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "value"
+          ]
+        },
+        {
+          "properties": {
+            "source": {
+              "const": "question"
+            },
+            "type": {
+              "const": "integer-list"
+            },
+            "value": {
+              "type": "array",
+              "items": {
+                "type": "integer"
+              }
+            }
+          },
+          "required": [
+            "value"
+          ]
+        }
+      ]
+    },
+    "column": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "logicalType",
+        "nullable"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "logicalType": {
+          "enum": [
+            "string",
+            "integer",
+            "decimal",
+            "boolean",
+            "date",
+            "date-time"
+          ]
+        },
+        "nullable": {
+          "type": "boolean"
+        },
+        "unit": {
+          "type": "string"
+        }
+      }
+    },
+    "generatedCandidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "ready",
+            "needs_clarification",
+            "unsupported",
+            "rejected"
+          ]
+        },
+        "target": {
+          "$ref": "#/$defs/target"
+        },
+        "sql": {
+          "type": "string",
+          "minLength": 1
+        },
+        "parameters": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/parameter"
+          }
+        },
+        "expectedColumns": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/column"
+          }
+        },
+        "clarification": {
+          "type": "string",
+          "minLength": 1
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "status": {
+              "const": "ready"
+            }
+          },
+          "required": [
+            "target",
+            "sql",
+            "parameters",
+            "expectedColumns"
+          ]
+        },
+        {
+          "properties": {
+            "status": {
+              "const": "needs_clarification"
+            }
+          },
+          "required": [
+            "clarification"
+          ]
+        },
+        {
+          "properties": {
+            "status": {
+              "enum": [
+                "unsupported",
+                "rejected"
+              ]
+            }
+          },
+          "required": [
+            "message"
+          ]
+        }
+      ]
+    },
+    "diagnosticFinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "stage",
+        "severity",
+        "path",
+        "message"
+      ],
+      "properties": {
+        "code": {
+          "type": "string",
+          "minLength": 1
+        },
+        "stage": {
+          "type": "string",
+          "minLength": 1
+        },
+        "severity": {
+          "enum": [
+            "warning",
+            "error"
+          ]
+        },
+        "path": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1
+        },
+        "evidence": {
+          "type": "string"
+        },
+        "suggestedAction": {
+          "type": "string"
+        },
+        "line": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "column": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "reviewCheck": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "status"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "status": {"enum": ["passed", "warned", "failed"]},
+        "message": {"type": "string"}
+      }
+    },
+    "modelCollaboration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["writer", "reviewer", "finalLintFindings"],
+      "properties": {
+        "base": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "baseClassification",
+            "observedBase",
+            "effectiveBaseVersion",
+            "editorDigest"
+          ],
+          "properties": {
+            "baseClassification": {
+              "enum": ["reused", "promoted_human", "unresolved"]
+            },
+            "observedBase": {"$ref": "#/$defs/nullableVersionRef"},
+            "effectiveBaseVersion": {"$ref": "#/$defs/nullableVersionRef"},
+            "editorDigest": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+          }
+        },
+        "writer": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["model", "candidate", "lintFindings"],
+          "properties": {
+            "model": {"type": "string", "minLength": 1},
+            "candidate": {"$ref": "#/$defs/generatedCandidate"},
+            "lintFindings": {
+              "type": "array",
+              "items": {"$ref": "#/$defs/diagnosticFinding"}
+            },
+            "disposition": {
+              "enum": ["selected", "superseded", "retained_unselected", "diagnostic_only"]
+            }
+          }
+        },
+        "reviewer": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["model", "decision", "checks"],
+          "properties": {
+            "model": {"type": "string", "minLength": 1},
+            "decision": {"enum": ["approve", "repair", "reject", "failed"]},
+            "candidate": {"$ref": "#/$defs/generatedCandidate"},
+            "checks": {
+              "type": "array",
+              "items": {"$ref": "#/$defs/reviewCheck"}
+            },
+            "disposition": {
+              "enum": ["selected", "retained_unselected", "diagnostic_only"]
+            },
+            "finalDecision": {"enum": ["approve", "reject"]},
+            "finalChecks": {
+              "type": "array",
+              "items": {"$ref": "#/$defs/reviewCheck"}
+            }
+          }
+        },
+        "finalLintFindings": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/diagnosticFinding"}
+        }
+      }
+    },
+    "nullableVersionRef": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["versionId", "queryDigest"],
+          "properties": {
+            "versionId": {"type": "string", "format": "uuid"},
+            "queryDigest": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+          }
+        }
+      ]
+    },
+    "modelInvocation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "invocationId",
+        "role",
+        "stage",
+        "attempt",
+        "providerId",
+        "modelId",
+        "configuration",
+        "startedAt",
+        "endedAt",
+        "durationMs",
+        "requestDigest",
+        "responseDigest",
+        "failureDigest",
+        "outcome"
+      ],
+      "properties": {
+        "invocationId": {"type": "string", "format": "uuid"},
+        "role": {"enum": ["writer", "reviewer"]},
+        "stage": {"enum": ["initial_generation", "followup_generation", "review"]},
+        "attempt": {"type": "integer", "minimum": 1, "maximum": 32},
+        "providerId": {"type": "string", "minLength": 1},
+        "modelId": {"type": "string", "minLength": 1},
+        "configuration": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["temperature", "maxTokens", "responseFormat"],
+          "properties": {
+            "temperature": {"type": "number"},
+            "maxTokens": {"type": ["integer", "null"], "minimum": 1},
+            "responseFormat": {"type": ["string", "null"]}
+          }
+        },
+        "startedAt": {"type": "string", "format": "date-time"},
+        "endedAt": {"type": "string", "format": "date-time"},
+        "durationMs": {"type": "integer", "minimum": 0},
+        "requestDigest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "responseDigest": {
+          "type": ["string", "null"],
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "failureDigest": {
+          "type": ["string", "null"],
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "outcome": {
+          "enum": [
+            "succeeded",
+            "transport_failed",
+            "contract_failed",
+            "validation_failed",
+            "timed_out",
+            "cancelled"
+          ]
+        }
+      }
+    },
+    "profileEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "profileId",
+        "profileName",
+        "profileDigest",
+        "writer",
+        "reviewer"
+      ],
+      "properties": {
+        "profileId": {"type": "string", "minLength": 1},
+        "profileName": {"type": "string", "minLength": 1},
+        "profileDigest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "writer": {
+          "allOf": [
+            {"$ref": "#/$defs/fullRoleEvidence"},
+            {"properties": {"role": {"const": "writer"}}}
+          ]
+        },
+        "reviewer": {
+          "allOf": [
+            {"$ref": "#/$defs/fullRoleEvidence"},
+            {"properties": {"role": {"const": "reviewer"}}}
+          ]
+        }
+      }
+    },
+    "fullRoleEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "role",
+        "providerId",
+        "modelClass",
+        "modelId",
+        "config",
+        "systemPrompt"
+      ],
+      "properties": {
+        "role": {"enum": ["writer", "reviewer"]},
+        "providerId": {"type": "string", "minLength": 1},
+        "modelClass": {"type": "string", "minLength": 1},
+        "modelId": {"type": "string", "minLength": 1},
+        "config": {
+          "type": "object",
+          "additionalProperties": {
+            "type": ["string", "number", "integer", "boolean", "null"]
+          }
+        },
+        "systemPrompt": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["promptId", "version", "promptRef", "promptDigest", "text"],
+          "properties": {
+            "promptId": {"type": "string", "minLength": 1},
+            "version": {"type": "string", "minLength": 1},
+            "promptRef": {"type": "string", "minLength": 1},
+            "promptDigest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+            "text": {"type": "string", "minLength": 1}
+          }
+        }
+      }
+    },
+    "diagnosticCandidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "executable"
+      ],
+      "properties": {
+        "executable": {
+          "const": false
+        },
+        "candidate": {
+          "$ref": "#/$defs/generatedCandidate"
+        },
+        "rawOutput": {
+          "type": "string",
+          "minLength": 1
+        },
+        "attempts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "attempt",
+              "status",
+              "finding_codes",
+              "findings"
+            ],
+            "properties": {
+              "attempt": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "status": {
+                "enum": [
+                  "passed",
+                  "failed"
+                ]
+              },
+              "finding_codes": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "findings": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/diagnosticFinding"
+                }
+              }
+            }
+          }
+        }
+      },
+      "anyOf": [
+        {
+          "required": [
+            "candidate"
+          ]
+        },
+        {
+          "required": [
+            "rawOutput"
+          ]
+        }
+      ]
+    },
+    "validation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "checks"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "passed",
+            "warned",
+            "rejected"
+          ]
+        },
+        "checks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "status"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "status": {
+                "enum": [
+                  "passed",
+                  "warned",
+                  "failed"
+                ]
+              },
+              "message": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "profileId",
+        "traceId",
+        "contextSourceIds"
+      ],
+      "properties": {
+        "profileId": {
+          "type": "string",
+          "pattern": "^catalyst-query-",
+          "minLength": 1
+        },
+        "traceId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "contextSourceIds": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    }
+  }
+}
