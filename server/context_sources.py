@@ -26,7 +26,9 @@ import httpx
 from . import kb
 from .chart_serializer import render_chart
 from .config import llm_config, querystore_config
+from .patient_ledger_cache import PatientLedgerCache, default_patient_ledger_cache
 from .querystore_client import QueryStoreClient
+from .ranked_candidates import resolve_ranked_hits_with_retry
 
 _CHART_MARKER = "Patient records (most recent first):"
 _CHART_LINE = re.compile(r"^\[(\d+)]\s*(.*)$")
@@ -154,6 +156,15 @@ class EvidenceRecord:
     date: Optional[str]
     text: str
     mandatory: bool = False
+    # clinical_date/date_kind mirror querystore's clinicalDate/dateKind: the temporally safe event
+    # date (absent when the record has none) and what `date` itself means. None for sources that
+    # never populate them (inline charts, static knowledge) rather than a guessed value.
+    clinical_date: Optional[str] = None
+    date_kind: Optional[str] = None
+    # 1-based position among this turn's querystore ranked-search candidates that resolved against
+    # the trusted full ledger (server.ranked_candidates); None for every other record, including a
+    # querystore record that simply wasn't ranked for this particular question.
+    querystore_rank: Optional[int] = None
     metadata: Mapping[str, Any] = field(default_factory=dict, compare=False)
     raw: Mapping[str, Any] = field(default_factory=dict, compare=False)
 
@@ -168,6 +179,8 @@ class EvidenceRecord:
             "resourceType": self.resource_type,
             "resourceUuid": self.resource_uuid,
             "date": self.date,
+            "clinicalDate": self.clinical_date,
+            "dateKind": self.date_kind,
             "text": self.text,
             "title": title,
         }
@@ -459,8 +472,11 @@ class QueryStoreSource:
     priority = 50
     supports_patient = True
 
-    def __init__(self, client: QueryStoreClient) -> None:
+    def __init__(
+        self, client: QueryStoreClient, *, cache: Optional[PatientLedgerCache] = None
+    ) -> None:
         self.client = client
+        self.cache = cache if cache is not None else default_patient_ledger_cache()
 
     async def fetch(self, request: ContextRequest) -> EvidenceLedger:
         if not request.patient:
@@ -469,14 +485,23 @@ class QueryStoreSource:
                 "Querystore requires a patient identifier.",
                 source=self.name,
             )
+        # Keys the bounded cache on deployment identity + authorization scope + patient, so a
+        # reconfigured querystore or service account never reuses another one's cached ledger.
+        cache_key = (self.client.base_url, self.client.username, request.patient)
         try:
-            raw_records = await self.client.get_patient_chart(request.patient)
+            raw_records = await self.cache.get_records(
+                cache_key,
+                lambda if_none_match: self.client.fetch_patient_ledger(
+                    request.patient, if_none_match=if_none_match
+                ),
+            )
         except Exception as exc:
             raise ContextSourceError(
                 "context_source_failed",
                 f"Querystore could not retrieve patient {request.patient!r}: {exc}",
                 source=self.name,
             ) from exc
+        rank_by_identity = await self._ranked_candidate_identities(request, raw_records)
         chart, mappings = render_chart(raw_records)
         records: list[EvidenceRecord] = []
         raw_by_key = {
@@ -485,9 +510,8 @@ class QueryStoreSource:
             if record and record.get("resourceType") and record.get("resourceUuid")
         }
         for mapping in mappings:
-            raw = raw_by_key.get(
-                (mapping.get("resourceType"), mapping.get("resourceUuid")), {}
-            )
+            identity = (mapping.get("resourceType"), mapping.get("resourceUuid"))
+            raw = raw_by_key.get(identity, {})
             stable_id = f"querystore:{mapping.get('resourceType')}:{mapping.get('resourceUuid')}"
             metadata = raw.get("metadata") or {}
             resource_type = str(mapping.get("resourceType") or "Record")
@@ -501,14 +525,47 @@ class QueryStoreSource:
                     resource_uuid=mapping.get("resourceUuid"),
                     date=mapping.get("date"),
                     text=text,
+                    querystore_rank=rank_by_identity.get(identity),
                     mandatory=_is_mandatory_safety_record(
                         resource_type, text, metadata
                     ),
+                    clinical_date=raw.get("clinicalDate"),
+                    date_kind=raw.get("dateKind"),
                     metadata=metadata,
                     raw=raw,
                 )
             )
         return EvidenceLedger(tuple(records), original_text=chart)
+
+    async def _ranked_candidate_identities(
+        self, request: ContextRequest, raw_records: list[dict[str, Any]]
+    ) -> dict[tuple[Optional[str], Optional[str]], int]:
+        """1-based rank per resolved identity for this turn's question, or ``{}`` when there is no
+        question or ranked search cannot be trusted this turn — ranked candidates are supplementary
+        evidence, never fatal to the turn (roadmap: "without allowing ranked search to replace the
+        full evidence ledger")."""
+        question = request.question.strip()
+        if not question:
+            return {}
+        try:
+            hits = await self.client.search_patient_records(request.patient, question)
+        except Exception:
+            return {}
+        cache_key = (self.client.base_url, self.client.username, request.patient)
+
+        async def refetch_ledger() -> list[dict[str, Any]]:
+            return await self.cache.get_records(
+                cache_key,
+                lambda if_none_match: self.client.fetch_patient_ledger(
+                    request.patient, if_none_match=if_none_match
+                ),
+            )
+
+        resolved = await resolve_ranked_hits_with_retry(hits, raw_records, refetch_ledger)
+        return {
+            (record.get("resourceType"), record.get("resourceUuid")): position
+            for position, record in enumerate(resolved, start=1)
+        }
 
 
 class SourceRegistry:
@@ -1105,8 +1162,10 @@ def _ranked_records(
         return exact, overlap
 
     def recency(record: EvidenceRecord) -> int:
+        # Prefer clinical_date: an administrative record_date (e.g. a Condition's dateCreated
+        # audit fallback) must not outrank a genuinely recent clinical event.
         try:
-            return int((record.date or "").replace("-", ""))
+            return int((record.clinical_date or record.date or "").replace("-", ""))
         except ValueError:
             return 0
 
@@ -1126,6 +1185,15 @@ def _ranked_records(
     relevant = [record for record in rest if features(record)[1] > 0]
     relevant_ids = {record.stable_id for record in relevant}
     rest = [record for record in rest if record.stable_id not in relevant_ids]
+    # Querystore's ranked search (BM25/semantic) is a second, independent relevance signal that
+    # can surface a paraphrase the local keyword ranker above misses. Additive, never a
+    # replacement: unioned in above recent_core, below the local exact/relevant matches.
+    querystore_ranked = sorted(
+        (record for record in rest if record.querystore_rank is not None),
+        key=lambda record: record.querystore_rank,
+    )
+    querystore_ranked_ids = {record.stable_id for record in querystore_ranked}
+    rest = [record for record in rest if record.stable_id not in querystore_ranked_ids]
     recent_candidates = [
         record
         for record in rest
@@ -1149,6 +1217,7 @@ def _ranked_records(
         mandatory
         + [(record, "exact_match") for record in exact]
         + [(record, "meaningful_overlap") for record in relevant]
+        + [(record, "querystore_ranked") for record in querystore_ranked]
         + [
             (
                 record,

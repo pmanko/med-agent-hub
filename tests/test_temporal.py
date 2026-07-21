@@ -206,6 +206,64 @@ def test_resolve_anchor_latest_record_ignores_program_enrollment():
     assert temporal.resolve_anchor("latest_record", _PROGRAM_CONFOUND) == "2026-01-07"
 
 
+# ---- the same exclusion, generalized: chart_serializer marks ANY record whose dateKind is not
+# clinical_event with a trailing "[administrative]"/"[unknown]" marker (not just Program, which is
+# excluded by class name above). A record's marker must count for exclusion the same way. ----
+
+_ADMIN_MARKER_CONFOUND = """Patient records (most recent first):
+[1] (2026-05-20) Patient: Jane Doe. Female. Born 1982-01-01 [administrative]
+[2] (2026-01-07) Assessment — Scheduled visit: No
+[3] (2026-01-07) Finding — Weight (kg): 41.0 kg
+[5] (2026-01-07) Encounter: Adult Visit at Clinic A
+[4] (2025-12-31) Finding — Weight (kg): 42.0 kg
+"""
+
+
+def test_parse_events_strips_the_marker_and_flags_the_event_non_clinical():
+    events = temporal.parse_events(_ADMIN_MARKER_CONFOUND)
+
+    marked = next(e for e in events if e["index"] == 1)
+    assert marked["is_clinical_event"] is False
+    assert marked["body"] == "Patient: Jane Doe. Female. Born 1982-01-01"
+    assert marked["cls"] == "Patient"
+
+    unmarked = next(e for e in events if e["index"] == 3)
+    assert unmarked["is_clinical_event"] is True
+
+
+def test_parse_events_defaults_is_clinical_event_true_when_no_marker_is_present():
+    events = temporal.parse_events(_PROGRAM_CONFOUND)
+
+    program_event = next(e for e in events if e["index"] == 1)
+    assert program_event["is_clinical_event"] is True
+    assert program_event["cls"] == "Program"
+
+
+def test_event_timeline_excludes_marker_flagged_administrative_dates_from_last_visit():
+    facts = temporal.build_temporal_facts(_ADMIN_MARKER_CONFOUND, anchor="2026-06-20")
+
+    assert facts["last_clinical_encounter"]["date"] == "2026-01-07"
+    assert facts["admin_dates"][0]["date"] == "2026-05-20"
+
+
+def test_resolve_anchor_latest_record_ignores_marker_flagged_administrative_dates():
+    # the default "now" must not become a Patient record's administrative creation date
+    assert (
+        temporal.resolve_anchor("latest_record", _ADMIN_MARKER_CONFOUND) == "2026-01-07"
+    )
+
+
+def test_an_unknown_date_kind_marker_is_also_excluded_from_clinical_dates():
+    chart = """Patient records (most recent first):
+[1] (2026-05-20) Legacy record [unknown]
+[2] (2026-01-07) Finding — Weight (kg): 41.0 kg
+"""
+    facts = temporal.build_temporal_facts(chart, anchor="2026-06-20")
+
+    assert facts["latest_clinical_activity"]["date"] == "2026-01-07"
+    assert facts["admin_dates"][0]["date"] == "2026-05-20"
+
+
 def test_last_clinical_encounter_prefers_explicit_encounter_records_only():
     facts = temporal.build_temporal_facts(
         _EXPLICIT_ENCOUNTER_WITH_SAME_DAY_RECORDS, "2026-06-20"

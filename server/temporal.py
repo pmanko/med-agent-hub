@@ -145,6 +145,18 @@ _CONCEPT_STOP_TOKENS = {
 _ADMIN_CLASSES = {"Program"}
 _ENCOUNTER_CLASSES = {"encounter", "visit"}
 
+# chart_serializer marks a record whose querystore dateKind is not clinical_event with a trailing
+# "[administrative]" / "[unknown]" — a per-record signal, unlike the class-name-based _ADMIN_CLASSES
+# above (Patient, Condition-without-encounter, etc. all share this without a dedicated class name).
+_DATE_KIND_MARKER_RE = re.compile(r"\s*\[(administrative|unknown)]\s*$")
+
+
+def _is_admin_event(event: Dict[str, Any]) -> bool:
+    """True when an event's date must be excluded from clinical-date reasoning: either its class
+    is a known non-visit administrative type (Program), or chart_serializer's per-record dateKind
+    marker says so."""
+    return event.get("cls") in _ADMIN_CLASSES or not event.get("is_clinical_event", True)
+
 
 def is_safe_no_upcoming_claim(value: str) -> bool:
     """Return whether the entire value is the bounded deterministic no-upcoming claim."""
@@ -219,11 +231,14 @@ def _record_class(body: str) -> str:
     return head.strip()
 
 
-def parse_events(chart: str) -> List[Dict[str, str]]:
-    """One {date, cls, body} per record line, carrying the run-leader's date forward to dateless
-    follow-ons (run-length compression). cls types the event for the timeline (Finding / Test /
-    Assessment / Drug order / Program / ...)."""
-    out: List[Dict[str, str]] = []
+def parse_events(chart: str) -> List[Dict[str, Any]]:
+    """One {date, cls, body, is_clinical_event} per record line, carrying the run-leader's date
+    forward to dateless follow-ons (run-length compression). cls types the event for the timeline
+    (Finding / Test / Assessment / Drug order / Program / ...). is_clinical_event is False when
+    chart_serializer's trailing "[administrative]"/"[unknown]" marker is present (stripped from
+    body before cls/text are derived); True otherwise, including for sources that never emit the
+    marker at all."""
+    out: List[Dict[str, Any]] = []
     last_date: Optional[str] = None
     for line in (chart or "").splitlines():
         m = _REC_RE.match(line.strip())
@@ -236,12 +251,18 @@ def parse_events(chart: str) -> List[Dict[str, str]]:
             body = dm.group(2)
         if last_date is None:
             continue
+        is_clinical_event = True
+        marker = _DATE_KIND_MARKER_RE.search(body)
+        if marker:
+            is_clinical_event = False
+            body = _DATE_KIND_MARKER_RE.sub("", body)
         out.append(
             {
                 "index": int(m.group(1)),
                 "date": last_date,
                 "cls": _record_class(body),
                 "body": body,
+                "is_clinical_event": is_clinical_event,
             }
         )
     return out
@@ -263,9 +284,7 @@ def resolve_anchor(
         return _dt.date.today().isoformat()
     if _ISO_RE.fullmatch(mode):
         return mode
-    clinical = [
-        e["date"] for e in parse_events(chart) if e["cls"] not in _ADMIN_CLASSES
-    ]
+    clinical = [e["date"] for e in parse_events(chart) if not _is_admin_event(e)]
     if clinical:
         return max(clinical)
     dates = _DATE_RE.findall(chart or "")
@@ -458,12 +477,12 @@ def build_temporal_facts(
     events = parse_events(chart)
     encounter_events = _clinical_encounter_events(events)
     encounter_dates = sorted({e["date"] for e in encounter_events}, reverse=True)
-    clinical_events = [e for e in events if e["cls"] not in _ADMIN_CLASSES]
+    clinical_events = [e for e in events if not _is_admin_event(e)]
     clinical_dates = sorted(
         {e["date"] for e in clinical_events}, reverse=True
     )
     admin_dates = sorted(
-        {e["date"] for e in events if e["cls"] in _ADMIN_CLASSES}, reverse=True
+        {e["date"] for e in events if _is_admin_event(e)}, reverse=True
     )
     date_roles: Dict[str, set] = {}
     _add_date_role(date_roles, reference_date, "reference_date")
@@ -483,9 +502,7 @@ def build_temporal_facts(
         _add_date_role(
             date_roles,
             e.get("date"),
-            "admin_record_date"
-            if e.get("cls") in _ADMIN_CLASSES
-            else "clinical_record_date",
+            "admin_record_date" if _is_admin_event(e) else "clinical_record_date",
         )
 
     by_concept: Dict[str, List[Dict[str, Any]]] = {}
@@ -606,7 +623,7 @@ def build_temporal_facts(
         ],
         "admin_dates": [
             _summarize_events(
-                [e for e in events if e["cls"] in _ADMIN_CLASSES],
+                [e for e in events if _is_admin_event(e)],
                 d,
                 include_summaries=False,
             )

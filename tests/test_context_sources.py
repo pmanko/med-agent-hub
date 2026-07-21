@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from typing import Optional
 
 import httpx
 import pytest
@@ -22,6 +23,8 @@ from server.context_sources import (
     _ranked_records,
     select_context,
 )
+from server.patient_ledger_cache import PatientLedgerCache
+from server.querystore_client import PatientLedgerFetch
 
 
 class WordTokenCounter:
@@ -577,22 +580,50 @@ def test_knowledge_source_protects_current_topic_from_prior_answer_pollution(
     ]
 
 
+class _FakeQueryStoreClient:
+    """A minimal stand-in for QueryStoreClient: identity attributes + one canned ledger fetch."""
+
+    base_url = "http://openmrs"
+    username = "service"
+
+    def __init__(self, records, *, snapshot_id="snap-1", etag='"etag-1"', ranked_hits=None):
+        self._records = records
+        self._snapshot_id = snapshot_id
+        self._etag = etag
+        self._ranked_hits = ranked_hits if ranked_hits is not None else []
+        self.calls: list[Optional[str]] = []
+        self.search_calls: list[str] = []
+
+    async def fetch_patient_ledger(self, _patient, *, if_none_match=None):
+        self.calls.append(if_none_match)
+        return PatientLedgerFetch(
+            not_modified=False,
+            records=self._records,
+            snapshot_id=self._snapshot_id,
+            etag=self._etag,
+        )
+
+    async def search_patient_records(self, _patient, query, *, limit=20):
+        self.search_calls.append(query)
+        return self._ranked_hits
+
+
 def test_querystore_mapping_keeps_the_matching_raw_record_when_invalid_rows_are_skipped():
-    class FakeClient:
-        async def get_patient_chart(self, _patient):
-            return [
-                {"resourceType": "Observation", "text": "invalid without uuid"},
-                {
-                    "resourceType": "Encounter",
-                    "resourceUuid": "enc-1",
-                    "date": "2026-01-01",
-                    "text": "Visit",
-                    "metadata": {"mandatory_context": True},
-                },
-            ]
+    client = _FakeQueryStoreClient(
+        [
+            {"resourceType": "Observation", "text": "invalid without uuid"},
+            {
+                "resourceType": "Encounter",
+                "resourceUuid": "enc-1",
+                "date": "2026-01-01",
+                "text": "Visit",
+                "metadata": {"mandatory_context": True},
+            },
+        ]
+    )
 
     ledger = asyncio.run(
-        QueryStoreSource(FakeClient()).fetch(
+        QueryStoreSource(client, cache=PatientLedgerCache()).fetch(
             ContextRequest(patient="patient-1", messages=_messages())
         )
     )
@@ -604,19 +635,19 @@ def test_querystore_mapping_keeps_the_matching_raw_record_when_invalid_rows_are_
 
 
 def test_querystore_allergy_record_is_mandatory_without_source_metadata():
-    class FakeClient:
-        async def get_patient_chart(self, _patient):
-            return [
-                {
-                    "resourceType": "AllergyIntolerance",
-                    "resourceUuid": "allergy-1",
-                    "date": "2025-10-22",
-                    "text": "Allergy: Penicillins (drug allergen)",
-                }
-            ]
+    client = _FakeQueryStoreClient(
+        [
+            {
+                "resourceType": "AllergyIntolerance",
+                "resourceUuid": "allergy-1",
+                "date": "2025-10-22",
+                "text": "Allergy: Penicillins (drug allergen)",
+            }
+        ]
+    )
 
     ledger = asyncio.run(
-        QueryStoreSource(FakeClient()).fetch(
+        QueryStoreSource(client, cache=PatientLedgerCache()).fetch(
             ContextRequest(patient="patient-1", messages=_messages())
         )
     )
@@ -626,18 +657,218 @@ def test_querystore_allergy_record_is_mandatory_without_source_metadata():
 
 def test_querystore_failure_is_explicit_not_an_empty_chart():
     class BrokenClient:
-        async def get_patient_chart(self, _patient):
+        base_url = "http://openmrs"
+        username = "service"
+
+        async def fetch_patient_ledger(self, _patient, *, if_none_match=None):
             raise RuntimeError("backend unavailable")
 
     with pytest.raises(ContextSourceError) as caught:
         asyncio.run(
-            QueryStoreSource(BrokenClient()).fetch(
+            QueryStoreSource(BrokenClient(), cache=PatientLedgerCache()).fetch(
                 ContextRequest(patient="patient-1", messages=_messages())
             )
         )
 
     assert caught.value.code == "context_source_failed"
     assert caught.value.source == "querystore"
+
+
+def test_querystore_source_reuses_the_shared_cache_across_fetches():
+    client = _FakeQueryStoreClient(
+        [{"resourceType": "Encounter", "resourceUuid": "enc-1", "date": "2026-01-01", "text": "Visit"}]
+    )
+    cache = PatientLedgerCache()
+    source = QueryStoreSource(client, cache=cache)
+    request = ContextRequest(patient="patient-1", messages=_messages())
+
+    asyncio.run(source.fetch(request))
+    asyncio.run(source.fetch(request))
+
+    # Both turns revalidate (never skip the network call outright), but the second reuses the
+    # first's etag rather than acquiring cold.
+    assert client.calls == [None, '"etag-1"']
+
+
+def test_querystore_source_keys_the_cache_by_deployment_identity_and_patient():
+    cache = PatientLedgerCache()
+    client_a = _FakeQueryStoreClient(
+        [{"resourceType": "Encounter", "resourceUuid": "enc-a", "date": "2026-01-01", "text": "A"}]
+    )
+    client_b = _FakeQueryStoreClient(
+        [{"resourceType": "Encounter", "resourceUuid": "enc-b", "date": "2026-01-01", "text": "B"}]
+    )
+    client_b.base_url = "http://other-openmrs"
+
+    asyncio.run(
+        QueryStoreSource(client_a, cache=cache).fetch(
+            ContextRequest(patient="patient-1", messages=_messages())
+        )
+    )
+    ledger_b = asyncio.run(
+        QueryStoreSource(client_b, cache=cache).fetch(
+            ContextRequest(patient="patient-1", messages=_messages())
+        )
+    )
+
+    # A different deployment for the same patient uuid must not reuse client_a's cached ledger.
+    assert ledger_b.records[0].resource_uuid == "enc-b"
+    assert len(cache) == 2
+
+
+def test_querystore_source_skips_ranked_search_when_there_is_no_question():
+    client = _FakeQueryStoreClient(
+        [{"resourceType": "Encounter", "resourceUuid": "enc-1", "date": "2026-01-01", "text": "Visit"}]
+    )
+
+    asyncio.run(
+        QueryStoreSource(client, cache=PatientLedgerCache()).fetch(
+            ContextRequest(patient="patient-1", messages=_messages(), question="")
+        )
+    )
+
+    assert client.search_calls == []
+
+
+def test_querystore_source_marks_resolved_ranked_hits_with_their_rank():
+    last_modified = "2026-01-16T12:00:00Z"
+    client = _FakeQueryStoreClient(
+        [
+            {
+                "resourceType": "Encounter",
+                "resourceUuid": "enc-1",
+                "date": "2026-01-01",
+                "text": "Visit",
+                "lastModified": last_modified,
+            },
+            {
+                "resourceType": "Observation",
+                "resourceUuid": "obs-1",
+                "date": "2026-01-02",
+                "text": "Weight: 58 kg",
+                "lastModified": last_modified,
+            },
+        ],
+        ranked_hits=[
+            {"resourceType": "Observation", "resourceUuid": "obs-1", "lastModified": last_modified},
+            {"resourceType": "Encounter", "resourceUuid": "enc-1", "lastModified": last_modified},
+        ],
+    )
+
+    ledger = asyncio.run(
+        QueryStoreSource(client, cache=PatientLedgerCache()).fetch(
+            ContextRequest(patient="patient-1", messages=_messages(), question="what was the weight?")
+        )
+    )
+
+    assert client.search_calls == ["what was the weight?"]
+    by_uuid = {record.resource_uuid: record for record in ledger.records}
+    assert by_uuid["obs-1"].querystore_rank == 1
+    assert by_uuid["enc-1"].querystore_rank == 2
+
+
+def test_querystore_source_leaves_unranked_records_with_no_rank():
+    client = _FakeQueryStoreClient(
+        [{"resourceType": "Encounter", "resourceUuid": "enc-1", "date": "2026-01-01", "text": "Visit"}],
+        ranked_hits=[],
+    )
+
+    ledger = asyncio.run(
+        QueryStoreSource(client, cache=PatientLedgerCache()).fetch(
+            ContextRequest(patient="patient-1", messages=_messages(), question="anything?")
+        )
+    )
+
+    assert ledger.records[0].querystore_rank is None
+
+
+def test_querystore_source_degrades_gracefully_when_ranked_search_itself_fails():
+    class FlakyRankedSearchClient(_FakeQueryStoreClient):
+        async def search_patient_records(self, _patient, query, *, limit=20):
+            raise RuntimeError("ranked search backend unavailable")
+
+    client = FlakyRankedSearchClient(
+        [{"resourceType": "Encounter", "resourceUuid": "enc-1", "date": "2026-01-01", "text": "Visit"}]
+    )
+
+    ledger = asyncio.run(
+        QueryStoreSource(client, cache=PatientLedgerCache()).fetch(
+            ContextRequest(patient="patient-1", messages=_messages(), question="anything?")
+        )
+    )
+
+    # The turn still gets its full ledger; it just proceeds without the ranked bonus.
+    assert ledger.records[0].resource_uuid == "enc-1"
+    assert ledger.records[0].querystore_rank is None
+
+
+def test_querystore_source_drops_a_ranked_hit_that_never_resolves_against_the_ledger():
+    client = _FakeQueryStoreClient(
+        [{"resourceType": "Encounter", "resourceUuid": "enc-1", "date": "2026-01-01", "text": "Visit"}],
+        ranked_hits=[{"resourceType": "Observation", "resourceUuid": "ghost", "lastModified": "x"}],
+    )
+
+    ledger = asyncio.run(
+        QueryStoreSource(client, cache=PatientLedgerCache()).fetch(
+            ContextRequest(patient="patient-1", messages=_messages(), question="anything?")
+        )
+    )
+
+    # The ledger still only has the one real record; the unresolvable ghost hit is dropped
+    # silently rather than fabricating evidence or failing the turn.
+    assert [record.resource_uuid for record in ledger.records] == ["enc-1"]
+    assert ledger.records[0].querystore_rank is None
+
+
+def test_querystore_records_carry_clinical_date_and_date_kind():
+    client = _FakeQueryStoreClient(
+        [
+            {
+                "resourceType": "Condition",
+                "resourceUuid": "cond-1",
+                "date": "2026-01-20",
+                "clinicalDate": "2026-01-15",
+                "dateKind": "administrative",
+                "text": "Condition: Hypertension",
+            }
+        ]
+    )
+
+    ledger = asyncio.run(
+        QueryStoreSource(client, cache=PatientLedgerCache()).fetch(
+            ContextRequest(patient="patient-1", messages=_messages())
+        )
+    )
+
+    record = ledger.records[0]
+    assert record.clinical_date == "2026-01-15"
+    assert record.date_kind == "administrative"
+    mapping = record.mapping(1)
+    assert mapping["clinicalDate"] == "2026-01-15"
+    assert mapping["dateKind"] == "administrative"
+
+
+def test_querystore_records_default_clinical_date_and_date_kind_to_none():
+    client = _FakeQueryStoreClient(
+        [
+            {
+                "resourceType": "Encounter",
+                "resourceUuid": "enc-1",
+                "date": "2026-01-01",
+                "text": "Visit",
+            }
+        ]
+    )
+
+    ledger = asyncio.run(
+        QueryStoreSource(client, cache=PatientLedgerCache()).fetch(
+            ContextRequest(patient="patient-1", messages=_messages())
+        )
+    )
+
+    record = ledger.records[0]
+    assert record.clinical_date is None
+    assert record.date_kind is None
 
 
 def _ledger(*records: EvidenceRecord) -> EvidenceLedger:
@@ -1117,6 +1348,92 @@ def test_active_conditions_have_priority_within_the_bounded_clinical_core():
         ("active-condition", "active_condition"),
         ("newest", "recent_core"),
         ("second-newest", "zero_relevance"),
+    ]
+
+
+def test_recency_ranking_prefers_clinical_date_over_the_administrative_sort_date():
+    records = (
+        EvidenceRecord(
+            "admin-newer-sort-date",
+            "inline",
+            1,
+            "Condition",
+            "cond-1",
+            "2026-03-01",  # record_date: an audit fallback, looks newest by sort date alone
+            "Condition: Hypertension",
+            clinical_date="2025-01-01",  # onset: the real clinical event, actually oldest
+            date_kind="administrative",
+        ),
+        EvidenceRecord(
+            "clinical-actual-newest",
+            "inline",
+            1,
+            "Encounter",
+            "enc-1",
+            "2026-01-15",
+            "Visit",
+            clinical_date="2026-01-15",
+            date_kind="clinical_event",
+        ),
+    )
+
+    ranked = _ranked_records(records, "", recent_core_limit=2)
+
+    assert [record.stable_id for record, _ in ranked] == [
+        "clinical-actual-newest",
+        "admin-newer-sort-date",
+    ]
+
+
+def test_querystore_ranked_candidates_are_unioned_in_above_recent_core_below_relevant():
+    records = (
+        EvidenceRecord(
+            "keyword-match",
+            "querystore",
+            50,
+            "Encounter",
+            "kw-1",
+            "2020-01-01",
+            "Weight overlap: this text shares the query token 'weight'",
+        ),
+        EvidenceRecord(
+            "ranked-2nd",
+            "querystore",
+            50,
+            "Observation",
+            "obs-2",
+            "2026-01-14",
+            "Some paraphrase the local keyword ranker would miss",
+            querystore_rank=2,
+        ),
+        EvidenceRecord(
+            "ranked-1st",
+            "querystore",
+            50,
+            "Observation",
+            "obs-1",
+            "2026-01-15",
+            "Another paraphrase, ranked closer to the question",
+            querystore_rank=1,
+        ),
+        EvidenceRecord(
+            "unranked-recent",
+            "querystore",
+            50,
+            "Encounter",
+            "enc-3",
+            "2026-01-20",
+            "Newest record, but neither keyword-matched nor querystore-ranked",
+        ),
+    )
+
+    ranked = _ranked_records(records, "weight", recent_core_limit=2)
+
+    assert [(record.stable_id, reason) for record, reason in ranked] == [
+        ("keyword-match", "meaningful_overlap"),
+        ("ranked-1st", "querystore_ranked"),
+        ("ranked-2nd", "querystore_ranked"),
+        ("unranked-recent", "recent_core"),
     ]
 
 
