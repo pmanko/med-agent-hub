@@ -1831,24 +1831,9 @@ async def _execute_stages(
                         )
                         record_stage_timing()
                         continue
-                    answer_status = str(
-                        (state.answer_validation or {}).get("status") or ""
-                    )
-                    if product and answer_status not in {"checked", "edited"}:
-                        state.indepth_error = (
-                            "In-Depth was withheld because the final Answer needs review."
-                            if answer_status == "needs_review"
-                            else "In-Depth was withheld because the final Answer check is unavailable."
-                        )
-                        state.steps.append(
-                            {
-                                "role": "indepth_withheld",
-                                "reason": "answer-validation-status",
-                                "answer_validation_status": answer_status,
-                            }
-                        )
-                        record_stage_timing()
-                        continue
+                    # In-depth is withheld only on preemption (disconnect / new turn), never
+                    # because the answer needs review: it runs on the answer as-is, and the
+                    # answer's own validation status is surfaced separately on the envelope.
                     prior_answer = (
                         stages._latest_assistant_text(state.messages)
                         if request.profile.output_mode == "indepth"

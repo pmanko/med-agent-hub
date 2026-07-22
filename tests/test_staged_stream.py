@@ -1754,46 +1754,51 @@ def test_temporal_block_rendering_keeps_each_table_date_with_its_row_values():
     assert refs == [1, 2]
 
 
-def test_final_unsupported_grounding_marks_answer_needs_review(monkeypatch):
+def test_needs_review_answer_still_runs_indepth(monkeypatch):
+    # In-depth is withheld only on preemption, never because the ANSWER needs review.
+    # Here the review rewrite is unusable so the answer is honestly flagged needs_review,
+    # while the underlying evidence still grounds — in-depth must run on it rather than
+    # being gated behind the answer-validation status. (In-depth's own temporal/evidence
+    # gate remains mandatory and is exercised separately.)
     _stub_common(monkeypatch)
 
     async def fake_answer(*_args, **_kwargs):
-        return "Unsupported claim [1].", [1], []
+        return "Useful answer [1].", [1], []
 
-    async def unsupported(_client, _model, _answer, references, _mappings):
-        output = []
-        for reference in references:
-            item = dict(reference)
-            item["grounded"] = False
-            item["groundingStatus"] = "unsupported"
-            output.append(item)
-        return output
+    async def fake_validate(_client, **kwargs):
+        return (
+            kwargs["answer_text"],
+            kwargs["citations"],
+            kwargs["blocks"],
+            {"level": "green", "note": ""},
+        )
+
+    async def unusable_rewrite(*_args, **_kwargs):
+        return {
+            "answer_ok": False,
+            "errors": [{"chart": "The rewrite is unusable."}],
+            "corrected_answer": ".",
+        }
 
     monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
-    monkeypatch.setattr(team, "_ground_references", unsupported)
+    monkeypatch.setattr(team, "_ensure_substantive_answer", fake_validate)
+    monkeypatch.setattr(team, "_validate_answer_rewrite", unusable_rewrite)
 
-    async def unexpected_indepth(*_args, **_kwargs):
-        raise AssertionError("In-Depth must not use an Answer that needs review")
-
-    monkeypatch.setattr(team, "_synthesize_indepth", unexpected_indepth)
-
-    collected = _collect(_product_profile(review_model="R"))
+    collected = _collect(_product_profile(review_model="V"))
     assert [name for name, _payload in collected] == [
         "answer_done",
         "answer_validation",
         "indepth_pending",
-        "indepth_error",
+        "indepth_done",
         "done",
     ]
     events = dict(collected)
-    assert events["indepth_error"]["inDepth"]["status"] == "needs_review"
     final = events["done"]
-    assert final["references"][0]["groundingStatus"] == "unsupported"
+    # Answer is honestly flagged needs_review, but in-depth is no longer gated on it.
+    assert final["answer"] == "Useful answer [1]."
     assert final["answerValidation"]["status"] == "needs_review"
-    assert final["inDepth"]["status"] == "needs_review"
-    assert "final Answer needs review" in final["inDepth"]["error"]
-    assert final["answerValidation"]["issues"][-1]["id"] == "citation_grounding"
-    assert final["confidence"]["answer"]["level"] == "red"
+    assert events["indepth_done"]["inDepth"]["status"] == "complete"
+    assert final["inDepth"]["status"] == "complete"
 
 
 def test_final_source_set_grounding_failure_is_reported_once(monkeypatch):
