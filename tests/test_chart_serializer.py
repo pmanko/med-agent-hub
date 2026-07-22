@@ -14,6 +14,17 @@ def _obs(resource_uuid="obs-1", **overrides):
     return record
 
 
+def test_the_grounding_source_text_excludes_the_date_kind_marker():
+    # The [dateKind] marker is a temporal-safety hint the answer model reads on the chart
+    # line. It must NOT leak into mappings[k].text, which is the source fed to the entailment
+    # grounding layer: a marker in the source makes grounding reject otherwise-supported
+    # claims (regression: everything failed review -> in-depth withheld).
+    text, mappings = render_chart([_obs(dateKind="administrative", text="Drug order: Didanosine")])
+    assert text == "[1] (2026-01-15) Drug order: Didanosine [administrative]\n"
+    assert mappings[0]["text"] == "(2026-01-15) Drug order: Didanosine"
+    assert "[administrative]" not in mappings[0]["text"]
+
+
 def test_a_clinical_event_record_renders_its_clinical_date_with_no_marker():
     text, mappings = render_chart(
         [_obs(clinicalDate="2026-01-15", dateKind="clinical_event")]

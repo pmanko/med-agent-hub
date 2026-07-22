@@ -54,14 +54,18 @@ def render_chart(records: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any
         date_prefix = f"({date}) " if date else ""
         # Nothing to qualify when there is no date to show at all.
         marker = "" if is_clinical or not date else f" [{rec.get('dateKind') or 'unknown'}]"
-        rendered = f"{date_prefix}{body}{group}{marker}"
-        lines.append(f"[{index}] {rendered}")
+        # The [dateKind] marker is a temporal-safety hint the answer model reads on the chart
+        # line; it must not enter the grounding source (mappings[k].text). The entailment
+        # grounding layer compares a claim against this text, and a trailing marker makes it
+        # reject otherwise-supported claims.
+        grounding_text = f"{date_prefix}{body}{group}"
+        lines.append(f"[{index}] {grounding_text}{marker}")
         mappings.append({
             "index": index,
             "resourceType": rec.get("resourceType"),
             "resourceUuid": rec.get("resourceUuid"),
             "date": date,
-            "text": rendered,
+            "text": grounding_text,
         })
     return ("\n".join(lines) + "\n" if lines else ""), mappings
 
