@@ -165,6 +165,11 @@ class EvidenceRecord:
     # the trusted full ledger (server.ranked_candidates); None for every other record, including a
     # querystore record that simply wasn't ranked for this particular question.
     querystore_rank: Optional[int] = None
+    # The shared context-slice selection tier (querystore ADR Decision 17:
+    # mandatory | recency_anchor | typed | similarity | panel) for querystore-sourced records
+    # this turn; None for other sources and when the slice was unavailable. A slice-selected
+    # record is never zero-relevance; slice-mandatory records are mandatory.
+    slice_tier: Optional[str] = None
     metadata: Mapping[str, Any] = field(default_factory=dict, compare=False)
     raw: Mapping[str, Any] = field(default_factory=dict, compare=False)
 
@@ -467,6 +472,43 @@ class StaticKnowledgeSource:
         return EvidenceLedger(tuple(records))
 
 
+# The hub's question interpretation for the shared context slice — cue regexes mirroring
+# bundled's QueryScopeRouter (typed scopes + temporal gate). Interpretation stays caller-side
+# in v1 of the shared-slice contract; querystore performs mechanical selection only.
+_SLICE_TYPE_CUES: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
+    (re.compile(r"\b(?:medications?|medicines?|meds|drugs?|prescriptions?|prescribed)\b", re.I),
+     ("drug_order", "medication_dispense")),
+    (re.compile(r"\b(?:allerg(?:y|ies|ic|en|ens)|adverse|reactions?|intoleran(?:t|ce|ces))\b", re.I),
+     ("allergy",)),
+    (re.compile(r"\b(?:programs?|enrolled|enrollments?)\b", re.I), ("program",)),
+    (re.compile(r"\b(?:conditions?|diagnos(?:is|es|ed)|problem list)\b", re.I),
+     ("condition", "diagnosis")),
+    (re.compile(r"\b(?:visits?|appointments?|encounters?|admissions?)\b", re.I),
+     ("visit", "encounter")),
+    (re.compile(r"\b(?:orders?|ordered)\b", re.I),
+     ("drug_order", "test_order", "referral_order")),
+)
+
+_SLICE_TEMPORAL_CUES = re.compile(
+    r"\b(?:most recent|latest|newest|last|current|currently|now|today|when was|when did"
+    r"|lately|recently|since"
+    r"|(?:over |in |during )?(?:the )?past (?:few )?(?:\d+ )?(?:days?|weeks?|months?|years?)"
+    r"|this (?:week|month|year))\b",
+    re.I,
+)
+
+
+def _slice_interpretation(question: str) -> tuple[set[str], bool]:
+    """(typed-complete resource types, temporal) for the shared context-slice request."""
+    text = (question or "").strip()
+    types: set[str] = set()
+    if text:
+        for pattern, cue_types in _SLICE_TYPE_CUES:
+            if pattern.search(text):
+                types.update(cue_types)
+    return types, bool(text and _SLICE_TEMPORAL_CUES.search(text))
+
+
 class QueryStoreSource:
     name = "querystore"
     priority = 50
@@ -502,6 +544,7 @@ class QueryStoreSource:
                 source=self.name,
             ) from exc
         rank_by_identity = await self._ranked_candidate_identities(request, raw_records)
+        slice_tiers = await self._slice_tiers(request)
         chart, mappings = render_chart(raw_records)
         records: list[EvidenceRecord] = []
         raw_by_key = {
@@ -526,9 +569,12 @@ class QueryStoreSource:
                     date=mapping.get("date"),
                     text=text,
                     querystore_rank=rank_by_identity.get(identity),
-                    mandatory=_is_mandatory_safety_record(
-                        resource_type, text, metadata
-                    ),
+                    slice_tier=slice_tiers.get(identity),
+                    # Slice-mandatory is authoritative for querystore records (the shared
+                    # contract, querystore ADR Decision 17); the local heuristic stays as the
+                    # union term so a slice outage never weakens safety inclusion.
+                    mandatory=(slice_tiers.get(identity) == "mandatory")
+                    or _is_mandatory_safety_record(resource_type, text, metadata),
                     clinical_date=raw.get("clinicalDate"),
                     date_kind=raw.get("dateKind"),
                     metadata=metadata,
@@ -536,6 +582,31 @@ class QueryStoreSource:
                 )
             )
         return EvidenceLedger(tuple(records), original_text=chart)
+
+    async def _slice_tiers(
+        self, request: ContextRequest
+    ) -> dict[tuple[Optional[str], Optional[str]], str]:
+        """Selection tier per record identity from querystore's shared context slice, or
+        ``{}`` when the client predates the contract or the slice call fails — the local
+        policy remains the degradation path, never a blocked turn."""
+        fetch = getattr(self.client, "fetch_context_slice", None)
+        if fetch is None:
+            return {}
+        types, temporal = _slice_interpretation(request.question)
+        try:
+            rows = await fetch(
+                request.patient, request.question.strip(), types=types, temporal=temporal
+            )
+        except Exception:
+            return {}
+        tiers: dict[tuple[Optional[str], Optional[str]], str] = {}
+        for row in rows or []:
+            if not isinstance(row, Mapping):
+                continue
+            tier = row.get("tier")
+            if isinstance(tier, str) and tier:
+                tiers[(row.get("resourceType"), row.get("resourceUuid"))] = tier
+        return tiers
 
     async def _ranked_candidate_identities(
         self, request: ContextRequest, raw_records: list[dict[str, Any]]
@@ -1194,11 +1265,25 @@ def _ranked_records(
     )
     querystore_ranked_ids = {record.stable_id for record in querystore_ranked}
     rest = [record for record in rest if record.stable_id not in querystore_ranked_ids]
-    recent_candidates = [
-        record
-        for record in rest
-        if record.date and record.resource_type.lower() != "knowledgereference"
-    ]
+    # Shared-slice guarantee: a record querystore's context slice selected (typed-complete,
+    # recency anchor, similarity, panel completion) is never zero-relevance, even when the
+    # local lexical ranker sees no overlap — the slice IS the selection contract.
+    slice_selected = [record for record in rest if record.slice_tier]
+    slice_selected_ids = {record.stable_id for record in slice_selected}
+    rest = [record for record in rest if record.stable_id not in slice_selected_ids]
+    # When the shared slice served this turn, recency inclusion is its recency_anchor tier's
+    # job (temporal-gated per the roadmap) — the local always-on recent-core heuristic yields,
+    # so a non-temporal question no longer pulls recent-but-unrelated records into the prompt.
+    slice_active = any(record.slice_tier for record in records)
+    recent_candidates = (
+        []
+        if slice_active
+        else [
+            record
+            for record in rest
+            if record.date and record.resource_type.lower() != "knowledgereference"
+        ]
+    )
     recent_candidates.sort(
         key=lambda record: (
             -int(_is_active_condition(record)),
@@ -1213,11 +1298,13 @@ def _ranked_records(
     zero_relevance = list(rest)
     exact.sort(key=rank_key)
     relevant.sort(key=rank_key)
+    slice_selected.sort(key=rank_key)
     return (
         mandatory
         + [(record, "exact_match") for record in exact]
         + [(record, "meaningful_overlap") for record in relevant]
         + [(record, "querystore_ranked") for record in querystore_ranked]
+        + [(record, f"slice_{record.slice_tier}") for record in slice_selected]
         + [
             (
                 record,

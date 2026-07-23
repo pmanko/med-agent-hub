@@ -163,6 +163,44 @@ class QueryStoreClient:
             not_modified=False, records=records, snapshot_id=snapshot_id, etag=etag
         )
 
+    async def fetch_context_slice(
+        self,
+        patient_uuid: str,
+        question: str,
+        *,
+        types: set[str] | frozenset[str] | list[str] = frozenset(),
+        temporal: bool = False,
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        """The tier-tagged context slice (querystore ADR Decision 17) for one question.
+
+        The caller's question interpretation rides as ``types`` (typed-complete resource
+        types) and ``temporal`` (recency anchor applies). Each returned record carries a
+        ``tier`` — ``mandatory`` records are never droppable downstream. Like ranked search
+        this window is question-dependent and uncached: no ``snapshotId``/``ETag``.
+        """
+        params: dict[str, Any] = {
+            "patient": patient_uuid,
+            "mode": "context",
+            "temporal": "true" if temporal else "false",
+            "limit": limit,
+        }
+        if question:
+            params["q"] = question
+        if types:
+            params["types"] = ",".join(sorted(types))
+        async with httpx.AsyncClient(timeout=self._timeout, auth=self._auth) as client:
+            resp = await client.get(self._url, params=params)
+            resp.raise_for_status()
+            body = resp.json()
+        rows = body.get("results")
+        if not isinstance(rows, list):
+            raise ValueError("Querystore did not return a valid context slice page")
+        for row in rows:
+            if not isinstance(row, dict) or not isinstance(row.get("tier"), str):
+                raise ValueError("Querystore returned a context-slice record without a tier")
+        return rows
+
     async def search_patient_records(
         self, patient_uuid: str, query: str, *, limit: int = 20
     ) -> list[dict[str, Any]]:

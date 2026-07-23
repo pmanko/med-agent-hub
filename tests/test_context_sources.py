@@ -21,6 +21,7 @@ from server.context_sources import (
     StaticKnowledgeSource,
     fit_message_history,
     _ranked_records,
+    _slice_interpretation,
     select_context,
 )
 from server.patient_ledger_cache import PatientLedgerCache
@@ -593,6 +594,9 @@ class _FakeQueryStoreClient:
         self._ranked_hits = ranked_hits if ranked_hits is not None else []
         self.calls: list[Optional[str]] = []
         self.search_calls: list[str] = []
+        self.slice_records: list = []
+        self.slice_error: Optional[BaseException] = None
+        self.slice_calls: list = []
 
     async def fetch_patient_ledger(self, _patient, *, if_none_match=None):
         self.calls.append(if_none_match)
@@ -606,6 +610,12 @@ class _FakeQueryStoreClient:
     async def search_patient_records(self, _patient, query, *, limit=20):
         self.search_calls.append(query)
         return self._ranked_hits
+
+    async def fetch_context_slice(self, _patient, question, *, types, temporal, limit=500):
+        self.slice_calls.append((question, set(types), temporal))
+        if self.slice_error is not None:
+            raise self.slice_error
+        return list(self.slice_records)
 
 
 def test_querystore_mapping_keeps_the_matching_raw_record_when_invalid_rows_are_skipped():
@@ -1574,3 +1584,98 @@ def test_drug_injection_preserves_inline_record_provenance():
     assert rebuilt.records[0].stable_id == "inline:1"
     assert rebuilt.records[0].source == "inline"
     assert rebuilt.records[0].resource_type == "ChartRecord"
+
+
+def test_querystore_slice_tiers_annotate_records_and_mandatory_tier_wins():
+    # Shared context-selection contract (querystore ADR Decision 17, roadmap amendment
+    # 2026-07-22): the querystore source consumes the tier-tagged slice; slice-mandatory
+    # records are mandatory regardless of the local heuristic, and every slice-selected
+    # record carries its tier for budget-aware trimming.
+    client = _FakeQueryStoreClient(
+        [
+            {"resourceType": "condition", "resourceUuid": "cond-1",
+             "date": "2026-05-01", "text": "Condition: Hypertension"},
+            {"resourceType": "drug_order", "resourceUuid": "med-1",
+             "date": "2026-06-20", "text": "Drug order: Lisinopril"},
+            {"resourceType": "obs", "resourceUuid": "noise-1",
+             "date": "2023-01-01", "text": "Shoe size: 42"},
+        ]
+    )
+    client.slice_records = [
+        {"resourceType": "condition", "resourceUuid": "cond-1", "tier": "mandatory"},
+        {"resourceType": "drug_order", "resourceUuid": "med-1", "tier": "typed"},
+    ]
+
+    ledger = asyncio.run(
+        QueryStoreSource(client, cache=PatientLedgerCache()).fetch(
+            ContextRequest(
+                patient="patient-1",
+                messages=_messages(),
+                question="What medications is the patient on?",
+            )
+        )
+    )
+
+    by_uuid = {record.resource_uuid: record for record in ledger.records}
+    assert by_uuid["cond-1"].slice_tier == "mandatory"
+    assert by_uuid["cond-1"].mandatory is True
+    assert by_uuid["med-1"].slice_tier == "typed"
+    assert by_uuid["noise-1"].slice_tier is None
+    # The slice request carried the hub's question interpretation.
+    assert client.slice_calls, "the source must request the shared slice"
+    question, types, temporal = client.slice_calls[0]
+    assert "drug_order" in types
+    assert temporal is False
+
+
+def test_querystore_slice_failure_degrades_to_the_local_policy():
+    client = _FakeQueryStoreClient(
+        [
+            {"resourceType": "AllergyIntolerance", "resourceUuid": "allergy-1",
+             "date": "2025-10-22", "text": "Allergy: Penicillins"},
+        ]
+    )
+    client.slice_error = RuntimeError("slice endpoint unavailable")
+
+    ledger = asyncio.run(
+        QueryStoreSource(client, cache=PatientLedgerCache()).fetch(
+            ContextRequest(patient="patient-1", messages=_messages(), question="allergies?")
+        )
+    )
+
+    # Local safety heuristic still holds; no tiers present.
+    assert ledger.records[0].mandatory is True
+    assert ledger.records[0].slice_tier is None
+
+
+def test_slice_selected_records_are_never_zero_relevance():
+    # A slice-typed record with no lexical overlap with the question must remain eligible
+    # (the slice guarantees typed completeness); a non-slice irrelevant record stays
+    # zero_relevance (ceiling-not-target: never pulled in to fill budget).
+    in_slice = EvidenceRecord(
+        stable_id="qs:drug_order:med-1", source="querystore", source_priority=50,
+        resource_type="drug_order", resource_uuid="med-1", date="2026-06-20",
+        text="Zzzq unpronounceable brand 5 mg", slice_tier="typed",
+    )
+    not_in_slice = EvidenceRecord(
+        stable_id="qs:obs:noise-1", source="querystore", source_priority=50,
+        resource_type="obs", resource_uuid="noise-1", date="2023-01-01",
+        text="Shoe size: 42",
+    )
+    ranked = _ranked_records((in_slice, not_in_slice), "What medications is the patient on?")
+    reasons = {record.stable_id: reason for record, reason in ranked}
+    assert reasons["qs:drug_order:med-1"] == "slice_typed"
+    assert reasons["qs:obs:noise-1"] == "zero_relevance"
+
+
+def test_slice_interpretation_mirrors_the_bundled_cues():
+    types, temporal = _slice_interpretation("What medications is the patient currently on?")
+    assert "drug_order" in types and "medication_dispense" in types
+    assert temporal is True  # "currently"
+
+    types, temporal = _slice_interpretation("Does the patient have any eye problems?")
+    assert types == set()
+    assert temporal is False
+
+    types, temporal = _slice_interpretation("any drug allergies?")
+    assert "allergy" in types and "drug_order" in types
