@@ -42,6 +42,24 @@ profiles:
     visibility: product
     knobs: {query_generate: {temperature: 0, dry: 0}, query_review: {temperature: 0, dry: 0}}
 
+  catalyst-query-gemma-e4b-coder:
+    label: Catalyst query — Gemma 4 E4B writer + Qwen 2.5 Coder 1.5B reviewer
+    topology: single
+    stages: *catalyst_query
+    models: {query_generate: gemma-e4b, query_review: qwen2.5-coder-1.5b-instruct-q4_k_m}
+    prompts: {query_generate: catalyst-query-generate, query_review: catalyst-query-review}
+    policies:
+      output: query
+      temporal_gate: "off"
+      allowed_operation: select
+      generation_attempts: 1
+      collaborative_review: true
+      model_classes: {query_generate: gemma-4, query_review: qwen-2.5-coder}
+    capabilities: {staged: false, validation: true}
+    outputContracts: [catalyst.query.v1]
+    visibility: product
+    knobs: {query_generate: {temperature: 0, dry: 0}, query_review: {temperature: 0, dry: 0}}
+
   catalyst-query-gemma-4-12b:
     label: Catalyst query — Gemma 4 12B writer + Qwen 2.5 14B reviewer
     topology: single
@@ -55,6 +73,36 @@ profiles:
       generation_attempts: 1
       collaborative_review: true
       model_classes: {query_generate: gemma-4, query_review: qwen-2.5}
+    capabilities: {staged: false, validation: true}
+    outputContracts: [catalyst.query.v1]
+    visibility: product
+    knobs: {query_generate: {temperature: 0, dry: 0}, query_review: {temperature: 0, dry: 0}}
+
+  catalyst-query-gemma-4-12b-coder:
+    label: Catalyst query — Gemma 4 12B writer + Qwen 2.5 Coder 1.5B reviewer
+    topology: single
+    stages: *catalyst_query
+    models: {query_generate: gemma-4-12b, query_review: qwen2.5-coder-1.5b-instruct-q4_k_m}
+    prompts: {query_generate: catalyst-query-generate, query_review: catalyst-query-review}
+    policies:
+      output: query
+      temporal_gate: "off"
+      allowed_operation: select
+      generation_attempts: 1
+      collaborative_review: true
+      model_classes: {query_generate: gemma-4, query_review: qwen-2.5-coder}
+    capabilities: {staged: false, validation: true}
+    outputContracts: [catalyst.query.v1]
+    visibility: product
+    knobs: {query_generate: {temperature: 0, dry: 0}, query_review: {temperature: 0, dry: 0}}
+
+  catalyst-query-gemma-4-12b-checked:
+    label: Catalyst governed query — Gemma 4 12B
+    topology: single
+    stages: *catalyst_query
+    models: {query_generate: gemma-4-12b, query_review: gemma-4-12b}
+    prompts: {query_generate: catalyst-query-generate, query_review: catalyst-query-review}
+    policies: {output: query, temporal_gate: "off", allowed_operation: select, generation_attempts: 3, model_classes: {query_generate: gemma-4, query_review: gemma-4}}
     capabilities: {staged: false, validation: true}
     outputContracts: [catalyst.query.v1]
     visibility: product
