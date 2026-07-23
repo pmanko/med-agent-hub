@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from copy import deepcopy
 import hashlib
 import json
 import uuid
@@ -15,13 +14,14 @@ from server.main import app
 from tests.test_catalyst_query import (
     _assert_shipped_contract,
     _content,
-    _flat_repair,
     _queued_backend,
     _ready_candidate,
     _request,
     _review,
     VIEW_NAME,
 )
+
+INITIAL_QUESTION = "Show viral load results"
 
 
 CURRENT_INSTRUCTION = "Keep the current query, but return only results after 2026-01-01"
@@ -215,7 +215,7 @@ def test_v2_contract_accepts_bounded_execution_value_warnings():
     validator_for(REQUEST_V2_ID).validate(request)
 
 
-def test_v2_request_sends_exact_instruction_base_and_bounded_history_to_both_roles():
+def test_v2_request_sends_exact_instruction_base_and_bounded_history_to_the_writer():
     response, calls = _post_v2([_ready_candidate(), _review()])
 
     payload = _content(response)
@@ -230,37 +230,54 @@ def test_v2_request_sends_exact_instruction_base_and_bounded_history_to_both_rol
         "editorDigest": _revision()["editorSnapshot"]["editorDigest"],
     }
     assert [call["model"] for call in calls] == ["gemma-4-12b", "qwen2.5-14b"]
-    for call in calls:
-        system_prompt = call["messages"][0]["content"]
-        assert "revision.editorSnapshot" in system_prompt
-        assert "exact" in system_prompt
-        assert "current instruction" in system_prompt.lower()
-        model_input = _model_payload(call)
-        assert model_input["instruction"] == CURRENT_INSTRUCTION
-        assert model_input["revision"]["currentInstruction"] == CURRENT_INSTRUCTION
-        assert (
-            model_input["revision"]["editorSnapshot"] == _revision()["editorSnapshot"]
-        )
-        assert [
-            item["ordinal"] for item in model_input["revision"]["instructionHistory"]
-        ] == [
-            1,
-            4,
-            5,
-            6,
-            7,
-            8,
-        ]
-        serialized = json.dumps(model_input)
-        assert "Prior refinement 2" not in serialized
-        assert "Prior refinement 3" not in serialized
-        assert {
-            "resultRows",
-            "databaseCredentials",
-            "databaseConnectionDetails",
-            "reasoningTrace",
-            "rawModelOutputs",
-        }.isdisjoint(_all_keys(model_input))
+    writer_call = calls[0]
+    system_prompt = writer_call["messages"][0]["content"]
+    assert "revision.editorSnapshot" in system_prompt
+    assert "exact" in system_prompt
+    assert "current instruction" in system_prompt.lower()
+    model_input = _model_payload(writer_call)
+    assert model_input["instruction"] == CURRENT_INSTRUCTION
+    assert model_input["revision"]["currentInstruction"] == CURRENT_INSTRUCTION
+    assert model_input["revision"]["editorSnapshot"] == _revision()["editorSnapshot"]
+    assert [
+        item["ordinal"] for item in model_input["revision"]["instructionHistory"]
+    ] == [
+        1,
+        4,
+        5,
+        6,
+        7,
+        8,
+    ]
+    serialized = json.dumps(model_input)
+    assert "Prior refinement 2" not in serialized
+    assert "Prior refinement 3" not in serialized
+    assert {
+        "resultRows",
+        "databaseCredentials",
+        "databaseConnectionDetails",
+        "reasoningTrace",
+        "rawModelOutputs",
+    }.isdisjoint(_all_keys(model_input))
+
+
+def test_followup_review_is_the_stateless_first_check_of_the_updated_sql():
+    # The reviewer sees the same context as the first check — the session's
+    # original question, catalog, and policy — with only the candidate updated.
+    # No revision artifact, history, or writer feedback reaches it.
+    candidate = _ready_candidate()
+
+    response, calls = _post_v2([candidate, _review()])
+
+    payload = _content(response)
+    assert payload["status"] == "ready"
+    review_call = calls[1]
+    review_input = _model_payload(review_call)
+    assert review_input["question"] == INITIAL_QUESTION
+    assert "revision" not in review_input
+    assert "instruction" not in review_input
+    assert "deterministicFindings" not in review_input
+    assert review_input["candidate"]["sql"] == candidate["sql"]
 
 
 @pytest.mark.parametrize(
@@ -347,144 +364,38 @@ def test_v2_rejects_forged_revision_lineage_digests_before_model_call(mutate, me
     assert calls == []
 
 
-def test_v2_rejects_profile_without_configured_different_family_roles():
+def test_v2_same_model_profile_executes_a_self_reviewed_followup():
+    # Follow-up review is the same stateless check as an initial review, so
+    # even a same-model profile is revision capable.
     request = _v2_request()
     request["model"] = "catalyst-query-checked"
 
-    response, calls = _post_v2([], request)
-
-    assert response.status_code == 422
-    assert response.json()["detail"]["code"] == "profile_not_revision_capable"
-    assert calls == []
-
-
-def test_lint_clean_writer_is_always_reviewed_and_complete_correction_is_relinted():
-    corrected = _ready_candidate()
-    corrected["sql"] = (
-        f"SELECT release_date FROM {corrected['target']['approvedViews'][0]} "
-        "WHERE release_date >= :since"
-    )
-    corrected["expectedColumns"] = [
-        {"name": "release_date", "logicalType": "date", "nullable": False}
-    ]
-
-    response, calls = _post_v2(
-        [_ready_candidate(), _review("failed", decision="repair", candidate=corrected)]
-    )
+    response, calls = _post_v2([_ready_candidate(), _review()], request)
 
     payload = _content(response)
-    assert len(calls) == 2
     assert payload["status"] == "ready"
-    assert payload["sql"] == corrected["sql"]
-    assert payload["modelCollaboration"]["writer"]["disposition"] == "superseded"
-    assert payload["modelCollaboration"]["reviewer"]["disposition"] == "selected"
-    assert payload["modelCollaboration"]["finalLintFindings"] == []
+    assert [call["model"] for call in calls] == ["qwen2.5-14b", "qwen2.5-14b"]
 
 
-def test_v2_reviewer_contract_failure_gets_one_reviewer_only_correction():
-    response, calls = _post_v2([_ready_candidate(), {"checks": []}, _review()])
+def test_lint_clean_followup_writer_ships_after_stateless_review():
+    candidate = _ready_candidate()
+
+    response, calls = _post_v2([candidate, _review()])
 
     payload = _content(response)
     envelope = _completion(response)
+    assert len(calls) == 2
     assert payload["status"] == "ready"
-    assert [call["model"] for call in calls] == [
-        "gemma-4-12b",
-        "qwen2.5-14b",
-        "qwen2.5-14b",
-    ]
-    assert [call["dry_multiplier"] for call in calls] == [0.0, 0.0, 0.0]
-    correction_feedback = calls[2]["messages"][-1]["content"]
-    assert "strict output contract" in correction_feedback
-    assert "decision" in correction_feedback
+    assert payload["sql"] == candidate["sql"]
     assert [item["role"] for item in envelope["modelInvocations"]] == [
         "writer",
         "reviewer",
-        "reviewer",
     ]
-    assert [item["outcome"] for item in envelope["modelInvocations"]] == [
-        "succeeded",
-        "contract_failed",
-        "succeeded",
-    ]
-    assert [item["attempt"] for item in envelope["modelInvocations"]] == [1, 1, 2]
-    assert [
-        item["configuration"]["dryMultiplier"] for item in envelope["modelInvocations"]
-    ] == [0.0, 0.0, 0.0]
+    checks = payload["validation"]["checks"]
+    assert any(check["name"].startswith("query_lint_attempt") for check in checks)
 
 
-def test_v2_reviewer_contract_correction_stops_after_one_retry():
-    response, calls = _post_v2(
-        [
-            _ready_candidate(),
-            {"checks": []},
-            {"checks": []},
-        ]
-    )
-
-    payload = _content(response)
-    envelope = _completion(response)
-    assert payload["status"] == "rejected"
-    assert [call["model"] for call in calls] == [
-        "gemma-4-12b",
-        "qwen2.5-14b",
-        "qwen2.5-14b",
-    ]
-    assert [item["outcome"] for item in envelope["modelInvocations"]] == [
-        "succeeded",
-        "contract_failed",
-        "contract_failed",
-    ]
-
-
-def test_v2_reviewer_missing_checks_is_hydrated_without_retry():
-    response, calls = _post_v2([_ready_candidate(), {"decision": "approve"}])
-
-    payload = _content(response)
-    envelope = _completion(response)
-
-    assert payload["status"] == "ready"
-    assert len(calls) == 2
-    assert payload["modelCollaboration"]["reviewer"]["checks"] == [
-        {
-            "name": "reviewer_output_hydrated",
-            "status": "passed",
-            "message": (
-                "The reviewer returned a decision without labelled checks; "
-                "the Hub retained that decision and hydrated this evidence marker."
-            ),
-        }
-    ]
-    assert [item["outcome"] for item in envelope["modelInvocations"]] == [
-        "succeeded",
-        "succeeded",
-    ]
-
-
-def test_v2_reviewer_repair_without_candidate_is_downgraded_without_retry():
-    incomplete_repair = {
-        "decision": "repair",
-        "checks": [
-            {
-                "name": "named_analyte_constraint",
-                "status": "warned",
-                "message": "The candidate should be repaired.",
-            }
-        ],
-    }
-    response, calls = _post_v2([_ready_candidate(), incomplete_repair])
-
-    payload = _content(response)
-    envelope = _completion(response)
-
-    assert payload["status"] == "rejected"
-    assert len(calls) == 2
-    assert [item["outcome"] for item in envelope["modelInvocations"]] == [
-        "succeeded",
-        "succeeded",
-    ]
-
-
-def test_failed_reviewer_repair_preserves_repair_candidate_and_findings():
+def test_lint_failing_followup_writer_is_rejected_with_diagnostic_evidence():
     writer = _ready_candidate()
     writer[
         "sql"
@@ -496,81 +407,47 @@ def test_failed_reviewer_repair_preserves_repair_candidate_and_findings():
             "nullable": True,
         }
     ]
-    repaired = deepcopy(writer)
-    repaired["sql"] = repaired["sql"].replace(
-        "invented_writer_column", "invented_reviewer_column"
-    )
-    repaired["expectedColumns"][0]["name"] = "invented_reviewer_column"
 
-    response, calls = _post_v2([writer, _flat_repair(repaired)])
+    response, calls = _post_v2([writer])
 
     payload = _content(response)
     envelope = _completion(response)
-    collaboration = payload["modelCollaboration"]
-    assert len(calls) == 2
+    assert len(calls) == 1
     assert payload["status"] == "rejected"
-    assert payload["diagnosticCandidate"]["candidate"] == repaired
-    assert collaboration["writer"]["candidate"] == writer
-    assert collaboration["writer"]["disposition"] == "retained_unselected"
-    assert collaboration["reviewer"]["decision"] == "repair"
-    assert collaboration["reviewer"]["candidate"] == repaired
-    assert collaboration["reviewer"]["disposition"] == "diagnostic_only"
-    assert [finding["code"] for finding in collaboration["finalLintFindings"]] == [
-        "catalog.unknown_column"
+    assert payload["diagnosticCandidate"]["candidate"] == writer
+    finding_codes = [
+        code
+        for attempt in payload["diagnosticCandidate"]["attempts"]
+        for code in attempt["finding_codes"]
     ]
-    assert (
-        collaboration["finalLintFindings"][0]["evidence"] == "invented_reviewer_column"
-    )
+    assert "catalog.unknown_column" in finding_codes
+    assert [item["role"] for item in envelope["modelInvocations"]] == ["writer"]
     assert envelope["modelInvocations"][-1]["outcome"] == "validation_failed"
+    assert "sql" not in payload
 
 
-def test_failed_reviewer_repair_preserves_location_bearing_lint_findings():
+def test_followup_writer_parse_error_findings_keep_line_and_column_locations():
     writer = _ready_candidate()
     writer["sql"] = f"SELECT viral_load_value\nFROM {VIEW_NAME}\nWHERE ("
-    repaired = deepcopy(writer)
-    repaired["sql"] = f"SELECT viral_load_value\nFROM {VIEW_NAME}\nORDER BY ("
 
-    response, calls = _post_v2([writer, _flat_repair(repaired)])
+    response, calls = _post_v2([writer])
 
     payload = _content(response)
     envelope = _completion(response)
-    collaboration = payload["modelCollaboration"]
     assert response.status_code == 200
-    assert len(calls) == 2
+    assert len(calls) == 1
     assert payload["status"] == "rejected"
-    assert payload["diagnosticCandidate"]["candidate"] == repaired
-    assert collaboration["writer"]["candidate"] == writer
-    assert collaboration["reviewer"]["candidate"] == repaired
-    assert collaboration["writer"]["disposition"] == "retained_unselected"
-    assert collaboration["reviewer"]["disposition"] == "diagnostic_only"
-    assert collaboration["writer"]["lintFindings"][0]["code"] == "sql.parse_error"
-    assert collaboration["finalLintFindings"][0]["code"] == "sql.parse_error"
-    for finding in (
-        collaboration["writer"]["lintFindings"][0],
-        collaboration["finalLintFindings"][0],
-    ):
-        assert finding["line"] >= 1
-        assert finding["column"] >= 1
-    assert envelope["modelInvocations"][-1]["outcome"] == "validation_failed"
-
-
-def test_reviewer_transport_failure_retains_valid_writer_as_unselected_evidence():
-    response, calls = _post_v2([_ready_candidate(), RuntimeError("router unavailable")])
-
-    payload = _content(response)
-    envelope = _completion(response)
-    assert len(calls) == 2
-    assert payload["status"] == "rejected"
-    assert payload["modelCollaboration"]["writer"]["candidate"] == _ready_candidate()
-    assert (
-        payload["modelCollaboration"]["writer"]["disposition"] == "retained_unselected"
-    )
-    assert payload["modelCollaboration"]["reviewer"]["decision"] == "failed"
-    assert "sql" not in payload
-    assert [item["outcome"] for item in envelope["modelInvocations"]] == [
-        "succeeded",
-        "transport_failed",
+    assert payload["diagnosticCandidate"]["candidate"] == writer
+    findings = [
+        finding
+        for attempt in payload["diagnosticCandidate"]["attempts"]
+        for finding in attempt["findings"]
+        if finding["code"] == "sql.parse_error"
     ]
+    assert findings
+    assert findings[0]["line"] >= 1
+    assert findings[0]["column"] >= 1
+    assert envelope["modelInvocations"][-1]["outcome"] == "validation_failed"
 
 
 def test_invalid_writer_output_is_diagnostic_only_and_records_contract_failure():

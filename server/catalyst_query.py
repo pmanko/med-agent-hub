@@ -1513,6 +1513,16 @@ def _parse_and_apply_patch(
     return patched
 
 
+def _initial_question(extension: Mapping[str, Any]) -> Optional[str]:
+    revision = extension.get("revision")
+    if not isinstance(revision, Mapping):
+        return None
+    for item in revision.get("instructionHistory") or []:
+        if isinstance(item, Mapping) and item.get("kind") == "initial":
+            return str(item["instruction"])
+    return None
+
+
 def _request_payload(
     request: Any,
     extension: Mapping[str, Any],
@@ -1520,8 +1530,14 @@ def _request_payload(
     candidate: Optional[Mapping[str, Any]] = None,
     review_attempt: Optional[int] = None,
     deterministic_findings: Optional[list[str]] = None,
+    stateless_review: bool = False,
 ) -> Dict[str, Any]:
     instruction = str(request.messages[0]["content"])
+    if stateless_review:
+        # Review is a stateless check on every turn: the same context the
+        # first review saw (the session's original question), with only the
+        # candidate updated. No revision artifact, history, or writer feedback.
+        instruction = _initial_question(extension) or instruction
     payload: Dict[str, Any] = {
         "question": instruction,
         "target": _canonical_target(extension),
@@ -1530,7 +1546,10 @@ def _request_payload(
         "requiredOutputContract": extension["requiredOutputContract"],
         "correlation": extension["correlation"],
     }
-    if extension.get("contractVersion") == "catalyst.query.request.v2":
+    if (
+        extension.get("contractVersion") == "catalyst.query.request.v2"
+        and not stateless_review
+    ):
         payload["instruction"] = instruction
         payload["revision"] = deepcopy(extension["revision"])
     if candidate is not None:
@@ -1942,7 +1961,14 @@ async def _generate(
                 "findings": findings,
             }
         )
-        if profile.policies.get("collaborative_review") is True and parsed is not None:
+        collaborative_initial = (
+            profile.policies.get("collaborative_review") is True
+            and extension.get("contractVersion") != "catalyst.query.request.v2"
+        )
+        if collaborative_initial and parsed is not None:
+            # Initial collaborative turns hand lint findings to the reviewer as
+            # repair context. Revision turns are writer-only, so they use the
+            # deterministic correction loop below like any solo profile.
             return parsed, attempt, binding_normalized, history
         if not findings and parsed is not None:
             return parsed, attempt, binding_normalized, history
@@ -2044,6 +2070,7 @@ async def _review(
                     candidate=candidate,
                     review_attempt=attempt,
                     deterministic_findings=deterministic_findings,
+                    stateless_review=not deterministic_findings,
                 ),
                 separators=(",", ":"),
             ),
@@ -2082,8 +2109,7 @@ async def _review(
         _finish_invocation(
             invocations[-1], outcome="contract_failed", failure=str(error)
         )
-        is_revision = extension.get("contractVersion") == "catalyst.query.request.v2"
-        if not deterministic_findings and not is_revision:
+        if not deterministic_findings:
             raise
         if deterministic_findings:
             correction_instruction = (

@@ -318,7 +318,9 @@ def test_query_profile_has_dedicated_stages_models_and_discovery_contract():
     by_id = {item["id"]: item for item in response.json()["data"]}
     assert by_id["catalyst-query-checked"]["outputContracts"] == ["catalyst.query.v1"]
     assert by_id["catalyst-query-checked"]["available"] is True
-    assert by_id["catalyst-query-checked"]["revisionCapable"] is False
+    # Revision turns are writer-only, so even a same-model profile can
+    # execute follow-ups.
+    assert by_id["catalyst-query-checked"]["revisionCapable"] is True
     assert by_id["single-e4b-checked"]["default"] is True
 
 

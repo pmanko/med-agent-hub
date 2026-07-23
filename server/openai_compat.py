@@ -687,23 +687,6 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
         if isinstance(req.catalystQuery, BaseModel)
         else req.catalystQuery
     )
-    if (
-        isinstance(catalyst_context, Mapping)
-        and catalyst_context.get("contractVersion") == "catalyst.query.request.v2"
-        and profile.policies.get("collaborative_review") is not True
-    ):
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "code": "profile_not_revision_capable",
-                "profileId": profile.id,
-                "message": (
-                    "follow-up requests require a configured different-family "
-                    "writer/reviewer profile"
-                ),
-            },
-        )
-
     execution = _request_for(req, profile)
     if req.stream and profile.staged:
         execution = replace(execution, is_disconnected=request.is_disconnected)

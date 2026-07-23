@@ -611,9 +611,8 @@ def profile_metadata(
     if isinstance(model_classes, Mapping):
         metadata["role_model_classes"] = _jsonable(model_classes)
     if profile.output_mode == "query":
-        metadata["revisionCapable"] = bool(
-            profile.policies.get("collaborative_review") is True
-            and isinstance(model_classes, Mapping)
-            and model_classes.get("query_generate") != model_classes.get("query_review")
-        )
+        # Follow-up review is the same stateless check as the initial review
+        # (original question vs. updated SQL), so every query profile can
+        # execute a follow-up regardless of its reviewer pairing.
+        metadata["revisionCapable"] = True
     return metadata
