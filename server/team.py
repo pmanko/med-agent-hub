@@ -568,7 +568,12 @@ async def _chat(
     # request while it is loading/evicting a model. Timeout covers a cold big-model load + a long
     # thinking generation. The lock makes loads strictly sequential — no eviction-vs-serve race.
     async with _ROUTER_LOCK:
-        resp = await client.post(url, json=payload, headers=headers, timeout=600.0)
+        resp = await client.post(
+            url,
+            json=payload,
+            headers=headers,
+            timeout=llm_config.request_timeout_seconds,
+        )
     if resp.status_code >= 400:
         # Surface the backend's reason (context overflow, bad schema, model-load failure) — bare
         # status codes are not actionable.

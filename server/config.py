@@ -24,6 +24,9 @@ class LLMConfig:
     med_model: str = os.getenv("MED_MODEL", "medgemma-1.5-4b-it")
     temperature: float = float(os.getenv("LLM_TEMPERATURE", "0.2"))
     max_tokens: int = int(os.getenv("LLM_MAX_TOKENS", "2000"))
+    request_timeout_seconds: float = float(
+        os.getenv("LLM_REQUEST_TIMEOUT_SECONDS", "600")
+    )
 
 
 @dataclass(frozen=True)
