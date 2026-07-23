@@ -21,7 +21,6 @@ from server.context_sources import (
     StaticKnowledgeSource,
     fit_message_history,
     _ranked_records,
-    _slice_interpretation,
     select_context,
 )
 from server.patient_ledger_cache import PatientLedgerCache
@@ -611,8 +610,8 @@ class _FakeQueryStoreClient:
         self.search_calls.append(query)
         return self._ranked_hits
 
-    async def fetch_context_slice(self, _patient, question, *, types, temporal, limit=500):
-        self.slice_calls.append((question, set(types), temporal))
+    async def fetch_context_slice(self, _patient, question, *, interpret=False, limit=500):
+        self.slice_calls.append((question, interpret))
         if self.slice_error is not None:
             raise self.slice_error
         return list(self.slice_records)
@@ -1621,11 +1620,11 @@ def test_querystore_slice_tiers_annotate_records_and_mandatory_tier_wins():
     assert by_uuid["cond-1"].mandatory is True
     assert by_uuid["med-1"].slice_tier == "typed"
     assert by_uuid["noise-1"].slice_tier is None
-    # The slice request carried the hub's question interpretation.
+    # The RAW question goes over with interpret=True — interpretation is querystore's.
     assert client.slice_calls, "the source must request the shared slice"
-    question, types, temporal = client.slice_calls[0]
-    assert "drug_order" in types
-    assert temporal is False
+    question, interpret = client.slice_calls[0]
+    assert question == "What medications is the patient on?"
+    assert interpret is True
 
 
 def test_querystore_slice_failure_degrades_to_the_local_policy():
@@ -1667,15 +1666,3 @@ def test_slice_selected_records_are_never_zero_relevance():
     assert reasons["qs:drug_order:med-1"] == "slice_typed"
     assert reasons["qs:obs:noise-1"] == "zero_relevance"
 
-
-def test_slice_interpretation_mirrors_the_bundled_cues():
-    types, temporal = _slice_interpretation("What medications is the patient currently on?")
-    assert "drug_order" in types and "medication_dispense" in types
-    assert temporal is True  # "currently"
-
-    types, temporal = _slice_interpretation("Does the patient have any eye problems?")
-    assert types == set()
-    assert temporal is False
-
-    types, temporal = _slice_interpretation("any drug allergies?")
-    assert "allergy" in types and "drug_order" in types

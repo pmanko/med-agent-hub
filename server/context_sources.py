@@ -472,43 +472,6 @@ class StaticKnowledgeSource:
         return EvidenceLedger(tuple(records))
 
 
-# The hub's question interpretation for the shared context slice — cue regexes mirroring
-# bundled's QueryScopeRouter (typed scopes + temporal gate). Interpretation stays caller-side
-# in v1 of the shared-slice contract; querystore performs mechanical selection only.
-_SLICE_TYPE_CUES: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
-    (re.compile(r"\b(?:medications?|medicines?|meds|drugs?|prescriptions?|prescribed)\b", re.I),
-     ("drug_order", "medication_dispense")),
-    (re.compile(r"\b(?:allerg(?:y|ies|ic|en|ens)|adverse|reactions?|intoleran(?:t|ce|ces))\b", re.I),
-     ("allergy",)),
-    (re.compile(r"\b(?:programs?|enrolled|enrollments?)\b", re.I), ("program",)),
-    (re.compile(r"\b(?:conditions?|diagnos(?:is|es|ed)|problem list)\b", re.I),
-     ("condition", "diagnosis")),
-    (re.compile(r"\b(?:visits?|appointments?|encounters?|admissions?)\b", re.I),
-     ("visit", "encounter")),
-    (re.compile(r"\b(?:orders?|ordered)\b", re.I),
-     ("drug_order", "test_order", "referral_order")),
-)
-
-_SLICE_TEMPORAL_CUES = re.compile(
-    r"\b(?:most recent|latest|newest|last|current|currently|now|today|when was|when did"
-    r"|lately|recently|since"
-    r"|(?:over |in |during )?(?:the )?past (?:few )?(?:\d+ )?(?:days?|weeks?|months?|years?)"
-    r"|this (?:week|month|year))\b",
-    re.I,
-)
-
-
-def _slice_interpretation(question: str) -> tuple[set[str], bool]:
-    """(typed-complete resource types, temporal) for the shared context-slice request."""
-    text = (question or "").strip()
-    types: set[str] = set()
-    if text:
-        for pattern, cue_types in _SLICE_TYPE_CUES:
-            if pattern.search(text):
-                types.update(cue_types)
-    return types, bool(text and _SLICE_TEMPORAL_CUES.search(text))
-
-
 class QueryStoreSource:
     name = "querystore"
     priority = 50
@@ -592,11 +555,11 @@ class QueryStoreSource:
         fetch = getattr(self.client, "fetch_context_slice", None)
         if fetch is None:
             return {}
-        types, temporal = _slice_interpretation(request.question)
         try:
-            rows = await fetch(
-                request.patient, request.question.strip(), types=types, temporal=temporal
-            )
+            # interpret=True: cue routing, temporal gating, and retrieval preprocessing run
+            # server-side (querystore ADR Decision 18) — the RAW question goes over, so the
+            # hub's and bundled's interpretations cannot drift.
+            rows = await fetch(request.patient, request.question.strip(), interpret=True)
         except Exception:
             return {}
         tiers: dict[tuple[Optional[str], Optional[str]], str] = {}

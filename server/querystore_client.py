@@ -170,6 +170,7 @@ class QueryStoreClient:
         *,
         types: set[str] | frozenset[str] | list[str] = frozenset(),
         temporal: bool = False,
+        interpret: bool = False,
         limit: int = 500,
     ) -> list[dict[str, Any]]:
         """The tier-tagged context slice (querystore ADR Decision 17) for one question.
@@ -185,6 +186,8 @@ class QueryStoreClient:
             "temporal": "true" if temporal else "false",
             "limit": limit,
         }
+        if interpret:
+            params["interpret"] = "true"
         if question:
             params["q"] = question
         if types:
