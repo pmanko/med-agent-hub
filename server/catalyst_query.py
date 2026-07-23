@@ -123,27 +123,6 @@ _REVIEW_SCHEMA: Dict[str, Any] = {
         "candidate": {"$ref": "#/$defs/candidate"},
         "message": {"type": "string", "minLength": 1},
     },
-    "oneOf": [
-        {
-            "properties": {"decision": {"const": "approve"}},
-            "not": {
-                "anyOf": [
-                    {"required": ["candidate"]},
-                    {"required": ["message"]},
-                ]
-            },
-        },
-        {
-            "properties": {"decision": {"const": "repair"}},
-            "required": ["candidate"],
-            "not": {"required": ["message"]},
-        },
-        {
-            "properties": {"decision": {"const": "reject"}},
-            "required": ["message"],
-            "not": {"required": ["candidate"]},
-        },
-    ],
     "$defs": {
         **deepcopy(_CANDIDATE_SCHEMA["$defs"]),
         "candidate": {
@@ -385,6 +364,13 @@ def _parse_review_object(
     extension: Mapping[str, Any],
 ) -> Dict[str, Any]:
     value = _decode_exact_object(content, label=label)
+    # Structured-output backends commonly emit every declared property,
+    # using null for ones the model considers unset. Treat null the same
+    # as absent so decision-conditional hydration below sees them as missing.
+    if value.get("candidate") is None:
+        value.pop("candidate", None)
+    if value.get("message") is None:
+        value.pop("message", None)
     decision = value.get("decision")
     default_status = {
         "approve": "passed",
@@ -419,6 +405,27 @@ def _parse_review_object(
                 hydrated["status"] = default_status
             hydrated_checks.append(hydrated)
         value["checks"] = hydrated_checks
+    if decision == "reject":
+        message = value.get("message")
+        if not isinstance(message, str) or not message.strip():
+            value["message"] = (
+                "The reviewer rejected the candidate without a labelled "
+                "message; the Hub hydrated this evidence marker."
+            )
+    elif (
+        decision == "repair"
+        and not flat_repair
+        and not isinstance(value.get("candidate"), Mapping)
+    ):
+        # A repair decision with no usable candidate cannot be applied; fail
+        # closed by downgrading to a rejection instead of raising, so this
+        # still reaches the reviewer's normal reject handling deterministically.
+        value["decision"] = "reject"
+        value.pop("candidate", None)
+        value["message"] = (
+            "The reviewer returned a repair decision without a usable "
+            "candidate; the Hub downgraded this to a rejection."
+        )
     if flat_repair and "candidate" not in value:
         candidate_fields = (
             "status",

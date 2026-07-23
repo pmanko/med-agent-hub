@@ -1799,6 +1799,49 @@ def test_reviewer_backend_or_contract_failure_fails_closed(review_failure):
     assert len(calls) == 2
 
 
+def test_reviewer_reject_without_message_is_hydrated_without_retry():
+    review = {
+        "decision": "reject",
+        "checks": [
+            {
+                "name": "read_only",
+                "status": "failed",
+                "message": "The candidate is not safely reviewable.",
+            }
+        ],
+    }
+    response, calls = _post_with_backend([_ready_candidate(), review])
+
+    payload = _content(response)
+    _assert_shipped_contract(payload)
+    assert payload["status"] == "rejected"
+    assert "review" in payload["message"].lower()
+    assert "sql" not in payload
+    assert len(calls) == 2
+
+
+def test_reviewer_repair_without_candidate_fails_closed_as_rejection():
+    review = {
+        "decision": "repair",
+        "checks": [
+            {
+                "name": "named_analyte_constraint",
+                "status": "warned",
+                "message": "The candidate should be repaired.",
+            }
+        ],
+    }
+    response, calls = _post_with_backend([_ready_candidate(), review])
+
+    payload = _content(response)
+    _assert_shipped_contract(payload)
+    assert payload["status"] == "rejected"
+    assert payload["validation"]["status"] == "rejected"
+    assert "review" in payload["message"].lower()
+    assert "sql" not in payload
+    assert len(calls) == 2
+
+
 def test_reviewer_rejection_preserves_findings_and_returns_no_query():
     review = {
         "decision": "reject",

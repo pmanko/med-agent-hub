@@ -460,6 +460,30 @@ def test_v2_reviewer_missing_checks_is_hydrated_without_retry():
     ]
 
 
+def test_v2_reviewer_repair_without_candidate_is_downgraded_without_retry():
+    incomplete_repair = {
+        "decision": "repair",
+        "checks": [
+            {
+                "name": "named_analyte_constraint",
+                "status": "warned",
+                "message": "The candidate should be repaired.",
+            }
+        ],
+    }
+    response, calls = _post_v2([_ready_candidate(), incomplete_repair])
+
+    payload = _content(response)
+    envelope = _completion(response)
+
+    assert payload["status"] == "rejected"
+    assert len(calls) == 2
+    assert [item["outcome"] for item in envelope["modelInvocations"]] == [
+        "succeeded",
+        "succeeded",
+    ]
+
+
 def test_failed_reviewer_repair_preserves_repair_candidate_and_findings():
     writer = _ready_candidate()
     writer[
