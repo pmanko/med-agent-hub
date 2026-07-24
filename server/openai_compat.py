@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import re
 import time
@@ -14,7 +13,6 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
-import rfc8785
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -31,10 +29,6 @@ from .levels_loader import (
 )
 
 router = APIRouter()
-
-
-def _canonical_digest(value: Any) -> str:
-    return hashlib.sha256(rfc8785.dumps(value)).hexdigest()
 
 
 class ChatCompletionRequest(BaseModel):
@@ -137,7 +131,10 @@ def _sanitize_backend_metadata(value: Any, *, key: str = "") -> Any:
     if isinstance(value, str):
         if _is_url_metadata_key(normalized_key, key_parts):
             return _public_url(value)
-        parsed = urlsplit(value)
+        try:
+            parsed = urlsplit(value)
+        except ValueError:
+            return value
         if parsed.scheme in {"http", "https"} and parsed.hostname:
             return _public_url(value)
     return value

@@ -62,6 +62,10 @@ def validate_config() -> None:
         raise ValueError(
             "LLM_BASE_URL must identify the OpenAI-compatible model router."
         )
+    if llm_config.request_timeout_seconds <= 0:
+        raise ValueError(
+            "LLM_REQUEST_TIMEOUT_SECONDS must be a positive number of seconds."
+        )
     if querystore_config.partially_configured:
         raise ValueError(
             "QUERYSTORE_BASE_URL, QUERYSTORE_USERNAME, and QUERYSTORE_PASSWORD "
