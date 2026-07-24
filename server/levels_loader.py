@@ -20,7 +20,7 @@ _PATH = Path(__file__).parent / "levels.yaml"
 _PROMPTS = Path(__file__).parent / "prompts"
 _TEMPORAL_GATE_MODES = {"off", "warn", "enforce"}
 _TOPOLOGIES = {"single", "team", "leg"}
-_OUTPUT_MODES = {"bare", "combined", "product", "query", "review", "indepth"}
+_OUTPUT_MODES = {"bare", "combined", "product", "review", "indepth"}
 _ALLOWED_STAGES = {
     "context",
     "gather",
@@ -32,10 +32,6 @@ _ALLOWED_STAGES = {
     "ground_verdicts",
     "indepth",
     "indepth_gate",
-    "query_generate",
-    "query_lint",
-    "query_review",
-    "query_finalize",
 }
 
 
@@ -237,8 +233,6 @@ def compile_profile(profile: Profile) -> Profile:
         ("review", "review"),
         ("ground_verdicts", "grounding"),
         ("indepth", "indepth"),
-        ("query_generate", "query_generate"),
-        ("query_review", "query_review"),
     ):
         if stage in profile.stages and role not in profile.models:
             raise ValueError(
@@ -328,70 +322,6 @@ def compile_profile(profile: Profile) -> Profile:
             raise ValueError(
                 f"product profile {profile.id!r} must ground before gated In-Depth"
             )
-    query_stages = {"query_generate", "query_lint", "query_review", "query_finalize"}
-    if profile.output_mode == "query":
-        expected = (
-            "context",
-            "query_generate",
-            "query_lint",
-            "query_review",
-            "query_finalize",
-        )
-        if profile.stages != expected:
-            raise ValueError(
-                f"query profile {profile.id!r} must use ordered stages {expected}"
-            )
-        if profile.topology != "single":
-            raise ValueError(f"query profile {profile.id!r} must use single topology")
-        if profile.output_contracts != ("catalyst.query.v1",):
-            raise ValueError(
-                f"query profile {profile.id!r} must advertise only catalyst.query.v1"
-            )
-        if profile.staged:
-            raise ValueError(f"query profile {profile.id!r} cannot stream")
-        for role in ("query_generate", "query_review"):
-            for knob in ("temperature", "dry"):
-                value = (profile.knobs.get(role) or {}).get(knob)
-                if (
-                    not isinstance(value, (int, float))
-                    or isinstance(value, bool)
-                    or value != 0
-                ):
-                    raise ValueError(
-                        f"query profile {profile.id!r} role {role!r} "
-                        f"must use {knob} 0"
-                    )
-        generation_attempts = profile.policies.get("generation_attempts", 2)
-        if (
-            not isinstance(generation_attempts, int)
-            or isinstance(generation_attempts, bool)
-            or not 1 <= generation_attempts <= 3
-        ):
-            raise ValueError(
-                f"query profile {profile.id!r} generation_attempts must be 1..3"
-            )
-        if profile.policies.get("collaborative_review") is True:
-            model_classes = profile.policies.get("model_classes")
-            if not isinstance(model_classes, Mapping):
-                raise ValueError(
-                    f"collaborative query profile {profile.id!r} requires model_classes"
-                )
-            writer_class = str(model_classes.get("query_generate") or "")
-            reviewer_class = str(model_classes.get("query_review") or "")
-            if not writer_class or not reviewer_class or writer_class == reviewer_class:
-                raise ValueError(
-                    f"collaborative query profile {profile.id!r} requires different "
-                    "writer and reviewer model classes"
-                )
-    elif query_stages.intersection(profile.stages):
-        raise ValueError(
-            f"non-query profile {profile.id!r} cannot declare query stages"
-        )
-    elif profile.output_contracts:
-        raise ValueError(
-            f"non-query profile {profile.id!r} cannot advertise query output contracts"
-        )
-
     temporal_mode = str(profile.policies.get("temporal_gate", "off")).lower()
     if temporal_mode not in _TEMPORAL_GATE_MODES:
         raise ValueError(
@@ -610,9 +540,4 @@ def profile_metadata(
     model_classes = profile.policies.get("model_classes")
     if isinstance(model_classes, Mapping):
         metadata["role_model_classes"] = _jsonable(model_classes)
-    if profile.output_mode == "query":
-        # Follow-up review is the same stateless check as the initial review
-        # (original question vs. updated SQL), so every query profile can
-        # execute a follow-up regardless of its reviewer pairing.
-        metadata["revisionCapable"] = True
     return metadata
