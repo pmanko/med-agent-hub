@@ -735,56 +735,6 @@ def test_v1_models_advertises_staged_capability_not_just_id_prefix():
     assert "answer-review:qwen2.5-14b" not in by_id
 
 
-def test_v1_models_attaches_required_backend_metadata_without_changing_availability():
-    catalog = {
-        "gemma-e4b": {
-            "id": "gemma-e4b",
-            "object": "model",
-            "owned_by": "llamacpp",
-            "meta": {"n_params": 7_518_000_000, "quantization": "Q4_K_M"},
-        },
-        "not-required-by-profile": {"id": "not-required-by-profile"},
-    }
-    backend = SimpleNamespace(
-        base_url="http://router:8077", provider="llama.cpp", api_key=""
-    )
-    with (
-        patch.object(openai_compat, "llm_config", backend),
-        patch.object(
-            openai_compat,
-            "_served_backend_model_metadata",
-            return_value=catalog,
-        ),
-    ):
-        response = TestClient(app).get("/v1/models")
-
-    by_id = {item["id"]: item for item in response.json()["data"]}
-    profile = by_id["catalyst-query-gemma-e4b"]
-    assert profile["available"] is True
-    assert profile["unavailable_reasons"] == []
-    assert profile["backend"] == {
-        "provider": "llama.cpp",
-        "endpoint": "http://router:8077",
-        "models_endpoint": "http://router:8077/v1/models",
-    }
-    assert profile["backend_model_metadata"] == {"gemma-e4b": catalog["gemma-e4b"]}
-    assert "not-required-by-profile" not in profile["backend_model_metadata"]
-    assert profile["role_knobs"] == {
-        "query_generate": {"temperature": 0, "dry": 0},
-        "query_review": {"temperature": 0, "dry": 0},
-    }
-    assert profile["profile_configuration_digest"].startswith("sha256:")
-    assert set(profile["role_prompt_digests"]) == {
-        "query_generate",
-        "query_review",
-    }
-
-    unavailable = by_id["catalyst-query-checked"]
-    assert unavailable["available"] is False
-    assert unavailable["unavailable_reasons"] == ["model_not_loaded:qwen2.5-14b"]
-    assert unavailable["backend_model_metadata"] == {"qwen2.5-14b": None}
-
-
 def test_chat_completions_profile_returns_openai_shape_with_the_envelope():
     async def fake_drain(execution):
         # The API is only an adapter: it compiles the profile and drains the engine.

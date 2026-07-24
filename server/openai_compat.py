@@ -10,18 +10,16 @@ import time
 import uuid
 from collections.abc import Mapping
 from dataclasses import replace
-from typing import Annotated, Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Optional
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 import rfc8785
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, Field
 
 from .config import llm_config
-from .catalyst_contracts import REQUEST_V2_ID, validator_for
-from .catalyst_query import query_profile_evidence
 from .context_sources import ContextSourceError
 from .engine import ExecutionRequest, drain_profile, execute_profile
 from .levels_loader import (
@@ -39,250 +37,6 @@ def _canonical_digest(value: Any) -> str:
     return hashlib.sha256(rfc8785.dumps(value)).hexdigest()
 
 
-class _StrictQueryModel(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-
-class CatalystQueryMessage(_StrictQueryModel):
-    role: Literal["user"]
-    content: str = Field(..., min_length=1)
-
-
-class CatalystQueryTarget(_StrictQueryModel):
-    dataSource: str = Field(..., min_length=1)
-    catalogVersion: str = Field(..., min_length=1)
-    dialect: str = Field(..., min_length=1)
-
-
-class CatalystQueryCatalogField(_StrictQueryModel):
-    name: str = Field(..., pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
-    type: str = Field(..., min_length=1)
-    description: str = Field(..., min_length=1)
-    unit: Optional[str] = None
-
-    @field_validator("unit", mode="before")
-    @classmethod
-    def reject_null_unit(cls, value: Any) -> Any:
-        if value is None:
-            raise ValueError("unit must be omitted rather than null")
-        return value
-
-
-class CatalystQuerySemanticValue(_StrictQueryModel):
-    canonical: str = Field(..., min_length=1)
-    aliases: List[Annotated[str, Field(min_length=1)]] = Field(..., min_length=1)
-
-
-class CatalystQuerySemanticDimension(_StrictQueryModel):
-    field: str = Field(..., pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
-    semanticType: Literal["analyte"]
-    values: List[CatalystQuerySemanticValue] = Field(..., min_length=1)
-
-
-class CatalystQueryCatalogView(_StrictQueryModel):
-    name: str = Field(..., pattern=r"^[A-Za-z_][A-Za-z0-9_.]*$")
-    version: str = Field(..., min_length=1)
-    grain: str = Field(..., min_length=1)
-    fields: List[CatalystQueryCatalogField] = Field(..., min_length=1)
-    relationships: Optional[List[Annotated[str, Field(min_length=1)]]] = None
-    semanticDimensions: Optional[List[CatalystQuerySemanticDimension]] = None
-
-    @field_validator("relationships", mode="before")
-    @classmethod
-    def reject_null_relationships(cls, value: Any) -> Any:
-        if value is None:
-            raise ValueError("relationships must be omitted rather than null")
-        return value
-
-    @field_validator("semanticDimensions", mode="before")
-    @classmethod
-    def reject_null_semantic_dimensions(cls, value: Any) -> Any:
-        if value is None:
-            raise ValueError("semanticDimensions must be omitted rather than null")
-        return value
-
-
-class CatalystQueryCatalog(_StrictQueryModel):
-    contextSourceId: str = Field(..., min_length=1)
-    views: List[CatalystQueryCatalogView] = Field(..., min_length=1)
-
-
-class CatalystQueryPolicy(_StrictQueryModel):
-    allowedOperation: Literal["select"]
-    requirePreview: Literal[True]
-    maxRows: int = Field(..., ge=1)
-    statementTimeoutMs: int = Field(..., ge=1)
-
-
-class CatalystQueryCorrelation(_StrictQueryModel):
-    requestId: str = Field(..., min_length=1)
-    traceId: str = Field(..., min_length=1)
-
-
-class CatalystQueryContext(_StrictQueryModel):
-    contractVersion: Literal["catalyst.query.request.v1"]
-    target: CatalystQueryTarget
-    catalog: CatalystQueryCatalog
-    policy: CatalystQueryPolicy
-    correlation: CatalystQueryCorrelation
-    requiredOutputContract: Literal["catalyst.query.v1"]
-
-
-class CatalystQueryCompletionRequest(_StrictQueryModel):
-    model: str = Field(..., min_length=1, pattern=r"^catalyst-query-")
-    stream: Literal[False]
-    messages: List[CatalystQueryMessage] = Field(..., min_length=1, max_length=1)
-    catalystQuery: CatalystQueryContext
-
-
-class CatalystQueryCompletionRequestV2(_StrictQueryModel):
-    """Strict follow-up request validated by the published offline contract."""
-
-    model: str = Field(..., min_length=1, pattern=r"^catalyst-query-")
-    stream: Literal[False]
-    messages: List[CatalystQueryMessage] = Field(..., min_length=1, max_length=1)
-    catalystQuery: Dict[str, Any]
-
-    @model_validator(mode="after")
-    def validate_revision_contract(self) -> "CatalystQueryCompletionRequestV2":
-        payload = self.model_dump(exclude_none=True)
-        errors = sorted(
-            validator_for(REQUEST_V2_ID).iter_errors(payload),
-            key=lambda error: [str(item) for item in error.absolute_path],
-        )
-        if errors:
-            error = errors[0]
-            location = ".".join(str(item) for item in error.absolute_path) or "<root>"
-            raise ValueError(
-                f"Catalyst v2 request failed at {location}: {error.message}"
-            )
-
-        revision = self.catalystQuery["revision"]
-        instruction = self.messages[0].content
-        if revision["currentInstruction"] != instruction:
-            raise ValueError(
-                "the sole user message must equal revision.currentInstruction"
-            )
-        expected_instruction_digest = hashlib.sha256(
-            instruction.encode("utf-8")
-        ).hexdigest()
-        if revision["instructionDigest"] != expected_instruction_digest:
-            raise ValueError(
-                "revision.instructionDigest must be SHA-256 of the exact current "
-                "instruction bytes"
-            )
-        history = revision["instructionHistory"]
-        if history[0]["kind"] != "initial" or any(
-            item["kind"] != "followup" for item in history[1:]
-        ):
-            raise ValueError(
-                "revision history must contain the initial instruction followed by "
-                "at most five follow-ups"
-            )
-        ordinals = [item["ordinal"] for item in history]
-        if ordinals != sorted(ordinals) or len(ordinals) != len(set(ordinals)):
-            raise ValueError("revision history ordinals must be unique and ordered")
-        if any(
-            item["instructionDigest"]
-            != hashlib.sha256(item["instruction"].encode("utf-8")).hexdigest()
-            for item in history
-        ):
-            raise ValueError(
-                "every history instructionDigest must bind its exact UTF-8 bytes"
-            )
-        included = revision["selection"]["includedHistoryTurnIds"]
-        if included != [item["turnId"] for item in history]:
-            raise ValueError(
-                "selection.includedHistoryTurnIds must exactly match instructionHistory"
-            )
-        editor = revision["editorSnapshot"]
-        editor_content = {
-            "sql": editor["sql"],
-            "parameters": editor["parameters"],
-            "expectedColumns": editor["expectedColumns"],
-        }
-        editor_digest = _canonical_digest(editor_content)
-        if editor["editorDigest"] != editor_digest:
-            raise ValueError(
-                "revision.editorSnapshot.editorDigest does not bind the exact "
-                "editor content"
-            )
-
-        classification = revision["baseClassification"]
-        observed = revision["observedBase"]
-        effective = revision["effectiveBaseVersion"]
-        if effective is not None and effective["queryDigest"] != editor_digest:
-            raise ValueError(
-                "revision.effectiveBaseVersion must bind the editor snapshot"
-            )
-        if classification == "reused" and (observed is None or effective != observed):
-            raise ValueError(
-                "a reused base requires identical observed and effective versions"
-            )
-        if classification == "promoted_human" and effective is None:
-            raise ValueError("a promoted human base requires an effective version")
-        if classification == "unresolved" and effective is not None:
-            raise ValueError("an unresolved base cannot have an effective version")
-
-        selection = revision["selection"]
-        omissions = selection["omissions"]
-        omitted_history = omissions["omittedHistory"]
-        if omissions["historyInstructionsOmitted"] != len(omitted_history):
-            raise ValueError(
-                "historyInstructionsOmitted must equal omittedHistory length"
-            )
-        if omissions["omittedHistoryDigest"] != _canonical_digest(omitted_history):
-            raise ValueError(
-                "omittedHistoryDigest must bind the ordered omitted references"
-            )
-        if any(item["turnId"] in set(included) for item in omitted_history):
-            raise ValueError("included and omitted history turns must be disjoint")
-
-        validation_context = revision["validationContext"]
-        validation_ref = selection["validationRef"]
-        expected_validation_ref = (
-            None
-            if validation_context is None
-            else {
-                key: validation_context[key]
-                for key in ("validationId", "versionId", "queryDigest")
-            }
-        )
-        if validation_ref != expected_validation_ref or (
-            validation_context is not None
-            and validation_context["queryDigest"] != editor_digest
-        ):
-            raise ValueError(
-                "validationContext and selection.validationRef must match the base"
-            )
-
-        execution_context = revision["executionContext"]
-        execution_ref = selection["executionRef"]
-        expected_execution_ref = (
-            None
-            if execution_context is None
-            else {
-                key: execution_context[key]
-                for key in ("executionId", "versionId", "queryDigest")
-            }
-        )
-        if execution_ref != expected_execution_ref or (
-            execution_context is not None
-            and execution_context["queryDigest"] != editor_digest
-        ):
-            raise ValueError(
-                "executionContext and selection.executionRef must match the base"
-            )
-
-        digestable_revision = dict(revision)
-        digestable_revision.pop("contextDigest", None)
-        if revision["contextDigest"] != _canonical_digest(digestable_revision):
-            raise ValueError(
-                "revision.contextDigest must bind the complete revision context"
-            )
-        return self
-
-
 class ChatCompletionRequest(BaseModel):
     model: str
     messages: List[Dict[str, Any]] = Field(..., min_length=1)
@@ -292,28 +46,6 @@ class ChatCompletionRequest(BaseModel):
     stream: bool = False
     context: Optional[Dict[str, Any]] = None
     patient: Optional[str] = None
-    catalystQuery: Optional[Any] = None
-
-    @model_validator(mode="before")
-    @classmethod
-    def validate_query_profile_request(cls, value: Any) -> Any:
-        if not isinstance(value, dict):
-            return value
-        if (
-            str(value.get("model", "")).startswith("catalyst-query-")
-            or "catalystQuery" in value
-        ):
-            context = value.get("catalystQuery")
-            contract_version = (
-                context.get("contractVersion") if isinstance(context, dict) else None
-            )
-            request_model = (
-                CatalystQueryCompletionRequestV2
-                if contract_version == "catalyst.query.request.v2"
-                else CatalystQueryCompletionRequest
-            )
-            return request_model.model_validate(value).model_dump(exclude_none=True)
-        return value
 
 
 _SENSITIVE_METADATA_KEYS = {
@@ -485,8 +217,6 @@ def list_models() -> Dict[str, Any]:
                 for model in sorted(set(profile.models.values()))
             },
         }
-        if profile.output_mode == "query" and not missing:
-            item["profileEvidence"] = query_profile_evidence(profile)
         data.append(item)
     return {
         "object": "list",
@@ -504,15 +234,6 @@ def _request_for(req: ChatCompletionRequest, profile: Profile) -> ExecutionReque
         context=req.context,
         patient=req.patient,
         model_label=req.model,
-        catalyst_query=(
-            (
-                req.catalystQuery.model_dump()
-                if isinstance(req.catalystQuery, BaseModel)
-                else dict(req.catalystQuery)
-            )
-            if req.catalystQuery is not None
-            else None
-        ),
     )
 
 
@@ -549,20 +270,6 @@ def _completion_envelope(
             )
         envelope.update(dict(extensions))
     return envelope
-
-
-def _extract_query_evidence(content: str) -> tuple[str, Dict[str, Any]]:
-    """Keep the query contract in message content and Hub evidence on the envelope."""
-    try:
-        payload = json.loads(content)
-    except (TypeError, json.JSONDecodeError):
-        return content, {}
-    if not isinstance(payload, dict):
-        return content, {}
-    evidence = payload.pop("_hubEvidence", None)
-    if not isinstance(evidence, Mapping):
-        return content, {}
-    return json.dumps(payload, separators=(",", ":")), dict(evidence)
 
 
 def _sse_stream(model: str, content: str):
@@ -682,11 +389,6 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
     except ModelNotFoundError as error:
         raise _model_error(error) from error
 
-    catalyst_context = (
-        req.catalystQuery.model_dump()
-        if isinstance(req.catalystQuery, BaseModel)
-        else req.catalystQuery
-    )
     execution = _request_for(req, profile)
     if req.stream and profile.staged:
         execution = replace(execution, is_disconnected=request.is_disconnected)
@@ -706,13 +408,7 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
             media_type="text/event-stream",
         )
     extensions: Dict[str, Any] = {}
-    if profile.output_mode == "query":
-        content, extensions = _extract_query_evidence(content)
-    completion_id = (
-        str((catalyst_context.get("correlation") or {}).get("traceId") or "")
-        if isinstance(catalyst_context, Mapping)
-        else None
-    ) or None
+    completion_id = None
     return _completion_envelope(
         req.model,
         content,

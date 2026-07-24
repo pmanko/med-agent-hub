@@ -61,7 +61,6 @@ class ExecutionRequest:
     is_disconnected: Optional[Callable[[], Awaitable[bool]]] = None
     source_registry: Optional[SourceRegistry] = None
     token_counter: Optional[TokenCounter] = None
-    catalyst_query: Optional[Mapping[str, Any]] = None
 
 
 @dataclass
@@ -1311,12 +1310,7 @@ class StageEngine:
 
         async def produce() -> None:
             try:
-                if request.profile.output_mode == "query":
-                    from .catalyst_query import execute_query_profile
-
-                    events = execute_query_profile(request)
-                else:
-                    events = _execute_stages(request)
+                events = _execute_stages(request)
                 async for event in events:
                     await queue.put(("item", event))
             except BaseException as error:
