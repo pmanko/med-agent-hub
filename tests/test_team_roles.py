@@ -385,6 +385,47 @@ def test_product_table_contract_drops_an_unrepairable_block():
     assert issues[0]["severity"] == "block"
 
 
+def test_product_table_contract_repairs_columns_with_no_content_format_to_verify():
+    # cell_matches_column only knows how to verify date/weight-shaped text; a "Medication" column
+    # (or Dose, Route, Frequency, ...) has no regex-verifiable format at all. Citation consistency
+    # (every cell in the group cites the same source) is the check that generalizes across column
+    # types — a table must not be dropped just because its columns aren't date/weight.
+    blocks = [
+        {
+            "kind": "table",
+            "title": "Medications",
+            "columns": [
+                {"key": "medication", "label": "Medication"},
+                {"key": "dose", "label": "Dose"},
+            ],
+            "rows": [
+                {"cells": {"refs": {"text": "Nevirapine", "refs": [1]}}},
+                {"cells": {"refs": {"text": "200mg", "refs": [1]}}},
+                {"cells": {"refs": {"text": "Lamivudine", "refs": [2]}}},
+                {"cells": {"refs": {"text": "150mg", "refs": [2]}}},
+            ],
+        }
+    ]
+
+    normalized, issues = team._normalize_product_blocks(blocks)
+
+    assert issues == []
+    assert normalized[0]["rows"] == [
+        {
+            "cells": {
+                "medication": {"text": "Nevirapine", "refs": [1]},
+                "dose": {"text": "200mg", "refs": [1]},
+            }
+        },
+        {
+            "cells": {
+                "medication": {"text": "Lamivudine", "refs": [2]},
+                "dose": {"text": "150mg", "refs": [2]},
+            }
+        },
+    ]
+
+
 def test_product_table_contract_does_not_guess_reversed_flat_cell_order():
     blocks = [
         {

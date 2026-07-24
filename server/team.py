@@ -165,6 +165,13 @@ def _normalize_product_blocks(
         )
 
     def cell_matches_column(column: Any, cell: Dict[str, Any]) -> bool:
+        # Only date/weight columns have a regex-verifiable text shape — most real columns
+        # (Medication, Dose, Route, Frequency, ...) are free text with no such format. For those,
+        # this check has no opinion and defers entirely to the citation-consistency check below
+        # (every cell in a repaired group shares the same non-empty refs): that is what actually
+        # proves the flat cells were grouped correctly, independent of column semantics. Treating
+        # "no verifiable format" as a hard failure — the previous behavior — meant every non-date/
+        # weight table was silently dropped, regardless of whether the repair was correct.
         if not isinstance(column, dict):
             return False
         descriptor = " ".join(
@@ -182,7 +189,7 @@ def _normalize_product_blocks(
                 )
                 is not None
             )
-        return False
+        return True
 
     normalized: List[Any] = []
     issues: List[Dict[str, Any]] = []
