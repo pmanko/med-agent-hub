@@ -107,16 +107,18 @@ def _compute_safety_warnings(
     answer_text: str,
     question: str,
     enabled: bool,
-) -> List[Dict[str, str]]:
-    """Post-answer drug-safety check (deterministic, no LLM). Returns [] when disabled, there is no
-    patient context (no patient ref, or querystore retrieval failed), or nothing is flagged.
+) -> Tuple[str, List[Dict[str, str]]]:
+    """Post-answer drug-safety check (deterministic, no LLM). Always returns an honest status
+    alongside the warnings list (checked/limited/unavailable) — status is unavailable when the
+    policy has drug safety disabled or there is no patient context (no patient ref, or querystore
+    retrieval failed), so a caller can never mistake a skipped check for a clean one.
     """
     if not enabled or patient_context is None:
-        return []
-    warnings = drug_safety.validate_answer(
+        return drug_safety.STATUS_UNAVAILABLE, []
+    result = drug_safety.check_answer_safety(
         answer_text, question, patient_context, drug_safety.load_dataset()
     )
-    return [w.to_dict() for w in warnings]
+    return result.status, [w.to_dict() for w in result.warnings]
 
 
 _INLINE_CITATION_RE = re.compile(r"\[(\d+)\]")

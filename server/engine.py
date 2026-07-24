@@ -998,12 +998,13 @@ def _stream_payload(
         payload["temporalGate"] = state.answer_gate
     if in_depth is not None:
         payload["inDepth"] = in_depth
-    warnings = stages._compute_safety_warnings(
+    safety_status, warnings = stages._compute_safety_warnings(
         state.drug_context,
         state.answer_text,
         stages._latest_user_text(state.messages),
         bool(request.profile.policies.get("drug_safety")),
     )
+    payload["safetyStatus"] = safety_status
     if warnings:
         payload["safetyWarnings"] = warnings
     payload["context"] = _context_summary(state)
@@ -1074,12 +1075,13 @@ def _raw_result(request: ExecutionRequest, state: _State) -> str:
             "citations": state.citations,
             "blocks": state.blocks,
         }
-        warnings = stages._compute_safety_warnings(
+        safety_status, warnings = stages._compute_safety_warnings(
             state.drug_context,
             state.answer_text,
             stages._latest_user_text(state.messages),
             bool(request.profile.policies.get("drug_safety")),
         )
+        payload["safetyStatus"] = safety_status
         if warnings:
             payload["safetyWarnings"] = warnings
         return json.dumps(payload)
@@ -1094,12 +1096,13 @@ def _raw_result(request: ExecutionRequest, state: _State) -> str:
                 state.indepth_conf,
             )
         )
-        warnings = stages._compute_safety_warnings(
+        safety_status, warnings = stages._compute_safety_warnings(
             state.drug_context,
             state.answer_text,
             stages._latest_user_text(state.messages),
             bool(request.profile.policies.get("drug_safety")),
         )
+        payload["safetyStatus"] = safety_status
         if warnings:
             payload["safetyWarnings"] = warnings
         return json.dumps(payload)

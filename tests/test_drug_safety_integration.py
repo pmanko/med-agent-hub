@@ -210,6 +210,42 @@ def test_profile_drain_omits_safety_warnings_key_when_disabled_default():
     assert "safetyWarnings" not in env
 
 
+def test_profile_drain_reports_checked_status_when_enabled():
+    with patch.object(team, "_chat", side_effect=_fake_chat_ibuprofen_answer):
+        out = run(
+            run_profile(
+                _answer_profile(drug_safety=True),
+                QUESTION_MESSAGES,
+                response_format={"type": "json_schema"},
+                temperature=0.0,
+                max_tokens=1024,
+                patient="patient-1",
+                source_registry=_PATIENT_SOURCE,
+            )
+        )
+    env = json.loads(out)
+    assert env["safetyStatus"] == "checked"
+
+
+def test_profile_drain_reports_unavailable_status_when_disabled_default():
+    # Disabled must never look identical to "checked, nothing flagged" — the status key is
+    # always present, distinct from safetyWarnings' presence-implies-enabled convention.
+    with patch.object(team, "_chat", side_effect=_fake_chat_ibuprofen_answer):
+        out = run(
+            run_profile(
+                _answer_profile(),
+                QUESTION_MESSAGES,
+                response_format={"type": "json_schema"},
+                temperature=0.0,
+                max_tokens=1024,
+                patient="patient-1",
+                source_registry=_PATIENT_SOURCE,
+            )
+        )
+    env = json.loads(out)
+    assert env["safetyStatus"] == "unavailable"
+
+
 def test_profile_stream_done_event_carries_safety_warnings():
     async def fake_synthesize_answer(
         client,
@@ -274,6 +310,8 @@ def test_profile_stream_done_event_carries_safety_warnings():
     ]
     # Deterministic safety checks are available with the fast answer and persist to done.
     assert by_name["answer_done"]["safetyWarnings"] == by_name["done"]["safetyWarnings"]
+    assert by_name["done"]["safetyStatus"] == "checked"
+    assert by_name["answer_done"]["safetyStatus"] == "checked"
 
 
 def test_profile_stream_omits_safety_warnings_when_disabled_default():
@@ -327,6 +365,7 @@ def test_profile_stream_omits_safety_warnings_when_disabled_default():
     events = run(_collect())
     by_name = dict(events)
     assert "safetyWarnings" not in by_name["done"]
+    assert by_name["done"]["safetyStatus"] == "unavailable"
 
 
 def test_stage_engine_drain_carries_safety_warnings_through():

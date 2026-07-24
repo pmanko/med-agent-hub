@@ -66,6 +66,12 @@ TYPE_CONTRAINDICATION = "contraindication"
 
 RESOURCE_TYPE_DRUG_REFERENCE = "drug_reference"
 
+# Honest drug-safety check states (dual-provider-conformance.v1 drug_safety_status): an empty
+# warning list must never be presented as "checked" when the check could not actually run.
+STATUS_CHECKED = "checked"
+STATUS_LIMITED = "limited"
+STATUS_UNAVAILABLE = "unavailable"
+
 
 def _format_number(value: float) -> str:
     if value == int(value):
@@ -909,16 +915,49 @@ def _validate_answer(answer: Optional[str], question: Optional[str], context: Pa
     return warnings
 
 
-def validate_answer(answer: Optional[str], question: Optional[str], context: PatientClinicalContext,
-                    dataset: DrugReferenceDataset, *, warn_dose: bool = True, warn_interactions: bool = True,
-                    warn_contraindications: bool = True) -> List[SafetyWarning]:
-    """Fail-safe safety boundary: incomplete reference data cannot break the answer path."""
+@dataclass
+class SafetyCheckResult:
+    """checked/limited/unavailable per the conformance contract: an empty ``warnings`` list must
+    never be read as "checked" on its own — callers that render a safety status need ``status``
+    alongside it."""
+    status: str
+    warnings: List[SafetyWarning]
+
+
+def check_answer_safety(answer: Optional[str], question: Optional[str],
+                        context: Optional[PatientClinicalContext],
+                        dataset: Optional[DrugReferenceDataset], *, warn_dose: bool = True,
+                        warn_interactions: bool = True,
+                        warn_contraindications: bool = True) -> SafetyCheckResult:
+    """The status-carrying superset of validate_answer. ``unavailable`` when there is no reference
+    dataset or no resolved patient context to check against (mirrors the real "no patient ref /
+    querystore retrieval failed" case in team.py) or when the check raised; ``limited`` when the
+    caller asked for only a subset of dose/interaction/contraindication checks; ``checked`` only
+    when a full check ran to completion against real reference data and a real patient context.
+    """
+    if dataset is None or context is None:
+        return SafetyCheckResult(status=STATUS_UNAVAILABLE, warnings=[])
     try:
-        return _validate_answer(
+        warnings = _validate_answer(
             answer, question, context, dataset,
             warn_dose=warn_dose,
             warn_interactions=warn_interactions,
             warn_contraindications=warn_contraindications,
         )
     except (AttributeError, KeyError, TypeError, ValueError, RuntimeError):
-        return []
+        return SafetyCheckResult(status=STATUS_UNAVAILABLE, warnings=[])
+    if not (warn_dose and warn_interactions and warn_contraindications):
+        return SafetyCheckResult(status=STATUS_LIMITED, warnings=warnings)
+    return SafetyCheckResult(status=STATUS_CHECKED, warnings=warnings)
+
+
+def validate_answer(answer: Optional[str], question: Optional[str], context: PatientClinicalContext,
+                    dataset: DrugReferenceDataset, *, warn_dose: bool = True, warn_interactions: bool = True,
+                    warn_contraindications: bool = True) -> List[SafetyWarning]:
+    """Fail-safe safety boundary: incomplete reference data cannot break the answer path."""
+    return check_answer_safety(
+        answer, question, context, dataset,
+        warn_dose=warn_dose,
+        warn_interactions=warn_interactions,
+        warn_contraindications=warn_contraindications,
+    ).warnings
