@@ -19,6 +19,7 @@ _PROMPTS = Path(__file__).parent / "prompts"
 _TEMPORAL_GATE_MODES = {"off", "warn", "enforce"}
 _TOPOLOGIES = {"single", "team", "leg"}
 _OUTPUT_MODES = {"bare", "combined", "product", "review", "indepth"}
+_ANSWER_CONTRACTS = {"caller", "chart_answer"}
 _ALLOWED_STAGES = {
     "context",
     "gather",
@@ -31,6 +32,8 @@ _ALLOWED_STAGES = {
     "indepth",
     "indepth_gate",
 }
+
+StagePlan = Tuple[str, ...]
 
 
 class ModelNotFoundError(KeyError):
@@ -49,14 +52,15 @@ class Profile:
     id: str
     label: str
     topology: str
-    stages: Tuple[str, ...]
+    stages: StagePlan
     models: Mapping[str, str]
     prompts: Mapping[str, str]
     policies: Mapping[str, Any]
-    capabilities: Mapping[str, bool]
+    supplemental_sources: Tuple[str, ...] = ()
     knobs: Mapping[str, Any] = field(default_factory=dict)
     visibility: str = "experimental"
     default: bool = False
+    selection_priority: int = 1000
     context_window: int = 0
     reserved_output_tokens: int = 0
     exact_tokenizer: bool = False
@@ -64,19 +68,15 @@ class Profile:
 
     @property
     def staged(self) -> bool:
-        return bool(self.capabilities.get("staged"))
+        return self.output_mode == "product"
+
+    @property
+    def validation(self) -> bool:
+        return "review" in self.stages
 
     @property
     def output_mode(self) -> str:
         return str(self.policies.get("output", "bare"))
-
-
-@dataclass(frozen=True)
-class StagePlan:
-    id: str
-    stages: Tuple[str, ...]
-    topology: str
-    low_level_leg: bool = False
 
 
 def _split_dynamic_prompt_profile(
@@ -158,7 +158,6 @@ def _dynamic_profile(profile_id: str) -> Optional[Profile]:
                 "output": output,
                 "drug_safety": False,
             },
-            capabilities={"staged": False, "validation": role == "review"},
             knobs=knobs,
             visibility="internal",
             low_level_leg=True,
@@ -180,6 +179,13 @@ def _load_raw() -> Dict[str, dict]:
 
 def _from_spec(profile_id: str, spec: Mapping[str, Any]) -> Profile:
     context = spec.get("context") or {}
+    supplemental_sources = context.get("supplemental_sources") or ()
+    if isinstance(supplemental_sources, str):
+        supplemental_sources = (supplemental_sources,)
+    elif not isinstance(supplemental_sources, (list, tuple)):
+        raise ValueError(
+            f"profile {profile_id!r} context.supplemental_sources must be a list"
+        )
     profile = Profile(
         id=profile_id,
         label=str(spec.get("label") or "").strip(),
@@ -188,10 +194,11 @@ def _from_spec(profile_id: str, spec: Mapping[str, Any]) -> Profile:
         models=dict(spec.get("models") or {}),
         prompts=dict(spec.get("prompts") or {}),
         policies=dict(spec.get("policies") or {}),
-        capabilities=dict(spec.get("capabilities") or {}),
+        supplemental_sources=tuple(supplemental_sources),
         knobs=dict(spec.get("knobs") or {}),
         visibility=str(spec.get("visibility") or "experimental"),
         default=bool(spec.get("default", False)),
+        selection_priority=int(spec.get("selection_priority", 1000)),
         context_window=int(context.get("window") or 0),
         reserved_output_tokens=int(context.get("reserved_output_tokens") or 0),
         exact_tokenizer=bool(context.get("exact_tokenizer", False)),
@@ -205,6 +212,17 @@ def compile_profile(profile: Profile) -> Profile:
     if profile.topology not in _TOPOLOGIES:
         raise ValueError(
             f"profile {profile.id!r} has invalid topology {profile.topology!r}"
+        )
+    supplemental_sources = tuple(
+        str(source).strip() for source in profile.supplemental_sources
+    )
+    if any(not source for source in supplemental_sources):
+        raise ValueError(
+            f"profile {profile.id!r} has an empty supplemental context source"
+        )
+    if len(set(supplemental_sources)) != len(supplemental_sources):
+        raise ValueError(
+            f"profile {profile.id!r} repeats a supplemental context source"
         )
     if not profile.stages or profile.stages[0] != "context":
         raise ValueError(f"profile {profile.id!r} must start with context")
@@ -237,6 +255,20 @@ def compile_profile(profile: Profile) -> Profile:
     if profile.output_mode not in _OUTPUT_MODES:
         raise ValueError(
             f"profile {profile.id!r} has invalid output mode {profile.output_mode!r}"
+        )
+    answer_contract = str(
+        profile.policies.get(
+            "answer_contract",
+            "chart_answer" if profile.output_mode == "product" else "caller",
+        )
+    )
+    if answer_contract not in _ANSWER_CONTRACTS:
+        raise ValueError(
+            f"profile {profile.id!r} has invalid answer contract {answer_contract!r}"
+        )
+    if profile.output_mode == "product" and answer_contract != "chart_answer":
+        raise ValueError(
+            f"product profile {profile.id!r} must use the chart_answer contract"
         )
 
     stages = profile.stages
@@ -344,10 +376,11 @@ def compile_profile(profile: Profile) -> Profile:
         models=_freeze_mapping(profile.models),
         prompts=_freeze_mapping(profile.prompts),
         policies=_freeze_mapping(profile.policies),
-        capabilities=_freeze_mapping(profile.capabilities),
+        supplemental_sources=supplemental_sources,
         knobs=_freeze_mapping(profile.knobs),
         visibility=profile.visibility,
         default=profile.default,
+        selection_priority=profile.selection_priority,
         context_window=profile.context_window,
         reserved_output_tokens=profile.reserved_output_tokens,
         exact_tokenizer=profile.exact_tokenizer,
@@ -413,17 +446,10 @@ def get_profile(profile_id: str) -> Profile:
     return _from_spec(profile_id, raw[profile_id] or {})
 
 
-def get_stage_plan(profile_id: str) -> StagePlan:
-    profile = get_profile(profile_id)
-    return StagePlan(
-        profile.id, profile.stages, profile.topology, profile.low_level_leg
-    )
-
-
 def resolve_temporal_policy(
     profile: Profile, request_context: Optional[Mapping[str, Any]]
 ) -> tuple[bool, str]:
-    if profile.visibility == "product":
+    if profile.output_mode == "product":
         return True, "enforce"
     context = request_context or {}
     enabled = bool(context.get("temporal", True))
@@ -440,15 +466,17 @@ def profile_metadata(
     *,
     available: bool,
     unavailable_reasons: Tuple[str, ...] = (),
+    effective_default: Optional[bool] = None,
 ) -> Dict[str, Any]:
     return {
         "id": profile.id,
         "label": profile.label,
         "staged": profile.staged,
-        "validation": bool(profile.capabilities.get("validation")),
+        "validation": profile.validation,
         "temporal_enforcement": str(profile.policies.get("temporal_gate", "off")),
         "available": bool(available),
-        "default": profile.default,
+        "default": profile.default if effective_default is None else bool(effective_default),
+        "selection_priority": profile.selection_priority,
         "topology": profile.topology,
         "visibility": profile.visibility,
         "stages": list(profile.stages),

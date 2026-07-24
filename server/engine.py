@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import copy
+import hashlib
 import json
 import os
+import time
 from dataclasses import dataclass, field
 from typing import (
     Any,
@@ -32,11 +35,14 @@ from .config import (
 from .context_sources import (
     ContextBudget,
     ContextRequest,
+    ContextSelector,
     ContextSourceError,
     ContextView,
     EvidenceLedger,
     EvidenceRecord,
     HistoryView,
+    IncludedRecord,
+    InsufficientContextError,
     RouterTokenCounter,
     SourceRegistry,
     TokenCounter,
@@ -61,6 +67,67 @@ class ExecutionRequest:
     is_disconnected: Optional[Callable[[], Awaitable[bool]]] = None
     source_registry: Optional[SourceRegistry] = None
     token_counter: Optional[TokenCounter] = None
+    context_selector: Optional[ContextSelector] = None
+
+
+def _chart_answer_response_format() -> Dict[str, Any]:
+    """Hub-owned structured-output contract for product Answer generation."""
+    cell = {
+        "type": "object",
+        "properties": {
+            "text": {"type": "string"},
+            "refs": {"type": "array", "items": {"type": "integer"}},
+        },
+        "required": ["text", "refs"],
+        "additionalProperties": False,
+    }
+    column = {
+        "type": "object",
+        "properties": {"key": {"type": "string"}, "label": {"type": "string"}},
+        "required": ["key", "label"],
+        "additionalProperties": False,
+    }
+    row = {
+        "type": "object",
+        "properties": {"cells": {"type": "object", "additionalProperties": cell}},
+        "required": ["cells"],
+        "additionalProperties": False,
+    }
+    block = {
+        "type": "object",
+        "properties": {
+            "kind": {"type": "string", "enum": ["table"]},
+            "title": {"type": "string"},
+            "columns": {"type": "array", "items": column},
+            "rows": {"type": "array", "items": row},
+        },
+        "required": ["kind", "title", "columns", "rows"],
+        "additionalProperties": False,
+    }
+    schema = {
+        "type": "object",
+        "properties": {
+            "answer": {"type": "string"},
+            "citations": {"type": "array", "items": {"type": "integer"}},
+            "blocks": {"type": "array", "items": block},
+        },
+        "required": ["answer", "citations", "blocks"],
+        "additionalProperties": False,
+    }
+    return {
+        "type": "json_schema",
+        "json_schema": {"name": "chart_answer", "strict": True, "schema": schema},
+    }
+
+
+def _answer_response_format(request: ExecutionRequest) -> Optional[Dict[str, Any]]:
+    """Complete profiles own their contract; low-level legs remain caller-controlled."""
+    if (
+        request.profile.output_mode == "product"
+        or request.profile.policies.get("answer_contract") == "chart_answer"
+    ):
+        return _chart_answer_response_format()
+    return request.response_format
 
 
 @dataclass
@@ -69,7 +136,6 @@ class _State:
     ledger: EvidenceLedger = field(default_factory=lambda: EvidenceLedger(()))
     view: Optional[ContextView] = None
     chart: str = ""
-    full_chart: str = ""
     mappings: List[Dict[str, Any]] = field(default_factory=list)
     gathered: str = ""
     derived_context: str = ""
@@ -80,6 +146,8 @@ class _State:
     steps: List[Dict[str, Any]] = field(default_factory=list)
     answer_text: str = ""
     citations: List[int] = field(default_factory=list)
+    table_issues: List[Dict[str, Any]] = field(default_factory=list)
+    citation_issues: List[Dict[str, Any]] = field(default_factory=list)
     blocks: List[Any] = field(default_factory=list)
     answer_conf: Dict[str, Any] = field(
         default_factory=lambda: {"level": "green", "note": ""}
@@ -87,25 +155,80 @@ class _State:
     answer_validation: Optional[Dict[str, Any]] = None
     answer_gate: Optional[Dict[str, Any]] = None
     original_answer: Optional[str] = None
+    initial_answer_text: Optional[str] = None
+    initial_answer_citations: List[int] = field(default_factory=list)
+    initial_answer_blocks: List[Any] = field(default_factory=list)
+    original_answer_references: List[Dict[str, Any]] = field(default_factory=list)
+    answer_check_edited: bool = False
+    answer_emitted: bool = False
+    stable_answer_snapshot: Optional[Dict[str, Any]] = None
     review_draft: Optional[str] = None
     review_draft_citations: List[int] = field(default_factory=list)
     review_draft_blocks: List[Any] = field(default_factory=list)
     review_edited: bool = False
-    review_rejected: bool = False
     references: List[Dict[str, Any]] = field(default_factory=list)
     claims: List[str] = field(default_factory=list)
+    indepth_review_draft: str = ""
+    indepth_review_references: List[Dict[str, Any]] = field(default_factory=list)
     indepth_conf: Dict[str, Any] = field(
         default_factory=lambda: {"level": "green", "note": ""}
     )
     indepth_gate: Optional[Dict[str, Any]] = None
     indepth_error: str = ""
+    indepth_error_code: Optional[str] = None
+    indepth_mandatory_source_ids: List[str] = field(default_factory=list)
     drug_context: Any = None
     raw_review_content: Optional[str] = None
     history: Optional[HistoryView] = None
 
 
+def _conversation_history_summary(
+    messages: Sequence[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    """Describe prior conversational context without storing clinical plaintext."""
+    conversational = [
+        {
+            "role": str(message.get("role") or ""),
+            "content": message.get("content"),
+        }
+        for message in messages
+        if message.get("role") in {"user", "assistant"}
+    ]
+    current_user_index = next(
+        (
+            index
+            for index in range(len(conversational) - 1, -1, -1)
+            if conversational[index]["role"] == "user"
+        ),
+        len(conversational),
+    )
+    prior = conversational[:current_user_index]
+    encoded = json.dumps(
+        prior, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("utf-8")
+    return {
+        "prior_message_count": len(prior),
+        "prior_turn_count": sum(item["role"] == "user" for item in prior),
+        "prior_roles": [item["role"] for item in prior],
+        "prior_messages_sha256": hashlib.sha256(encoded).hexdigest(),
+    }
+
+
 def _prompt(profile: Profile, role: str, fallback: str) -> str:
     return load_prompt(str(profile.prompts.get(role) or fallback))
+
+
+def _temporal_anchor(request: ExecutionRequest) -> Optional[str]:
+    """Resolve temporal "today" without making historical charts current by default."""
+    configured = str(request.profile.policies.get("anchor") or "").strip()
+    if configured:
+        return configured
+    environment = str(os.environ.get("HUB_ANCHOR") or "").strip()
+    if environment:
+        return environment
+    if request.profile.output_mode == "product":
+        return "wall_clock"
+    return None
 
 
 def _context_summary(state: _State) -> Dict[str, Any]:
@@ -116,6 +239,10 @@ def _context_summary(state: _State) -> Dict[str, Any]:
         "ledger_records": len(state.ledger.records),
         "selection_mode": view.mode if view else "none",
         "included_ids": list(view.included_ids) if view else [],
+        "included": [
+            {"source_id": item.stable_id, "reason": item.reason}
+            for item in (view.included if view else ())
+        ],
         "excluded": [
             {"source_id": item.stable_id, "reason": item.reason}
             for item in (view.excluded if view else ())
@@ -133,6 +260,63 @@ def _context_summary(state: _State) -> Dict[str, Any]:
         ),
         "derived_context_chars": len(state.derived_context),
     }
+
+
+def _merge_reference_grounding(
+    existing: Dict[str, Any], incoming: Mapping[str, Any]
+) -> None:
+    """Merge usage and claim-level verdicts when Answer and In-Depth cite one record."""
+    usages = list(existing.get("usage") or [])
+    for usage in incoming.get("usage") or []:
+        if usage not in usages:
+            usages.append(usage)
+    existing["usage"] = usages
+
+    checks = list(existing.get("groundingChecks") or [])
+    for check in incoming.get("groundingChecks") or []:
+        if check not in checks:
+            checks.append(check)
+    if checks:
+        existing["groundingChecks"] = checks
+
+    groups = {
+        index
+        for reference in (existing, incoming)
+        for index in (reference.get("groundingGroup") or [])
+        if isinstance(index, int)
+    }
+    for check in checks:
+        groups.update(
+            index
+            for index in check.get("source_indices") or []
+            if isinstance(index, int)
+        )
+    if len(groups) > 1:
+        existing["groundingScope"] = "source_set"
+        existing["groundingGroup"] = sorted(groups)
+    elif groups or any(
+        reference.get("groundingScope") == "record"
+        for reference in (existing, incoming)
+    ):
+        existing["groundingScope"] = "record"
+        existing.pop("groundingGroup", None)
+
+    statuses = {check.get("status") for check in checks}
+    if not statuses:
+        statuses = {
+            existing.get("groundingStatus"),
+            incoming.get("groundingStatus"),
+        }
+    if statuses & {"unchecked", "checking", None}:
+        grounded, aggregate = None, "unchecked"
+    elif "mixed" in statuses or {"verified", "unsupported"} <= statuses:
+        grounded, aggregate = None, "mixed"
+    elif "unsupported" in statuses:
+        grounded, aggregate = False, "unsupported"
+    else:
+        grounded, aggregate = True, "verified"
+    existing["grounded"] = grounded
+    existing["groundingStatus"] = aggregate
 
 
 def _ledger_after_drug_injection(
@@ -263,8 +447,9 @@ async def _count_answer_input(
     count_chat = getattr(counter, "count_chat", None)
     if callable(count_chat):
         payload: Dict[str, Any] = {"messages": actual_messages}
-        if request.response_format is not None:
-            payload["response_format"] = request.response_format
+        response_format = _answer_response_format(request)
+        if response_format is not None:
+            payload["response_format"] = response_format
         return await count_chat(request.profile.models["answer"], payload)
     # Unit-test counters can implement the simpler text protocol. Production
     # profiles instantiate RouterTokenCounter and therefore always take the exact
@@ -286,7 +471,8 @@ async def _select_answer_context(
             "The profile requires exact context selection.",
             source="llama-router",
         )
-    state.view = await select_context(
+    selector = request.context_selector or select_context
+    state.view = await selector(
         state.ledger,
         question=stages._latest_user_text(state.messages),
         model=request.profile.models["answer"],
@@ -298,7 +484,237 @@ async def _select_answer_context(
     state.messages = _replace_chart_message(state.messages, state.chart)
 
 
+async def _count_indepth_input(
+    request: ExecutionRequest,
+    state: _State,
+    chart: str,
+    prior_answer: str,
+    extra_msgs: Optional[List[Dict[str, Any]]] = None,
+) -> int:
+    counter = state.token_counter
+    if counter is None:
+        raise ContextSourceError(
+            "tokenization_unavailable",
+            "The profile requires an exact token counter.",
+            source="llama-router",
+        )
+    messages = _replace_chart_message(state.messages, chart)
+    messages = stages._indepth_messages(
+        messages,
+        _prompt(request.profile, "indepth", "synthesis-indepth"),
+        state.gathered,
+        prior_answer,
+        extra_msgs=extra_msgs,
+    )
+    count_chat = getattr(counter, "count_chat", None)
+    if callable(count_chat):
+        return await count_chat(
+            request.profile.models["indepth"],
+            {"messages": messages, "response_format": stages._INDEPTH_RF},
+        )
+    rendered = "\n".join(
+        f"{message.get('role', 'user')}: {message.get('content', '')}"
+        for message in messages
+    )
+    return await counter.count(request.profile.models["indepth"], rendered)
+
+
+async def _select_indepth_context(
+    request: ExecutionRequest,
+    state: _State,
+    prior_answer: str,
+    *,
+    extra_msgs: Optional[List[Dict[str, Any]]] = None,
+    stage: str = "indepth",
+) -> Tuple[ContextView, List[Dict[str, Any]], str]:
+    if state.token_counter is None or state.context_budget is None:
+        raise ContextSourceError(
+            "tokenization_unavailable",
+            "The profile requires exact context selection.",
+            source="llama-router",
+        )
+    selector = request.context_selector or select_context
+    view = await selector(
+        state.ledger,
+        question=stages._latest_user_text(state.messages),
+        model=request.profile.models["indepth"],
+        budget=state.context_budget,
+        counter=state.token_counter,
+        input_measure=lambda chart: _count_indepth_input(
+            request, state, chart, prior_answer, extra_msgs
+        ),
+    )
+    chart = view.render()
+    messages = _replace_chart_message(state.messages, chart)
+    state.steps.append(
+        {
+            "role": "context_selection",
+            "stage": stage,
+            "mode": view.mode,
+            "input_tokens": view.input_tokens,
+            "input_limit": view.input_limit,
+            "included": [
+                {"stable_id": item.stable_id, "reason": item.reason}
+                for item in view.included
+            ],
+            "excluded": [
+                {"stable_id": item.stable_id, "reason": item.reason}
+                for item in view.excluded
+            ],
+        }
+    )
+    return view, messages, chart
+
+
+async def _select_answer_review_context(
+    request: ExecutionRequest,
+    state: _State,
+    answer_text: str,
+    blocks: List[Any],
+    *,
+    stage: str = "answer_review",
+) -> str:
+    """Select evidence against the reviewer's exact prompt, schema, and output reserve."""
+    counter = state.token_counter
+    budget = state.context_budget
+    if counter is None or budget is None:
+        raise ContextSourceError(
+            "tokenization_unavailable",
+            "The profile requires exact context selection.",
+            source="llama-router",
+        )
+    reviewer_model = request.profile.models["review"]
+    review_text = answer_text
+    block_text, _block_refs = stages._block_temporal_text_and_refs(blocks)
+    if block_text:
+        review_text += "\n\n=== STRUCTURED BLOCK TEXT ===\n" + block_text
+
+    async def measure(chart: str) -> int:
+        messages = stages._answer_validation_messages(
+            chart=chart,
+            gathered=state.gathered,
+            answer_text=review_text,
+            validation_prompt=str(
+                request.profile.prompts.get("review") or "validation-rewrite"
+            ),
+        )
+        count_chat = getattr(counter, "count_chat", None)
+        if callable(count_chat):
+            return await count_chat(
+                reviewer_model,
+                {
+                    "messages": messages,
+                    "response_format": stages._REWRITE_VERDICT_RF,
+                },
+            )
+        rendered = "\n".join(
+            f"{message.get('role', 'user')}: {message.get('content', '')}"
+            for message in messages
+        )
+        return await counter.count(reviewer_model, rendered)
+
+    selector = request.context_selector or select_context
+    view = await selector(
+        state.ledger,
+        question=stages._latest_user_text(state.messages),
+        model=reviewer_model,
+        budget=budget,
+        counter=counter,
+        input_measure=measure,
+    )
+    state.steps.append(
+        {
+            "role": "context_selection",
+            "stage": stage,
+            "mode": view.mode,
+            "input_tokens": view.input_tokens,
+            "input_limit": view.input_limit,
+            "included": [
+                {"stable_id": item.stable_id, "reason": item.reason}
+                for item in view.included
+            ],
+            "excluded": [
+                {"stable_id": item.stable_id, "reason": item.reason}
+                for item in view.excluded
+            ],
+        }
+    )
+    return view.render()
+
+
+async def _select_indepth_review_context(
+    request: ExecutionRequest,
+    state: _State,
+    prior_answer: str,
+    claims: List[str],
+) -> str:
+    counter = state.token_counter
+    budget = state.context_budget
+    if counter is None or budget is None:
+        raise ContextSourceError(
+            "tokenization_unavailable",
+            "The profile requires exact context selection.",
+            source="llama-router",
+        )
+    reviewer_model = request.profile.models["review"]
+
+    async def measure(chart: str) -> int:
+        messages = stages._indepth_validation_messages(
+            chart=chart,
+            gathered=state.gathered,
+            answer_text=prior_answer,
+            claims=claims,
+            validation_prompt=str(
+                request.profile.prompts.get("review") or "validation-rewrite"
+            ),
+        )
+        count_chat = getattr(counter, "count_chat", None)
+        if callable(count_chat):
+            return await count_chat(
+                reviewer_model,
+                {
+                    "messages": messages,
+                    "response_format": stages._INDEPTH_VERDICT_RF,
+                },
+            )
+        rendered = "\n".join(
+            f"{message.get('role', 'user')}: {message.get('content', '')}"
+            for message in messages
+        )
+        return await counter.count(reviewer_model, rendered)
+
+    selector = request.context_selector or select_context
+    view = await selector(
+        state.ledger,
+        question=stages._latest_user_text(state.messages),
+        model=reviewer_model,
+        budget=budget,
+        counter=counter,
+        input_measure=measure,
+    )
+    state.steps.append(
+        {
+            "role": "context_selection",
+            "stage": "indepth_review",
+            "mode": view.mode,
+            "input_tokens": view.input_tokens,
+            "input_limit": view.input_limit,
+            "included": [
+                {"stable_id": item.stable_id, "reason": item.reason}
+                for item in view.included
+            ],
+            "excluded": [
+                {"stable_id": item.stable_id, "reason": item.reason}
+                for item in view.excluded
+            ],
+        }
+    )
+    return view.render()
+
+
 async def _prepare_context(request: ExecutionRequest, state: _State) -> None:
+    context_started = time.perf_counter()
+    timing: Dict[str, int] = {}
     registry = request.source_registry or SourceRegistry.default()
     context = request.context or {}
     requested_sources = context.get("sources") or ()
@@ -317,9 +733,7 @@ async def _prepare_context(request: ExecutionRequest, state: _State) -> None:
                 messages=state.messages,
                 source=str(context.get("source")) if context.get("source") else None,
                 sources=tuple(str(item) for item in requested_sources),
-                supplemental_sources=(
-                    ("knowledge-base",) if "gather" in request.profile.stages else ()
-                ),
+                supplemental_sources=request.profile.supplemental_sources,
                 question=stages._latest_user_text(state.messages),
             )
         )
@@ -327,36 +741,41 @@ async def _prepare_context(request: ExecutionRequest, state: _State) -> None:
         if request.patient or context.get("source") or requested_sources:
             raise
         ledger = EvidenceLedger(())
+    timing["source_fetch_ms"] = round((time.perf_counter() - context_started) * 1000)
 
     state.ledger = ledger
     full_chart = ledger.render()
     mappings = ledger.mappings()
     raw_records = ledger.raw_records()
+    anchor = _temporal_anchor(request)
+    temporal_enabled, _mode = resolve_temporal_policy(request.profile, request.context)
+    resolved_reference_date = None
+    if temporal_enabled or request.profile.policies.get("drug_safety"):
+        resolved_reference_date = temporal.resolve_anchor(
+            anchor,
+            full_chart,
+            timezone_name=os.environ.get("HUB_TIMEZONE"),
+        )
     if request.profile.policies.get("drug_safety") and full_chart:
+        drug_started = time.perf_counter()
         full_chart, mappings, state.drug_context = stages._prepare_drug_safety(
             full_chart,
             mappings,
             raw_records,
             stages._latest_user_text(state.messages),
-            str(request.profile.policies.get("anchor") or "") or None,
+            resolved_reference_date,
             True,
         )
         ledger = _ledger_after_drug_injection(ledger, full_chart, mappings)
         state.ledger = ledger
+        timing["drug_safety_ms"] = round((time.perf_counter() - drug_started) * 1000)
+    else:
+        timing["drug_safety_ms"] = 0
 
-    state.full_chart = full_chart
-    temporal_enabled, _mode = resolve_temporal_policy(request.profile, request.context)
     temporal_block = ""
     if temporal_enabled:
-        anchor = (
-            str(
-                request.profile.policies.get("anchor")
-                or os.environ.get("HUB_ANCHOR")
-                or ""
-            )
-            or None
-        )
-        state.reference_date = temporal.resolve_anchor(anchor, full_chart)
+        temporal_started = time.perf_counter()
+        state.reference_date = resolved_reference_date
         state.temporal_facts = temporal.build_temporal_facts(
             full_chart,
             state.reference_date,
@@ -366,10 +785,18 @@ async def _prepare_context(request: ExecutionRequest, state: _State) -> None:
             state.temporal_facts,
             profile=str(request.profile.policies.get("temporal_render") or "full"),
         )
+        timing["temporal_facts_ms"] = round(
+            (time.perf_counter() - temporal_started) * 1000
+        )
+    else:
+        timing["temporal_facts_ms"] = 0
     state.gathered = temporal_block
 
     if request.profile.exact_tokenizer:
-        counter = request.token_counter or RouterTokenCounter()
+        # StageEngine installs one request-scoped counter before context preparation.
+        # Reusing it lets the final dispatch consume the exact count already measured
+        # for the identical prompt instead of tokenizing that prompt again.
+        counter = state.token_counter or request.token_counter or RouterTokenCounter()
         budget = ContextBudget(
             context_window=request.profile.context_window,
             reserved_output_tokens=request.profile.reserved_output_tokens,
@@ -378,6 +805,7 @@ async def _prepare_context(request: ExecutionRequest, state: _State) -> None:
         state.context_budget = budget
         mandatory = tuple(record for record in ledger.records if record.mandatory)
         mandatory_text = ledger.preamble + EvidenceLedger(mandatory).render()
+        history_started = time.perf_counter()
         state.history = await fit_message_history(
             state.messages,
             model=request.profile.models["answer"],
@@ -391,15 +819,24 @@ async def _prepare_context(request: ExecutionRequest, state: _State) -> None:
             input_measure=lambda messages: _count_answer_input(
                 request, state, mandatory_text, messages=messages
             ),
+            defer_when_no_droppable=True,
         )
+        timing["history_fit_ms"] = round((time.perf_counter() - history_started) * 1000)
         state.messages = [dict(message) for message in state.history.messages]
+        selection_started = time.perf_counter()
         await _select_answer_context(request, state)
+        timing["selection_ms"] = round((time.perf_counter() - selection_started) * 1000)
     else:
+        timing["history_fit_ms"] = 0
+        timing["selection_ms"] = 0
         state.view = ContextView(
             records=ledger.records,
             record_indices=tuple(range(1, len(ledger.records) + 1)),
             mode="full",
-            included_ids=tuple(record.stable_id for record in ledger.records),
+            included=tuple(
+                IncludedRecord(record.stable_id, "full_context")
+                for record in ledger.records
+            ),
             excluded=(),
             input_tokens=0,
             input_limit=0,
@@ -417,6 +854,8 @@ async def _prepare_context(request: ExecutionRequest, state: _State) -> None:
         or state.ledger.source_names != ("inline",)
     ):
         state.messages = _replace_chart_message(state.messages, state.chart)
+    timing["total_ms"] = round((time.perf_counter() - context_started) * 1000)
+    state.steps.append({"role": "context_preparation_timing", **timing})
     state.steps.append({"role": "context", **_context_summary(state)})
 
 
@@ -456,6 +895,67 @@ async def _disconnected(request: ExecutionRequest) -> bool:
         return False
 
 
+def _initial_answer_changed(state: _State) -> bool:
+    initial = state.initial_answer_text
+    _initial_block_text, initial_block_refs = stages._block_temporal_text_and_refs(
+        state.initial_answer_blocks
+    )
+    _current_block_text, current_block_refs = stages._block_temporal_text_and_refs(
+        state.blocks
+    )
+    initial_sources = stages._citation_indices(
+        list(state.initial_answer_citations) + initial_block_refs,
+        initial or "",
+    )
+    current_sources = stages._citation_indices(
+        list(state.citations) + current_block_refs,
+        state.answer_text,
+    )
+    return (state.answer_check_edited or state.review_edited) and initial is not None and (
+        initial.strip() != state.answer_text.strip()
+        or initial_sources != current_sources
+        or state.initial_answer_blocks != state.blocks
+    )
+
+
+def _snapshot_stable_answer(state: _State) -> Dict[str, Any]:
+    """Capture the latest coherent Answer state already shown to the client."""
+    return copy.deepcopy(
+        {
+            "answer_text": state.answer_text,
+            "citations": state.citations,
+            "blocks": state.blocks,
+            "references": state.references,
+            "answer_conf": state.answer_conf,
+            "answer_validation": state.answer_validation,
+            "answer_gate": state.answer_gate,
+            "citation_issues": state.citation_issues,
+            "table_issues": state.table_issues,
+            "original_answer_references": state.original_answer_references,
+            "answer_check_edited": state.answer_check_edited,
+            "review_edited": state.review_edited,
+        }
+    )
+
+
+def _restore_stable_answer(state: _State) -> None:
+    """Restore the last stable Answer after a later stage fails partway through."""
+    snapshot = state.stable_answer_snapshot
+    if not snapshot:
+        return
+    for name, value in snapshot.items():
+        setattr(state, name, copy.deepcopy(value))
+
+
+def _mark_answer_low_confidence(state: _State, note: str) -> None:
+    """Keep lifecycle and confidence aligned for deterministic blocking issues."""
+    existing = str(state.answer_conf.get("note") or "").strip()
+    notes = [existing] if existing else []
+    if note and note not in notes:
+        notes.append(note)
+    state.answer_conf = {"level": "red", "note": " ".join(notes)}
+
+
 def _stream_payload(
     state: _State,
     request: ExecutionRequest,
@@ -471,22 +971,91 @@ def _stream_payload(
         payload["model"] = request.model_label or request.profile.id
     if state.answer_conf:
         payload["confidence"] = {"answer": state.answer_conf}
+        if (
+            in_depth is not None
+            and in_depth.get("status") != "pending"
+            and state.indepth_conf
+        ):
+            payload["confidence"]["in_depth"] = state.indepth_conf
     if state.answer_validation is not None:
-        payload["answerValidation"] = state.answer_validation
+        validation = dict(state.answer_validation)
+        initial = state.initial_answer_text
+        initial_changed = _initial_answer_changed(state)
+        if initial_changed:
+            validation["originalAnswer"] = initial
+            validation["originalReferences"] = list(
+                state.original_answer_references
+            )
+            validation["originalBlocks"] = copy.deepcopy(
+                state.initial_answer_blocks
+            )
+        elif initial is not None:
+            validation.pop("originalAnswer", None)
+            validation.pop("originalReferences", None)
+            validation.pop("originalBlocks", None)
+        payload["answerValidation"] = validation
     if state.answer_gate is not None:
         payload["temporalGate"] = state.answer_gate
     if in_depth is not None:
         payload["inDepth"] = in_depth
-    warnings = stages._compute_safety_warnings(
+    safety_status, warnings = stages._compute_safety_warnings(
         state.drug_context,
         state.answer_text,
         stages._latest_user_text(state.messages),
         bool(request.profile.policies.get("drug_safety")),
     )
+    payload["safetyStatus"] = safety_status
     if warnings:
         payload["safetyWarnings"] = warnings
     payload["context"] = _context_summary(state)
     return json.dumps(payload)
+
+
+def _initial_indepth_draft_claims(state: _State) -> List[str]:
+    """Return the first model draft later review/gates had an opportunity to change."""
+    for step in state.steps:
+        if step.get("role") not in {"indepth", "indepth_synth", "indepth_resynth"}:
+            continue
+        claims = step.get("original_claims") or step.get("claims") or []
+        if isinstance(claims, list):
+            return [str(claim) for claim in claims if str(claim).strip()]
+    return [str(claim) for claim in state.claims if str(claim).strip()]
+
+
+def _capture_indepth_review_artifact(state: _State) -> None:
+    claims = _initial_indepth_draft_claims(state)
+    if not claims:
+        return
+    state.indepth_review_draft = "\n".join("- " + claim for claim in claims)
+    state.indepth_review_references = stages._resolve_references(
+        stages._extract_citations(state.indepth_review_draft),
+        state.mappings,
+        answer=state.indepth_review_draft,
+        grounding_status="unchecked",
+        answer_usage_location="indepth_review_draft",
+    )
+
+
+def _in_depth_payload(state: _State) -> Dict[str, Any]:
+    final_answer = (
+        "" if state.indepth_error else "\n".join("- " + claim for claim in state.claims)
+    )
+    payload: Dict[str, Any] = {
+        "status": "needs_review" if state.indepth_error else "complete",
+        "answer": final_answer,
+        "error": state.indepth_error or "",
+        "validation": state.indepth_gate,
+    }
+    if state.indepth_error_code:
+        payload["errorCode"] = state.indepth_error_code
+        payload["mandatorySourceIds"] = list(state.indepth_mandatory_source_ids)
+    if (
+        state.indepth_review_draft
+        and state.indepth_review_draft.strip() != final_answer.strip()
+    ):
+        payload["reviewDraft"] = state.indepth_review_draft
+        payload["reviewReferences"] = list(state.indepth_review_references)
+    return payload
 
 
 def _raw_result(request: ExecutionRequest, state: _State) -> str:
@@ -506,12 +1075,13 @@ def _raw_result(request: ExecutionRequest, state: _State) -> str:
             "citations": state.citations,
             "blocks": state.blocks,
         }
-        warnings = stages._compute_safety_warnings(
+        safety_status, warnings = stages._compute_safety_warnings(
             state.drug_context,
             state.answer_text,
             stages._latest_user_text(state.messages),
             bool(request.profile.policies.get("drug_safety")),
         )
+        payload["safetyStatus"] = safety_status
         if warnings:
             payload["safetyWarnings"] = warnings
         return json.dumps(payload)
@@ -526,12 +1096,13 @@ def _raw_result(request: ExecutionRequest, state: _State) -> str:
                 state.indepth_conf,
             )
         )
-        warnings = stages._compute_safety_warnings(
+        safety_status, warnings = stages._compute_safety_warnings(
             state.drug_context,
             state.answer_text,
             stages._latest_user_text(state.messages),
             bool(request.profile.policies.get("drug_safety")),
         )
+        payload["safetyStatus"] = safety_status
         if warnings:
             payload["safetyWarnings"] = warnings
         return json.dumps(payload)
@@ -542,40 +1113,112 @@ def _raw_result(request: ExecutionRequest, state: _State) -> str:
 
 async def _execute_stages(
     request: ExecutionRequest,
+    budget_policy: Optional[stages.ChatBudgetPolicy] = None,
 ) -> AsyncIterator[Tuple[str, str]]:
     """Execute the profile stage list and emit public phase events as stages complete."""
     state = _State(messages=[dict(message) for message in request.messages])
+    state.steps.append(
+        {"role": "conversation_history", **_conversation_history_summary(request.messages)}
+    )
     sampling = _sampling(request)
+    answer_response_format = _answer_response_format(request)
     temporal_enabled, temporal_mode = resolve_temporal_policy(
         request.profile, request.context
     )
     gate_count = 0
+    stage_occurrences: Dict[str, int] = {}
+    active_stage: Optional[str] = None
+    active_stage_started = 0.0
+    active_stage_occurrence = 0
+    active_stage_recorded = True
     product = request.profile.output_mode == "product"
-    budget_policy: Optional[stages.ChatBudgetPolicy] = None
-    budget_token = None
-    if request.profile.exact_tokenizer:
-        counter = request.token_counter or RouterTokenCounter()
-        state.token_counter = counter
-        budget_policy = stages.ChatBudgetPolicy(
-            counter=counter,
-            context_window=request.profile.context_window,
-            reserved_output_tokens=request.profile.reserved_output_tokens,
+    if budget_policy is not None:
+        state.token_counter = budget_policy.counter
+
+    def record_stage_timing(status: str = "completed") -> None:
+        nonlocal active_stage_recorded
+        if active_stage is None or active_stage_recorded:
+            return
+        state.steps.append(
+            {
+                "role": "stage_timing",
+                "stage": active_stage,
+                "occurrence": active_stage_occurrence,
+                "duration_ms": round(
+                    (time.perf_counter() - active_stage_started) * 1000
+                ),
+                "status": status,
+            }
         )
-        budget_token = stages.activate_chat_budget(budget_policy)
+        active_stage_recorded = True
+
+    def write_execution_trace(*, answer_text: Optional[str] = None) -> None:
+        if budget_policy is not None and not any(
+            step.get("role") == "exact_request_budgets" for step in state.steps
+        ):
+            stats = getattr(budget_policy.counter, "stats", None)
+            state.steps.append(
+                {
+                    "role": "exact_request_budgets",
+                    "measurements": list(budget_policy.measurements),
+                    "token_counter": stats() if callable(stats) else None,
+                }
+            )
+        stages._write_trace(
+            request.profile.id,
+            state.messages,
+            orchestrator=request.profile.models.get("orchestrator"),
+            expert=request.profile.models.get("expert"),
+            synthesizer=request.profile.models.get(
+                "answer", request.profile.models.get("indepth")
+            ),
+            validator=request.profile.models.get("review"),
+            steps=state.steps,
+            answer_confidence=state.answer_conf,
+            indepth_confidence=state.indepth_conf,
+            answer_text=state.answer_text if answer_text is None else answer_text,
+            in_depth_claims=state.claims,
+            reference_date=state.reference_date,
+            temporal_facts=state.temporal_facts,
+            temporal_gate=state.answer_gate,
+            original_answer_text=(
+                state.initial_answer_text
+                if _initial_answer_changed(state)
+                else state.original_answer
+            ),
+            answer_validation=state.answer_validation,
+            context_summary=_context_summary(state),
+            request_context=request.context,
+            indepth_temporal_gate=state.indepth_gate,
+            final_references=state.references,
+            sampling={
+                "answer_temperature": sampling["answer_temperature"],
+                "synth_temperature": sampling["answer_temperature"],
+                "synth_temperature_floor": sampling["answer_temperature"],
+                "synth_temperature_source": (
+                    "level_knob"
+                    if "temperature" in request.profile.knobs.get("answer", {})
+                    else "request_or_default"
+                ),
+            },
+        )
 
     try:
         async with httpx.AsyncClient() as client:
             for stage in request.profile.stages:
+                stage_occurrences[stage] = stage_occurrences.get(stage, 0) + 1
+                active_stage = stage
+                active_stage_started = time.perf_counter()
+                active_stage_occurrence = stage_occurrences[stage]
+                active_stage_recorded = False
+
                 if stage == "context":
                     await _prepare_context(request, state)
+                    record_stage_timing()
                     continue
 
                 if stage == "gather":
-                    (
-                        kb_context,
-                        expert_notes,
-                        gather_steps,
-                    ) = await stages._gather_evidence(
+                    expert_notes, gather_steps = await stages._gather_evidence(
                         client,
                         has_expert="expert" in request.profile.models,
                         orchestrator_model=request.profile.models["orchestrator"],
@@ -597,12 +1240,9 @@ async def _execute_stages(
                         exp_temp=sampling["expert_temperature"],
                         exp_rp=sampling["expert_repeat_penalty"],
                         exp_dry=sampling["expert_dry"],
-                        allow_kb_search=(
-                            "knowledge-base" not in state.ledger.source_names
-                        ),
                     )
                     state.steps.extend(gather_steps)
-                    gathered = stages._gathered_evidence(kb_context, expert_notes)
+                    gathered = stages._gathered_evidence(expert_notes)
                     state.derived_context = gathered
                     if gathered:
                         state.gathered = (
@@ -615,6 +1255,7 @@ async def _execute_stages(
                         state.steps.append(
                             {"role": "context_reselection", **_context_summary(state)}
                         )
+                    record_stage_timing()
                     continue
 
                 if stage == "answer":
@@ -628,18 +1269,22 @@ async def _execute_stages(
                         state.messages,
                         _prompt(request.profile, "answer", "synthesis-answer"),
                         state.gathered,
-                        response_format=request.response_format,
+                        response_format=answer_response_format,
                         temperature=sampling["answer_temperature"],
                         max_tokens=request.max_tokens,
                         repeat_penalty=sampling["answer_repeat_penalty"],
                         dry=sampling["answer_dry"],
                     )
+                    state.initial_answer_text = state.answer_text
+                    state.initial_answer_citations = list(state.citations)
+                    state.initial_answer_blocks = copy.deepcopy(state.blocks)
                     state.steps.append(
                         {
                             "role": "answer_synth",
                             "model": request.profile.models["answer"],
                             "output": state.answer_text,
                             "citations": state.citations,
+                            "blocks": copy.deepcopy(state.blocks),
                         }
                     )
                     # Substance checking is part of the deterministic answer gate, not
@@ -649,7 +1294,7 @@ async def _execute_stages(
                         state.citations,
                         state.blocks,
                         state.answer_conf,
-                    ) = await stages._validate_and_refine_answer(
+                    ) = await stages._ensure_substantive_answer(
                         client,
                         synth_model=request.profile.models["answer"],
                         base_messages=state.messages,
@@ -657,32 +1302,64 @@ async def _execute_stages(
                             request.profile, "answer", "synthesis-answer"
                         ),
                         gathered=state.gathered,
-                        response_format=request.response_format,
+                        response_format=answer_response_format,
                         answer_text=state.answer_text,
                         citations=state.citations,
                         blocks=state.blocks,
-                        validator_model=None,
-                        validator_prompt=None,
-                        chart=state.chart,
                         synth_temperature=sampling["answer_temperature"],
                         synth_repeat_penalty=sampling["answer_repeat_penalty"],
                         synth_dry=sampling["answer_dry"],
-                        validator_temperature=0.0,
-                        validator_repeat_penalty=None,
-                        validator_dry=None,
                         max_tokens=request.max_tokens,
                         max_loops=int(request.profile.policies.get("review_loops", 1)),
                         steps=state.steps,
                     )
+                    state.answer_check_edited = (
+                        state.answer_text != state.initial_answer_text
+                        or state.citations != state.initial_answer_citations
+                        or state.blocks != state.initial_answer_blocks
+                    )
+                    record_stage_timing()
                     continue
 
                 if stage == "gate":
                     gate_count += 1
+                    before_gate_answer = state.answer_text
+                    before_gate_citations = list(state.citations)
+                    block_issues: List[Dict[str, Any]] = []
                     if (
                         request.profile.output_mode == "review"
                         and not state.answer_text
                     ):
+                        record_stage_timing()
                         continue
+                    if request.profile.output_mode == "product":
+                        before_blocks = list(state.blocks)
+                        state.blocks, block_issues = stages._normalize_product_blocks(
+                            state.blocks
+                        )
+                        if block_issues or gate_count == 1 or state.review_edited:
+                            # Preserve table failures when review changes nothing.
+                            # untouched. Once a rewrite removes that block, only current
+                            # envelope issues remain lifecycle blockers.
+                            state.table_issues = block_issues
+                        if state.blocks != before_blocks or block_issues:
+                            state.steps.append(
+                                {
+                                    "role": "table_contract",
+                                    "status": (
+                                        "fail" if block_issues else "canonicalized"
+                                    ),
+                                    "before_blocks": len(before_blocks),
+                                    "after_blocks": len(state.blocks),
+                                    "n_issues": len(block_issues),
+                                }
+                            )
+                        if gate_count > 1 and state.blocks != before_blocks:
+                            state.review_edited = True
+                        if gate_count == 1 and (
+                            state.blocks != before_blocks or block_issues
+                        ):
+                            state.answer_check_edited = True
                     if gate_count == 1:
                         (
                             state.answer_text,
@@ -703,6 +1380,9 @@ async def _execute_stages(
                         )
                         state.answer_conf = stages._merge_temporal_gate_conf(
                             state.answer_conf, state.answer_gate
+                        )
+                        state.answer_check_edited = state.answer_check_edited or (
+                            state.answer_gate.get("applied") in {"patch", "fallback"}
                         )
                     elif state.review_edited:
                         (
@@ -725,13 +1405,64 @@ async def _execute_stages(
                             answer_conf=state.answer_conf,
                             prior_original_answer=state.original_answer,
                         )
+                        state.answer_check_edited = state.answer_check_edited or (
+                            state.answer_gate.get("applied") in {"patch", "fallback"}
+                        )
                     else:
                         state.answer_conf = stages._merge_temporal_gate_conf(
                             state.answer_conf, state.answer_gate
                         )
+                    if request.profile.output_mode == "product":
+                        before_contract_answer = state.answer_text
+                        before_contract_citations = list(state.citations)
+                        (
+                            state.answer_text,
+                            state.citations,
+                            citation_issues,
+                        ) = stages._enforce_product_citation_contract(
+                            state.answer_text, state.citations, state.blocks
+                        )
+                        state.citation_issues = state.table_issues + citation_issues
+                        contract_changed = (
+                            state.answer_text != before_contract_answer
+                            or state.citations != before_contract_citations
+                        )
+                        if gate_count > 1 and (
+                            state.answer_text != before_gate_answer
+                            or state.citations != before_gate_citations
+                        ):
+                            state.review_edited = True
+                        if gate_count == 1 and contract_changed:
+                            state.answer_check_edited = True
+                        if contract_changed or state.citation_issues:
+                            state.steps.append(
+                                {
+                                    "role": "citation_contract",
+                                    "status": (
+                                        "fail" if state.citation_issues else "canonicalized"
+                                    ),
+                                    "before": before_contract_citations,
+                                    "after": list(state.citations),
+                                }
+                            )
+                        if state.citation_issues:
+                            _mark_answer_low_confidence(
+                                state,
+                                "The answer has a blocking citation-format or citation-scope issue.",
+                            )
+                    record_stage_timing()
                     continue
 
                 if stage == "resolve_refs":
+                    if state.initial_answer_text is not None:
+                        state.original_answer_references = stages._resolve_references(
+                            state.initial_answer_citations,
+                            state.mappings,
+                            answer=state.initial_answer_text,
+                            blocks=state.initial_answer_blocks,
+                            grounding_status="unchecked",
+                            answer_usage_location="answer_review_draft",
+                        )
                     state.references = stages._resolve_references(
                         state.citations,
                         state.mappings,
@@ -740,11 +1471,13 @@ async def _execute_stages(
                         grounding_status="checking" if state.mappings else None,
                     )
                     has_review = "review" in request.profile.stages
+                    has_final_grounding = "ground_verdicts" in request.profile.stages
                     gate_issues = [
                         check
                         for check in (state.answer_gate or {}).get("checks", [])
                         if check.get("status") in {"warn", "fail"}
                     ]
+                    gate_issues.extend(state.citation_issues)
                     unresolved = [
                         reference
                         for reference in state.references
@@ -760,12 +1493,19 @@ async def _execute_stages(
                         }
                         for reference in unresolved
                     )
-                    fast_status = "validating" if has_review else "checked"
+                    if unresolved:
+                        _mark_answer_low_confidence(
+                            state,
+                            "One or more citations do not resolve to the current evidence ledger.",
+                        )
+                    fast_status = (
+                        "checking" if has_review or has_final_grounding else "checked"
+                    )
                     if (
                         state.answer_conf.get("level") == "red"
                         or (state.answer_gate or {}).get("applied") == "fallback"
                         or unresolved
-                    ):
+                    ) and not (has_review or has_final_grounding):
                         fast_status = "needs_review"
                     fast_validation = stages._answer_validation_wire(
                         fast_status,
@@ -774,6 +1514,9 @@ async def _execute_stages(
                     )
                     prior_validation = state.answer_validation
                     state.answer_validation = fast_validation
+                    record_stage_timing()
+                    state.answer_emitted = True
+                    state.stable_answer_snapshot = _snapshot_stable_answer(state)
                     yield (
                         "answer_done",
                         _stream_payload(
@@ -804,13 +1547,30 @@ async def _execute_stages(
                             "citations": list(state.citations),
                             "blocks": list(state.blocks),
                         }
+                    review_chart_selector = None
+                    if (
+                        request.profile.output_mode == "product"
+                        and request.profile.exact_tokenizer
+                    ):
+                        async def review_chart_selector(
+                            answer_text: str,
+                            blocks: List[Any],
+                            stage: str,
+                        ) -> str:
+                            return await _select_answer_review_context(
+                                request,
+                                state,
+                                answer_text,
+                                blocks,
+                                stage=stage,
+                            )
                     (
                         state.raw_review_content,
                         state.answer_conf,
                         state.answer_text,
                         state.answer_validation,
-                        state.answer_gate,
-                        state.original_answer,
+                        reviewed_gate,
+                        reviewed_original_answer,
                     ) = await stages._review_existing_answer(
                         client,
                         messages=state.messages,
@@ -831,7 +1591,12 @@ async def _execute_stages(
                         max_tokens=request.max_tokens,
                         steps=state.steps,
                         payload_override=payload_override,
+                        review_chart_selector=review_chart_selector,
                     )
+                    if reviewed_gate is not None:
+                        state.answer_gate = reviewed_gate
+                    if state.original_answer is None:
+                        state.original_answer = reviewed_original_answer
                     reviewed = json.loads(state.raw_review_content or "{}")
                     state.citations = [
                         value
@@ -849,6 +1614,7 @@ async def _execute_stages(
                             or state.citations != state.review_draft_citations
                             or state.blocks != state.review_draft_blocks
                         )
+                    record_stage_timing()
                     continue
 
                 if stage == "final_resolve_refs":
@@ -866,15 +1632,26 @@ async def _execute_stages(
                             reference.get("resolutionStatus") == "unresolved"
                             for reference in state.references
                         )
+                        if unresolved_final:
+                            _mark_answer_low_confidence(
+                                state,
+                                "One or more citations do not resolve to the current evidence ledger.",
+                            )
+                        if state.citation_issues:
+                            _mark_answer_low_confidence(
+                                state,
+                                "The answer has a blocking citation-format or citation-scope issue.",
+                            )
                         if (
                             state.answer_conf.get("level") == "red"
                             or unresolved_final
+                            or state.citation_issues
                             or prior_status == "needs_review"
                         ):
                             status = "needs_review"
                         elif prior_status == "unavailable":
                             status = "unavailable"
-                        elif state.review_edited:
+                        elif state.review_edited or _initial_answer_changed(state):
                             status = "edited"
                         else:
                             status = "checked"
@@ -885,6 +1662,7 @@ async def _execute_stages(
                                 or state.answer_conf.get("note", "")
                             ),
                             issues=list(prior_validation.get("issues") or [])
+                            + list(state.citation_issues)
                             + [
                                 check
                                 for check in (state.answer_gate or {}).get("checks", [])
@@ -906,6 +1684,121 @@ async def _execute_stages(
                                 or (state.review_draft if state.review_edited else None)
                             ),
                         )
+                    record_stage_timing()
+                    continue
+
+                if stage == "ground_verdicts":
+                    if state.mappings:
+                        deterministic_checks = [
+                            check
+                            for check in (state.answer_gate or {}).get("checks", [])
+                            if check.get("status") == "pass"
+                            and check.get("source_indices")
+                        ]
+                        if deterministic_checks:
+                            state.references = await stages._ground_references(
+                                client,
+                                request.profile.models["grounding"],
+                                state.answer_text,
+                                state.references,
+                                state.mappings,
+                                deterministic_checks=deterministic_checks,
+                            )
+                        else:
+                            state.references = await stages._ground_references(
+                                client,
+                                request.profile.models["grounding"],
+                                state.answer_text,
+                                state.references,
+                                state.mappings,
+                            )
+                    unsupported = [
+                        reference
+                        for reference in state.references
+                        if reference.get("groundingStatus")
+                        in {"unsupported", "mixed"}
+                    ]
+                    unchecked = [
+                        reference
+                        for reference in state.references
+                        if reference.get("resolutionStatus") == "resolved"
+                        and reference.get("groundingStatus") == "unchecked"
+                    ]
+                    if unsupported:
+                        prior = state.answer_validation or {}
+                        state.answer_conf = {
+                            "level": "red",
+                            "note": "One or more cited source sets did not support the associated claim.",
+                        }
+                        state.answer_validation = stages._answer_validation_wire(
+                            "needs_review",
+                            summary="One or more cited sources do not support the associated claim.",
+                            issues=list(prior.get("issues") or [])
+                            + stages._grounding_failure_issues(unsupported),
+                            original_answer=prior.get("originalAnswer"),
+                        )
+                    elif unchecked:
+                        prior = state.answer_validation or {}
+                        if state.answer_conf.get("level") == "green":
+                            state.answer_conf = {
+                                "level": "yellow",
+                                "note": "Citation support checking was unavailable for one or more sources.",
+                            }
+                        if prior.get("status") != "needs_review":
+                            state.answer_validation = stages._answer_validation_wire(
+                                "unavailable",
+                                summary="Citation support checking was unavailable for one or more sources.",
+                                issues=list(prior.get("issues") or [])
+                                + [
+                                    {
+                                        "id": "citation_grounding_unavailable",
+                                        "status": "warn",
+                                        "severity": "warn",
+                                        "reason": "Citation support could not be checked.",
+                                        "source_indices": [reference.get("index")],
+                                    }
+                                    for reference in unchecked
+                                ],
+                                original_answer=prior.get("originalAnswer"),
+                            )
+                    elif "review" not in request.profile.stages:
+                        prior = state.answer_validation or {}
+                        unresolved = any(
+                            reference.get("resolutionStatus") == "unresolved"
+                            for reference in state.references
+                        )
+                        if unresolved:
+                            _mark_answer_low_confidence(
+                                state,
+                                "One or more citations do not resolve to the current evidence ledger.",
+                            )
+                        if state.citation_issues:
+                            _mark_answer_low_confidence(
+                                state,
+                                "The answer has a blocking citation-format or citation-scope issue.",
+                            )
+                        status = (
+                            "needs_review"
+                            if unresolved
+                            or state.citation_issues
+                            or state.answer_conf.get("level") == "red"
+                            else (
+                                "edited"
+                                if _initial_answer_changed(state)
+                                else "checked"
+                            )
+                        )
+                        state.answer_validation = stages._answer_validation_wire(
+                            status,
+                            summary=prior.get("summary")
+                            or state.answer_conf.get("note", ""),
+                            issues=list(prior.get("issues") or [])
+                            + list(state.citation_issues),
+                            original_answer=prior.get("originalAnswer"),
+                        )
+                    record_stage_timing()
+                    if "review" in request.profile.stages:
+                        state.stable_answer_snapshot = _snapshot_stable_answer(state)
                         yield (
                             "answer_validation",
                             _stream_payload(
@@ -918,68 +1811,78 @@ async def _execute_stages(
                             return
                     continue
 
-                if stage == "ground_verdicts":
-                    if state.mappings:
-                        state.references = await stages._ground_references(
-                            client,
-                            request.profile.models["grounding"],
-                            state.answer_text,
-                            state.references,
-                            state.mappings,
-                        )
-                    unsupported = [
-                        reference
-                        for reference in state.references
-                        if reference.get("groundingStatus") == "unsupported"
-                    ]
-                    if unsupported:
-                        prior = state.answer_validation or {}
-                        state.answer_validation = stages._answer_validation_wire(
-                            "needs_review",
-                            summary="One or more cited sources do not support the associated claim.",
-                            issues=list(prior.get("issues") or [])
-                            + [
-                                {
-                                    "id": "citation_grounding",
-                                    "status": "fail",
-                                    "severity": "block",
-                                    "reason": f"Citation [{reference.get('index')}] was not supported by its source record.",
-                                    "source_indices": [reference.get("index")],
-                                }
-                                for reference in unsupported
-                            ],
-                            original_answer=prior.get("originalAnswer"),
-                        )
-                    continue
-
                 if stage == "indepth":
                     if product:
+                        state.stable_answer_snapshot = _snapshot_stable_answer(state)
                         yield (
                             "indepth_pending",
-                            json.dumps(
-                                {
-                                    "messageId": None,
-                                    "inDepth": {"status": "pending", "answer": ""},
-                                }
+                            _stream_payload(
+                                state,
+                                request,
+                                in_depth={"status": "pending", "answer": ""},
                             ),
                         )
+                    if product and not stages._is_substantive_answer(state.answer_text):
+                        state.indepth_error = (
+                            "In-Depth was withheld because the final Answer was not substantive."
+                        )
+                        state.steps.append(
+                            {
+                                "role": "indepth_withheld",
+                                "reason": "non-substantive-answer",
+                            }
+                        )
+                        record_stage_timing()
+                        continue
+                    # In-depth is withheld only on preemption (disconnect / new turn), never
+                    # because the answer needs review: it runs on the answer as-is, and the
+                    # answer's own validation status is surfaced separately on the envelope.
                     prior_answer = (
                         stages._latest_assistant_text(state.messages)
                         if request.profile.output_mode == "indepth"
                         else state.answer_text
                     )
                     try:
+                        indepth_messages = state.messages
+                        indepth_chart = state.chart
+                        if product and request.profile.exact_tokenizer:
+                            (
+                                _indepth_view,
+                                indepth_messages,
+                                indepth_chart,
+                            ) = await _select_indepth_context(
+                                request, state, prior_answer
+                            )
                         if (
                             "review" in request.profile.models
                             and request.profile.output_mode != "indepth"
                         ):
+                            async def fit_review(claims: List[str]) -> str:
+                                return await _select_indepth_review_context(
+                                    request, state, prior_answer, claims
+                                )
+
+                            async def fit_retry(
+                                extra_msgs: List[Dict[str, Any]],
+                            ) -> List[Dict[str, Any]]:
+                                _view, messages, _chart = (
+                                    await _select_indepth_context(
+                                        request,
+                                        state,
+                                        prior_answer,
+                                        extra_msgs=extra_msgs,
+                                        stage="indepth_retry",
+                                    )
+                                )
+                                return messages
+
                             (
                                 state.claims,
                                 state.indepth_conf,
                             ) = await stages._gen_indepth(
                                 client,
                                 request.profile.models["indepth"],
-                                state.messages,
+                                indepth_messages,
                                 _prompt(
                                     request.profile, "indepth", "synthesis-indepth"
                                 ),
@@ -990,7 +1893,7 @@ async def _execute_stages(
                                     request.profile.prompts.get("review")
                                     or "validation-rewrite"
                                 ),
-                                chart=state.chart,
+                                chart=indepth_chart,
                                 synth_temperature=sampling["answer_temperature"],
                                 synth_repeat_penalty=sampling["answer_repeat_penalty"],
                                 synth_dry=sampling["answer_dry"],
@@ -1004,12 +1907,25 @@ async def _execute_stages(
                                     request.profile.policies.get("review_loops", 1)
                                 ),
                                 steps=state.steps,
+                                canonicalize_citations=(
+                                    product and temporal_mode == "enforce"
+                                ),
+                                review_context_fitter=(
+                                    fit_review
+                                    if product and request.profile.exact_tokenizer
+                                    else None
+                                ),
+                                retry_context_fitter=(
+                                    fit_retry
+                                    if product and request.profile.exact_tokenizer
+                                    else None
+                                ),
                             )
                         else:
                             state.claims = await stages._synthesize_indepth(
                                 client,
                                 request.profile.models["indepth"],
-                                state.messages,
+                                indepth_messages,
                                 _prompt(
                                     request.profile, "indepth", "synthesis-indepth"
                                 ),
@@ -1027,8 +1943,31 @@ async def _execute_stages(
                                     "claims": list(state.claims),
                                 }
                             )
-                    except Exception as exc:
+                        _capture_indepth_review_artifact(state)
+                        if state.indepth_conf.get("status") == "unavailable":
+                            state.indepth_error = (
+                                "In-Depth was withheld because review was unavailable."
+                            )
+                    except InsufficientContextError as exc:
+                        _capture_indepth_review_artifact(state)
                         state.indepth_error = str(exc)
+                        state.indepth_error_code = exc.code
+                        state.indepth_mandatory_source_ids = list(
+                            exc.mandatory_ids
+                        )
+                        state.steps.append(
+                            {
+                                "role": "indepth_withheld",
+                                "reason": exc.code,
+                                "mandatory_source_ids": list(
+                                    exc.mandatory_ids
+                                ),
+                            }
+                        )
+                    except Exception as exc:
+                        _capture_indepth_review_artifact(state)
+                        state.indepth_error = str(exc)
+                    record_stage_timing()
                     continue
 
                 if stage == "indepth_gate":
@@ -1038,11 +1977,37 @@ async def _execute_stages(
                         state.temporal_facts,
                         mode=temporal_mode,
                     )
+                    if state.indepth_conf.get("status") == "unavailable":
+                        state.indepth_gate["review_status"] = "unavailable"
+                    elif state.indepth_conf.get("status") == "edited":
+                        state.indepth_gate["review_status"] = "edited"
+                        state.indepth_gate["review_removed"] = int(
+                            state.indepth_conf.get("removed") or 0
+                        )
+                        state.indepth_gate["review_issues"] = str(
+                            state.indepth_conf.get("issues") or ""
+                        )
+                        state.indepth_gate["review_attempts"] = int(
+                            state.indepth_conf.get("review_attempts") or 1
+                        )
+                        if state.indepth_gate.get("status") == "checked":
+                            state.indepth_gate["status"] = "edited"
                     state.claims = list(state.indepth_gate["claims"])
                     citation_checks: list[dict[str, Any]] = []
                     candidates: list[tuple[int, str, list[dict[str, Any]]]] = []
                     for claim_index, claim in enumerate(state.claims, 1):
                         claim_citations = stages._extract_citations(claim)
+                        if not claim_citations:
+                            citation_checks.append(
+                                {
+                                    "claim_index": claim_index,
+                                    "claim": claim,
+                                    "status": "fail",
+                                    "reason": "In-Depth claim has no source citation.",
+                                    "source_indices": [],
+                                }
+                            )
+                            continue
                         claim_references = stages._resolve_references(
                             claim_citations,
                             state.mappings,
@@ -1096,7 +2061,8 @@ async def _execute_stages(
                         unsupported = [
                             reference
                             for reference in grounded_references
-                            if reference.get("groundingStatus") == "unsupported"
+                            if reference.get("groundingStatus")
+                            in {"unsupported", "mixed"}
                         ]
                         if unsupported:
                             citation_checks.append(
@@ -1108,6 +2074,25 @@ async def _execute_stages(
                                     "source_indices": [
                                         reference.get("index")
                                         for reference in unsupported
+                                    ],
+                                }
+                            )
+                            continue
+                        unchecked = [
+                            reference
+                            for reference in grounded_references
+                            if reference.get("groundingStatus") == "unchecked"
+                        ]
+                        if unchecked:
+                            citation_checks.append(
+                                {
+                                    "claim_index": claim_index,
+                                    "claim": claim,
+                                    "status": "fail",
+                                    "reason": "In-Depth citation support could not be checked within the grounding limits.",
+                                    "source_indices": [
+                                        reference.get("index")
+                                        for reference in unchecked
                                     ],
                                 }
                             )
@@ -1134,117 +2119,88 @@ async def _execute_stages(
                         if existing is None:
                             state.references.append(reference)
                             continue
-                        usages = list(existing.get("usage") or [])
-                        for usage in reference.get("usage") or []:
-                            if usage not in usages:
-                                usages.append(usage)
-                        existing["usage"] = usages
-                        statuses = {
-                            existing.get("groundingStatus"),
-                            reference.get("groundingStatus"),
-                        }
-                        if "unsupported" in statuses:
-                            existing["grounded"] = False
-                            existing["groundingStatus"] = "unsupported"
-                        elif statuses & {"unchecked", "checking", None}:
-                            existing["grounded"] = None
-                            existing["groundingStatus"] = "unchecked"
-                        else:
-                            existing["grounded"] = True
-                            existing["groundingStatus"] = "verified"
-                    if state.indepth_gate["status"] == "needs_review":
+                        _merge_reference_grounding(existing, reference)
+                    if (
+                        state.indepth_gate["status"] == "needs_review"
+                        and not state.indepth_error
+                    ):
                         state.indepth_error = (
-                            "In-Depth was withheld because deterministic temporal checks "
-                            "rejected every claim."
+                            "In-Depth was withheld because evidence checks rejected every claim."
                         )
+                    if state.indepth_error:
+                        state.indepth_conf = {
+                            **state.indepth_conf,
+                            "level": "red",
+                            "note": state.indepth_error,
+                        }
                     if product:
+                        record_stage_timing()
+                        indepth = _in_depth_payload(state)
                         if state.indepth_error:
+                            payload = json.loads(
+                                _stream_payload(state, request, in_depth=indepth)
+                            )
                             yield (
                                 "indepth_error",
-                                json.dumps(
-                                    {
-                                        "status": "needs_review",
-                                        "answer": "",
-                                        "error": state.indepth_error,
-                                        "validation": state.indepth_gate,
-                                    }
-                                ),
+                                json.dumps(payload),
                             )
                         else:
+                            payload = json.loads(
+                                _stream_payload(state, request, in_depth=indepth)
+                            )
                             yield (
                                 "indepth_done",
-                                json.dumps(
-                                    {
-                                        "status": "complete",
-                                        "answer": "\n".join(
-                                            "- " + claim for claim in state.claims
-                                        ),
-                                        "error": "",
-                                        "validation": state.indepth_gate,
-                                    }
-                                ),
+                                json.dumps(payload),
                             )
+                    else:
+                        record_stage_timing()
                     continue
 
         if product:
-            indepth_status = "needs_review" if state.indepth_error else "complete"
-            indepth = {
-                "status": indepth_status,
-                "answer": (
-                    ""
-                    if state.indepth_error
-                    else "\n".join("- " + claim for claim in state.claims)
-                ),
-                "error": state.indepth_error,
-                "validation": state.indepth_gate,
-            }
-            yield "done", _stream_payload(state, request, in_depth=indepth)
+            yield "done", _stream_payload(
+                state, request, in_depth=_in_depth_payload(state)
+            )
         else:
             yield "result", _raw_result(request, state)
 
-        if budget_policy is not None:
-            state.steps.append(
-                {
-                    "role": "exact_request_budgets",
-                    "measurements": list(budget_policy.measurements),
-                }
-            )
-        stages._write_trace(
-            request.profile.id,
-            state.messages,
-            orchestrator=request.profile.models.get("orchestrator"),
-            expert=request.profile.models.get("expert"),
-            synthesizer=request.profile.models.get(
-                "answer", request.profile.models.get("indepth")
-            ),
-            validator=request.profile.models.get("review"),
-            steps=state.steps,
-            answer_confidence=state.answer_conf,
-            indepth_confidence=state.indepth_conf,
-            answer_text=state.answer_text,
-            in_depth_claims=state.claims,
-            reference_date=state.reference_date,
-            temporal_facts=state.temporal_facts,
-            temporal_gate=state.answer_gate,
-            original_answer_text=state.original_answer,
-            answer_validation=state.answer_validation,
-            context_summary=_context_summary(state),
-            indepth_temporal_gate=state.indepth_gate,
-            final_references=state.references,
-            sampling={
-                "answer_temperature": sampling["answer_temperature"],
-                "synth_temperature": sampling["answer_temperature"],
-                "synth_temperature_floor": sampling["answer_temperature"],
-                "synth_temperature_source": (
-                    "level_knob"
-                    if "temperature" in request.profile.knobs.get("answer", {})
-                    else "request_or_default"
-                ),
-            },
-        )
+        write_execution_trace()
+    except asyncio.CancelledError:
+        record_stage_timing("cancelled")
+        write_execution_trace()
+        raise
     except ContextSourceError:
+        record_stage_timing("failed")
+        write_execution_trace()
         raise
     except Exception as exc:
+        record_stage_timing("failed")
+        state.steps.append(
+            {
+                "role": "pipeline_error",
+                "error": type(exc).__name__,
+            }
+        )
+        if product and state.answer_emitted and (
+            state.stable_answer_snapshot or state.answer_text.strip()
+        ):
+            _restore_stable_answer(state)
+            note = "The hub could not safely complete the remaining checks."
+            state.answer_conf = {"level": "red", "note": note}
+            prior_validation = state.answer_validation or {}
+            state.answer_validation = stages._answer_validation_wire(
+                "needs_review",
+                summary=note,
+                issues=list(prior_validation.get("issues") or []),
+                original_answer=prior_validation.get("originalAnswer"),
+            )
+            state.indepth_error = "In-Depth was not generated."
+            state.indepth_conf = {"level": "red", "note": state.indepth_error}
+            payload = _stream_payload(
+                state, request, in_depth=_in_depth_payload(state)
+            )
+            write_execution_trace(answer_text=state.answer_text)
+            yield "done", payload
+            return
         fallback = stages._fallback_envelope(
             "I could not produce a complete answer for this turn. Please try again."
         )
@@ -1263,13 +2219,7 @@ async def _execute_stages(
                 "level": "red",
                 "note": "The hub could not safely complete the configured stages.",
             }
-            state.steps.append(
-                {
-                    "role": "pipeline_error",
-                    "error": type(exc).__name__,
-                    "temporal_gate": fallback_gate,
-                }
-            )
+            state.steps[-1]["temporal_gate"] = fallback_gate
             payload["temporalGate"] = fallback_gate
             payload["answerValidation"] = stages._answer_validation_wire(
                 "needs_review",
@@ -1280,60 +2230,75 @@ async def _execute_stages(
                 "answer": "",
                 "error": "In-Depth was not generated.",
             }
-            stages._write_trace(
-                request.profile.id,
-                state.messages,
-                orchestrator=request.profile.models.get("orchestrator"),
-                expert=request.profile.models.get("expert"),
-                synthesizer=request.profile.models.get("answer"),
-                validator=request.profile.models.get("review"),
-                steps=state.steps,
-                answer_confidence=state.answer_conf,
-                answer_text=str(payload.get("answer") or ""),
-                temporal_facts=state.temporal_facts,
-                temporal_gate=fallback_gate,
-                context_summary=_context_summary(state),
-            )
+            write_execution_trace(answer_text=str(payload.get("answer") or ""))
             yield "done", json.dumps(payload)
         else:
             yield "result", fallback
-    finally:
-        if budget_token is not None:
-            stages.reset_chat_budget(budget_token)
+
+
+def _chat_budget_policy(
+    request: ExecutionRequest,
+) -> Optional[stages.ChatBudgetPolicy]:
+    if not request.profile.exact_tokenizer:
+        return None
+    return stages.ChatBudgetPolicy(
+        counter=request.token_counter or RouterTokenCounter(),
+        context_window=request.profile.context_window,
+        reserved_output_tokens=request.profile.reserved_output_tokens,
+    )
 
 
 class StageEngine:
     """Single owner of profile event execution and blocking event drain."""
 
     async def events(self, request: ExecutionRequest) -> AsyncIterator[Tuple[str, str]]:
-        queue: asyncio.Queue = asyncio.Queue()
-
-        async def produce() -> None:
-            try:
-                async for event in _execute_stages(request):
-                    await queue.put(("item", event))
-            except BaseException as error:
-                await queue.put(("error", error))
-            finally:
-                await queue.put(("done", None))
-
-        producer = asyncio.create_task(produce())
+        cancelled = False
+        budget_policy = _chat_budget_policy(request)
+        router_slot_evidence = stages.RouterSlotEvidence()
+        events = _execute_stages(request, budget_policy).__aiter__()
         try:
             while True:
-                kind, value = await queue.get()
-                if kind == "item":
-                    yield value
-                elif kind == "error":
-                    raise value
-                else:
+                router_slot_token = stages.activate_router_slot_evidence(
+                    router_slot_evidence
+                )
+                budget_token = (
+                    stages.activate_chat_budget(budget_policy)
+                    if budget_policy is not None
+                    else None
+                )
+                try:
+                    event = await events.__anext__()
+                except StopAsyncIteration:
                     return
+                finally:
+                    if budget_token is not None:
+                        stages.reset_chat_budget(budget_token)
+                    stages.reset_router_slot_evidence(router_slot_token)
+                yield event
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
         finally:
-            if not producer.done():
-                producer.cancel()
+            router_slot_token = stages.activate_router_slot_evidence(
+                router_slot_evidence
+            )
             try:
-                await producer
-            except BaseException:
-                pass
+                await events.aclose()
+            finally:
+                if cancelled:
+                    stages._write_cancellation_trace(
+                        request.profile.id,
+                        [dict(message) for message in request.messages],
+                        router_lock_released=router_slot_evidence.fully_released,
+                        router_slot_evidence=router_slot_evidence.snapshot(),
+                    )
+                stages.reset_router_slot_evidence(router_slot_token)
+                if (
+                    request.token_counter is None
+                    and budget_policy is not None
+                    and isinstance(budget_policy.counter, RouterTokenCounter)
+                ):
+                    await budget_policy.counter.aclose()
 
     async def drain(self, request: ExecutionRequest) -> str:
         result: Optional[str] = None
@@ -1348,14 +2313,20 @@ class StageEngine:
             return result
         final_payload = json.loads(result or "{}")
         references = final_payload.get("references") or []
+        answer_citations = [
+            reference.get("index")
+            for reference in references
+            if isinstance(reference, dict)
+            and isinstance(reference.get("index"), int)
+            and any(
+                isinstance(usage, dict)
+                and usage.get("location") in {"answer", "block"}
+                for usage in (reference.get("usage") or [])
+            )
+        ]
         output: Dict[str, Any] = {
             "answer": final_payload.get("answer") or "",
-            "citations": [
-                reference.get("index")
-                for reference in references
-                if isinstance(reference, dict)
-                and isinstance(reference.get("index"), int)
-            ],
+            "citations": answer_citations,
             "references": references,
             "blocks": final_payload.get("blocks") or [],
         }

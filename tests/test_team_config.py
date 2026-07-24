@@ -8,15 +8,31 @@ from server import levels_loader, team
 def test_profile_ids_are_unique_and_include_supported_topologies():
     ids = levels_loader.profile_ids()
     assert len(ids) == len(set(ids))
-    assert {"med-agent-team-med", "single-e4b-checked", "team-med-checked"} <= set(ids)
+    assert {
+        "single-e2b-checked",
+        "single-e4b-checked",
+        "team-med-checked",
+    } <= set(ids)
 
 
 def test_configured_team_profile_resolves_explicit_roles_and_stages():
-    profile = levels_loader.get_profile("med-agent-team-med")
+    profile = levels_loader.get_profile("team-med-checked")
     assert profile.topology == "team"
     assert profile.models["orchestrator"] == "gemma-e4b-q8"
     assert profile.models["answer"] == "qwen2.5-14b"
-    assert profile.stages == ("context", "gather", "answer", "gate", "indepth")
+    assert profile.stages == (
+        "context",
+        "gather",
+        "answer",
+        "gate",
+        "resolve_refs",
+        "review",
+        "gate",
+        "final_resolve_refs",
+        "ground_verdicts",
+        "indepth",
+        "indepth_gate",
+    )
 
 
 def test_unknown_profile_fails_with_structured_model_not_found():
@@ -28,8 +44,8 @@ def test_unknown_profile_fails_with_structured_model_not_found():
 def test_expert_role_controls_tool_availability():
     names_with = [tool["function"]["name"] for tool in team._tool_definitions(True)]
     names_without = [tool["function"]["name"] for tool in team._tool_definitions(False)]
-    assert "medical_expert" in names_with
-    assert names_without == ["kb_search"]
+    assert names_with == ["medical_expert"]
+    assert names_without == []
 
 
 @pytest.mark.parametrize("writer", ["mistral-nemo-12b-q8", "qwen3.6-35b"])
@@ -92,9 +108,9 @@ def test_product_single_profile_has_no_fake_orchestrator_and_correct_order():
 
 def test_grounding_is_after_review_and_final_reference_resolution():
     # Required order: review -> final_resolve_refs -> ground_verdicts.
-    plan = levels_loader.get_stage_plan("single-12b-checked")
-    assert plan.stages.index("review") < plan.stages.index("final_resolve_refs")
-    assert plan.stages.index("final_resolve_refs") < plan.stages.index(
+    profile = levels_loader.get_profile("single-12b-checked")
+    assert profile.stages.index("review") < profile.stages.index("final_resolve_refs")
+    assert profile.stages.index("final_resolve_refs") < profile.stages.index(
         "ground_verdicts"
     )
 

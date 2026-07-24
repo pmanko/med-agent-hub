@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 import uuid
 from dataclasses import replace
@@ -39,7 +40,8 @@ class ChatCompletionRequest(BaseModel):
     patient: Optional[str] = None
 
 
-def _served_backend_models() -> set[str]:
+def _served_backend_models() -> Optional[set[str]]:
+    """Return the router catalog, or ``None`` when discovery itself fails."""
     headers = {}
     if llm_config.api_key:
         headers["Authorization"] = f"Bearer {llm_config.api_key}"
@@ -56,15 +58,17 @@ def _served_backend_models() -> set[str]:
             if item.get("id")
         }
     except Exception:
-        return set()
+        return None
 
 
 @router.get("/v1/models")
 def list_models() -> Dict[str, Any]:
     created = int(time.time())
-    served = _served_backend_models()
+    discovered = _served_backend_models()
+    backend_reachable = discovered is not None
+    served = discovered or set()
     profiles = [get_profile(profile_id) for profile_id in profile_ids()]
-    data = []
+    readiness = []
     for profile in profiles:
         missing = [
             model
@@ -73,15 +77,37 @@ def list_models() -> Dict[str, Any]:
         ]
         unavailable_reasons = (
             ("model_backend_unreachable",)
-            if not served
+            if not backend_reachable
             else tuple(f"model_not_loaded:{model}" for model in missing)
         )
+        readiness.append((profile, not missing, unavailable_reasons))
+
+    available_products = [
+        profile
+        for profile, available, _reasons in readiness
+        if available and profile.visibility == "product"
+    ]
+    configured_default = next(
+        (profile for profile in available_products if profile.default), None
+    )
+    effective_default = configured_default or min(
+        available_products,
+        key=lambda profile: (profile.selection_priority, profile.id),
+        default=None,
+    )
+
+    data = []
+    for profile, available, unavailable_reasons in readiness:
         data.append(
             {
                 **profile_metadata(
                     profile,
-                    available=not missing,
+                    available=available,
                     unavailable_reasons=unavailable_reasons,
+                    effective_default=(
+                        effective_default is not None
+                        and profile.id == effective_default.id
+                    ),
                 ),
                 "object": "model",
                 "created": created,
@@ -107,8 +133,25 @@ def _request_for(req: ChatCompletionRequest, profile: Profile) -> ExecutionReque
     )
 
 
-async def _content_for(req: ChatCompletionRequest) -> str:
-    return await drain_profile(_request_for(req, get_profile(req.model)))
+def _require_product_profile(req: ChatCompletionRequest, profile: Profile) -> None:
+    """Keep product clients on complete, safety-enforced profile plans.
+
+    Direct hub clients may intentionally use low-level legs. Product relays mark
+    their request explicitly so an arbitrary client-supplied model id cannot turn a
+    product Answer into an experimental ``off``/``warn`` execution.
+    """
+    product_request = bool((req.context or {}).get("require_product_profile"))
+    if product_request and (
+        profile.visibility != "product" or profile.output_mode != "product"
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "product_profile_required",
+                "model": req.model,
+                "message": "This client accepts configured product profiles only.",
+            },
+        )
 
 
 def _completion_envelope(model: str, content: str) -> Dict[str, Any]:
@@ -149,7 +192,15 @@ def _sse_stream(model: str, content: str):
     yield "data: [DONE]\n\n"
 
 
-_SSE_HEARTBEAT_INTERVAL_S = 10.0
+def _heartbeat_interval() -> float:
+    try:
+        configured = float(os.environ.get("HUB_SSE_HEARTBEAT_SECONDS", "0.5"))
+    except ValueError:
+        configured = 0.5
+    return max(0.1, configured)
+
+
+_SSE_HEARTBEAT_INTERVAL_S = _heartbeat_interval()
 
 
 def _named_sse(gen, interval_s: float = _SSE_HEARTBEAT_INTERVAL_S):
@@ -245,6 +296,7 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
     except ModelNotFoundError as error:
         raise _model_error(error) from error
 
+    _require_product_profile(req, profile)
     execution = _request_for(req, profile)
     if req.stream and profile.staged:
         execution = replace(execution, is_disconnected=request.is_disconnected)

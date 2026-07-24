@@ -1,7 +1,8 @@
 # Clinical knowledge-base seed
 
-`corpus.jsonl` is a small, hand-curated seed of reference snippets the Med Agent
-Team may consult via the `kb_search` tool (`server/kb.py`). It is **demo-grade**:
+`corpus.jsonl` is a small, hand-curated seed used by the optional
+`StaticKnowledgeSource` context adapter. Matching rows enter the common evidence ledger as
+numbered `KnowledgeReference` records. It is **demo-grade**:
 enough well-established facts to prove the retrieve-and-ground path, not a
 comprehensive corpus.
 
@@ -45,5 +46,5 @@ BM25, keyword-overlap fallback) — edit this file and restart to pick up change
 
 Rigorous corpus acquisition — page-anchor provenance, verified terminology
 licensing, broader sources, and OpenMRS-contextualized (PHI-free aggregate)
-content — is feature **F009**. KB facts are attributed inline in prose by the
-synthesizer and kept **out of** the integer `citations` array (chart-records-only).
+content — is feature **F009**. Displayed KB facts cite their numbered
+`KnowledgeReference` records and retain the source metadata in the evidence layer.

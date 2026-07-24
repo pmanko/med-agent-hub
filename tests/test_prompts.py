@@ -17,7 +17,13 @@ from unittest.mock import patch
 import pytest
 
 from server import prompt_loader, team
-from tests.factories import run_profile, team_profile
+from tests.factories import (
+    TEST_ANSWER_MODEL,
+    TEST_EXPERT_MODEL,
+    TEST_ORCHESTRATOR_MODEL,
+    run_profile,
+    team_profile,
+)
 
 PROMPTS_DIR = Path(team.__file__).parent / "prompts"
 
@@ -41,10 +47,10 @@ MESSAGES = [
 
 def _profile():
     return team_profile(
-        orchestrator=team.llm_config.orchestrator_model,
-        expert=team.llm_config.med_model,
-        answer=team.llm_config.synthesizer_model,
-        indepth=team.llm_config.synthesizer_model,
+        orchestrator=TEST_ORCHESTRATOR_MODEL,
+        expert=TEST_EXPERT_MODEL,
+        answer=TEST_ANSWER_MODEL,
+        indepth=TEST_ANSWER_MODEL,
         output="combined",
     )
 
@@ -135,11 +141,87 @@ def test_synthesis_prompts_instruct_on_temporal_facts_sidecar():
         "synthesis-date-output-contract",
     ):
         text = prompt_loader.load_prompt(name)
-        assert "temporal_facts.v1" in text
+        assert "temporal_facts" in text
+        assert "temporal_facts.v" not in text
         assert "reference_date" in text
         assert "date_ledger" in text
         assert "DYYYY_MM_DD" in text
         assert "Do not infer a trend from one point" in text
+
+
+def test_indepth_prompt_matches_evidence_gate_contract():
+    text = prompt_loader.load_prompt("synthesis-indepth")
+
+    assert "directly relevant to the question and direct answer" in text
+    assert "the cited source set must support the entire displayed claim" in text
+    assert "Do not use a patient chart citation as support for outside medical knowledge" in text
+    assert "If no supporting KnowledgeReference record is present" in text
+    assert "asks only for a factual point lookup" in text
+    assert "first confirm and use the record already cited by the DIRECT ANSWER" in text
+    assert "explicitly asks for a trend, comparison, interpretation, or guidance" in text
+    assert "the point-lookup limit does not apply" in text
+    assert "Do not introduce a trend, comparison, different measurement" in text
+    assert "A claim may cover one evidence record or one concept series" in text
+    assert "do not bundle weight, blood pressure, pulse" in text
+    assert "put exactly that one [N] citation at the end" in text
+    assert "cite every chart endpoint or supporting KnowledgeReference it needs" in text
+
+
+@pytest.mark.parametrize(
+    "name",
+    (
+        "validation-indepth",
+        "validation-rewrite-indepth",
+    ),
+)
+def test_indepth_review_prompts_enforce_the_same_source_support_contract(name):
+    text = prompt_loader.load_prompt(name)
+
+    assert "the cited source set must support the entire displayed claim" in text
+    assert "outside medical knowledge requires a cited KnowledgeReference" in text
+    assert "Do not KEEP a claim merely because the guidance sounds standard" in text
+
+
+def test_combined_validator_uses_the_same_indepth_source_support_contract():
+    text = prompt_loader.load_prompt("validation")
+
+    assert "the cited source set must support the entire displayed claim" in text
+    assert "outside medical knowledge requires a supporting source" in text
+
+
+def test_indepth_resynthesis_feedback_uses_the_same_source_contract():
+    feedback = team._indepth_feedback(
+        {"drop": [1], "issues": "The cited chart record does not state the guidance."},
+        ["Unsupported guidance [1]."],
+    )
+
+    assert "supported by its cited numbered source set" in feedback
+    assert "KnowledgeReference" in feedback
+    assert "patient chart citation" in feedback
+
+
+def test_product_answer_prompt_distinguishes_patient_records_from_knowledge_sources():
+    text = prompt_loader.load_prompt("synthesis-answer")
+
+    assert "Patient facts must come from patient records" in text
+    assert "KnowledgeReference" in text
+
+
+@pytest.mark.parametrize(
+    "name", ("synthesis", "synthesis-chartsearchai", "synthesis-coverage")
+)
+def test_raw_batch_prompts_do_not_emit_ungrounded_knowledge_citations(name):
+    text = prompt_loader.load_prompt(name)
+
+    assert "ignore records labeled KnowledgeReference" in text
+
+
+def test_direct_answer_prompt_requires_minimal_explicit_prose_citations():
+    text = prompt_loader.load_prompt("synthesis-answer")
+
+    assert '"citations" must contain exactly the distinct [N] markers' in text
+    assert "smallest set of records that directly states the claim" in text
+    assert "Do not include every record from the same date or encounter" in text
 
 
 def test_team_sends_the_synthesis_prompts_to_the_model():

@@ -8,8 +8,15 @@ asserts which model each compiled stage targets
 import asyncio
 import json
 
+import pytest
+
 from server import config, team
-from tests.factories import run_profile, team_profile
+from tests.factories import (
+    TEST_EXPERT_MODEL,
+    TEST_ORCHESTRATOR_MODEL,
+    run_profile,
+    team_profile,
+)
 
 
 def _fake_chat_factory(calls):
@@ -54,7 +61,7 @@ def test_synthesis_uses_synthesizer_model_loop_uses_orchestrator(monkeypatch):
     monkeypatch.setattr(team, "_chat", _fake_chat_factory(calls))
     profile = team_profile(
         orchestrator="ORCH-MODEL",
-        expert=team.llm_config.med_model,
+        expert=TEST_EXPERT_MODEL,
         answer="SYNTH-MODEL",
         indepth="SYNTH-MODEL",
         output="combined",
@@ -104,7 +111,7 @@ def test_synthesis_applies_anti_degeneration_params(monkeypatch):
     monkeypatch.setattr(team, "_chat", fake_chat)
     profile = team_profile(
         orchestrator="ORCH-MODEL",
-        expert=team.llm_config.med_model,
+        expert=TEST_EXPERT_MODEL,
         answer="SYNTH-MODEL",
         indepth="SYNTH-MODEL",
         output="combined",
@@ -154,7 +161,7 @@ def test_synthesis_reads_reasoning_content_when_content_empty(monkeypatch):
     monkeypatch.setattr(team, "_chat", fake_chat)
     profile = team_profile(
         orchestrator="ORCH-MODEL",
-        expert=team.llm_config.med_model,
+        expert=TEST_EXPERT_MODEL,
         answer="SYNTH-MODEL",
         indepth="SYNTH-MODEL",
         output="combined",
@@ -196,8 +203,8 @@ def test_synthesis_normalizes_literal_newline_and_reconciles_citations(monkeypat
 
     monkeypatch.setattr(team, "_chat", fake_chat)
     profile = team_profile(
-        orchestrator=team.llm_config.orchestrator_model,
-        expert=team.llm_config.med_model,
+        orchestrator=TEST_ORCHESTRATOR_MODEL,
+        expert=TEST_EXPERT_MODEL,
         answer="S",
         indepth="S",
         output="combined",
@@ -237,3 +244,205 @@ def test_normalize_envelope_strips_backslash_run_artifacts():
     assert "**In Depth**" in out["answer"]
     assert "The patient is on lamivudine" in out["answer"]  # content preserved
     assert out["citations"] == [3]  # inline [N] reconcile still works
+
+
+def test_product_citation_contract_uses_explicit_markers_over_declared_extras():
+    answer, citations, issues = team._enforce_product_citation_contract(
+        "The documented visit was on 2006-06-06 [4].",
+        [4, 1, 2, 3, 5],
+        [],
+    )
+
+    assert answer == "The documented visit was on 2006-06-06 [4]."
+    assert citations == [4]
+    assert issues == []
+
+
+def test_product_citation_contract_canonicalizes_grouped_numeric_markers():
+    answer, citations, issues = team._enforce_product_citation_contract(
+        "The chart documents three medications [2, 3, 4], and WHO guidance applies [116].",
+        [2, 3, 4, 116],
+        [],
+    )
+
+    assert answer == (
+        "The chart documents three medications [2][3][4], and WHO guidance applies [116]."
+    )
+    assert citations == [2, 3, 4, 116]
+    assert issues == []
+
+
+def test_product_citation_contract_scopes_one_declared_source_to_prose():
+    answer, citations, issues = team._enforce_product_citation_contract(
+        "The documented visit was on 2006-06-06.", [4], []
+    )
+
+    assert answer == "The documented visit was on 2006-06-06 [4]."
+    assert citations == [4]
+    assert issues == []
+
+
+def test_product_citation_contract_does_not_scope_one_source_over_two_claims():
+    answer, citations, issues = team._enforce_product_citation_contract(
+        "The visit was on 2006-06-06. The weight was 71 kg.", [4], []
+    )
+
+    assert answer == "The visit was on 2006-06-06. The weight was 71 kg."
+    assert citations == [4]
+    assert issues[0]["id"] == "citation_scope"
+
+
+def test_product_citation_contract_scopes_multi_source_set_to_one_prose_claim():
+    answer, citations, issues = team._enforce_product_citation_contract(
+        "The documented visit was on 2006-06-06.", [4, 1, 2], []
+    )
+
+    assert answer == "The documented visit was on 2006-06-06 [4][1][2]."
+    assert citations == [4, 1, 2]
+    assert issues == []
+
+
+@pytest.mark.parametrize(
+    "answer",
+    (
+        "The visit was on 2006-06-06. The weight was 71 kg.",
+        "The visit was on 2006-06-06; the weight was 71 kg.",
+        "The visit was on 2006-06-06, and the weight was 71 kg.",
+        "The visit was on 2006-06-06, but the weight was 71 kg.",
+        "The visit was on 2006-06-06, for the weight was 71 kg.",
+        "The visit was on 2006-06-06, nor was the weight 71 kg.",
+        "The visit was on 2006-06-06, or the weight was 71 kg.",
+        "The visit was on 2006-06-06, so the weight was 71 kg.",
+        "The visit was on 2006-06-06, yet the weight was 71 kg.",
+    ),
+)
+def test_product_citation_contract_blocks_multi_source_set_over_two_claims(answer):
+    answer, citations, issues = team._enforce_product_citation_contract(
+        answer, [4, 1, 2], []
+    )
+
+    assert citations == [4, 1, 2]
+    assert issues[0]["id"] == "citation_scope"
+    assert issues[0]["severity"] == "block"
+
+
+def test_product_table_contract_repairs_alternating_cells_by_declared_columns():
+    blocks = [
+        {
+            "kind": "table",
+            "title": "Weights",
+            "columns": [
+                {"key": "date", "label": "Date"},
+                {"key": "weight", "label": "Weight"},
+            ],
+            "rows": [
+                {"cells": {"refs": {"text": "2026-01-01", "refs": [7]}}},
+                {"cells": {"refs": {"text": "71.0 kg", "refs": [7]}}},
+                {"cells": {"refs": {"text": "2026-02-01", "refs": [8]}}},
+                {"cells": {"refs": {"text": "70.0 kg", "refs": [8]}}},
+            ],
+        }
+    ]
+
+    normalized, issues = team._normalize_product_blocks(blocks)
+
+    assert issues == []
+    assert normalized[0]["rows"] == [
+        {
+            "cells": {
+                "date": {"text": "2026-01-01", "refs": [7]},
+                "weight": {"text": "71.0 kg", "refs": [7]},
+            }
+        },
+        {
+            "cells": {
+                "date": {"text": "2026-02-01", "refs": [8]},
+                "weight": {"text": "70.0 kg", "refs": [8]},
+            }
+        },
+    ]
+
+
+def test_product_table_contract_drops_an_unrepairable_block():
+    blocks = [
+        {
+            "kind": "table",
+            "title": "Weights",
+            "columns": [
+                {"key": "date", "label": "Date"},
+                {"key": "weight", "label": "Weight"},
+            ],
+            "rows": [
+                {"cells": {"unexpected": {"text": "2026-01-01", "refs": [7]}}}
+            ],
+        }
+    ]
+
+    normalized, issues = team._normalize_product_blocks(blocks)
+
+    assert normalized == []
+    assert issues[0]["id"] == "table_contract"
+    assert issues[0]["severity"] == "block"
+
+
+def test_product_table_contract_repairs_columns_with_no_content_format_to_verify():
+    # cell_matches_column only knows how to verify date/weight-shaped text; a "Medication" column
+    # (or Dose, Route, Frequency, ...) has no regex-verifiable format at all. Citation consistency
+    # (every cell in the group cites the same source) is the check that generalizes across column
+    # types — a table must not be dropped just because its columns aren't date/weight.
+    blocks = [
+        {
+            "kind": "table",
+            "title": "Medications",
+            "columns": [
+                {"key": "medication", "label": "Medication"},
+                {"key": "dose", "label": "Dose"},
+            ],
+            "rows": [
+                {"cells": {"refs": {"text": "Nevirapine", "refs": [1]}}},
+                {"cells": {"refs": {"text": "200mg", "refs": [1]}}},
+                {"cells": {"refs": {"text": "Lamivudine", "refs": [2]}}},
+                {"cells": {"refs": {"text": "150mg", "refs": [2]}}},
+            ],
+        }
+    ]
+
+    normalized, issues = team._normalize_product_blocks(blocks)
+
+    assert issues == []
+    assert normalized[0]["rows"] == [
+        {
+            "cells": {
+                "medication": {"text": "Nevirapine", "refs": [1]},
+                "dose": {"text": "200mg", "refs": [1]},
+            }
+        },
+        {
+            "cells": {
+                "medication": {"text": "Lamivudine", "refs": [2]},
+                "dose": {"text": "150mg", "refs": [2]},
+            }
+        },
+    ]
+
+
+def test_product_table_contract_does_not_guess_reversed_flat_cell_order():
+    blocks = [
+        {
+            "kind": "table",
+            "title": "Weights",
+            "columns": [
+                {"key": "date", "label": "Date"},
+                {"key": "weight", "label": "Weight"},
+            ],
+            "rows": [
+                {"cells": {"refs": {"text": "71.0 kg", "refs": [7]}}},
+                {"cells": {"refs": {"text": "2026-01-01", "refs": [7]}}},
+            ],
+        }
+    ]
+
+    normalized, issues = team._normalize_product_blocks(blocks)
+
+    assert normalized == []
+    assert issues[0]["id"] == "table_contract"

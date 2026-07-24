@@ -12,6 +12,8 @@ Run: pytest tests/test_validator_rewrite.py
 import asyncio
 import json
 
+import pytest
+
 from server import team
 from tests.factories import make_profile, run_profile, team_profile
 
@@ -21,6 +23,15 @@ _MESSAGES = [
     {"role": "user", "content": "the question"},
 ]
 _RF = {"type": "json_schema", "json_schema": {"name": "chart_answer"}}
+
+
+@pytest.fixture(autouse=True)
+def _restore_chat_after_test():
+    original_chat = team._chat
+    try:
+        yield
+    finally:
+        team._chat = original_chat
 
 
 def _factory(calls, rewrite_verdicts):
@@ -66,7 +77,7 @@ def _factory(calls, rewrite_verdicts):
                 else {"answer_ok": True}
             )
             state["rw"] += 1
-            return {"content": json.dumps(v)}
+            return {"content": v if isinstance(v, str) else json.dumps(v)}
         if name == "indepth_verdict":
             return {"content": json.dumps({"drop": [], "issues": ""})}
         return {"content": "", "tool_calls": None}
@@ -83,18 +94,22 @@ def _counts(calls):
 
 def _run(rewrite_verdicts, **kw):
     calls = []
-    team._chat = _factory(calls, rewrite_verdicts)
-    profile = team_profile(
-        orchestrator="ORCH",
-        answer="SYNTH",
-        review="VALIDATOR",
-        indepth="SYNTH",
-        output="combined",
-        review_prompt="validation-rewrite",
-        policies={"review_loops": int(kw.get("validator_max_loops", 1))},
-    )
-    out = asyncio.run(run_profile(profile, _MESSAGES, response_format=_RF))
-    return calls, json.loads(out)
+    original_chat = team._chat
+    try:
+        team._chat = _factory(calls, rewrite_verdicts)
+        profile = team_profile(
+            orchestrator="ORCH",
+            answer="SYNTH",
+            review="VALIDATOR",
+            indepth="SYNTH",
+            output="combined",
+            review_prompt="validation-rewrite",
+            policies={"review_loops": int(kw.get("validator_max_loops", 1))},
+        )
+        out = asyncio.run(run_profile(profile, _MESSAGES, response_format=_RF))
+        return calls, json.loads(out)
+    finally:
+        team._chat = original_chat
 
 
 def _err(wrong, chart, fix):
@@ -124,24 +139,27 @@ def _run_review(
     rewrite_verdicts, *, answer="The patient is taking aspirin [1].", blocks=None
 ):
     calls = []
-    team._chat = _factory(calls, rewrite_verdicts)
-    profile = make_profile(
-        topology="leg",
-        stages=("context", "review"),
-        models={"review": "REVIEWER"},
-        prompts={"review": "validation-rewrite"},
-        output="review",
-        capabilities={"validation": True},
-    )
-    out = asyncio.run(
-        run_profile(
-            profile,
-            _review_messages(answer=answer, blocks=blocks),
-            response_format=_RF,
-            context={"temporal": False},
+    original_chat = team._chat
+    try:
+        team._chat = _factory(calls, rewrite_verdicts)
+        profile = make_profile(
+            topology="leg",
+            stages=("context", "review"),
+            models={"review": "REVIEWER"},
+            prompts={"review": "validation-rewrite"},
+            output="review",
         )
-    )
-    return calls, json.loads(out)
+        out = asyncio.run(
+            run_profile(
+                profile,
+                _review_messages(answer=answer, blocks=blocks),
+                response_format=_RF,
+                context={"temporal": False},
+            )
+        )
+        return calls, json.loads(out)
+    finally:
+        team._chat = original_chat
 
 
 def test_answer_review_clean_pass_returns_checked_metadata():
@@ -186,6 +204,97 @@ def test_answer_review_preserves_original_when_no_safe_patch():
             },
         ]
     )
+    assert env["answer"] == "The patient is taking aspirin [1]."
+    assert env["answerValidation"]["status"] == "needs_review"
+    assert env["confidence"]["answer"]["level"] == "red"
+
+
+def test_answer_review_ignores_an_error_whose_wrong_text_is_not_in_the_draft():
+    calls, env = _run_review(
+        [
+            {
+                "answer_ok": False,
+                "errors": [
+                    _err(
+                        "lisinopril on 2 026-01-07",
+                        "The chart says lisinopril on 2026-01-07 [1].",
+                        "lisinopril on 2026-01-07",
+                    )
+                ],
+                "corrected_answer": "The patient is taking lisinopril [1].",
+            }
+        ],
+        answer="The patient is taking aspirin [1].",
+    )
+
+    assert env["answer"] == "The patient is taking aspirin [1]."
+    assert env["answerValidation"]["status"] == "checked"
+    assert env["answerValidation"]["issues"] == []
+    assert [name for _model, name in calls].count("rewrite_verdict") == 1
+
+
+def test_answer_review_does_not_apply_a_mixed_localized_and_unlocalized_rewrite():
+    _calls, env = _run_review(
+        [
+            {
+                "answer_ok": False,
+                "errors": [
+                    _err("aspirin", "Lisinopril is active [1].", "lisinopril"),
+                    _err("warfarin", "No warfarin record exists.", "remove"),
+                ],
+                "corrected_answer": "The patient is taking lisinopril [1].",
+            }
+        ],
+        answer="The patient is taking aspirin [1].",
+    )
+
+    assert env["answer"] == "The patient is taking aspirin [1]."
+    assert env["answerValidation"]["status"] == "needs_review"
+    assert len(env["answerValidation"]["issues"]) == 1
+
+
+def test_answer_review_derives_failure_from_localized_errors_when_flag_is_inconsistent():
+    _calls, env = _run_review(
+        [
+            {
+                "answer_ok": True,
+                "errors": [
+                    _err("aspirin", "Lisinopril is active [1].", "lisinopril")
+                ],
+                "corrected_answer": "",
+            }
+        ],
+        answer="The patient is taking aspirin [1].",
+    )
+
+    assert env["answer"] == "The patient is taking aspirin [1]."
+    assert env["answerValidation"]["status"] == "needs_review"
+    assert len(env["answerValidation"]["issues"]) == 1
+
+
+@pytest.mark.parametrize("malformed_verdict", ["{not-json", []])
+def test_answer_review_does_not_mark_malformed_reviewer_output_checked(
+    malformed_verdict,
+):
+    _calls, env = _run_review([malformed_verdict])
+
+    assert env["answer"] == "The patient is taking aspirin [1]."
+    assert env["answerValidation"]["status"] == "unavailable"
+    assert env["confidence"]["answer"]["level"] == "yellow"
+
+
+def test_answer_review_does_not_adopt_correction_when_recheck_is_malformed():
+    _calls, env = _run_review(
+        [
+            {
+                "answer_ok": False,
+                "errors": [_err("aspirin", "lisinopril [1]", "lisinopril")],
+                "corrected_answer": "The patient is taking lisinopril [1].",
+            },
+            "{not-json",
+        ]
+    )
+
     assert env["answer"] == "The patient is taking aspirin [1]."
     assert env["answerValidation"]["status"] == "needs_review"
     assert env["confidence"]["answer"]["level"] == "red"
@@ -248,7 +357,6 @@ def test_answer_review_rewrite_reintroducing_temporal_error_is_caught():
         models={"review": "REVIEWER"},
         prompts={"review": "validation-rewrite"},
         output="review",
-        capabilities={"validation": True},
         policies={"temporal_gate": "enforce", "anchor": "2026-06-20"},
     )
     out = asyncio.run(
@@ -357,7 +465,7 @@ def test_adopts_corrected_answer_without_regenerating():
         [
             {
                 "answer_ok": False,
-                "errors": [_err("65 kg", "weight 71 kg on 2026-01-26 [15]", "71 kg")],
+                "errors": [_err("ans-v0", "weight 71 kg on 2026-01-26 [15]", "71 kg")],
                 "corrected_answer": "The patient weighs 71 kg [15].",
             },
             {"answer_ok": True, "errors": [], "corrected_answer": ""},
@@ -383,7 +491,7 @@ def test_never_regress_reverts_to_original_when_rewrite_is_worse():
         [
             {
                 "answer_ok": False,
-                "errors": [_err("65 kg", "weight 71 kg [15]", "71 kg")],
+                "errors": [_err("ans-v0", "weight 71 kg [15]", "71 kg")],
                 "corrected_answer": "The patient weighs 71 kg but the HbA1c is 12 and BP 200/130.",
             },
             # re-audit of the rewrite: it introduced NEW errors (2 > the original's 1)
@@ -413,12 +521,15 @@ def test_adopts_improved_but_imperfect_rewrite_as_red():
         [
             {
                 "answer_ok": False,
-                "errors": [_err("a", "x [1]", "a2"), _err("b", "y [2]", "b2")],
+                "errors": [
+                    _err("ans", "x [1]", "a2"),
+                    _err("v0", "y [2]", "b2"),
+                ],
                 "corrected_answer": "improved answer [1] [2]",
             },
             {
                 "answer_ok": False,
-                "errors": [_err("b", "y [2]", "b2")],
+                "errors": [_err("improved", "y [2]", "b2")],
                 "corrected_answer": "improved answer [1] [2]",
             },
         ],
@@ -437,7 +548,7 @@ def test_flag_without_a_rewrite_keeps_original_red():
         [
             {
                 "answer_ok": False,
-                "errors": [_err("65 kg", "weight 71 kg [15]", "71 kg")],
+                "errors": [_err("ans-v0", "weight 71 kg [15]", "71 kg")],
                 "corrected_answer": "",
             },
         ],
