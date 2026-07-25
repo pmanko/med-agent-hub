@@ -37,5 +37,61 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # HUB_BUILD_REVISION must be the real commit: validate_config() rejects
+      # the Dockerfile's "unknown" default, so an image built without it builds
+      # fine and then refuses to start.
       - name: Build image
-        run: docker build .
+        run: |
+          docker build --build-arg HUB_BUILD_REVISION="${GITHUB_SHA}" -t hub-ci-candidate .
+
+      # Building is not evidence the image runs: validate_config() executes at
+      # import, so a container that starts and answers /health is what proves
+      # the packaged configuration is actually serviceable.
+      - name: Verify the image starts and serves /health
+        run: |
+          docker run -d --name hub-smoke -p 8080:8080 hub-ci-candidate
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:8080/health >/dev/null 2>&1; then
+              echo "healthy after ${i}s"
+              docker rm -f hub-smoke >/dev/null
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "image never served /health:" >&2
+          docker logs hub-smoke >&2
+          docker rm -f hub-smoke >/dev/null
+          exit 1
+
+  # Publish so consumers can pin an image instead of vendoring this repo and
+  # building from source. Catalyst's demo stack in particular has no other
+  # reason to require a checkout of the hub.
+  publish:
+    # Only from main: a published tag should always name reviewed, merged code,
+    # and pull requests (especially from forks) cannot push packages anyway.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [unit-and-contract, docker-build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Both tags point at the same image. The commit-SHA tag is the one to
+      # deploy: it is immutable and reproducible, which `latest` is not.
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          build-args: |
+            HUB_BUILD_REVISION=${{ github.sha }}
+          tags: |
+            ghcr.io/${{ github.repository }}:${{ github.sha }}
+            ghcr.io/${{ github.repository }}:latest
