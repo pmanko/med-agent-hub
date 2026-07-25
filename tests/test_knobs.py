@@ -77,6 +77,7 @@ def test_per_lane_knobs_route_to_each_role(monkeypatch):
     }
     profile = team_profile(
         orchestrator="ORCH",
+        expert="EXPERT",
         answer="SYNTH",
         review="VAL",
         indepth="SYNTH",

@@ -8,10 +8,13 @@ negatives): alias matching (question/answer text, dataset lookups) is WHOLE-WORD
 matching (allergy/condition/active-drug tokens) is substring `in`.
 """
 
+import json
+import math
 import os
 import re
 import threading
 from dataclasses import dataclass, field
+from datetime import date, timedelta
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 _DATASET_PATH = os.environ.get(
@@ -23,11 +26,25 @@ _DATASET_PATH = os.environ.get(
 # same source-format selection the ported Java drug-reference layer offered (ADR Decision 24).
 _SOURCE_FORMAT = os.environ.get("DRUG_SAFETY_SOURCE_FORMAT", "json").strip().lower()
 
+_CROSS_REACTIVITY_PATH = os.environ.get(
+    "DRUG_SAFETY_CROSS_REACTIVITY_PATH",
+    os.path.join(os.path.dirname(__file__), "drug_data", "cross-reactivity-groups.json"),
+)
+
+DEFAULT_WEIGHT_CONCEPT_UUID = "5089AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+DEFAULT_WEIGHT_MAX_AGE_DAYS = 90
+_DISABLED_SENTINEL = "none"
+_KILOGRAM_UNITS = {"kg", "kilogram", "kilograms"}
+
 _ATC_SUBGROUP_PREFIX_LENGTH = 5
 
 # A level-5 ATC substance code is 7 chars: one letter, two digits, two letters, two digits
 # (e.g. M01AE01). Guards against a non-ATC/malformed file turning any 7-char token into a drug.
 _ATC_LEVEL5 = re.compile(r"[A-Z]\d{2}[A-Z]{2}\d{2}")
+# Curated cross-reactivity groups may target ATC levels 2-5, but never the
+# one-letter anatomical level: that would turn one bad value into a very broad
+# clinical match.
+_ATC_GROUP_PREFIX = re.compile(r"[A-Z]\d{2}(?:[A-Z](?:[A-Z](?:\d{2})?)?)?")
 # Parent-group code lengths to try for a substance's drug_class, longest first: level 4, 3, 2.
 _ATC_PARENT_LENGTHS = (5, 4, 3)
 
@@ -49,11 +66,43 @@ TYPE_CONTRAINDICATION = "contraindication"
 
 RESOURCE_TYPE_DRUG_REFERENCE = "drug_reference"
 
+# Honest drug-safety check states (dual-provider-conformance.v1 drug_safety_status): an empty
+# warning list must never be presented as "checked" when the check could not actually run.
+STATUS_CHECKED = "checked"
+STATUS_LIMITED = "limited"
+STATUS_UNAVAILABLE = "unavailable"
+
 
 def _format_number(value: float) -> str:
     if value == int(value):
         return str(int(value))
     return str(value)
+
+
+def _clean_text(value: Any) -> Optional[str]:
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _clean_text_list(values: Any) -> List[str]:
+    if not isinstance(values, list):
+        return []
+    return [cleaned for value in (values or []) if (cleaned := _clean_text(value))]
+
+
+def _finite_number(value: Any) -> float:
+    if isinstance(value, bool):
+        raise ValueError("boolean is not a numeric clinical value")
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError("clinical value must be finite")
+    return parsed
+
+
+def _whole_year(value: Any) -> int:
+    parsed = _finite_number(value)
+    if not parsed.is_integer():
+        raise ValueError("age-band bounds must be whole years")
+    return int(parsed)
 
 
 @dataclass
@@ -89,6 +138,7 @@ class DrugReferenceEntry:
     age_bands: List[AgeBand] = field(default_factory=list)
     interactions: List[Interaction] = field(default_factory=list)
     contraindications: List[Contraindication] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
     source: Optional[str] = None
 
     def normalized_atc_codes(self) -> Set[str]:
@@ -127,30 +177,95 @@ class DrugReferenceEntry:
         return False
 
 
+@dataclass
+class CrossReactivityGroup:
+    """Curated family spanning ATC branches that the ATC hierarchy cannot connect."""
+
+    name: str
+    atc_prefixes: List[str] = field(default_factory=list)
+    note: Optional[str] = None
+
+    def normalized_prefixes(self) -> Set[str]:
+        normalized = {
+            prefix.strip().upper()
+            for prefix in self.atc_prefixes
+            if isinstance(prefix, str) and prefix.strip()
+        }
+        return {prefix for prefix in normalized if _ATC_GROUP_PREFIX.fullmatch(prefix)}
+
+    def contains_code(self, code: Optional[str]) -> bool:
+        if not isinstance(code, str) or not code.strip():
+            return False
+        normalized = code.strip().upper()
+        return any(normalized.startswith(prefix) for prefix in self.normalized_prefixes())
+
+    def contains_entry(self, entry: DrugReferenceEntry) -> bool:
+        return any(self.contains_code(code) for code in entry.normalized_atc_codes())
+
+
 def _entry_from_dict(d: Dict[str, Any]) -> DrugReferenceEntry:
+    age_bands = []
+    for band in d.get("ageBands") or []:
+        if not isinstance(band, dict) or "minYears" not in band or "maxYears" not in band:
+            continue
+        try:
+            parsed = AgeBand(
+                min_years=_whole_year(band["minYears"]),
+                max_years=_whole_year(band["maxYears"]),
+                mg_per_kg_min=_finite_number(band.get("mgPerKgMin", 0.0)),
+                mg_per_kg_max=_finite_number(band.get("mgPerKgMax", 0.0)),
+                max_daily_dose_mg=_finite_number(
+                    band.get("maxDailyDoseMg", 0.0)
+                ),
+            )
+        except (TypeError, ValueError):
+            continue
+        if (
+            parsed.min_years < 0
+            or parsed.max_years < parsed.min_years
+            or parsed.mg_per_kg_min < 0
+            or parsed.mg_per_kg_max < 0
+            or parsed.max_daily_dose_mg < 0
+        ):
+            continue
+        age_bands.append(parsed)
     return DrugReferenceEntry(
-        id=d.get("id"),
-        name=d.get("name"),
-        drug_class=d.get("drugClass"),
-        aliases=list(d.get("aliases") or []),
-        atc_codes=list(d.get("atcCodes") or []),
-        age_bands=[AgeBand(min_years=b["minYears"], max_years=b["maxYears"],
-                            mg_per_kg_min=b.get("mgPerKgMin", 0.0), mg_per_kg_max=b.get("mgPerKgMax", 0.0),
-                            max_daily_dose_mg=b.get("maxDailyDoseMg", 0.0))
-                   for b in (d.get("ageBands") or [])],
-        interactions=[Interaction(token=i.get("token"), atc=i.get("atc"), note=i.get("note"))
-                      for i in (d.get("interactions") or [])],
-        contraindications=[Contraindication(type=c.get("type", ""), token=c.get("token", ""), note=c.get("note"))
-                            for c in (d.get("contraindications") or [])],
-        source=d.get("source"),
+        id=_clean_text(d.get("id")) or "",
+        name=_clean_text(d.get("name")) or "",
+        drug_class=_clean_text(d.get("drugClass")),
+        aliases=_clean_text_list(d.get("aliases")),
+        atc_codes=_clean_text_list(d.get("atcCodes")),
+        age_bands=age_bands,
+        interactions=[
+            Interaction(
+                token=_clean_text(item.get("token")),
+                atc=_clean_text(item.get("atc")),
+                note=_clean_text(item.get("note")),
+            )
+            for item in (d.get("interactions") or [])
+            if isinstance(item, dict)
+        ],
+        contraindications=[
+            Contraindication(
+                type=_clean_text(item.get("type")) or "",
+                token=_clean_text(item.get("token")) or "",
+                note=_clean_text(item.get("note")),
+            )
+            for item in (d.get("contraindications") or [])
+            if isinstance(item, dict)
+        ],
+        warnings=_clean_text_list(d.get("warnings")),
+        source=_clean_text(d.get("source")),
     )
 
 
 class DrugReferenceDataset:
     """Loaded + indexed drug-reference entries. Mirrors DrugReferenceService's query surface."""
 
-    def __init__(self, entries: List[DrugReferenceEntry]):
+    def __init__(self, entries: List[DrugReferenceEntry],
+                 cross_reactivity_groups: Optional[List[CrossReactivityGroup]] = None):
         self.entries = entries
+        self.cross_reactivity_groups = list(cross_reactivity_groups or [])
 
     def find_by_query(self, text: Optional[str]) -> List[DrugReferenceEntry]:
         if not text or not text.strip():
@@ -182,18 +297,63 @@ class DrugReferenceDataset:
                 return e.name
         return upper_code
 
+    def groups_for(self, entry: DrugReferenceEntry) -> List[CrossReactivityGroup]:
+        return [group for group in self.cross_reactivity_groups if group.contains_entry(entry)]
+
+    def shared_group(self, first: DrugReferenceEntry,
+                     second: DrugReferenceEntry) -> Optional[CrossReactivityGroup]:
+        return next((group for group in self.groups_for(first) if group.contains_entry(second)), None)
+
+    def shared_group_for_code(self, entry: DrugReferenceEntry,
+                              code: str) -> Optional[CrossReactivityGroup]:
+        return next((group for group in self.groups_for(entry) if group.contains_code(code)), None)
+
 
 _lock = threading.Lock()
 _dataset: Optional[DrugReferenceDataset] = None
 
 
 def _load_entries(path: str) -> List[DrugReferenceEntry]:
-    import json
-    if not os.path.exists(path):
+    if not path or not os.path.exists(path):
         return []
-    with open(path, "r", encoding="utf-8") as f:
-        raw = json.load(f)
-    return [_entry_from_dict(e) for e in raw.get("entries", [])]
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return []
+    entries: List[DrugReferenceEntry] = []
+    for raw_entry in raw.get("entries", []) if isinstance(raw, dict) else []:
+        if (not isinstance(raw_entry, dict) or not _clean_text(raw_entry.get("id"))
+                or not _clean_text(raw_entry.get("name"))):
+            continue
+        try:
+            entries.append(_entry_from_dict(raw_entry))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return entries
+
+
+def _load_cross_reactivity_groups(path: Optional[str]) -> List[CrossReactivityGroup]:
+    if not path or path.strip().lower() == _DISABLED_SENTINEL or not os.path.exists(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            raw = json.load(handle)
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return []
+    groups: List[CrossReactivityGroup] = []
+    for item in raw.get("groups", []) if isinstance(raw, dict) else []:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name")
+        group = CrossReactivityGroup(
+            name=name.strip() if isinstance(name, str) else "",
+            atc_prefixes=_clean_text_list(item.get("atcPrefixes")),
+            note=_clean_text(item.get("note")),
+        )
+        if group.name and group.normalized_prefixes():
+            groups.append(group)
+    return groups
 
 
 def _load_atc_entries(path: str) -> List[DrugReferenceEntry]:
@@ -250,24 +410,31 @@ def _load_source(path: str, source_format: str) -> List[DrugReferenceEntry]:
     return _load_entries(path)
 
 
-def load_dataset(path: Optional[str] = None, source_format: Optional[str] = None) -> DrugReferenceDataset:
+def load_dataset(path: Optional[str] = None, source_format: Optional[str] = None,
+                 cross_reactivity_path: Optional[str] = None) -> DrugReferenceDataset:
     """Lazy singleton for the default path+format; an explicit path always loads fresh (test seam).
     ``source_format`` selects the adapter (``json``|``atc``); defaults to the DRUG_SAFETY_SOURCE_FORMAT env."""
     fmt = (source_format or _SOURCE_FORMAT or "json").strip().lower()
+    groups_path = _CROSS_REACTIVITY_PATH if cross_reactivity_path is None else cross_reactivity_path
     global _dataset
     if path is not None:
-        return DrugReferenceDataset(_load_source(path, fmt))
+        return DrugReferenceDataset(
+            _load_source(path, fmt), _load_cross_reactivity_groups(groups_path)
+        )
     if _dataset is not None:
         return _dataset
     with _lock:
         if _dataset is None:
-            _dataset = DrugReferenceDataset(_load_source(_DATASET_PATH, fmt))
+            _dataset = DrugReferenceDataset(
+                _load_source(_DATASET_PATH, fmt), _load_cross_reactivity_groups(groups_path)
+            )
     return _dataset
 
 
 @dataclass
 class PatientClinicalContext:
     age_years: Optional[int]
+    weight_kg: Optional[float] = None
     active_drug_names: Set[str] = field(default_factory=set)
     active_drug_atc_codes: Set[str] = field(default_factory=set)
     allergy_tokens: Set[str] = field(default_factory=set)
@@ -317,7 +484,9 @@ class SafetyWarning:
 # ---------------------------------------------------------------------------
 
 def build_patient_context(records: List[Dict[str, Any]], reference_date: Optional[str],
-                           dataset: Optional[DrugReferenceDataset] = None) -> PatientClinicalContext:
+                           dataset: Optional[DrugReferenceDataset] = None, *,
+                           weight_concept_uuid: Optional[str] = None,
+                           weight_max_age_days: Optional[int] = None) -> PatientClinicalContext:
     """Builds a PatientClinicalContext from raw querystore records (resourceType/metadata),
     mirroring PatientClinicalContextBuilder. querystore does not expose ATC codes on drug_order
     metadata (confirmed against the Java serializer, 2026-07-05), so active-drug ATC codes are
@@ -331,6 +500,26 @@ def build_patient_context(records: List[Dict[str, Any]], reference_date: Optiona
     atc_codes: Set[str] = set()
     allergy_tokens: Set[str] = set()
     condition_tokens: Set[str] = set()
+    weights: List[Tuple[date, float]] = []
+    configured_weight_concept = (
+        weight_concept_uuid
+        if weight_concept_uuid is not None
+        else os.environ.get("DRUG_SAFETY_WEIGHT_CONCEPT_UUID", DEFAULT_WEIGHT_CONCEPT_UUID)
+    ).strip()
+    weight_enabled = configured_weight_concept.lower() != _DISABLED_SENTINEL
+    if weight_max_age_days is None:
+        try:
+            weight_max_age_days = int(os.environ.get(
+                "DRUG_SAFETY_WEIGHT_MAX_AGE_DAYS", str(DEFAULT_WEIGHT_MAX_AGE_DAYS)
+            ))
+        except (TypeError, ValueError):
+            weight_max_age_days = DEFAULT_WEIGHT_MAX_AGE_DAYS
+    if weight_max_age_days <= 0:
+        weight_max_age_days = DEFAULT_WEIGHT_MAX_AGE_DAYS
+    try:
+        anchor_date = date.fromisoformat((reference_date or "")[:10])
+    except ValueError:
+        anchor_date = None
 
     for rec in records or []:
         rtype = rec.get("resourceType")
@@ -356,7 +545,22 @@ def build_patient_context(records: List[Dict[str, Any]], reference_date: Optiona
                 if meta.get(key):
                     condition_tokens.add(meta[key])
 
-    return PatientClinicalContext(age_years=age_years, active_drug_names=drug_names,
+        elif rtype == "obs" and weight_enabled and meta.get("concept_uuid") == configured_weight_concept:
+            units = _clean_text(meta.get("units"))
+            if units is None or units.casefold() not in _KILOGRAM_UNITS:
+                continue
+            try:
+                value = float(meta.get("value_numeric"))
+                observed = date.fromisoformat(str(rec.get("date") or "")[:10])
+            except (TypeError, ValueError):
+                continue
+            if value <= 0 or anchor_date is None or observed > anchor_date:
+                continue
+            if observed >= anchor_date - timedelta(days=weight_max_age_days):
+                weights.append((observed, value))
+
+    weight_kg = max(weights, key=lambda item: item[0])[1] if weights else None
+    return PatientClinicalContext(age_years=age_years, weight_kg=weight_kg, active_drug_names=drug_names,
                                    active_drug_atc_codes=atc_codes, allergy_tokens=allergy_tokens,
                                    condition_tokens=condition_tokens)
 
@@ -374,11 +578,14 @@ def _order_is_active(meta: Dict[str, Any], reference_date: Optional[str]) -> boo
 # Injection (Part 1)
 # ---------------------------------------------------------------------------
 
-def _related_to_any(order: DrugReferenceEntry, question_drugs: List[DrugReferenceEntry]) -> bool:
+def _related_to_any(order: DrugReferenceEntry, question_drugs: List[DrugReferenceEntry],
+                    dataset: DrugReferenceDataset) -> bool:
     order_subgroups = order.atc_subgroups()
-    if not order_subgroups:
-        return False
-    return any(order_subgroups & q.atc_subgroups() for q in question_drugs)
+    return any(
+        bool(order_subgroups & question_drug.atc_subgroups())
+        or dataset.shared_group(order, question_drug) is not None
+        for question_drug in question_drugs
+    )
 
 
 def _render_entry(ref: DrugReferenceEntry, age: Optional[int]) -> str:
@@ -386,8 +593,9 @@ def _render_entry(ref: DrugReferenceEntry, age: Optional[int]) -> str:
     paren_bits = []
     if ref.drug_class:
         paren_bits.append(ref.drug_class)
-    if ref.atc_codes:
-        paren_bits.append("ATC " + ", ".join(ref.atc_codes))
+    atc_codes = _clean_text_list(ref.atc_codes)
+    if atc_codes:
+        paren_bits.append("ATC " + ", ".join(atc_codes))
     if paren_bits:
         parts.append(f" ({'; '.join(paren_bits)})")
     parts.append(".")
@@ -403,22 +611,33 @@ def _render_entry(ref: DrugReferenceEntry, age: Optional[int]) -> str:
         parts.append(".")
 
     if ref.contraindications:
-        notes = [c.note if c.note else c.token for c in ref.contraindications]
-        parts.append(" Contraindicated with: " + "; ".join(notes) + ".")
+        notes = [_clean_text(c.note) or _clean_text(c.token) for c in ref.contraindications if c is not None]
+        notes = [note for note in notes if note]
+        if notes:
+            parts.append(" Contraindicated with: " + "; ".join(notes) + ".")
 
     if ref.interactions:
         notes = []
         for i in ref.interactions:
-            label = i.token if i.token else i.atc
-            notes.append(f"{label} ({i.note})" if i.note else label)
-        parts.append(" Interactions: " + "; ".join(notes) + ".")
+            if i is None:
+                continue
+            label = _clean_text(i.token) or _clean_text(i.atc)
+            note = _clean_text(i.note)
+            rendered = f"{label} ({note})" if label and note else label or note
+            if rendered:
+                notes.append(rendered)
+        if notes:
+            parts.append(" Interactions: " + "; ".join(notes) + ".")
+
+    if ref.warnings:
+        parts.append(" Warnings: " + "; ".join(ref.warnings) + ".")
 
     if ref.source:
         parts.append(f" Source: {ref.source}.")
     return "".join(parts)
 
 
-def inject_drug_references(
+def _inject_drug_references(
         chart_text: str, mappings: List[Dict[str, Any]], question: Optional[str], age: Optional[int],
         dataset: DrugReferenceDataset, *, active_order_atc_codes: Optional[Set[str]] = None,
         inject_from_query: bool = True, inject_from_orders: bool = True,
@@ -437,7 +656,7 @@ def inject_drug_references(
     if inject_from_orders and active_order_atc_codes:
         context = PatientClinicalContext(age_years=None, active_drug_atc_codes=active_order_atc_codes)
         for ref in dataset.find_by_active_orders(context):
-            if _related_to_any(ref, question_drugs):
+            if _related_to_any(ref, question_drugs, dataset):
                 by_id[ref.id] = ref
 
     matched = list(by_id.values())
@@ -454,6 +673,23 @@ def inject_drug_references(
         text = text + f"[{index}] {rendered}\n"
         index += 1
     return text, out_mappings
+
+
+def inject_drug_references(
+        chart_text: str, mappings: List[Dict[str, Any]], question: Optional[str], age: Optional[int],
+        dataset: DrugReferenceDataset, *, active_order_atc_codes: Optional[Set[str]] = None,
+        inject_from_query: bool = True, inject_from_orders: bool = True,
+) -> Tuple[str, List[Dict[str, Any]]]:
+    """Fail-safe public injection boundary: reference-data failures never break an answer."""
+    try:
+        return _inject_drug_references(
+            chart_text, mappings, question, age, dataset,
+            active_order_atc_codes=active_order_atc_codes,
+            inject_from_query=inject_from_query,
+            inject_from_orders=inject_from_orders,
+        )
+    except (AttributeError, KeyError, TypeError, ValueError, RuntimeError):
+        return chart_text, mappings
 
 
 # ---------------------------------------------------------------------------
@@ -516,9 +752,10 @@ def _alias_owns_dose(clause: str, dose_pos: int, ref: DrugReferenceEntry,
     return True
 
 
-def _parse_daily_dose_mg(lower_answer: str, ref: DrugReferenceEntry,
-                          all_entries: List[DrugReferenceEntry]) -> Optional[float]:
-    best: Optional[float] = None
+def _parse_stated_dose_mg(lower_answer: str, ref: DrugReferenceEntry,
+                          all_entries: List[DrugReferenceEntry]) -> Tuple[Optional[float], Optional[float]]:
+    max_per_dose: Optional[float] = None
+    max_daily: Optional[float] = None
     for clause in _CLAUSE_DELIMITER.split(lower_answer):
         if not ref.matches_text(clause):
             continue
@@ -532,14 +769,18 @@ def _parse_daily_dose_mg(lower_answer: str, ref: DrugReferenceEntry,
                 continue
             freq = frequency_per_day(clause)
             daily = per_dose * (freq if freq > 0 else 1)
-            if best is None or daily > best:
-                best = daily
-    return best
+            if max_per_dose is None or per_dose > max_per_dose:
+                max_per_dose = per_dose
+            if max_daily is None or daily > max_daily:
+                max_daily = daily
+    return max_per_dose, max_daily
 
 
 def _add_contraindications(warnings: List[SafetyWarning], ref: DrugReferenceEntry,
                             context: PatientClinicalContext) -> None:
     for c in ref.contraindications:
+        if c is None or not _clean_text(c.type) or not _clean_text(c.token):
+            continue
         hit = False
         against = None
         if c.type.lower() == "allergy" and context.has_allergy_token(c.token):
@@ -547,7 +788,7 @@ def _add_contraindications(warnings: List[SafetyWarning], ref: DrugReferenceEntr
         elif c.type.lower() == "condition" and context.has_condition_token(c.token):
             hit, against = True, "active condition"
         if hit:
-            note = c.note if c.note else c.token
+            note = _clean_text(c.note) or c.token
             warnings.append(SafetyWarning(TYPE_CONTRAINDICATION, ref.name,
                                            f"contraindicated by {against}: {note}"))
 
@@ -555,10 +796,15 @@ def _add_contraindications(warnings: List[SafetyWarning], ref: DrugReferenceEntr
 def _add_interactions(warnings: List[SafetyWarning], ref: DrugReferenceEntry,
                        context: PatientClinicalContext) -> None:
     for i in ref.interactions:
+        if i is None:
+            continue
         if context.has_active_drug(i.token, i.atc):
-            detail = f"interacts with active order {i.token if i.token else i.atc}"
-            if i.note:
-                detail += f" — {i.note}"
+            label = _clean_text(i.token) or _clean_text(i.atc)
+            if not label:
+                continue
+            detail = f"interacts with active order {label}"
+            if _clean_text(i.note):
+                detail += f" — {i.note.strip()}"
             warnings.append(SafetyWarning(TYPE_INTERACTION, ref.name, detail))
 
 
@@ -582,6 +828,13 @@ def _add_class_contraindications(warnings: List[SafetyWarning], ref: DrugReferen
             warnings.append(SafetyWarning(
                 TYPE_CONTRAINDICATION, ref.name,
                 f"same ATC class ({shared}) as the patient's allergy to {allergen.name} — possible cross-reactivity"))
+            continue
+        group = dataset.shared_group(ref, allergen)
+        if group is not None:
+            warnings.append(SafetyWarning(
+                TYPE_CONTRAINDICATION, ref.name,
+                f"same cross-reactivity group ({group.name}) as the patient's allergy to "
+                f"{allergen.name} — possible cross-reactivity"))
 
 
 def _add_class_interactions(warnings: List[SafetyWarning], ref: DrugReferenceEntry,
@@ -591,33 +844,48 @@ def _add_class_interactions(warnings: List[SafetyWarning], ref: DrugReferenceEnt
         return
     ref_codes = ref.normalized_atc_codes()
     for order_code in context.active_drug_atc_codes:
-        if len(order_code) < _ATC_SUBGROUP_PREFIX_LENGTH:
+        if order_code in ref_codes:
             continue
         order_class = order_code[:_ATC_SUBGROUP_PREFIX_LENGTH]
-        if order_class not in ref_classes or order_code in ref_codes:
+        if len(order_code) >= _ATC_SUBGROUP_PREFIX_LENGTH and order_class in ref_classes:
+            warnings.append(SafetyWarning(
+                TYPE_INTERACTION, ref.name,
+                f"same ATC class ({order_class}) as active order {dataset.display_name_for_atc_code(order_code)}"
+                " — possible duplicate therapy"))
             continue
-        warnings.append(SafetyWarning(
-            TYPE_INTERACTION, ref.name,
-            f"same ATC class ({order_class}) as active order {dataset.display_name_for_atc_code(order_code)}"
-            " — possible duplicate therapy"))
+        group = dataset.shared_group_for_code(ref, order_code)
+        if group is not None:
+            warnings.append(SafetyWarning(
+                TYPE_INTERACTION, ref.name,
+                f"same cross-reactivity group ({group.name}) as active order "
+                f"{dataset.display_name_for_atc_code(order_code)} — possible duplicate therapy"))
 
 
 def _add_overdose(warnings: List[SafetyWarning], ref: DrugReferenceEntry, context: PatientClinicalContext,
                    lower_answer: str, all_entries: List[DrugReferenceEntry]) -> None:
     age = context.age_years if context else None
     band = ref.band_for_age(age)
-    if band is None or band.max_daily_dose_mg <= 0:
+    if band is None:
         return
-    daily_mg = _parse_daily_dose_mg(lower_answer, ref, all_entries)
-    if daily_mg is not None and daily_mg > band.max_daily_dose_mg:
+    per_dose_mg, daily_mg = _parse_stated_dose_mg(lower_answer, ref, all_entries)
+    if (band.max_daily_dose_mg > 0 and daily_mg is not None
+            and daily_mg > band.max_daily_dose_mg):
         warnings.append(SafetyWarning(
             TYPE_OVERDOSE, ref.name,
             f"stated dose ~{_format_number(daily_mg)} mg/day exceeds the "
             f"{_format_number(band.max_daily_dose_mg)} mg/day maximum for ages "
             f"{band.min_years}-{band.max_years}"))
+        return
+    if (band.mg_per_kg_max > 0 and context.weight_kg is not None and per_dose_mg is not None
+            and per_dose_mg > band.mg_per_kg_max * context.weight_kg):
+        warnings.append(SafetyWarning(
+            TYPE_OVERDOSE, ref.name,
+            f"stated dose {_format_number(per_dose_mg)} mg exceeds the "
+            f"{_format_number(band.mg_per_kg_max)} mg/kg per-dose maximum for the patient's "
+            f"{_format_number(context.weight_kg)} kg weight"))
 
 
-def validate_answer(answer: Optional[str], question: Optional[str], context: PatientClinicalContext,
+def _validate_answer(answer: Optional[str], question: Optional[str], context: PatientClinicalContext,
                      dataset: DrugReferenceDataset, *, warn_dose: bool = True, warn_interactions: bool = True,
                      warn_contraindications: bool = True) -> List[SafetyWarning]:
     """Pure validation — the drugs checked are the union of what the QUESTION resolves to and what
@@ -645,3 +913,51 @@ def validate_answer(answer: Optional[str], question: Optional[str], context: Pat
             _add_overdose(warnings, ref, context, lower_answer, all_entries)
 
     return warnings
+
+
+@dataclass
+class SafetyCheckResult:
+    """checked/limited/unavailable per the conformance contract: an empty ``warnings`` list must
+    never be read as "checked" on its own — callers that render a safety status need ``status``
+    alongside it."""
+    status: str
+    warnings: List[SafetyWarning]
+
+
+def check_answer_safety(answer: Optional[str], question: Optional[str],
+                        context: Optional[PatientClinicalContext],
+                        dataset: Optional[DrugReferenceDataset], *, warn_dose: bool = True,
+                        warn_interactions: bool = True,
+                        warn_contraindications: bool = True) -> SafetyCheckResult:
+    """The status-carrying superset of validate_answer. ``unavailable`` when there is no reference
+    dataset or no resolved patient context to check against (mirrors the real "no patient ref /
+    querystore retrieval failed" case in team.py) or when the check raised; ``limited`` when the
+    caller asked for only a subset of dose/interaction/contraindication checks; ``checked`` only
+    when a full check ran to completion against real reference data and a real patient context.
+    """
+    if dataset is None or context is None:
+        return SafetyCheckResult(status=STATUS_UNAVAILABLE, warnings=[])
+    try:
+        warnings = _validate_answer(
+            answer, question, context, dataset,
+            warn_dose=warn_dose,
+            warn_interactions=warn_interactions,
+            warn_contraindications=warn_contraindications,
+        )
+    except (AttributeError, KeyError, TypeError, ValueError, RuntimeError):
+        return SafetyCheckResult(status=STATUS_UNAVAILABLE, warnings=[])
+    if not (warn_dose and warn_interactions and warn_contraindications):
+        return SafetyCheckResult(status=STATUS_LIMITED, warnings=warnings)
+    return SafetyCheckResult(status=STATUS_CHECKED, warnings=warnings)
+
+
+def validate_answer(answer: Optional[str], question: Optional[str], context: PatientClinicalContext,
+                    dataset: DrugReferenceDataset, *, warn_dose: bool = True, warn_interactions: bool = True,
+                    warn_contraindications: bool = True) -> List[SafetyWarning]:
+    """Fail-safe safety boundary: incomplete reference data cannot break the answer path."""
+    return check_answer_safety(
+        answer, question, context, dataset,
+        warn_dose=warn_dose,
+        warn_interactions=warn_interactions,
+        warn_contraindications=warn_contraindications,
+    ).warnings

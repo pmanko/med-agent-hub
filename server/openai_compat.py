@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import time
 import uuid
@@ -140,7 +141,8 @@ def _sanitize_backend_metadata(value: Any, *, key: str = "") -> Any:
     return value
 
 
-def _served_backend_model_metadata() -> Dict[str, Dict[str, Any]]:
+def _served_backend_model_metadata() -> Optional[Dict[str, Dict[str, Any]]]:
+    """Return the router catalog's per-model metadata, or ``None`` when discovery itself fails."""
     headers = {}
     if llm_config.api_key:
         headers["Authorization"] = f"Bearer {llm_config.api_key}"
@@ -163,12 +165,13 @@ def _served_backend_model_metadata() -> Dict[str, Dict[str, Any]]:
             result[str(item["id"])] = dict(sanitized)
         return result
     except Exception:
-        return {}
+        return None
 
 
-def _served_backend_models() -> set[str]:
+def _served_backend_models() -> Optional[set[str]]:
     """Compatibility helper for callers that only need loaded backend aliases."""
-    return set(_served_backend_model_metadata())
+    discovered = _served_backend_model_metadata()
+    return None if discovered is None else set(discovered)
 
 
 def _backend_discovery_metadata() -> Dict[str, str]:
@@ -184,10 +187,11 @@ def _backend_discovery_metadata() -> Dict[str, str]:
 def list_models() -> Dict[str, Any]:
     created = int(time.time())
     backend_models = _served_backend_model_metadata()
-    served = set(backend_models)
+    backend_reachable = backend_models is not None
+    served = set(backend_models) if backend_models else set()
     backend = _backend_discovery_metadata()
     profiles = [get_profile(profile_id) for profile_id in profile_ids()]
-    data = []
+    readiness = []
     for profile in profiles:
         missing = [
             model
@@ -196,25 +200,48 @@ def list_models() -> Dict[str, Any]:
         ]
         unavailable_reasons = (
             ("model_backend_unreachable",)
-            if not served
+            if not backend_reachable
             else tuple(f"model_not_loaded:{model}" for model in missing)
         )
-        item = {
-            **profile_metadata(
-                profile,
-                available=not missing,
-                unavailable_reasons=unavailable_reasons,
-            ),
-            "object": "model",
-            "created": created,
-            "owned_by": "med-agent-hub",
-            "backend": backend,
-            "backend_model_metadata": {
-                model: backend_models.get(model)
-                for model in sorted(set(profile.models.values()))
-            },
-        }
-        data.append(item)
+        readiness.append((profile, not missing, unavailable_reasons))
+
+    available_products = [
+        profile
+        for profile, available, _reasons in readiness
+        if available and profile.visibility == "product"
+    ]
+    configured_default = next(
+        (profile for profile in available_products if profile.default), None
+    )
+    effective_default = configured_default or min(
+        available_products,
+        key=lambda profile: (profile.selection_priority, profile.id),
+        default=None,
+    )
+
+    data = []
+    for profile, available, unavailable_reasons in readiness:
+        data.append(
+            {
+                **profile_metadata(
+                    profile,
+                    available=available,
+                    unavailable_reasons=unavailable_reasons,
+                    effective_default=(
+                        effective_default is not None
+                        and profile.id == effective_default.id
+                    ),
+                ),
+                "object": "model",
+                "created": created,
+                "owned_by": "med-agent-hub",
+                "backend": backend,
+                "backend_model_metadata": {
+                    model: (backend_models or {}).get(model)
+                    for model in sorted(set(profile.models.values()))
+                },
+            }
+        )
     return {
         "object": "list",
         "data": data,
@@ -234,19 +261,30 @@ def _request_for(req: ChatCompletionRequest, profile: Profile) -> ExecutionReque
     )
 
 
-async def _content_for(req: ChatCompletionRequest) -> str:
-    return await drain_profile(_request_for(req, get_profile(req.model)))
+def _require_product_profile(req: ChatCompletionRequest, profile: Profile) -> None:
+    """Keep product clients on complete, safety-enforced profile plans.
+
+    Direct hub clients may intentionally use low-level legs. Product relays mark
+    their request explicitly so an arbitrary client-supplied model id cannot turn a
+    product Answer into an experimental ``off``/``warn`` execution.
+    """
+    product_request = bool((req.context or {}).get("require_product_profile"))
+    if product_request and (
+        profile.visibility != "product" or profile.output_mode != "product"
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "product_profile_required",
+                "model": req.model,
+                "message": "This client accepts configured product profiles only.",
+            },
+        )
 
 
-def _completion_envelope(
-    model: str,
-    content: str,
-    *,
-    completion_id: Optional[str] = None,
-    extensions: Optional[Mapping[str, Any]] = None,
-) -> Dict[str, Any]:
-    envelope = {
-        "id": completion_id or f"chatcmpl-{uuid.uuid4().hex}",
+def _completion_envelope(model: str, content: str) -> Dict[str, Any]:
+    return {
+        "id": f"chatcmpl-{uuid.uuid4().hex}",
         "object": "chat.completion",
         "created": int(time.time()),
         "model": model,
@@ -259,14 +297,6 @@ def _completion_envelope(
         ],
         "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
     }
-    if extensions:
-        reserved = set(envelope).intersection(extensions)
-        if reserved:
-            raise ValueError(
-                f"completion extensions overlap reserved fields: {sorted(reserved)}"
-            )
-        envelope.update(dict(extensions))
-    return envelope
 
 
 def _sse_stream(model: str, content: str):
@@ -290,7 +320,15 @@ def _sse_stream(model: str, content: str):
     yield "data: [DONE]\n\n"
 
 
-_SSE_HEARTBEAT_INTERVAL_S = 10.0
+def _heartbeat_interval() -> float:
+    try:
+        configured = float(os.environ.get("HUB_SSE_HEARTBEAT_SECONDS", "0.5"))
+    except ValueError:
+        configured = 0.5
+    return max(0.1, configured)
+
+
+_SSE_HEARTBEAT_INTERVAL_S = _heartbeat_interval()
 
 
 def _named_sse(gen, interval_s: float = _SSE_HEARTBEAT_INTERVAL_S):
@@ -386,6 +424,7 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
     except ModelNotFoundError as error:
         raise _model_error(error) from error
 
+    _require_product_profile(req, profile)
     execution = _request_for(req, profile)
     if req.stream and profile.staged:
         execution = replace(execution, is_disconnected=request.is_disconnected)
@@ -404,11 +443,4 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
             _sse_stream(req.model, content),
             media_type="text/event-stream",
         )
-    extensions: Dict[str, Any] = {}
-    completion_id = None
-    return _completion_envelope(
-        req.model,
-        content,
-        completion_id=completion_id,
-        extensions=extensions,
-    )
+    return _completion_envelope(req.model, content)
