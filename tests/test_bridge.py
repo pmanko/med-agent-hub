@@ -15,7 +15,13 @@ from fastapi.testclient import TestClient
 
 from server import levels_loader, openai_compat, team
 from server.main import app
-from tests.factories import make_profile, run_profile
+from tests.factories import (
+    TEST_ANSWER_MODEL,
+    TEST_EXPERT_MODEL,
+    TEST_ORCHESTRATOR_MODEL,
+    make_profile,
+    run_profile,
+)
 
 ENVELOPE = json.dumps(
     {"answer": "Lisinopril 10 mg [1]", "citations": [1], "blocks": []}
@@ -38,9 +44,9 @@ def run(coro):
 def _team_profile(*, output="combined", answer_prompt="synthesis-answer", indepth=True):
     stages = ["context", "gather", "answer", "gate"]
     models = {
-        "orchestrator": team.llm_config.orchestrator_model,
-        "expert": team.llm_config.med_model,
-        "answer": team.llm_config.synthesizer_model,
+        "orchestrator": TEST_ORCHESTRATOR_MODEL,
+        "expert": TEST_EXPERT_MODEL,
+        "answer": TEST_ANSWER_MODEL,
     }
     prompts = {
         "orchestrator": "orchestrator",
@@ -49,7 +55,7 @@ def _team_profile(*, output="combined", answer_prompt="synthesis-answer", indept
     }
     if indepth:
         stages.append("indepth")
-        models["indepth"] = team.llm_config.synthesizer_model
+        models["indepth"] = TEST_ANSWER_MODEL
         prompts["indepth"] = "synthesis-indepth"
     return make_profile(
         topology="team",
@@ -57,6 +63,7 @@ def _team_profile(*, output="combined", answer_prompt="synthesis-answer", indept
         models=models,
         prompts=prompts,
         output=output,
+        supplemental_sources=("knowledge-base",),
     )
 
 
@@ -64,7 +71,7 @@ def _indepth_leg():
     return make_profile(
         topology="leg",
         stages=("context", "indepth"),
-        models={"indepth": team.llm_config.synthesizer_model},
+        models={"indepth": TEST_ANSWER_MODEL},
         prompts={"indepth": "synthesis-indepth"},
         output="indepth",
     )
@@ -402,7 +409,7 @@ def test_orchestrator_consults_the_medical_expert_on_a_tool_call():
             return {"content": ENVELOPE}
         # First orchestrator turn emits a tool call; later turns are done.
         orchestrator_turns = sum(
-            1 for m in calls if m == team.llm_config.orchestrator_model
+            1 for m in calls if m == TEST_ORCHESTRATOR_MODEL
         )
         if tools is not None and orchestrator_turns == 1:
             return {
@@ -425,14 +432,12 @@ def test_orchestrator_consults_the_medical_expert_on_a_tool_call():
 
     json.loads(out)  # still a valid envelope
     # The medgemma expert was actually called (a _chat to the med model).
-    assert team.llm_config.med_model in calls
+    assert TEST_EXPERT_MODEL in calls
 
 
-def test_kb_results_are_threaded_into_the_medical_expert():
-    # The headline of the prompt-driven design: when the orchestrator calls
-    # kb_search then medical_expert, the clinical model must reason WITH the
-    # retrieved guidance — the KB block is built into the expert's user message
-    # in code, not left to the orchestrator to copy across.
+def test_normalized_kb_records_are_threaded_into_the_medical_expert():
+    # Retrieval is completed before gather. The expert receives the same numbered ledger,
+    # including provenance-labelled KnowledgeReference records, with no second search path.
     captured = {}
     orch_turns = {"n": 0}
 
@@ -449,28 +454,12 @@ def test_kb_results_are_threaded_into_the_medical_expert():
     ):
         if response_format is not None:
             return {"content": ENVELOPE}
-        if model == team.llm_config.med_model:
+        if model == TEST_EXPERT_MODEL:
             captured["expert_user"] = messages[-1]["content"]
             return {"content": "the chart's regimen is outdated per the guidance"}
-        # Orchestrator: kb_search, then medical_expert, then done.
+        # Orchestrator: consult the expert once, then stop.
         orch_turns["n"] += 1
         if orch_turns["n"] == 1:
-            return {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [
-                    {
-                        "id": "k1",
-                        "function": {
-                            "name": "kb_search",
-                            "arguments": json.dumps(
-                                {"query": "stavudine d4T phase-out"}
-                            ),
-                        },
-                    }
-                ],
-            }
-        if orch_turns["n"] == 2:
             return {
                 "role": "assistant",
                 "content": None,
@@ -488,62 +477,22 @@ def test_kb_results_are_threaded_into_the_medical_expert():
             }
         return {"content": "ok", "tool_calls": None}
 
-    with patch.object(team, "_chat", side_effect=fake_chat):
+    with patch.object(team, "_chat", side_effect=fake_chat), patch(
+        "server.context_sources.kb.search",
+        return_value=[
+            {
+                "id": "who-d4t",
+                "title": "WHO guidance",
+                "text": "Stavudine is not a preferred antiretroviral backbone.",
+                "source": "WHO",
+            }
+        ],
+    ):
         run(run_profile(_team_profile(), MESSAGES, response_format=RESP_FORMAT))
 
     expert_user = captured["expert_user"]
-    # The expert received the labelled reference block AND the real KB snippet text
-    # retrieved by kb_search (the d4T phase-out snippet contains "stavudine").
-    assert "Reference guidance" in expert_user
+    assert "KnowledgeReference (source: knowledge-base)" in expert_user
     assert "stavudine" in expert_user.lower()
-
-
-def test_orchestrator_can_search_the_knowledge_base():
-    # The orchestrator emits a kb_search tool call; the REAL KB runs (only _chat
-    # is seamed) and its labelled reference snippet flows into the synthesis turn.
-    captured = {}
-
-    async def fake_chat(
-        client,
-        model,
-        messages,
-        *,
-        tools=None,
-        response_format=None,
-        temperature=None,
-        max_tokens=None,
-        **kwargs,
-    ):
-        if response_format is not None:
-            captured["synth"] = messages
-            return {"content": ENVELOPE}
-        already_searched = any(m.get("role") == "tool" for m in messages)
-        if tools is not None and not already_searched:
-            return {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [
-                    {
-                        "id": "k1",
-                        "function": {
-                            "name": "kb_search",
-                            "arguments": json.dumps(
-                                {"query": "metformin first-line diabetes"}
-                            ),
-                        },
-                    }
-                ],
-            }
-        return {"content": "ok", "tool_calls": None}
-
-    with patch.object(team, "_chat", side_effect=fake_chat):
-        out = run(run_profile(_team_profile(), MESSAGES, response_format=RESP_FORMAT))
-
-    json.loads(out)  # still a valid envelope
-    blob = json.dumps(captured["synth"]).lower()
-    # The real corpus snippet reached synthesis, labelled as reference (not chart) data.
-    assert "metformin" in blob
-    assert "knowledge-base reference snippets" in blob
 
 
 def test_profile_drain_falls_back_to_a_valid_envelope_when_synthesis_fails():
@@ -581,6 +530,14 @@ def test_v1_models_advertises_the_levels():
     assert ids == levels_loader.profile_ids()
 
 
+def test_root_status_does_not_duplicate_authoritative_profile_metadata():
+    response = TestClient(app).get("/")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "Server is running"
+    assert "default_profile" not in response.json()
+
+
 def test_backend_model_discovery_uses_configured_bearer_auth():
     backend = SimpleNamespace(base_url="https://router.example", api_key="secret")
     with patch.object(openai_compat, "llm_config", backend), patch.object(
@@ -613,16 +570,75 @@ def test_backend_model_discovery_omits_auth_when_api_key_is_blank():
     )
 
 
+def test_backend_model_discovery_returns_none_when_router_is_unreachable():
+    backend = SimpleNamespace(base_url="http://router", api_key="")
+    with patch.object(openai_compat, "llm_config", backend), patch.object(
+        openai_compat.httpx, "get", side_effect=ConnectionError("offline")
+    ):
+        assert openai_compat._served_backend_models() is None
+
+
+def test_v1_models_distinguishes_empty_catalog_from_unreachable_router():
+    with patch.object(openai_compat, "_served_backend_models", return_value=set()):
+        empty = TestClient(app).get("/v1/models").json()["data"]
+    with patch.object(openai_compat, "_served_backend_models", return_value=None):
+        unreachable = TestClient(app).get("/v1/models").json()["data"]
+
+    assert all(
+        item["unavailable_reasons"]
+        and all(reason.startswith("model_not_loaded:") for reason in item["unavailable_reasons"])
+        for item in empty
+    )
+    assert all(
+        item["unavailable_reasons"] == ["model_backend_unreachable"]
+        for item in unreachable
+    )
+
+
 def test_v1_models_advertises_staged_capability_not_just_id_prefix():
     # Gate 10: clients must route by this field, never by pattern-matching the id string.
-    client = TestClient(app)
-    r = client.get("/v1/models")
+    with patch.object(openai_compat, "_served_backend_models", return_value={"gemma-e4b"}):
+        client = TestClient(app)
+        r = client.get("/v1/models")
     by_id = {m["id"]: m for m in r.json()["data"]}
     assert by_id["single-12b-checked"]["staged"] is True
-    # parity is explicitly a single-shot (non-staged) relay target, never the phased engine
-    assert by_id["med-agent-team-parity"]["staged"] is False
+    assert by_id["eval-e4b-answer-only"]["staged"] is False
     assert by_id["single-e4b-checked"]["default"] is True
+    assert by_id["single-e2b-checked"]["available"] is False
+    assert by_id["single-e2b-checked"]["required_models"] == [
+        "gemma-e2b",
+        "gemma-e4b",
+    ]
     assert "answer-review:qwen2.5-14b" not in by_id
+
+
+def test_v1_models_advertises_e2b_comparison_when_writer_and_checker_are_available():
+    with patch.object(
+        openai_compat,
+        "_served_backend_models",
+        return_value={"gemma-e2b", "gemma-e4b"},
+    ):
+        r = TestClient(app).get("/v1/models")
+
+    by_id = {model["id"]: model for model in r.json()["data"]}
+    e2b = by_id["single-e2b-checked"]
+    assert e2b["label"] == "Experimental fast answer (E2B, E4B check)"
+    assert e2b["available"] is True
+    assert e2b["default"] is False
+    assert e2b["temporal_enforcement"] == "enforce"
+
+
+def test_v1_models_selects_available_fallback_default_in_the_hub():
+    with patch.object(openai_compat, "_served_backend_models", return_value={"gemma-26b"}):
+        client = TestClient(app)
+        r = client.get("/v1/models")
+
+    product = [item for item in r.json()["data"] if item["visibility"] == "product"]
+    defaults = [item for item in product if item["default"]]
+    assert [(item["id"], item["available"]) for item in defaults] == [
+        ("single-a4b-checked", True)
+    ]
+    assert next(item for item in product if item["id"] == "single-e4b-checked")["default"] is False
 
 
 def test_chat_completions_profile_returns_openai_shape_with_the_envelope():
@@ -630,7 +646,7 @@ def test_chat_completions_profile_returns_openai_shape_with_the_envelope():
         # The API is only an adapter: it compiles the profile and drains the engine.
         assert execution.messages == MESSAGES
         assert execution.response_format == RESP_FORMAT
-        assert execution.profile.id == "med-agent-team-med"
+        assert execution.profile.id == "team-med-checked"
         return ENVELOPE
 
     with patch("server.openai_compat.drain_profile", side_effect=fake_drain):
@@ -638,7 +654,7 @@ def test_chat_completions_profile_returns_openai_shape_with_the_envelope():
         r = client.post(
             "/v1/chat/completions",
             json={
-                "model": "med-agent-team-med",
+                "model": "team-med-checked",
                 "messages": MESSAGES,
                 "response_format": RESP_FORMAT,
             },
@@ -646,7 +662,7 @@ def test_chat_completions_profile_returns_openai_shape_with_the_envelope():
 
     assert r.status_code == 200
     body = r.json()
-    assert body["model"] == "med-agent-team-med"
+    assert body["model"] == "team-med-checked"
     content = body["choices"][0]["message"]["content"]
     assert json.loads(content)["citations"] == [1]
 
@@ -663,3 +679,38 @@ def test_unknown_model_id_returns_structured_model_not_found():
     assert r.json()["detail"]["code"] == "model_not_found"
     assert r.json()["detail"]["model"] == "some-raw-model"
     mock_drain.assert_not_called()
+
+
+def test_product_client_rejects_low_level_leg_before_execution():
+    with patch("server.openai_compat.drain_profile") as mock_drain:
+        client = TestClient(app)
+        r = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "answer:gemma-e4b@synthesis-answer~off",
+                "messages": MESSAGES,
+                "context": {"require_product_profile": True},
+            },
+        )
+
+    assert r.status_code == 400
+    assert r.json()["detail"]["code"] == "product_profile_required"
+    mock_drain.assert_not_called()
+
+
+def test_direct_hub_client_can_still_use_low_level_leg():
+    async def fake_drain(execution):
+        assert execution.profile.id == "answer:gemma-e4b@synthesis-answer~off"
+        return ENVELOPE
+
+    with patch("server.openai_compat.drain_profile", side_effect=fake_drain):
+        client = TestClient(app)
+        r = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "answer:gemma-e4b@synthesis-answer~off",
+                "messages": MESSAGES,
+            },
+        )
+
+    assert r.status_code == 200

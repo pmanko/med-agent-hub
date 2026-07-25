@@ -1,26 +1,34 @@
-Write ONLY a JSON object with exactly one key: "claims" — an array of strings. Output nothing before or after the JSON object. No prose, no markdown, no code fences.
+Write ONLY a JSON object with exactly one key: "claims" - an array of strings. Output nothing before or after the JSON object. No prose, no markdown, no code fences.
 
-GOAL: write the IN-DEPTH elaboration for the answer below — the clinically useful CONTEXT a clinician wants alongside the direct answer. Each claim connects external guidance (WHO / standard medical knowledge) TO this patient. This is the most valuable part of the response; do not make it a restatement of the chart.
+GOAL: write the IN-DEPTH elaboration for the answer below - concise supporting context that is directly relevant to the question and direct answer and useful to a clinician. Every displayed claim must be grounded in the numbered evidence supplied to you.
 
 You will be given, appended after this instruction:
-- the DIRECT ANSWER (already written — do not repeat it), and
-- the GATHERED KB / EVIDENCE (knowledge-base reference snippets and the clinical-expert notes) plus the patient chart above.
+- the DIRECT ANSWER (already written - do not repeat it), and
+- the patient chart plus any GATHERED KB / EVIDENCE.
 
-Write 2–4 claims. Prioritise, in order:
-1. The relevant GUIDELINE / WHO guidance and what it means for THIS patient (e.g. "Per WHO HIV guidelines, dolutegravir-based regimens are first-line; this patient's zidovudine/lamivudine regimen predates that recommendation.").
-2. The clinical-expert interpretation of the chart findings (significance, risk, what to monitor).
-3. The standard medical context that frames the finding (e.g. "Anemia is common in HIV from chronic inflammation, opportunistic infection, or zidovudine marrow suppression.").
-Use the GATHERED KB / expert notes when present; when they are sparse, you MAY still state well-established, standard guidance — but only what is genuinely standard, never invented specifics.
+Write 1-3 claims. Prioritise, in order:
+1. Additional patient-chart facts that directly clarify the answer.
+2. A trend or comparison only when the cited records collectively state every value and date used.
+3. Guideline or general-medical context only when a supporting numbered KnowledgeReference record is present in the supplied evidence.
+
+Keep the retrieval task narrow:
+- When the question asks only for a factual point lookup such as a last visit, latest result, current medication, or single event, first confirm and use the record already cited by the DIRECT ANSWER. Add at most one chart-context claim containing only extra details stated by that same record.
+- When the question explicitly asks for a trend, comparison, interpretation, or guidance, the point-lookup limit does not apply. Provide only the requested context, keep each claim atomic, and cite every chart endpoint or supporting KnowledgeReference it needs.
+- Do not introduce a trend, comparison, different measurement, or unrelated chart topic unless the question asks for it or it is necessary to explain the direct answer.
+- A claim may cover one evidence record or one concept series, never several unrelated measurements. For example, do not bundle weight, blood pressure, pulse, oxygen saturation, and temperature into one claim.
+- When one record supports the claim, put exactly that one [N] citation at the end. A comparison may cite only the endpoint records that state its values and dates.
 
 Each string in "claims":
-- States ONE idea only — a single piece of guidance or interpretation, checkable on its own.
-- Names its source inline in PROSE for guideline / general-medical facts (e.g. "per WHO HIV guidelines", "standard practice"); cite a specific THIS-patient chart fact with [N] only when the claim hinges on that record.
+- States ONE checkable idea.
+- Includes [N] citations to the smallest source set that supports it.
+- Uses multiple citations when a comparison or trend depends on multiple records.
+- Is limited to what those cited sources actually say: the cited source set must support the entire displayed claim.
 
-Rules:
-- Do NOT restate the direct answer; do NOT re-list chart tables, drugs, doses, dates, or order indices (the blocks table already shows them). The In-Depth is reasoning and context, not a data dump.
-- [N] is reserved for real chart-record integers ONLY. NEVER wrap a guideline title/source/year in brackets, and NEVER emit a literal "[N]" placeholder — if you have no specific chart record for a claim, attribute it in prose with no bracket.
-- Do not invent a record, dose, source name, guideline title, threshold, or index. No generic "consult a doctor" disclaimer; do not restate the question.
-- Return {"claims": []} ONLY when there is genuinely no useful context (e.g. the asked fact is simply not documented and nothing general applies).
+Evidence rules:
+- Do not use a patient chart citation as support for outside medical knowledge, a guideline, a threshold, a risk interpretation, or a recommendation that the cited chart record does not state.
+- If no supporting KnowledgeReference record is present, do not add outside clinical interpretation. Use only additional chart context that the cited patient records directly support.
+- A source that supports one clause does not support a second uncited clause. Split the ideas or omit the unsupported clause.
+- [N] is reserved for real numbered evidence records only. Never emit a literal "[N]" placeholder or invent an index.
+- If a useful idea cannot be fully supported by numbered evidence, omit it.
 
-Example output:
-{"claims": ["Per WHO HIV guidelines, stavudine (d4T) is no longer recommended because of frequent, often irreversible toxicity; tenofovir or zidovudine are the preferred nucleoside backbones, so this patient's d4T-based regimen [4] would now be switched.", "The clinical concern with continued d4T is peripheral neuropathy and lipoatrophy, which warrant monitoring."]}
+Do not restate the direct answer, list unrelated chart facts, or add generic advice. Return {"claims": []} when no additional relevant, fully supported context exists.

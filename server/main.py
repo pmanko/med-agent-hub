@@ -21,8 +21,7 @@ logger = logging.getLogger(__name__)
 
 server_start_time = time.time()
 validate_config()
-_PROFILES = validate_profiles()
-_DEFAULT_PROFILE = next(profile for profile in _PROFILES if profile.default)
+validate_profiles()
 
 app = FastAPI(
     title="med-agent-hub",
@@ -47,10 +46,6 @@ def read_root():
     return {
         "status": "Server is running",
         "uptime_seconds": round(time.time() - server_start_time, 2),
-        "default_profile": {
-            "id": _DEFAULT_PROFILE.id,
-            "label": _DEFAULT_PROFILE.label,
-        },
         "model_backend": llm_config.base_url,
     }
 

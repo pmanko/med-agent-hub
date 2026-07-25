@@ -1,0 +1,11 @@
+{
+  "version": "1.0",
+  "description": "Curated cross-reactivity families that span ATC branches. These groups complement either supported drug-reference source and may be replaced per deployment.",
+  "groups": [
+    {
+      "name": "NSAID",
+      "note": "Non-steroidal anti-inflammatory drugs may cross-react across chemically distinct branches, including salicylates.",
+      "atcPrefixes": ["M01AE", "N02BA"]
+    }
+  ]
+}

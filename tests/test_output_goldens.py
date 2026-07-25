@@ -12,6 +12,7 @@ import pytest
 
 from server import engine, team
 from server.levels_loader import get_profile
+from tests.factories import team_profile
 
 GOLDENS = Path(__file__).parent / "goldens"
 ANSWER = json.dumps({"answer": "Lisinopril 10 mg [1]", "citations": [1], "blocks": []})
@@ -77,14 +78,19 @@ async def _fake_chat(
     return {"content": IN_DEPTH if schema == "in_depth" else ANSWER}
 
 
-def _run(profile_id, *, messages=MESSAGES) -> str:
+def _run(profile_or_id, *, messages=MESSAGES) -> str:
+    profile = (
+        get_profile(profile_or_id)
+        if isinstance(profile_or_id, str)
+        else profile_or_id
+    )
     with patch.object(team, "_chat", side_effect=_fake_chat), patch.object(
         team, "_write_trace"
     ), patch.object(team, "datetime", _FixedDateTime):
         return asyncio.run(
             engine.drain_profile(
                 engine.ExecutionRequest(
-                    profile=get_profile(profile_id),
+                    profile=profile,
                     messages=messages,
                     response_format=RESPONSE_FORMAT,
                     temperature=0.0,
@@ -92,11 +98,29 @@ def _run(profile_id, *, messages=MESSAGES) -> str:
                     context={"temporal": False},
                 )
             )
-        )
+    )
+
+
+LEGACY_PARITY_PROFILE = team_profile(
+    orchestrator="gemma-e4b-q8",
+    expert="medgemma-1.5-4b-q8",
+    answer="qwen2.5-14b",
+    output="bare",
+    answer_prompt="synthesis-chartsearchai",
+    profile_id="med-agent-team-parity",
+)
+LEGACY_TWO_CALL_PROFILE = team_profile(
+    orchestrator="gemma-e2b-q2",
+    expert="medgemma-1.5-4b",
+    answer="qwen3-4b",
+    indepth="qwen3-4b",
+    output="combined",
+    profile_id="med-agent-team-low",
+)
 
 
 @pytest.mark.parametrize(
-    ("golden", "profile_id", "messages"),
+    ("golden", "profile", "messages"),
     [
         (
             "raw-answer.json",
@@ -115,13 +139,13 @@ def _run(profile_id, *, messages=MESSAGES) -> str:
         ),
         (
             "legacy-parity.json",
-            "med-agent-team-parity",
+            LEGACY_PARITY_PROFILE,
             MESSAGES,
         ),
-        ("legacy-two-call.json", "med-agent-team-low", MESSAGES),
+        ("legacy-two-call.json", LEGACY_TWO_CALL_PROFILE, MESSAGES),
     ],
 )
-def test_pre_refactor_envelopes_remain_byte_exact(golden, profile_id, messages):
+def test_pre_refactor_envelopes_remain_byte_exact(golden, profile, messages):
     expected = (GOLDENS / golden).read_text(encoding="utf-8").rstrip("\n")
 
-    assert _run(profile_id, messages=messages) == expected
+    assert _run(profile, messages=messages) == expected

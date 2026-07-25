@@ -1,6 +1,7 @@
 """Executable acceptance checks for exact deterministic context budgeting."""
 
 import asyncio
+import json
 from dataclasses import replace
 
 import pytest
@@ -19,8 +20,16 @@ from tests.factories import patient_source_registry
 
 
 class ExactWordCounter:
+    def __init__(self):
+        self.calls = 0
+
     async def count(self, _model: str, text: str) -> int:
+        self.calls += 1
         return len(text.split())
+
+    async def count_records(self, _model: str, texts) -> tuple[int, ...]:
+        self.calls += 1
+        return tuple(len(text.split()) for text in texts)
 
 
 def _record(source_id: str, text: str, *, mandatory: bool = False) -> EvidenceRecord:
@@ -57,18 +66,36 @@ def test_oversized_selection_preserves_canonical_indices_and_trace_reasons():
     ledger = EvidenceLedger(
         (
             _record("safety", "allergy evidence", mandatory=True),
-            _record("large", "unrelated words that do not fit"),
+            EvidenceRecord(
+                "large",
+                "knowledge-base",
+                1,
+                "KnowledgeReference",
+                "large",
+                None,
+                "unrelated words that do not fit",
+            ),
             _record("target", "code WT-71"),
+            EvidenceRecord(
+                "relevant-large",
+                "knowledge-base",
+                1,
+                "KnowledgeReference",
+                "relevant-large",
+                None,
+                "weight " * 20,
+            ),
         )
     )
     view = asyncio.run(
         select_context(
             ledger,
-            question="Find WT-71",
+            question="Find weight WT-71",
             model="fixture-model",
             budget=ContextBudget(context_window=8, reserved_output_tokens=1),
             counter=ExactWordCounter(),
             fixed_text="fixed",
+            recent_core_limit=0,
         )
     )
     assert view.mode == "selected"
@@ -77,8 +104,378 @@ def test_oversized_selection_preserves_canonical_indices_and_trace_reasons():
     assert "[3] code WT-71" in view.render()
     assert view.input_tokens <= view.input_limit
     assert [(item.stable_id, item.reason) for item in view.excluded] == [
-        ("large", "token_budget_after_ranked")
+        ("large", "zero_relevance"),
+        ("relevant-large", "token_budget_after_meaningful_overlap"),
     ]
+
+
+def test_input_limit_is_a_ceiling_not_a_target_to_fill():
+    ledger = EvidenceLedger(
+        (
+            _record("safety", "allergy evidence", mandatory=True),
+            EvidenceRecord(
+                "relevant",
+                "knowledge-base",
+                1,
+                "KnowledgeReference",
+                "relevant",
+                None,
+                "Metformin medication guidance",
+            ),
+            EvidenceRecord(
+                "irrelevant-1",
+                "knowledge-base",
+                1,
+                "KnowledgeReference",
+                "irrelevant-1",
+                None,
+                "OpenMRS data model",
+            ),
+            EvidenceRecord(
+                "irrelevant-2",
+                "knowledge-base",
+                1,
+                "KnowledgeReference",
+                "irrelevant-2",
+                None,
+                "Childhood malaria treatment",
+            ),
+        )
+    )
+
+    counter = ExactWordCounter()
+    view = asyncio.run(
+        select_context(
+            ledger,
+            question="What medication guidance applies to metformin?",
+            model="fixture-model",
+            budget=ContextBudget(context_window=1000, reserved_output_tokens=10),
+            counter=counter,
+            fixed_text="fixed",
+            recent_core_limit=0,
+        )
+    )
+
+    assert view.mode == "selected"
+    assert view.input_tokens < view.input_limit
+    assert [(item.stable_id, item.reason) for item in view.included] == [
+        ("safety", "mandatory"),
+        ("relevant", "meaningful_overlap"),
+    ]
+    assert [(item.stable_id, item.reason) for item in view.excluded] == [
+        ("irrelevant-1", "zero_relevance"),
+        ("irrelevant-2", "zero_relevance"),
+    ]
+    assert counter.calls == 1
+
+
+def test_oversized_fitting_uses_sublinear_exact_counts():
+    records = tuple(
+        EvidenceRecord(
+            f"relevant-{index:03d}",
+            "knowledge-base",
+            1,
+            "KnowledgeReference",
+            f"relevant-{index:03d}",
+            None,
+            f"Medication evidence item {index} with supporting detail",
+        )
+        for index in range(128)
+    )
+    counter = ExactWordCounter()
+
+    async def exact_input_measure(chart: str) -> int:
+        counter.calls += 1
+        return len(f"fixed {chart}".split())
+
+    view = asyncio.run(
+        select_context(
+            EvidenceLedger(records),
+            question="What medication evidence applies?",
+            model="fixture-model",
+            budget=ContextBudget(context_window=90, reserved_output_tokens=10),
+            counter=counter,
+            fixed_text="fixed",
+            input_measure=exact_input_measure,
+            recent_core_limit=0,
+        )
+    )
+
+    assert view.mode == "selected"
+    assert view.input_tokens <= view.input_limit
+    assert len(view.records) < len(records)
+    assert counter.calls <= 10
+
+
+def test_large_ranked_record_does_not_block_smaller_later_evidence():
+    records = (
+        EvidenceRecord(
+            "a-large",
+            "knowledge-base",
+            1,
+            "KnowledgeReference",
+            "a-large",
+            None,
+            "medication " * 100,
+        ),
+        EvidenceRecord(
+            "b-small",
+            "knowledge-base",
+            1,
+            "KnowledgeReference",
+            "b-small",
+            None,
+            "medication note",
+        ),
+    )
+    counter = ExactWordCounter()
+
+    view = asyncio.run(
+        select_context(
+            EvidenceLedger(records),
+            question="What medication evidence applies?",
+            model="fixture-model",
+            budget=ContextBudget(context_window=14, reserved_output_tokens=2),
+            counter=counter,
+            fixed_text="fixed",
+            recent_core_limit=0,
+        )
+    )
+
+    assert view.included_ids == ("b-small",)
+    assert view.input_tokens <= view.input_limit
+    assert counter.calls <= 10
+
+
+def test_byte_large_token_small_record_is_not_lost_to_the_fit_proxy():
+    records = (
+        EvidenceRecord(
+            "a-many-tokens",
+            "knowledge-base",
+            1,
+            "KnowledgeReference",
+            "a-many-tokens",
+            None,
+            "medication " * 100,
+        ),
+        EvidenceRecord(
+            "b-one-token",
+            "knowledge-base",
+            1,
+            "KnowledgeReference",
+            "b-one-token",
+            None,
+            "x" * 1000,
+            metadata={"title": "Medication"},
+        ),
+    )
+    counter = ExactWordCounter()
+
+    view = asyncio.run(
+        select_context(
+            EvidenceLedger(records),
+            question="What medication evidence applies?",
+            model="fixture-model",
+            budget=ContextBudget(context_window=14, reserved_output_tokens=2),
+            counter=counter,
+            fixed_text="fixed",
+            recent_core_limit=0,
+        )
+    )
+
+    assert view.included_ids == ("b-one-token",)
+    assert view.input_tokens <= view.input_limit
+    assert counter.calls <= 10
+
+
+def test_batched_record_costs_keep_a_viable_later_record():
+    records = (
+        EvidenceRecord(
+            "a-underestimated",
+            "knowledge-base",
+            1,
+            "KnowledgeReference",
+            "a-underestimated",
+            None,
+            "A_UNDERESTIMATED",
+            metadata={"title": "Medication"},
+        ),
+        EvidenceRecord(
+            "b-viable",
+            "knowledge-base",
+            1,
+            "KnowledgeReference",
+            "b-viable",
+            None,
+            "B_VIABLE_" + ("x" * 100),
+            metadata={"title": "Medication"},
+        ),
+    )
+
+    class InvertedCounter:
+        def __init__(self):
+            self.calls = 0
+
+        async def count(self, _model, text):
+            self.calls += 1
+            return (
+                1
+                + (100 if "A_UNDERESTIMATED" in text else 0)
+                + (3 if "B_VIABLE_" in text else 0)
+            )
+
+        async def count_records(self, _model, texts):
+            self.calls += 1
+            return tuple(100 if "A_UNDERESTIMATED" in text else 3 for text in texts)
+
+    counter = InvertedCounter()
+    view = asyncio.run(
+        select_context(
+            EvidenceLedger(records),
+            question="What medication evidence applies?",
+            model="fixture-model",
+            budget=ContextBudget(context_window=14, reserved_output_tokens=2),
+            counter=counter,
+            fixed_text="fixed",
+            recent_core_limit=0,
+        )
+    )
+
+    assert view.included_ids == ("b-viable",)
+    assert view.input_tokens <= view.input_limit
+    assert counter.calls <= 10
+
+
+def test_underestimated_high_ranked_record_does_not_strand_later_evidence():
+    records = (
+        EvidenceRecord(
+            "a-underestimated",
+            "knowledge-base",
+            1,
+            "KnowledgeReference",
+            "a-underestimated",
+            None,
+            "A_UNDERESTIMATED",
+            metadata={"title": "Medication"},
+        ),
+        EvidenceRecord(
+            "b-viable",
+            "knowledge-base",
+            1,
+            "KnowledgeReference",
+            "b-viable",
+            None,
+            "B_VIABLE",
+            metadata={"title": "Medication"},
+        ),
+    )
+
+    class BoundaryMismatchCounter:
+        def __init__(self):
+            self.calls = 0
+
+        async def count(self, _model, text):
+            self.calls += 1
+            return (
+                1
+                + (100 if "A_UNDERESTIMATED" in text else 0)
+                + (3 if "B_VIABLE" in text else 0)
+            )
+
+        async def count_records(self, _model, texts):
+            self.calls += 1
+            return tuple(3 for _text in texts)
+
+    counter = BoundaryMismatchCounter()
+    view = asyncio.run(
+        select_context(
+            EvidenceLedger(records),
+            question="What medication evidence applies?",
+            model="fixture-model",
+            budget=ContextBudget(context_window=14, reserved_output_tokens=2),
+            counter=counter,
+            fixed_text="fixed",
+            recent_core_limit=0,
+        )
+    )
+
+    assert view.included_ids == ("b-viable",)
+    assert view.input_tokens <= view.input_limit
+    assert counter.calls <= 10
+
+
+def test_canonical_records_can_fit_when_original_inline_rendering_does_not():
+    record = _record("relevant", "medication evidence")
+    ledger = EvidenceLedger(
+        (record,),
+        original_text="[1] medication evidence\n" + ("ignored continuation " * 100),
+    )
+    counter = ExactWordCounter()
+
+    view = asyncio.run(
+        select_context(
+            ledger,
+            question="What medication evidence applies?",
+            model="fixture-model",
+            budget=ContextBudget(context_window=12, reserved_output_tokens=2),
+            counter=counter,
+            fixed_text="fixed",
+            recent_core_limit=0,
+        )
+    )
+
+    assert view.mode == "selected"
+    assert view.included_ids == ("relevant",)
+    assert view.input_tokens <= view.input_limit
+
+
+def test_selected_records_render_in_canonical_chart_order():
+    ledger = EvidenceLedger(
+        (
+            EvidenceRecord(
+                "recent",
+                "inline",
+                1,
+                "ChartRecord",
+                "recent",
+                "2026-01-01",
+                "Recent observation",
+            ),
+            EvidenceRecord(
+                "active-condition",
+                "inline",
+                1,
+                "ChartRecord",
+                "active-condition",
+                "2025-01-01",
+                "Condition: Chronic disease. Status: ACTIVE.",
+            ),
+            EvidenceRecord(
+                "irrelevant",
+                "knowledge-base",
+                1,
+                "KnowledgeReference",
+                "irrelevant",
+                None,
+                "Unrelated material",
+            ),
+        )
+    )
+
+    view = asyncio.run(
+        select_context(
+            ledger,
+            question="",
+            model="fixture-model",
+            budget=ContextBudget(context_window=100, reserved_output_tokens=10),
+            counter=ExactWordCounter(),
+            recent_core_limit=2,
+        )
+    )
+
+    assert view.mode == "selected"
+    assert view.record_indices == (1, 2)
+    assert view.render().index("[1]") < view.render().index("[2]")
 
 
 def test_mandatory_overflow_returns_insufficient_context():
@@ -201,6 +598,59 @@ def test_actual_chat_request_overflow_is_rejected_before_backend_call():
     assert client.requests == []
 
 
+def test_grounding_batches_split_against_the_actual_chat_budget():
+    class PairCounter:
+        async def count_chat(self, _model, payload):
+            prompt = payload["messages"][0]["content"]
+            return prompt.count("PAIR ") * 10
+
+    class GroundingResponse:
+        status_code = 200
+
+        def __init__(self, count):
+            self.count = count
+
+        def json(self):
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps({"verdicts": ["YES"] * self.count})
+                        }
+                    }
+                ]
+            }
+
+    class GroundingClient:
+        def __init__(self):
+            self.batch_sizes = []
+
+        async def post(self, _url, *, json, **_kwargs):
+            count = json["messages"][0]["content"].count("PAIR ")
+            self.batch_sizes.append(count)
+            return GroundingResponse(count)
+
+    policy = team.ChatBudgetPolicy(
+        counter=PairCounter(), context_window=35, reserved_output_tokens=5
+    )
+    token = team.activate_chat_budget(policy)
+    client = GroundingClient()
+    try:
+        verdicts = asyncio.run(
+            team._bounded_entailment_verdicts(
+                client,
+                "fixture-model",
+                [(f"source {index}", f"claim {index}") for index in range(5)],
+            )
+        )
+    finally:
+        team.reset_chat_budget(token)
+
+    assert verdicts == [True] * 5
+    assert client.batch_sizes == [2, 3]
+    assert [item["input_tokens"] for item in policy.measurements] == [50, 20, 30]
+
+
 def test_team_derived_context_triggers_exact_answer_context_reselection():
     mappings = [
         {
@@ -241,9 +691,327 @@ def test_team_derived_context_triggers_exact_answer_context_reselection():
     asyncio.run(engine._prepare_context(request, state))
     before = len(state.view.records)
     assert "knowledge-base" in state.ledger.source_names
-    assert before == len(state.ledger.records)
+    assert before < len(state.ledger.records)
+    assert any(item.reason == "zero_relevance" for item in state.view.excluded)
     extra_words = state.view.input_limit - state.view.input_tokens + 5
     state.gathered += "\n\n" + ("derived " * extra_words)
     asyncio.run(engine._select_answer_context(request, state))
 
     assert len(state.view.records) < before
+
+
+def test_single_product_profile_supplies_knowledge_to_answer_and_indepth():
+    mappings = [
+        {
+            "resourceType": "DrugOrder",
+            "resourceUuid": "stavudine-order",
+            "date": "2026-01-07",
+            "text": "(2026-01-07) Drug order: Stavudine",
+        }
+    ]
+    registry = patient_source_registry(
+        "[1] (2026-01-07) Drug order: Stavudine\n", mappings
+    )
+    messages = [
+        {"role": "user", "content": "What medications is this patient taking?"},
+        {
+            "role": "assistant",
+            "content": "The patient is taking stavudine, nevirapine, and lamivudine [1].",
+        },
+        {
+            "role": "user",
+            "content": "How does the regimen compare with WHO recommendations?",
+        },
+    ]
+    profile = get_profile("single-12b-checked")
+    state = engine._State(messages=messages)
+    request = engine.ExecutionRequest(
+        profile=profile,
+        messages=state.messages,
+        patient="patient-1",
+        source_registry=registry,
+        token_counter=ExactWordCounter(),
+    )
+
+    asyncio.run(engine._prepare_context(request, state))
+
+    assert state.ledger.source_names == ("test-patient", "knowledge-base")
+    assert "Stavudine (d4T) is no longer recommended" in state.chart
+
+    _view, _messages, indepth_chart = asyncio.run(
+        engine._select_indepth_context(
+            request,
+            state,
+            "The checked answer compares the regimen with WHO guidance.",
+        )
+    )
+    assert "Stavudine (d4T) is no longer recommended" in indepth_chart
+
+
+def test_indepth_refits_context_without_mutating_answer_view_or_ledger():
+    mappings = [
+        {
+            "resourceType": "Observation",
+            "resourceUuid": f"obs-{index}",
+            "date": f"2026-01-0{index}",
+            "text": f"(2026-01-0{index}) Weight: {70 + index} kg",
+        }
+        for index in range(1, 4)
+    ]
+    registry = patient_source_registry(
+        "".join(f"[{index}] {row['text']}\n" for index, row in enumerate(mappings, 1)),
+        mappings,
+    )
+
+    class StageCounter:
+        async def count(self, _model, text):
+            return text.count("\n[") + 1
+
+        async def count_chat(self, _model, payload):
+            content = "\n".join(
+                str(message.get("content") or "") for message in payload["messages"]
+            )
+            records = sum(
+                1
+                for line in content.splitlines()
+                if len(line) > 2 and line[0] == "[" and line[1].isdigit()
+            )
+            fixed = 2 if "=== DIRECT ANSWER" in content else 1
+            return records + fixed
+
+    profile = replace(
+        get_profile("single-e4b-checked"),
+        supplemental_sources=(),
+        context_window=5,
+        reserved_output_tokens=1,
+    )
+    state = engine._State(
+        messages=[{"role": "user", "content": "What is the weight trend?"}]
+    )
+    request = engine.ExecutionRequest(
+        profile=profile,
+        messages=state.messages,
+        patient="patient-1",
+        source_registry=registry,
+        token_counter=StageCounter(),
+    )
+
+    asyncio.run(engine._prepare_context(request, state))
+    assert state.view is not None and state.view.mode == "full"
+    assert len(state.view.records) == len(state.ledger.records) == 3
+
+    indepth_view, indepth_messages, indepth_chart = asyncio.run(
+        engine._select_indepth_context(request, state, "The weight declined.")
+    )
+
+    assert indepth_view.mode == "selected"
+    assert len(indepth_view.records) == 2
+    assert indepth_view.input_tokens <= indepth_view.input_limit
+    assert len(state.view.records) == len(state.ledger.records) == 3
+    record_lines = lambda text: sum(
+        1
+        for line in text.splitlines()
+        if len(line) > 2 and line[0] == "[" and line[1].isdigit()
+    )
+    assert record_lines(state.chart) == 3
+    assert record_lines(indepth_chart) == 2
+    assert any(
+        "Patient records (most recent first):" in str(message.get("content") or "")
+        and str(message.get("content") or "").count("\n[") == 2
+        for message in indepth_messages
+    )
+    context_step = state.steps[-1]
+    assert context_step["stage"] == "indepth"
+    assert all(
+        item["stable_id"] and item["reason"] for item in context_step["included"]
+    )
+    assert all(
+        item["stable_id"] and item["reason"] for item in context_step["excluded"]
+    )
+
+
+def test_indepth_synthesis_review_and_retry_match_the_exact_backend_guard():
+    mappings = [
+        {
+            "resourceType": "Observation",
+            "resourceUuid": f"obs-{index}",
+            "date": f"2026-01-0{index}",
+            "text": f"(2026-01-0{index}) Finding: value {index}",
+        }
+        for index in range(1, 4)
+    ]
+    registry = patient_source_registry(
+        "".join(f"[{index}] {row['text']}\n" for index, row in enumerate(mappings, 1)),
+        mappings,
+    )
+
+    class StageExactCounter:
+        async def count(self, _model, text):
+            return len(text.split())
+
+        async def count_records(self, _model, texts):
+            return tuple(1 for _text in texts)
+
+        async def count_chat(self, _model, payload):
+            content = "\n".join(
+                str(message.get("content") or "") for message in payload["messages"]
+            )
+            records = sum(
+                1
+                for line in content.splitlines()
+                if len(line) > 2 and line[0] == "[" and line[1].isdigit()
+            )
+            schema = (
+                (payload.get("response_format") or {})
+                .get("json_schema", {})
+                .get("name")
+            )
+            if schema == "in_depth":
+                fixed = 5 if "retry-feedback" in content else 3
+            elif schema == "indepth_verdict":
+                fixed = 4
+            elif schema == "rewrite_verdict":
+                fixed = 4
+            else:
+                fixed = 1
+            return records + fixed
+
+    base_profile = get_profile("single-e4b-checked")
+    profile = replace(
+        base_profile,
+        supplemental_sources=(),
+        models={
+            **base_profile.models,
+            "indepth": "writer-model",
+            "review": "reviewer-model",
+        },
+        context_window=8,
+        reserved_output_tokens=2,
+    )
+    counter = StageExactCounter()
+    state = engine._State(
+        messages=[{"role": "user", "content": "What are the findings?"}]
+    )
+    request = engine.ExecutionRequest(
+        profile=profile,
+        messages=state.messages,
+        patient="patient-1",
+        source_registry=registry,
+        token_counter=counter,
+    )
+    asyncio.run(engine._prepare_context(request, state))
+    answer = "The findings are documented."
+    initial_view, initial_messages, _ = asyncio.run(
+        engine._select_indepth_context(request, state, answer)
+    )
+    answer_review_chart = asyncio.run(
+        engine._select_answer_review_context(request, state, answer, [])
+    )
+    review_chart = asyncio.run(
+        engine._select_indepth_review_context(
+            request, state, answer, ["Finding 1 [1]."]
+        )
+    )
+    retry_extra = [
+        {"role": "assistant", "content": '{"claims":["Finding 1 [1]."]}'},
+        {"role": "user", "content": "retry-feedback"},
+    ]
+    retry_view, retry_messages, _ = asyncio.run(
+        engine._select_indepth_context(
+            request,
+            state,
+            answer,
+            extra_msgs=retry_extra,
+            stage="indepth_retry",
+        )
+    )
+
+    assert initial_view.mode == "full" and len(initial_view.records) == 3
+    assert (
+        sum(1 for line in answer_review_chart.splitlines() if line.startswith("[")) == 2
+    )
+    assert sum(1 for line in review_chart.splitlines() if line.startswith("[")) == 2
+    assert retry_view.mode == "selected" and len(retry_view.records) == 1
+
+    class StageResponse:
+        status_code = 200
+
+        def __init__(self, content):
+            self.content = content
+
+        def json(self):
+            return {"choices": [{"message": {"content": self.content}}]}
+
+    class StageClient:
+        def __init__(self):
+            self.requests = []
+
+        async def post(self, _url, *, json, **_kwargs):
+            self.requests.append(json)
+            schema = json["response_format"]["json_schema"]["name"]
+            if schema == "indepth_verdict":
+                return StageResponse('{"drop":[],"issues":""}')
+            return StageResponse('{"claims":["Finding 1 [1]."]}')
+
+    client = StageClient()
+    policy = team.ChatBudgetPolicy(
+        counter=counter, context_window=8, reserved_output_tokens=2
+    )
+    token = team.activate_chat_budget(policy)
+    try:
+        asyncio.run(
+            team._synthesize_indepth(
+                client,
+                "writer-model",
+                initial_messages,
+                engine._prompt(profile, "indepth", "synthesis-indepth"),
+                state.gathered,
+                answer,
+                temperature=0,
+                max_tokens=None,
+                repeat_penalty=None,
+                dry=None,
+            )
+        )
+        asyncio.run(
+            team._validate_indepth_verdict(
+                client,
+                "reviewer-model",
+                chart=review_chart,
+                gathered=state.gathered,
+                answer_text=answer,
+                claims=["Finding 1 [1]."],
+                max_tokens=None,
+                temperature=0,
+                repeat_penalty=None,
+                dry=None,
+                validation_prompt=str(
+                    profile.prompts.get("review") or "validation-rewrite"
+                ),
+            )
+        )
+        asyncio.run(
+            team._synthesize_indepth(
+                client,
+                "writer-model",
+                retry_messages,
+                engine._prompt(profile, "indepth", "synthesis-indepth"),
+                state.gathered,
+                answer,
+                temperature=0,
+                max_tokens=None,
+                repeat_penalty=None,
+                dry=None,
+                extra_msgs=retry_extra,
+            )
+        )
+    finally:
+        team.reset_chat_budget(token)
+
+    assert len(client.requests) == 3
+    assert [row["model"] for row in policy.measurements] == [
+        "writer-model",
+        "reviewer-model",
+        "writer-model",
+    ]
+    assert [row["input_tokens"] for row in policy.measurements] == [6, 6, 6]

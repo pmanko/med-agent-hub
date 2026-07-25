@@ -1,12 +1,11 @@
 """
 Clinical knowledge base — a small openly-licensed seed searched via SQLite FTS5
-(BM25), exposed as a typed tool the orchestrator may call. Demo-grade precursor
+(BM25) by the optional StaticKnowledgeSource context adapter. Demo-grade precursor
 to F009: hand-curated snippets; no rerank / OpenMRS contextualization yet.
 
 The corpus (server/kb_data/corpus.jsonl) is loaded into an in-memory index on
-first use. Each result carries provenance (source/version/url/license) so the
-synthesizer can label KB-derived claims inline — KB content never enters the
-integer citation array (which is chart-record-only).
+first use. Each result carries provenance (source/version/url/license); matching
+rows become numbered KnowledgeReference records in the common evidence ledger.
 
 FTS5 is the primary backend; if the runtime's sqlite lacks the FTS5 module we
 fall back to a pure-Python keyword-overlap ranker so the KB still works.

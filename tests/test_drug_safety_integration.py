@@ -54,6 +54,44 @@ _PATIENT_SOURCE = patient_source_registry(
     _WARFARIN_RECORDS,
 )
 
+_WEIGHT_SOURCE = patient_source_registry(
+    "Patient: 40-year-old Female\n\n[1] Patient demographics\n[2] (2026-06-20) Weight: 50 kg\n",
+    [
+        {
+            "index": 1,
+            "resourceType": "patient",
+            "resourceUuid": "patient-1",
+            "date": None,
+            "text": "Patient demographics",
+        },
+        {
+            "index": 2,
+            "resourceType": "obs",
+            "resourceUuid": "weight-1",
+            "date": "2026-06-20",
+            "text": "Weight: 50 kg",
+        }
+    ],
+    [
+        {
+            "resourceType": "patient",
+            "resourceUuid": "patient-1",
+            "date": None,
+            "metadata": {"age_years": 40},
+        },
+        {
+            "resourceType": "obs",
+            "resourceUuid": "weight-1",
+            "date": "2026-06-20",
+            "metadata": {
+                "concept_uuid": "5089AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                "value_numeric": 50.0,
+                "units": "kg",
+            },
+        }
+    ],
+)
+
 
 async def _fake_chat_ibuprofen_answer(
     client,
@@ -99,7 +137,6 @@ def _product_profile(*, drug_safety=False):
         prompts={"answer": "synthesis-answer", "indepth": "synthesis-indepth"},
         output="product",
         policies={"drug_safety": drug_safety},
-        capabilities={"staged": True},
     )
 
 
@@ -126,6 +163,36 @@ def test_profile_drain_attaches_safety_warnings_when_enabled():
     ]
 
 
+def test_profile_drain_uses_fresh_querystore_weight_for_per_dose_limit():
+    async def fake_weighted_answer(*_args, **_kwargs):
+        return {
+            "content": json.dumps({
+                "answer": "Ibuprofen 600 mg every 8 hours can be given.",
+                "citations": [],
+                "blocks": [],
+            })
+        }
+
+    with patch.object(team, "_chat", side_effect=fake_weighted_answer):
+        out = run(
+            run_profile(
+                _answer_profile(drug_safety=True),
+                QUESTION_MESSAGES,
+                response_format={"type": "json_schema"},
+                temperature=0.0,
+                max_tokens=1024,
+                patient="patient-1",
+                source_registry=_WEIGHT_SOURCE,
+            )
+        )
+
+    warnings = json.loads(out)["safetyWarnings"]
+    assert len(warnings) == 1
+    assert warnings[0]["type"] == "overdose"
+    assert "10 mg/kg" in warnings[0]["detail"]
+    assert "50 kg" in warnings[0]["detail"]
+
+
 def test_profile_drain_omits_safety_warnings_key_when_disabled_default():
     with patch.object(team, "_chat", side_effect=_fake_chat_ibuprofen_answer):
         out = run(
@@ -141,6 +208,42 @@ def test_profile_drain_omits_safety_warnings_key_when_disabled_default():
         )
     env = json.loads(out)
     assert "safetyWarnings" not in env
+
+
+def test_profile_drain_reports_checked_status_when_enabled():
+    with patch.object(team, "_chat", side_effect=_fake_chat_ibuprofen_answer):
+        out = run(
+            run_profile(
+                _answer_profile(drug_safety=True),
+                QUESTION_MESSAGES,
+                response_format={"type": "json_schema"},
+                temperature=0.0,
+                max_tokens=1024,
+                patient="patient-1",
+                source_registry=_PATIENT_SOURCE,
+            )
+        )
+    env = json.loads(out)
+    assert env["safetyStatus"] == "checked"
+
+
+def test_profile_drain_reports_unavailable_status_when_disabled_default():
+    # Disabled must never look identical to "checked, nothing flagged" — the status key is
+    # always present, distinct from safetyWarnings' presence-implies-enabled convention.
+    with patch.object(team, "_chat", side_effect=_fake_chat_ibuprofen_answer):
+        out = run(
+            run_profile(
+                _answer_profile(),
+                QUESTION_MESSAGES,
+                response_format={"type": "json_schema"},
+                temperature=0.0,
+                max_tokens=1024,
+                patient="patient-1",
+                source_registry=_PATIENT_SOURCE,
+            )
+        )
+    env = json.loads(out)
+    assert env["safetyStatus"] == "unavailable"
 
 
 def test_profile_stream_done_event_carries_safety_warnings():
@@ -207,6 +310,8 @@ def test_profile_stream_done_event_carries_safety_warnings():
     ]
     # Deterministic safety checks are available with the fast answer and persist to done.
     assert by_name["answer_done"]["safetyWarnings"] == by_name["done"]["safetyWarnings"]
+    assert by_name["done"]["safetyStatus"] == "checked"
+    assert by_name["answer_done"]["safetyStatus"] == "checked"
 
 
 def test_profile_stream_omits_safety_warnings_when_disabled_default():
@@ -260,10 +365,11 @@ def test_profile_stream_omits_safety_warnings_when_disabled_default():
     events = run(_collect())
     by_name = dict(events)
     assert "safetyWarnings" not in by_name["done"]
+    assert by_name["done"]["safetyStatus"] == "unavailable"
 
 
 def test_stage_engine_drain_carries_safety_warnings_through():
-    async def fake_stream(request):
+    async def fake_stream(request, _budget_policy=None):
         assert request.profile.policies["drug_safety"] is True
         yield (
             "done",

@@ -10,11 +10,12 @@ THE ANSWER — strict (this is the high-stakes part):
 - A citation index [N] that resolves to a near-miss record is NOT a failure as long as the clinical value/date is correct — index resolution is checked elsewhere. Never set answer_ok=false merely for HAVING [N] citations (the format requires them).
 - Set answer_ok=false ONLY for a genuine factual or temporal error (wrong number, wrong date, a trend asserted from one point, a value the chart does not contain), and in answer_issues name the exact chart fact that fixes it.
 
-THE IN-DEPTH CLAIMS — advisory, judged by TYPE (keep useful guidance; drop only what is wrong):
-Read each numbered claim and add its number to indepth_drop ONLY if it fails its own test:
-- A PATIENT claim (a fact about THIS chart) -> must be supported by the chart. Drop it if the value, date, or interpretation is wrong or invented.
-- A GUIDELINE / KB claim (general medical guidance, named in prose like "per WHO HIV guidelines") -> this is EXPECTED to come from OUTSIDE the chart. Do NOT drop it for "not in the chart". Drop it ONLY if it is fabricated (no such guidance, an invented source/title/dose) OR it does not actually apply to this patient's situation.
-- The PURPOSE of the In Depth is to show the retrieved KB correctly INFORMS the answer. Keep a claim that does that. Lean toward KEEPING: drop a claim only when it is clearly wrong, fabricated, mis-applied, or unsupported — never because it could be worded better, never for being incomplete.
+THE IN-DEPTH CLAIMS - strict evidence support, judged claim by claim:
+Read each numbered claim and add its number to indepth_drop when any factual clause is not supported by the numbered sources it cites: the cited source set must support the entire displayed claim.
+- A PATIENT claim (a fact about THIS chart) must cite the chart records that state every value, date, trend, or comparison used.
+- A GUIDELINE / KB / general-medical claim must cite a supporting KnowledgeReference record in the supplied numbered evidence: outside medical knowledge requires a supporting source, and a patient chart citation cannot stand in for it.
+- Do not keep a claim merely because the guidance sounds standard. Drop fabricated, unsupported, contradicted, or misapplied claims.
+- Do not drop a fully supported claim merely for wording, style, hedging, or incompleteness.
 - Do NOT set answer_ok=false because of an In-Depth problem, and do NOT abstain — indepth_drop is how you remediate the In Depth. An empty indepth_drop means keep them all.
 
 Work claim by claim against the chart and the gathered evidence. Return JSON only.
