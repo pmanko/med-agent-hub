@@ -245,6 +245,11 @@ def list_models() -> Dict[str, Any]:
     return {
         "object": "list",
         "data": data,
+        "backend": {
+            **backend,
+            "reachable": backend_reachable,
+            "models": sorted(served),
+        },
     }
 
 

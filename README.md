@@ -70,7 +70,10 @@ Weight-aware dose checks read the newest fresh numeric Querystore `obs` matching
 ## Endpoints
 
 - `POST /v1/chat/completions`: blocking or staged streaming profile execution.
-- `GET /v1/models`: configured profile metadata, availability, validation capability, exact context requirements, and at most one hub-selected available default marker.
+- `GET /v1/models`: configured profile metadata, availability, validation capability,
+  exact context requirements, at most one hub-selected available default marker,
+  and a sanitized top-level `backend` inventory (`reachable` plus exact served
+  aliases) for generic clients that own their own profiles.
 - `GET /health`: service health, uptime, and process memory.
 - `GET /`: concise service status.
 

@@ -690,19 +690,47 @@ def test_backend_model_discovery_returns_none_when_router_is_unreachable():
 
 def test_v1_models_distinguishes_empty_catalog_from_unreachable_router():
     with patch.object(openai_compat, "_served_backend_model_metadata", return_value={}):
-        empty = TestClient(app).get("/v1/models").json()["data"]
-    with patch.object(openai_compat, "_served_backend_model_metadata", return_value=None):
-        unreachable = TestClient(app).get("/v1/models").json()["data"]
+        empty_response = TestClient(app).get("/v1/models").json()
+    with patch.object(
+        openai_compat, "_served_backend_model_metadata", return_value=None
+    ):
+        unreachable_response = TestClient(app).get("/v1/models").json()
 
     assert all(
         item["unavailable_reasons"]
-        and all(reason.startswith("model_not_loaded:") for reason in item["unavailable_reasons"])
-        for item in empty
+        and all(
+            reason.startswith("model_not_loaded:")
+            for reason in item["unavailable_reasons"]
+        )
+        for item in empty_response["data"]
     )
     assert all(
         item["unavailable_reasons"] == ["model_backend_unreachable"]
-        for item in unreachable
+        for item in unreachable_response["data"]
     )
+    assert empty_response["backend"]["reachable"] is True
+    assert empty_response["backend"]["models"] == []
+    assert unreachable_response["backend"]["reachable"] is False
+    assert unreachable_response["backend"]["models"] == []
+
+
+def test_v1_models_advertises_complete_backend_inventory_for_generic_clients():
+    served = {
+        "gemma-4-12b": {"id": "gemma-4-12b"},
+        # This alias is intentionally absent from Hub product profiles. Generic
+        # clients such as Catalyst still need to know that they may select it.
+        "gemma-4-12b-q4": {"id": "gemma-4-12b-q4"},
+    }
+    with patch.object(
+        openai_compat, "_served_backend_model_metadata", return_value=served
+    ):
+        response = TestClient(app).get("/v1/models").json()
+
+    assert response["backend"] == {
+        **openai_compat._backend_discovery_metadata(),
+        "reachable": True,
+        "models": ["gemma-4-12b", "gemma-4-12b-q4"],
+    }
 
 
 def test_v1_models_advertises_staged_capability_not_just_id_prefix():
