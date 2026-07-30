@@ -25,6 +25,7 @@ from server.context_sources import (
 )
 from server.patient_ledger_cache import PatientLedgerCache
 from server.querystore_client import PatientLedgerFetch
+from server.querystore_client import ContextSliceFetch
 
 
 class WordTokenCounter:
@@ -614,7 +615,15 @@ class _FakeQueryStoreClient:
         self.slice_calls.append((question, interpret))
         if self.slice_error is not None:
             raise self.slice_error
-        return list(self.slice_records)
+        return ContextSliceFetch(
+            records=list(self.slice_records),
+            slice_id="slice-1",
+            total_count=len(self.slice_records),
+            chart_size=len(self._records),
+            chart_truncated=False,
+            effective_types=("drug_order",),
+            temporal_applied=True,
+        )
 
 
 def test_querystore_mapping_keeps_the_matching_raw_record_when_invalid_rows_are_skipped():
@@ -1620,6 +1629,14 @@ def test_querystore_slice_tiers_annotate_records_and_mandatory_tier_wins():
     assert by_uuid["cond-1"].mandatory is True
     assert by_uuid["med-1"].slice_tier == "typed"
     assert by_uuid["noise-1"].slice_tier is None
+    assert ledger.source_metadata["querystore"]["context_slice"] == {
+        "slice_id": "slice-1",
+        "total_count": 2,
+        "chart_size": 3,
+        "chart_truncated": False,
+        "effective_types": ["drug_order"],
+        "temporal_applied": True,
+    }
     # The RAW question goes over with interpret=True — interpretation is querystore's.
     assert client.slice_calls, "the source must request the shared slice"
     question, interpret = client.slice_calls[0]
@@ -1665,4 +1682,3 @@ def test_slice_selected_records_are_never_zero_relevance():
     reasons = {record.stable_id: reason for record, reason in ranked}
     assert reasons["qs:drug_order:med-1"] == "slice_typed"
     assert reasons["qs:obs:noise-1"] == "zero_relevance"
-

@@ -236,6 +236,10 @@ def _context_summary(state: _State) -> Dict[str, Any]:
     return {
         "schema_version": "context_view.v1",
         "sources": list(state.ledger.source_names),
+        "source_metadata": {
+            name: dict(metadata)
+            for name, metadata in state.ledger.source_metadata.items()
+        },
         "ledger_records": len(state.ledger.records),
         "selection_mode": view.mode if view else "none",
         "included_ids": list(view.included_ids) if view else [],
@@ -365,7 +369,12 @@ def _ledger_after_drug_injection(
                 mandatory=resource_type.lower() == "drugreference",
             )
         )
-    return EvidenceLedger(tuple(records), original_text=chart, preamble=ledger.preamble)
+    return EvidenceLedger(
+        tuple(records),
+        original_text=chart,
+        preamble=ledger.preamble,
+        source_metadata=ledger.source_metadata,
+    )
 
 
 def _fixed_context_text(

@@ -27,7 +27,7 @@ from . import kb
 from .chart_serializer import render_chart
 from .config import llm_config, querystore_config
 from .patient_ledger_cache import PatientLedgerCache, default_patient_ledger_cache
-from .querystore_client import QueryStoreClient
+from .querystore_client import ContextSliceFetch, QueryStoreClient
 from .ranked_candidates import resolve_ranked_hits_with_retry
 
 _CHART_MARKER = "Patient records (most recent first):"
@@ -225,6 +225,9 @@ class EvidenceLedger:
     records: Tuple[EvidenceRecord, ...]
     original_text: str = field(default="", compare=False)
     preamble: str = field(default="", compare=False)
+    source_metadata: Mapping[str, Mapping[str, Any]] = field(
+        default_factory=dict, compare=False
+    )
 
     @property
     def source_names(self) -> Tuple[str, ...]:
@@ -507,7 +510,7 @@ class QueryStoreSource:
                 source=self.name,
             ) from exc
         rank_by_identity = await self._ranked_candidate_identities(request, raw_records)
-        slice_tiers = await self._slice_tiers(request)
+        slice_tiers, slice_metadata = await self._slice_selection(request)
         chart, mappings = render_chart(raw_records)
         records: list[EvidenceRecord] = []
         raw_by_key = {
@@ -544,32 +547,50 @@ class QueryStoreSource:
                     raw=raw,
                 )
             )
-        return EvidenceLedger(tuple(records), original_text=chart)
+        source_metadata = (
+            {self.name: {"context_slice": slice_metadata}} if slice_metadata else {}
+        )
+        return EvidenceLedger(
+            tuple(records), original_text=chart, source_metadata=source_metadata
+        )
 
-    async def _slice_tiers(
+    async def _slice_selection(
         self, request: ContextRequest
-    ) -> dict[tuple[Optional[str], Optional[str]], str]:
+    ) -> tuple[
+        dict[tuple[Optional[str], Optional[str]], str], dict[str, Any]
+    ]:
         """Selection tier per record identity from querystore's shared context slice, or
         ``{}`` when the client predates the contract or the slice call fails — the local
         policy remains the degradation path, never a blocked turn."""
         fetch = getattr(self.client, "fetch_context_slice", None)
         if fetch is None:
-            return {}
+            return {}, {}
         try:
             # interpret=True: cue routing, temporal gating, and retrieval preprocessing run
             # server-side (querystore ADR Decision 18) — the RAW question goes over, so the
             # hub's and bundled's interpretations cannot drift.
-            rows = await fetch(request.patient, request.question.strip(), interpret=True)
+            result = await fetch(
+                request.patient, request.question.strip(), interpret=True
+            )
         except Exception:
-            return {}
+            return {}, {}
+        if not isinstance(result, ContextSliceFetch):
+            return {}, {}
         tiers: dict[tuple[Optional[str], Optional[str]], str] = {}
-        for row in rows or []:
+        for row in result.records:
             if not isinstance(row, Mapping):
                 continue
             tier = row.get("tier")
             if isinstance(tier, str) and tier:
                 tiers[(row.get("resourceType"), row.get("resourceUuid"))] = tier
-        return tiers
+        return tiers, {
+            "slice_id": result.slice_id,
+            "total_count": result.total_count,
+            "chart_size": result.chart_size,
+            "chart_truncated": result.chart_truncated,
+            "effective_types": list(result.effective_types),
+            "temporal_applied": result.temporal_applied,
+        }
 
     async def _ranked_candidate_identities(
         self, request: ContextRequest, raw_records: list[dict[str, Any]]
@@ -639,7 +660,17 @@ class SourceRegistry:
             )
         original_text = ledgers[0].original_text if len(ledgers) == 1 else ""
         preamble = "".join(ledger.preamble for ledger in ledgers if ledger.preamble)
-        return EvidenceLedger(records, original_text=original_text, preamble=preamble)
+        source_metadata = {
+            source_name: metadata
+            for ledger in ledgers
+            for source_name, metadata in ledger.source_metadata.items()
+        }
+        return EvidenceLedger(
+            records,
+            original_text=original_text,
+            preamble=preamble,
+            source_metadata=source_metadata,
+        )
 
     def _resolve(self, request: ContextRequest) -> Tuple[ContextSource, ...]:
         requested = request.sources or ((request.source,) if request.source else ())
