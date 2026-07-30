@@ -76,4 +76,4 @@ async def generate(req: GenerateRequest) -> GenerateResponse:
             status_code=502,
             detail="model response contained no assistant content",
         )
-    return GenerateResponse(model=req.model, content=content.strip())
+    return GenerateResponse(model=req.model, content=content)

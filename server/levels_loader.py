@@ -495,6 +495,8 @@ def _profile_configuration_digest(profile: Profile) -> str:
         "knobs": profile.knobs,
         "visibility": profile.visibility,
         "default": profile.default,
+        "selection_priority": profile.selection_priority,
+        "supplemental_sources": profile.supplemental_sources,
         "context_window": profile.context_window,
         "reserved_output_tokens": profile.reserved_output_tokens,
         "exact_tokenizer": profile.exact_tokenizer,

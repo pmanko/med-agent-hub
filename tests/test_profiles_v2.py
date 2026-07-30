@@ -295,6 +295,14 @@ def test_profile_and_prompt_digests_are_deterministic_and_separate():
     first = profile_metadata(profile, available=True)
     second = profile_metadata(profile, available=False)
     renamed = profile_metadata(replace(profile, label="Changed label"), available=True)
+    reprioritized = profile_metadata(
+        replace(profile, selection_priority=profile.selection_priority + 1),
+        available=True,
+    )
+    with_different_sources = profile_metadata(
+        replace(profile, supplemental_sources=("different-source",)),
+        available=True,
+    )
 
     assert (
         first["profile_configuration_digest"] == second["profile_configuration_digest"]
@@ -302,6 +310,14 @@ def test_profile_and_prompt_digests_are_deterministic_and_separate():
     assert first["role_prompt_digests"] == second["role_prompt_digests"]
     assert (
         first["profile_configuration_digest"] != renamed["profile_configuration_digest"]
+    )
+    assert (
+        first["profile_configuration_digest"]
+        != reprioritized["profile_configuration_digest"]
+    )
+    assert (
+        first["profile_configuration_digest"]
+        != with_different_sources["profile_configuration_digest"]
     )
     assert first["role_prompt_digests"] == renamed["role_prompt_digests"]
 

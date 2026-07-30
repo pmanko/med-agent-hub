@@ -67,6 +67,19 @@ def test_returns_model_content_and_forwards_arguments():
     assert captured["dry_multiplier"] == 0
 
 
+def test_returns_nonempty_model_content_verbatim():
+    async def fake_chat(*args: Any, **kwargs: Any) -> Dict[str, Any]:
+        return {"role": "assistant", "content": " \n  {\"status\":\"ready\"}\n "}
+
+    with patch.object(team, "_chat", side_effect=fake_chat):
+        response = _post(
+            {"model": "m", "messages": [{"role": "user", "content": "hi"}]}
+        )
+
+    assert response.status_code == 200
+    assert response.json()["content"] == " \n  {\"status\":\"ready\"}\n "
+
+
 def test_empty_content_is_a_bad_gateway():
     async def fake_chat(*args: Any, **kwargs: Any) -> Dict[str, Any]:
         return {"role": "assistant", "content": "   "}
