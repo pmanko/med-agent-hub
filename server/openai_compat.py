@@ -188,7 +188,7 @@ def list_models() -> Dict[str, Any]:
     created = int(time.time())
     backend_models = _served_backend_model_metadata()
     backend_reachable = backend_models is not None
-    served = set(backend_models) if backend_models else set()
+    advertised = set(backend_models) if backend_models else set()
     backend = _backend_discovery_metadata()
     profiles = [get_profile(profile_id) for profile_id in profile_ids()]
     readiness = []
@@ -196,7 +196,7 @@ def list_models() -> Dict[str, Any]:
         missing = [
             model
             for model in sorted(set(profile.models.values()))
-            if model not in served
+            if model not in advertised
         ]
         unavailable_reasons = (
             ("model_backend_unreachable",)
@@ -246,9 +246,10 @@ def list_models() -> Dict[str, Any]:
         "object": "list",
         "data": data,
         "backend": {
+            "contract_version": "med-agent-hub.backend-model-inventory.v1",
             **backend,
-            "reachable": backend_reachable,
-            "models": sorted(served),
+            "catalog_reachable": backend_reachable,
+            "advertised_model_ids": sorted(advertised),
         },
     }
 

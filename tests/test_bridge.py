@@ -708,10 +708,10 @@ def test_v1_models_distinguishes_empty_catalog_from_unreachable_router():
         item["unavailable_reasons"] == ["model_backend_unreachable"]
         for item in unreachable_response["data"]
     )
-    assert empty_response["backend"]["reachable"] is True
-    assert empty_response["backend"]["models"] == []
-    assert unreachable_response["backend"]["reachable"] is False
-    assert unreachable_response["backend"]["models"] == []
+    assert empty_response["backend"]["catalog_reachable"] is True
+    assert empty_response["backend"]["advertised_model_ids"] == []
+    assert unreachable_response["backend"]["catalog_reachable"] is False
+    assert unreachable_response["backend"]["advertised_model_ids"] == []
 
 
 def test_v1_models_advertises_complete_backend_inventory_for_generic_clients():
@@ -727,9 +727,10 @@ def test_v1_models_advertises_complete_backend_inventory_for_generic_clients():
         response = TestClient(app).get("/v1/models").json()
 
     assert response["backend"] == {
+        "contract_version": "med-agent-hub.backend-model-inventory.v1",
         **openai_compat._backend_discovery_metadata(),
-        "reachable": True,
-        "models": ["gemma-4-12b", "gemma-4-12b-q4"],
+        "catalog_reachable": True,
+        "advertised_model_ids": ["gemma-4-12b", "gemma-4-12b-q4"],
     }
 
 

@@ -72,8 +72,10 @@ Weight-aware dose checks read the newest fresh numeric Querystore `obs` matching
 - `POST /v1/chat/completions`: blocking or staged streaming profile execution.
 - `GET /v1/models`: configured profile metadata, availability, validation capability,
   exact context requirements, at most one hub-selected available default marker,
-  and a sanitized top-level `backend` inventory (`reachable` plus exact served
-  aliases) for generic clients that own their own profiles.
+  and a versioned top-level `backend` inventory (`catalog_reachable` plus exact
+  router-advertised model IDs) for generic clients that own their own profiles.
+  Router model IDs are public identifiers and must not embed credentials;
+  endpoint and model metadata are credential-sanitized separately.
 - `GET /health`: service health, uptime, and process memory.
 - `GET /`: concise service status.
 
