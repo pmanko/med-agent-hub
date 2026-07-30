@@ -699,7 +699,7 @@ def test_v1_models_distinguishes_empty_catalog_from_unreachable_router():
     assert all(
         item["unavailable_reasons"]
         and all(
-            reason.startswith("model_not_loaded:")
+            reason.startswith("model_not_advertised:")
             for reason in item["unavailable_reasons"]
         )
         for item in empty_response["data"]

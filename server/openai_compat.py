@@ -201,7 +201,7 @@ def list_models() -> Dict[str, Any]:
         unavailable_reasons = (
             ("model_backend_unreachable",)
             if not backend_reachable
-            else tuple(f"model_not_loaded:{model}" for model in missing)
+            else tuple(f"model_not_advertised:{model}" for model in missing)
         )
         readiness.append((profile, not missing, unavailable_reasons))
 
