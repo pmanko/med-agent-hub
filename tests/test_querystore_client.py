@@ -144,6 +144,47 @@ def test_full_chart_accepts_multiple_pages(monkeypatch):
     assert result.snapshot_id == "snap-1"
 
 
+def test_full_chart_continues_when_server_caps_each_page_below_the_requested_limit(
+    monkeypatch,
+):
+    fake = _FakeResponses(
+        [
+            _page(
+                [
+                    {"resourceType": "obs", "resourceUuid": "one"},
+                    {"resourceType": "obs", "resourceUuid": "two"},
+                ],
+                total=5,
+            ),
+            _page(
+                [
+                    {"resourceType": "obs", "resourceUuid": "three"},
+                    {"resourceType": "obs", "resourceUuid": "four"},
+                ],
+                total=5,
+            ),
+            _page([{"resourceType": "obs", "resourceUuid": "five"}], total=5),
+        ]
+    )
+    monkeypatch.setattr("server.querystore_client.httpx.AsyncClient", fake)
+
+    result = _run(
+        QueryStoreClient("http://openmrs", "service", "secret").fetch_patient_ledger(
+            "patient-1", page_size=500
+        )
+    )
+
+    assert [record["resourceUuid"] for record in result.records] == [
+        "one",
+        "two",
+        "three",
+        "four",
+        "five",
+    ]
+    assert [request["params"]["startIndex"] for request in fake.requests] == [0, 2, 4]
+    assert all(request["params"]["limit"] == 500 for request in fake.requests)
+
+
 def test_full_chart_rejects_duplicate_record_across_pages(monkeypatch):
     fake = _FakeResponses(
         [

@@ -152,7 +152,9 @@ class QueryStoreClient:
                         "Querystore changed the patient chart snapshot while paging"
                     )
                 start += len(page)
-                if not page or len(page) < page_size or start >= expected_total:
+                # OpenMRS may cap `limit` below the requested page size. `totalCount`, not the
+                # requested limit, determines whether more records remain.
+                if not page or start >= expected_total:
                     break
         if expected_total is None or len(records) != expected_total:
             raise ValueError(
