@@ -5,10 +5,13 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import time
 import uuid
+from collections.abc import Mapping
 from dataclasses import replace
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request
@@ -40,8 +43,106 @@ class ChatCompletionRequest(BaseModel):
     patient: Optional[str] = None
 
 
-def _served_backend_models() -> Optional[set[str]]:
-    """Return the router catalog, or ``None`` when discovery itself fails."""
+_SENSITIVE_METADATA_KEYS = {
+    "access_token",
+    "api_key",
+    "apikey",
+    "authorization",
+    "client_secret",
+    "credential",
+    "credentials",
+    "password",
+    "refresh_token",
+    "secret",
+}
+_URL_METADATA_KEYS = {
+    "base_url",
+    "download_url",
+    "endpoint",
+    "model_url",
+    "uri",
+    "url",
+}
+
+
+def _normalized_metadata_key(key: str) -> tuple[str, tuple[str, ...]]:
+    snake_case = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", key.strip())
+    normalized = re.sub(r"[^a-z0-9]+", "_", snake_case.lower()).strip("_")
+    return normalized, tuple(part for part in normalized.split("_") if part)
+
+
+def _is_sensitive_metadata_key(normalized: str, parts: tuple[str, ...]) -> bool:
+    if normalized in _SENSITIVE_METADATA_KEYS:
+        return True
+    if any(
+        part in {"credential", "credentials", "password", "secret"}
+        for part in parts
+    ):
+        return True
+    pairs = set(zip(parts, parts[1:]))
+    return bool(
+        pairs
+        & {
+            ("access", "token"),
+            ("api", "key"),
+            ("auth", "token"),
+            ("bearer", "token"),
+            ("client", "secret"),
+            ("refresh", "token"),
+        }
+    )
+
+
+def _is_url_metadata_key(normalized: str, parts: tuple[str, ...]) -> bool:
+    return normalized in _URL_METADATA_KEYS or bool(
+        parts and parts[-1] in {"endpoint", "uri", "url"}
+    )
+
+
+def _public_url(value: str) -> str:
+    """Remove credentials, query parameters, and fragments from advertised URLs."""
+    try:
+        parsed = urlsplit(value)
+        if not parsed.scheme or not parsed.hostname:
+            return value
+        host = parsed.hostname
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        if parsed.port is not None:
+            host = f"{host}:{parsed.port}"
+        return urlunsplit((parsed.scheme, host, parsed.path, "", ""))
+    except ValueError:
+        return "[redacted-invalid-url]"
+
+
+def _sanitize_backend_metadata(value: Any, *, key: str = "") -> Any:
+    """Preserve backend model metadata while removing conventional secrets."""
+    normalized_key, key_parts = _normalized_metadata_key(key)
+    if _is_sensitive_metadata_key(normalized_key, key_parts):
+        return "[redacted]"
+    if isinstance(value, Mapping):
+        return {
+            str(item_key): _sanitize_backend_metadata(item, key=str(item_key))
+            for item_key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_sanitize_backend_metadata(item, key=key) for item in value]
+    if isinstance(value, tuple):
+        return [_sanitize_backend_metadata(item, key=key) for item in value]
+    if isinstance(value, str):
+        if _is_url_metadata_key(normalized_key, key_parts):
+            return _public_url(value)
+        try:
+            parsed = urlsplit(value)
+        except ValueError:
+            return value
+        if parsed.scheme in {"http", "https"} and parsed.hostname:
+            return _public_url(value)
+    return value
+
+
+def _served_backend_model_metadata() -> Optional[Dict[str, Dict[str, Any]]]:
+    """Return the router catalog's per-model metadata, or ``None`` when discovery itself fails."""
     headers = {}
     if llm_config.api_key:
         headers["Authorization"] = f"Bearer {llm_config.api_key}"
@@ -52,33 +153,55 @@ def _served_backend_models() -> Optional[set[str]]:
             timeout=3.0,
         )
         response.raise_for_status()
-        return {
-            str(item.get("id"))
-            for item in (response.json().get("data") or [])
-            if item.get("id")
-        }
+        result: Dict[str, Dict[str, Any]] = {}
+        for item in response.json().get("data") or []:
+            if not isinstance(item, Mapping) or not item.get("id"):
+                continue
+            # The local llama.cpp router advertises configured aliases before
+            # loading them and loads the selected alias on first inference.
+            # Presence in the router catalog therefore means the model is
+            # available; "unloaded" is lifecycle state, not an error.
+            sanitized = _sanitize_backend_metadata(item)
+            result[str(item["id"])] = dict(sanitized)
+        return result
     except Exception:
         return None
+
+
+def _served_backend_models() -> Optional[set[str]]:
+    """Compatibility helper for callers that only need loaded backend aliases."""
+    discovered = _served_backend_model_metadata()
+    return None if discovered is None else set(discovered)
+
+
+def _backend_discovery_metadata() -> Dict[str, str]:
+    endpoint = _public_url(str(llm_config.base_url).rstrip("/"))
+    return {
+        "provider": str(getattr(llm_config, "provider", "openai-compatible")),
+        "endpoint": endpoint,
+        "models_endpoint": f"{endpoint}/v1/models",
+    }
 
 
 @router.get("/v1/models")
 def list_models() -> Dict[str, Any]:
     created = int(time.time())
-    discovered = _served_backend_models()
-    backend_reachable = discovered is not None
-    served = discovered or set()
+    backend_models = _served_backend_model_metadata()
+    backend_reachable = backend_models is not None
+    advertised = set(backend_models) if backend_models else set()
+    backend = _backend_discovery_metadata()
     profiles = [get_profile(profile_id) for profile_id in profile_ids()]
     readiness = []
     for profile in profiles:
         missing = [
             model
             for model in sorted(set(profile.models.values()))
-            if model not in served
+            if model not in advertised
         ]
         unavailable_reasons = (
             ("model_backend_unreachable",)
             if not backend_reachable
-            else tuple(f"model_not_loaded:{model}" for model in missing)
+            else tuple(f"model_not_advertised:{model}" for model in missing)
         )
         readiness.append((profile, not missing, unavailable_reasons))
 
@@ -112,11 +235,22 @@ def list_models() -> Dict[str, Any]:
                 "object": "model",
                 "created": created,
                 "owned_by": "med-agent-hub",
+                "backend": backend,
+                "backend_model_metadata": {
+                    model: (backend_models or {}).get(model)
+                    for model in sorted(set(profile.models.values()))
+                },
             }
         )
     return {
         "object": "list",
         "data": data,
+        "backend": {
+            "contract_version": "med-agent-hub.backend-model-inventory.v1",
+            **backend,
+            "catalog_reachable": backend_reachable,
+            "advertised_model_ids": sorted(advertised),
+        },
     }
 
 

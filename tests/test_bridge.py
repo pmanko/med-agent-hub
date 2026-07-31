@@ -554,6 +554,116 @@ def test_backend_model_discovery_uses_configured_bearer_auth():
     )
 
 
+def test_backend_model_discovery_preserves_metadata_and_redacts_secrets():
+    backend = SimpleNamespace(
+        base_url="https://user:password@router.example:8443/openai?token=secret",
+        provider="llama.cpp",
+        api_key="request-secret",
+    )
+    advertised = {
+        "id": "gemma-e4b",
+        "object": "model",
+        "owned_by": "llamacpp",
+        "created": 1234,
+        "meta": {
+            "quantization": "Q4_K_M",
+            "physical_revision": "sha256:model-bytes",
+            "api_key": "metadata-secret",
+            "tokenizer": "gemma",
+            "download_url": "https://user:pass@models.example/gemma?sig=secret",
+        },
+    }
+    with patch.object(openai_compat, "llm_config", backend), patch.object(
+        openai_compat.httpx, "get"
+    ) as get:
+        get.return_value.json.return_value = {"data": [advertised]}
+
+        metadata = openai_compat._served_backend_model_metadata()
+        backend_metadata = openai_compat._backend_discovery_metadata()
+
+    assert metadata["gemma-e4b"] == {
+        **advertised,
+        "meta": {
+            **advertised["meta"],
+            "api_key": "[redacted]",
+            "download_url": "https://models.example/gemma",
+        },
+    }
+    assert backend_metadata == {
+        "provider": "llama.cpp",
+        "endpoint": "https://router.example:8443/openai",
+        "models_endpoint": "https://router.example:8443/openai/v1/models",
+    }
+    assert "request-secret" not in json.dumps(metadata)
+    assert "metadata-secret" not in json.dumps(metadata)
+    assert "password" not in json.dumps(backend_metadata)
+
+
+def test_backend_metadata_sanitizes_url_values_in_sequences():
+    metadata = openai_compat._sanitize_backend_metadata(
+        {
+            "download_url": [
+                "https://user:pass@models.example/gemma?sig=secret#fragment"
+            ],
+            "endpoint": ("https://token@router.example/v1/models?api_key=secret",),
+            "api_key": ["metadata-secret"],
+        }
+    )
+
+    assert metadata == {
+        "download_url": ["https://models.example/gemma"],
+        "endpoint": ["https://router.example/v1/models"],
+        "api_key": "[redacted]",
+    }
+
+
+def test_backend_metadata_redacts_camel_case_compound_secrets_and_all_urls():
+    metadata = openai_compat._sanitize_backend_metadata(
+        {
+            "routerApiKey": "api-secret",
+            "nested": {
+                "clientSecret": "client-secret",
+                "serviceAccessToken": "access-secret",
+                "base_url": "https://user:pass@router.example/v1?token=secret",
+                "artifactUrl": "https://models.example/file?signature=secret",
+                "homepage": "https://user:pass@example.org/model?token=secret",
+                "tokenizer": "gemma",
+            },
+        }
+    )
+
+    assert metadata == {
+        "routerApiKey": "[redacted]",
+        "nested": {
+            "clientSecret": "[redacted]",
+            "serviceAccessToken": "[redacted]",
+            "base_url": "https://router.example/v1",
+            "artifactUrl": "https://models.example/file",
+            "homepage": "https://example.org/model",
+            "tokenizer": "gemma",
+        },
+    }
+
+
+def test_backend_model_discovery_includes_on_demand_unloaded_router_entries():
+    backend = SimpleNamespace(base_url="http://router", api_key="")
+    with (
+        patch.object(openai_compat, "llm_config", backend),
+        patch.object(openai_compat.httpx, "get") as get,
+    ):
+        get.return_value.json.return_value = {
+            "data": [
+                {"id": "loaded", "status": {"value": "loaded"}},
+                {"id": "unloaded", "status": {"value": "unloaded"}},
+                {"id": "standard-openai-entry"},
+            ]
+        }
+
+        metadata = openai_compat._served_backend_model_metadata()
+
+    assert set(metadata) == {"loaded", "unloaded", "standard-openai-entry"}
+
+
 def test_backend_model_discovery_omits_auth_when_api_key_is_blank():
     backend = SimpleNamespace(base_url="http://router", api_key="")
     with patch.object(openai_compat, "llm_config", backend), patch.object(
@@ -579,25 +689,56 @@ def test_backend_model_discovery_returns_none_when_router_is_unreachable():
 
 
 def test_v1_models_distinguishes_empty_catalog_from_unreachable_router():
-    with patch.object(openai_compat, "_served_backend_models", return_value=set()):
-        empty = TestClient(app).get("/v1/models").json()["data"]
-    with patch.object(openai_compat, "_served_backend_models", return_value=None):
-        unreachable = TestClient(app).get("/v1/models").json()["data"]
+    with patch.object(openai_compat, "_served_backend_model_metadata", return_value={}):
+        empty_response = TestClient(app).get("/v1/models").json()
+    with patch.object(
+        openai_compat, "_served_backend_model_metadata", return_value=None
+    ):
+        unreachable_response = TestClient(app).get("/v1/models").json()
 
     assert all(
         item["unavailable_reasons"]
-        and all(reason.startswith("model_not_loaded:") for reason in item["unavailable_reasons"])
-        for item in empty
+        and all(
+            reason.startswith("model_not_advertised:")
+            for reason in item["unavailable_reasons"]
+        )
+        for item in empty_response["data"]
     )
     assert all(
         item["unavailable_reasons"] == ["model_backend_unreachable"]
-        for item in unreachable
+        for item in unreachable_response["data"]
     )
+    assert empty_response["backend"]["catalog_reachable"] is True
+    assert empty_response["backend"]["advertised_model_ids"] == []
+    assert unreachable_response["backend"]["catalog_reachable"] is False
+    assert unreachable_response["backend"]["advertised_model_ids"] == []
+
+
+def test_v1_models_advertises_complete_backend_inventory_for_generic_clients():
+    served = {
+        "gemma-4-12b": {"id": "gemma-4-12b"},
+        # This alias is intentionally absent from Hub product profiles. Generic
+        # clients such as Catalyst still need to know that they may select it.
+        "gemma-4-12b-q4": {"id": "gemma-4-12b-q4"},
+    }
+    with patch.object(
+        openai_compat, "_served_backend_model_metadata", return_value=served
+    ):
+        response = TestClient(app).get("/v1/models").json()
+
+    assert response["backend"] == {
+        "contract_version": "med-agent-hub.backend-model-inventory.v1",
+        **openai_compat._backend_discovery_metadata(),
+        "catalog_reachable": True,
+        "advertised_model_ids": ["gemma-4-12b", "gemma-4-12b-q4"],
+    }
 
 
 def test_v1_models_advertises_staged_capability_not_just_id_prefix():
     # Gate 10: clients must route by this field, never by pattern-matching the id string.
-    with patch.object(openai_compat, "_served_backend_models", return_value={"gemma-e4b"}):
+    with patch.object(
+        openai_compat, "_served_backend_model_metadata", return_value={"gemma-e4b": {}}
+    ):
         client = TestClient(app)
         r = client.get("/v1/models")
     by_id = {m["id"]: m for m in r.json()["data"]}
@@ -615,8 +756,8 @@ def test_v1_models_advertises_staged_capability_not_just_id_prefix():
 def test_v1_models_advertises_e2b_comparison_when_writer_and_checker_are_available():
     with patch.object(
         openai_compat,
-        "_served_backend_models",
-        return_value={"gemma-e2b", "gemma-e4b"},
+        "_served_backend_model_metadata",
+        return_value={"gemma-e2b": {}, "gemma-e4b": {}},
     ):
         r = TestClient(app).get("/v1/models")
 
@@ -629,7 +770,9 @@ def test_v1_models_advertises_e2b_comparison_when_writer_and_checker_are_availab
 
 
 def test_v1_models_selects_available_fallback_default_in_the_hub():
-    with patch.object(openai_compat, "_served_backend_models", return_value={"gemma-26b"}):
+    with patch.object(
+        openai_compat, "_served_backend_model_metadata", return_value={"gemma-26b": {}}
+    ):
         client = TestClient(app)
         r = client.get("/v1/models")
 

@@ -15,7 +15,6 @@ python-multipart = "^0.0.6"
 psutil = "^5.9.0"
 httpx = "^0.28.1"
 python-dotenv = "^1.0.1"
-jsonschema = "^4.20.0"
 PyYAML = "^6.0"
 
 [tool.poetry.group.dev.dependencies]

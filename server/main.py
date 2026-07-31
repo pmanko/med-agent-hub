@@ -13,6 +13,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import llm_config, validate_config
+from .generic_role import router as generic_role_router
 from .levels_loader import validate_profiles
 from .openai_compat import router as openai_router
 
@@ -71,3 +72,4 @@ def health_check():
 
 
 app.include_router(openai_router)
+app.include_router(generic_role_router)

@@ -1057,7 +1057,12 @@ async def _chat(
     if slot_evidence is not None:
         slot_evidence.acquired()
     try:
-        resp = await client.post(url, json=payload, headers=headers, timeout=600.0)
+        resp = await client.post(
+            url,
+            json=payload,
+            headers=headers,
+            timeout=llm_config.request_timeout_seconds,
+        )
     finally:
         _ROUTER_LOCK.release()
         if slot_evidence is not None:

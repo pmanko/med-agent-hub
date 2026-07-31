@@ -18,9 +18,13 @@ class LLMConfig:
     """OpenAI-compatible backend used by hub stages."""
 
     base_url: str = os.getenv("LLM_BASE_URL", "http://localhost:8077")
+    provider: str = os.getenv("LLM_PROVIDER", "openai-compatible")
     api_key: str = os.getenv("LLM_API_KEY", "")
     temperature: float = float(os.getenv("LLM_TEMPERATURE", "0.2"))
     max_tokens: int = int(os.getenv("LLM_MAX_TOKENS", "2000"))
+    request_timeout_seconds: float = float(
+        os.getenv("LLM_REQUEST_TIMEOUT_SECONDS", "600")
+    )
 
 
 @dataclass(frozen=True)
@@ -74,6 +78,10 @@ def validate_config() -> None:
     if not llm_config.base_url:
         raise ValueError(
             "LLM_BASE_URL must identify the OpenAI-compatible model router."
+        )
+    if llm_config.request_timeout_seconds <= 0:
+        raise ValueError(
+            "LLM_REQUEST_TIMEOUT_SECONDS must be a positive number of seconds."
         )
     if not resolve_hub_build_revision():
         raise ValueError(

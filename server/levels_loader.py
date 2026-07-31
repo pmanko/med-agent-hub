@@ -7,6 +7,8 @@ are intentionally absent from product discovery.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
@@ -65,6 +67,7 @@ class Profile:
     reserved_output_tokens: int = 0
     exact_tokenizer: bool = False
     low_level_leg: bool = False
+    output_contracts: Tuple[str, ...] = ()
 
     @property
     def staged(self) -> bool:
@@ -202,6 +205,7 @@ def _from_spec(profile_id: str, spec: Mapping[str, Any]) -> Profile:
         context_window=int(context.get("window") or 0),
         reserved_output_tokens=int(context.get("reserved_output_tokens") or 0),
         exact_tokenizer=bool(context.get("exact_tokenizer", False)),
+        output_contracts=tuple(spec.get("outputContracts") or ()),
     )
     return compile_profile(profile)
 
@@ -350,7 +354,6 @@ def compile_profile(profile: Profile) -> Profile:
             raise ValueError(
                 f"product profile {profile.id!r} must ground before gated In-Depth"
             )
-
     temporal_mode = str(profile.policies.get("temporal_gate", "off")).lower()
     if temporal_mode not in _TEMPORAL_GATE_MODES:
         raise ValueError(
@@ -385,6 +388,7 @@ def compile_profile(profile: Profile) -> Profile:
         reserved_output_tokens=profile.reserved_output_tokens,
         exact_tokenizer=profile.exact_tokenizer,
         low_level_leg=profile.low_level_leg,
+        output_contracts=tuple(profile.output_contracts),
     )
 
 
@@ -461,6 +465,79 @@ def resolve_temporal_policy(
     return enabled, mode
 
 
+def _jsonable(value: Any) -> Any:
+    """Return immutable profile configuration as canonical JSON values."""
+    if isinstance(value, Mapping):
+        return {
+            str(key): _jsonable(item)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+        }
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(item) for item in value]
+    return value
+
+
+def _sha256(value: str) -> str:
+    return f"sha256:{hashlib.sha256(value.encode('utf-8')).hexdigest()}"
+
+
+def _profile_configuration_digest(profile: Profile) -> str:
+    configuration = {
+        "id": profile.id,
+        "label": profile.label,
+        "topology": profile.topology,
+        "stages": profile.stages,
+        "models": profile.models,
+        "prompts": profile.prompts,
+        "policies": profile.policies,
+        "staged": profile.staged,
+        "validation": profile.validation,
+        "knobs": profile.knobs,
+        "visibility": profile.visibility,
+        "default": profile.default,
+        "selection_priority": profile.selection_priority,
+        "supplemental_sources": profile.supplemental_sources,
+        "context_window": profile.context_window,
+        "reserved_output_tokens": profile.reserved_output_tokens,
+        "exact_tokenizer": profile.exact_tokenizer,
+        "low_level_leg": profile.low_level_leg,
+        "output_contracts": profile.output_contracts,
+    }
+    canonical = json.dumps(
+        _jsonable(configuration),
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return _sha256(canonical)
+
+
+def _prompt_assets(profile: Profile, role: str, configured: str) -> Tuple[str, ...]:
+    if role != "review":
+        return (configured,)
+    assets = [configured + "-answer"]
+    if "indepth" in profile.stages:
+        assets.append(configured + "-indepth")
+    return tuple(assets)
+
+
+def _role_prompt_digests(profile: Profile) -> Dict[str, Any]:
+    digests: Dict[str, Any] = {}
+    for role, configured_value in sorted(profile.prompts.items()):
+        configured = str(configured_value)
+        system_prompts = {}
+        for name in _prompt_assets(profile, role, configured):
+            content = (
+                (_PROMPTS / f"{name}.txt").read_text(encoding="utf-8").rstrip("\n")
+            )
+            system_prompts[name] = _sha256(content)
+        digests[str(role)] = {
+            "configured_prompt": configured,
+            "system_prompt_sha256": system_prompts,
+        }
+    return digests
+
+
 def profile_metadata(
     profile: Profile,
     *,
@@ -468,7 +545,7 @@ def profile_metadata(
     unavailable_reasons: Tuple[str, ...] = (),
     effective_default: Optional[bool] = None,
 ) -> Dict[str, Any]:
-    return {
+    metadata = {
         "id": profile.id,
         "label": profile.label,
         "staged": profile.staged,
@@ -481,7 +558,17 @@ def profile_metadata(
         "visibility": profile.visibility,
         "stages": list(profile.stages),
         "required_models": sorted(set(profile.models.values())),
+        "role_models": dict(profile.models),
+        "role_knobs": _jsonable(profile.knobs),
+        "profile_configuration_digest": _profile_configuration_digest(profile),
+        "role_prompt_digests": _role_prompt_digests(profile),
         "context_window": profile.context_window or None,
         "exact_tokenizer": profile.exact_tokenizer,
         "unavailable_reasons": list(unavailable_reasons),
     }
+    if profile.output_contracts:
+        metadata["outputContracts"] = list(profile.output_contracts)
+    model_classes = profile.policies.get("model_classes")
+    if isinstance(model_classes, Mapping):
+        metadata["role_model_classes"] = _jsonable(model_classes)
+    return metadata
