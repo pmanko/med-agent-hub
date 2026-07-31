@@ -843,6 +843,74 @@ def test_ground_references_checks_a_multi_citation_claim_against_combined_source
     assert "[2] 2006-06-06 Weight (kg): 71 kg" in prompt
 
 
+def test_ground_references_grounds_each_enumerated_item_against_its_own_source(
+    monkeypatch,
+):
+    # An ENUMERATION sentence — each item cited by its own marker separated by its own item
+    # text — must be grounded per-item against ONLY that item's source, NOT collapsed into one
+    # combined-source verdict. Regression for the compound-citation coupling bug: a small
+    # grounding model asked "does {cotrimoxazole + lamivudine + efavirenz records} support
+    # 'cotrimoxazole, lamivudine, and efavirenz'?" as one unit would fail the whole thing and mark
+    # every citation unsupported. Contrast test_ground_references_checks_a_multi_citation_claim_
+    # against_combined_sources, whose ADJACENT [1][2] markers are one collective claim and stay
+    # combined. Here the markers are SEPARATED by their own item text, so each is its own cluster.
+    fake_chat, calls = _fake_chat_returning_verdicts([["YES", "NO", "YES"]])
+    monkeypatch.setattr(team, "_chat", fake_chat)
+    statement = (
+        "The patient is prescribed cotrimoxazole [2], lamivudine [3], and efavirenz [4]."
+    )
+    refs = [
+        {
+            "index": index,
+            "resourceType": "drug_order",
+            "resourceUuid": f"drug-{index}",
+            "date": "2026-01-26",
+            "usage": [{"location": "answer", "text": statement}],
+        }
+        for index in (2, 3, 4)
+    ]
+    mappings = [
+        {"index": 2, "date": "2026-01-26", "text": "Drug order: cotrimoxazole"},
+        {"index": 3, "date": "2026-01-26", "text": "Drug order: lamivudine"},
+        {"index": 4, "date": "2026-01-26", "text": "Drug order: efavirenz"},
+    ]
+
+    async def _run():
+        return await team._ground_references(None, "M", statement, refs, mappings)
+
+    grounded = asyncio.run(_run())
+    # Each citation gets its OWN independent verdict, not one shared across the group.
+    assert [item["groundingStatus"] for item in grounded] == [
+        "verified",
+        "unsupported",
+        "verified",
+    ]
+    assert [item["grounded"] for item in grounded] == [True, False, True]
+    # Each is scoped to its own single record, not a source_set.
+    assert [item["groundingScope"] for item in grounded] == [
+        "record",
+        "record",
+        "record",
+    ]
+    assert all("groundingGroup" not in item for item in grounded)
+    # Each grounding check cites only that item's own source index and its own item clause.
+    assert [check_source_indices(item) for item in grounded] == [[2], [3], [4]]
+    claims = [item["groundingChecks"][0]["claim"] for item in grounded]
+    assert "cotrimoxazole" in claims[0] and "lamivudine" not in claims[0]
+    assert "lamivudine" in claims[1] and "efavirenz" not in claims[1]
+    assert "efavirenz" in claims[2]
+    # One batched call carrying one PAIR per enumerated item (hub's single-slot batching model),
+    # but three independent verdicts positionally mapped — the fix is per-item claims+sources,
+    # not per-item network calls.
+    assert len(calls) == 1
+    prompt = calls[0]["messages"][0]["content"]
+    assert prompt.count("PAIR ") == 3
+
+
+def check_source_indices(grounded_ref):
+    return grounded_ref["groundingChecks"][0]["source_indices"]
+
+
 @pytest.mark.parametrize(
     "statement",
     (
@@ -2684,10 +2752,16 @@ def test_knowledge_reference_survives_source_set_grounding_with_provenance(monke
         answer_usage_location="indepth",
     )
 
+    # The patient-fact citation [1] and the knowledge-base provenance citation [2] back DIFFERENT
+    # clauses of this sentence (separated by their own text), so each is grounded per-claim against
+    # only its own source rather than as one combined source_set — the same compound-citation
+    # decoupling as the enumeration case. The point of this test is that the knowledge reference's
+    # provenance/source metadata SURVIVES grounding, which it still does.
     async def supported(_client, _model, pairs):
-        assert len(pairs) == 1
-        assert "[1]" in pairs[0][0] and "[2]" in pairs[0][0]
-        return [True]
+        assert len(pairs) == 2
+        assert "[1]" in pairs[0][0] and "Examplemed" in pairs[0][1]
+        assert "[2]" in pairs[1][0] and "monitoring" in pairs[1][1]
+        return [True, True]
 
     monkeypatch.setattr(team, "_entailment_verdicts", supported)
     grounded = asyncio.run(
@@ -2705,7 +2779,9 @@ def test_knowledge_reference_survives_source_set_grounding_with_provenance(monke
         "url": "https://example.test/guide",
         "license": "CC BY",
     }
-    assert kb_reference["groundingGroup"] == [1, 2]
+    # Now grounded as its own clause against its own source, so it is record-scoped, not a set.
+    assert kb_reference["groundingScope"] == "record"
+    assert "groundingGroup" not in kb_reference
 
 
 def test_product_review_and_final_event_preserve_grounded_knowledge_reference(monkeypatch):

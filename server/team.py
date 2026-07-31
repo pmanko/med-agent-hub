@@ -453,6 +453,40 @@ def _claim_fragments_for_index(answer: str, index: int) -> List[str]:
     return fragments
 
 
+def _citation_clusters(text: str) -> List[Dict[str, Any]]:
+    """Partition ``text`` into citation clusters for per-item grounding.
+
+    Adjacent markers with no word-bearing text between them (a collective claim like a
+    ``74 kg ... to 71 kg [1][2]`` change, whose sources are checked TOGETHER) stay in ONE
+    cluster; markers each preceded by their own item text (an enumeration like
+    ``cotrimoxazole [2], lamivudine [3]``) each form their OWN cluster so each is grounded
+    against only its own source — the fix for compound-citation verdict coupling. Each cluster's
+    claim is its text span with citation markers stripped; a cluster owns the span from the end of
+    the previous cluster's last marker to the start of the next cluster (the final cluster runs to
+    end-of-text, so trailing punctuation is preserved). Returns ``[{"indices": [int, ...],
+    "claim": str}, ...]`` in order; empty when ``text`` cites nothing."""
+    markers = list(_INLINE_CITATION_RE.finditer(text or ""))
+    if not markers:
+        return []
+    spans: List[Dict[str, Any]] = []
+    prev_end = 0
+    for marker in markers:
+        idx = int(marker.group(1))
+        between = text[prev_end : marker.start()]
+        if not spans or re.search(r"\w", between):
+            spans.append({"indices": [idx], "text_start": prev_end, "last_end": marker.end()})
+        else:
+            spans[-1]["indices"].append(idx)
+            spans[-1]["last_end"] = marker.end()
+        prev_end = marker.end()
+    clusters: List[Dict[str, Any]] = []
+    for position, span in enumerate(spans):
+        span_end = spans[position + 1]["text_start"] if position + 1 < len(spans) else len(text)
+        claim = _INLINE_CITATION_RE.sub("", text[span["text_start"] : span_end]).strip()
+        clusters.append({"indices": span["indices"], "claim": claim})
+    return clusters
+
+
 _ENTAILMENT_SYSTEM_PROMPT = (
     "You are a strict clinical fact-checker. For each PAIR, decide whether the SOURCE record "
     "supports the STATEMENT. Answer NO if: the statement is about a different person or describes "
@@ -607,7 +641,20 @@ async def _ground_references(
                 for fragment in _claim_fragments_for_index(answer or "", idx)
             ]
         for usage in usages:
-            claim = _INLINE_CITATION_RE.sub("", str(usage.get("text") or "")).strip()
+            usage_text = str(usage.get("text") or "")
+            # Enumeration split: when this citation sits in exactly ONE of several clusters (its own
+            # item, e.g. one drug in a comma-separated list), scope its claim to that item so it is
+            # grounded against only its own source instead of a combined multi-item verdict. Collective
+            # claims (adjacent markers -> a single cluster) and citations reused across clusters fall
+            # back to the whole-usage claim, preserving combined-source and deterministic-temporal
+            # behavior. Single-index parsing is deliberate (see _INLINE_CITATION_RE): a value bracket
+            # like [120, 80] is never a marker, so it is never split into phantom references.
+            clusters = _citation_clusters(usage_text)
+            idx_clusters = [cluster for cluster in clusters if idx in cluster["indices"]]
+            if len(clusters) > 1 and len(idx_clusters) == 1:
+                claim = idx_clusters[0]["claim"]
+            else:
+                claim = _INLINE_CITATION_RE.sub("", usage_text).strip()
             if not claim or not source:
                 continue
             key = (

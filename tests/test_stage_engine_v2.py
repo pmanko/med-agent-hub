@@ -35,6 +35,26 @@ def test_conversation_history_summary_proves_priors_without_plaintext():
     assert summary != engine._conversation_history_summary(messages[-1:])
 
 
+def test_context_summary_preserves_source_selection_metadata():
+    state = engine._State(messages=[])
+    state.ledger = EvidenceLedger(
+        (),
+        source_metadata={
+            "querystore": {
+                "context_slice": {
+                    "slice_id": "slice-1",
+                    "chart_truncated": True,
+                    "effective_types": ["drug_order"],
+                }
+            }
+        },
+    )
+
+    summary = engine._context_summary(state)
+
+    assert summary["source_metadata"] == state.ledger.source_metadata
+
+
 def test_stage_engine_uses_injected_context_selector():
     record = EvidenceRecord(
         source="alternate",

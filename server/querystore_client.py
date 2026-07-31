@@ -40,6 +40,19 @@ class PatientLedgerFetch:
     etag: Optional[str] = None
 
 
+@dataclass(frozen=True)
+class ContextSliceFetch:
+    """Complete tiered selection plus the server's auditable selection metadata."""
+
+    records: list[dict[str, Any]]
+    slice_id: str
+    total_count: int
+    chart_size: int
+    chart_truncated: bool
+    effective_types: tuple[str, ...]
+    temporal_applied: bool
+
+
 class QueryStoreClient:
     """Reads a patient's chart from querystore over REST. Auth is OpenMRS Basic (a service account)."""
 
@@ -152,7 +165,9 @@ class QueryStoreClient:
                         "Querystore changed the patient chart snapshot while paging"
                     )
                 start += len(page)
-                if not page or len(page) < page_size or start >= expected_total:
+                # OpenMRS may cap `limit` below the requested page size. `totalCount`, not the
+                # requested limit, determines whether more records remain.
+                if not page or start >= expected_total:
                     break
         if expected_total is None or len(records) != expected_total:
             raise ValueError(
@@ -172,37 +187,128 @@ class QueryStoreClient:
         temporal: bool = False,
         interpret: bool = False,
         limit: int = 500,
-    ) -> list[dict[str, Any]]:
+    ) -> ContextSliceFetch:
         """The tier-tagged context slice (querystore ADR Decision 17) for one question.
 
         The caller's question interpretation rides as ``types`` (typed-complete resource
         types) and ``temporal`` (recency anchor applies). Each returned record carries a
         ``tier`` — ``mandatory`` records are never droppable downstream. Like ranked search
-        this window is question-dependent and uncached: no ``snapshotId``/``ETag``.
+        this window is question-dependent and uncached: no full-chart ``snapshotId``/``ETag``.
+        Every page does carry one ``sliceId`` for the complete ordered selection; mixed pages
+        are rejected instead of silently joining two question-context versions.
         """
-        params: dict[str, Any] = {
+        base_params: dict[str, Any] = {
             "patient": patient_uuid,
             "mode": "context",
             "temporal": "true" if temporal else "false",
             "limit": limit,
         }
         if interpret:
-            params["interpret"] = "true"
+            base_params["interpret"] = "true"
         if question:
-            params["q"] = question
+            base_params["q"] = question
         if types:
-            params["types"] = ",".join(sorted(types))
+            base_params["types"] = ",".join(sorted(types))
+
+        records: list[dict[str, Any]] = []
+        seen_ids: set[tuple[str, str]] = set()
+        start = 0
+        expected: Optional[tuple[str, int, int, bool, tuple[str, ...], bool]] = None
         async with httpx.AsyncClient(timeout=self._timeout, auth=self._auth) as client:
-            resp = await client.get(self._url, params=params)
-            resp.raise_for_status()
-            body = resp.json()
-        rows = body.get("results")
-        if not isinstance(rows, list):
-            raise ValueError("Querystore did not return a valid context slice page")
-        for row in rows:
-            if not isinstance(row, dict) or not isinstance(row.get("tier"), str):
-                raise ValueError("Querystore returned a context-slice record without a tier")
-        return rows
+            while True:
+                params = {**base_params, "startIndex": start}
+                resp = await client.get(self._url, params=params)
+                resp.raise_for_status()
+                body = resp.json()
+                rows = body.get("results")
+                if not isinstance(rows, list):
+                    raise ValueError("Querystore did not return a valid context slice page")
+
+                total = body.get("totalCount")
+                chart_size = body.get("chartSize")
+                chart_truncated = body.get("chartTruncated")
+                slice_id = body.get("sliceId")
+                effective_types = body.get("effectiveTypes")
+                temporal_applied = body.get("temporalApplied")
+                if (
+                    type(total) is not int
+                    or total < 0
+                    or type(chart_size) is not int
+                    or chart_size < 0
+                    or not isinstance(chart_truncated, bool)
+                    or not isinstance(slice_id, str)
+                    or not slice_id.strip()
+                    or not isinstance(effective_types, list)
+                    or any(
+                        not isinstance(item, str) or not item.strip()
+                        for item in effective_types
+                    )
+                    or not isinstance(temporal_applied, bool)
+                ):
+                    raise ValueError(
+                        "Querystore did not return valid context-slice metadata"
+                    )
+                page_identity = (
+                    slice_id,
+                    total,
+                    chart_size,
+                    chart_truncated,
+                    tuple(effective_types),
+                    temporal_applied,
+                )
+                if expected is None:
+                    expected = page_identity
+                elif page_identity != expected:
+                    raise InconsistentSnapshotError(
+                        "Querystore changed the context slice while paging"
+                    )
+
+                for row in rows:
+                    if (
+                        not isinstance(row, dict)
+                        or not isinstance(row.get("tier"), str)
+                        or not row["tier"].strip()
+                    ):
+                        raise ValueError(
+                            "Querystore returned a context-slice record without a tier"
+                        )
+                    resource_type = row.get("resourceType")
+                    resource_uuid = row.get("resourceUuid")
+                    if (
+                        not isinstance(resource_type, str)
+                        or not resource_type.strip()
+                        or not isinstance(resource_uuid, str)
+                        or not resource_uuid.strip()
+                    ):
+                        raise ValueError(
+                            "Querystore returned a context-slice record without a stable identity"
+                        )
+                    identity = (resource_type, resource_uuid)
+                    if identity in seen_ids:
+                        raise ValueError(
+                            "Querystore returned a duplicate context-slice record while paging"
+                        )
+                    seen_ids.add(identity)
+                records.extend(rows)
+                start += len(rows)
+                if not rows or start >= total:
+                    break
+
+        if expected is None or len(records) != expected[1]:
+            expected_total = expected[1] if expected else None
+            raise ValueError(
+                "Querystore returned a truncated context slice: "
+                f"expected {expected_total} records, received {len(records)}"
+            )
+        return ContextSliceFetch(
+            records=records,
+            slice_id=expected[0],
+            total_count=expected[1],
+            chart_size=expected[2],
+            chart_truncated=expected[3],
+            effective_types=expected[4],
+            temporal_applied=expected[5],
+        )
 
     async def search_patient_records(
         self, patient_uuid: str, query: str, *, limit: int = 20
