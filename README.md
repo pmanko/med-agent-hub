@@ -7,6 +7,10 @@ clinical profiles compose the Hub's clinical stage engine; caller-orchestrated
 profiles configure named roles that an application such as Catalyst invokes
 while retaining its own domain workflow.
 
+The hosted clinical workflow remains the client-facing clinical answer service;
+the caller-orchestrated workflow does not move Catalyst's SQL business logic
+into the Hub.
+
 ## Architecture
 
 ```text

@@ -243,7 +243,7 @@ def catalyst_query_profile_evidence(profile: Profile) -> Dict[str, Any]:
                 "promptId": prompt_name,
                 "version": "1",
                 "promptRef": f"med-agent-hub:server/prompts/{prompt_name}.txt",
-                "promptDigest": _sha256(prompt_text),
+                "promptDigest": hashlib.sha256(prompt_text.encode("utf-8")).hexdigest(),
                 "text": prompt_text,
             },
         }

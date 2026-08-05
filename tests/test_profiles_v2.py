@@ -8,6 +8,7 @@ import pytest
 from server.levels_loader import (
     ModelNotFoundError,
     Profile,
+    catalyst_query_profile_evidence,
     catalyst_query_profile_ids,
     compile_profile,
     get_catalyst_query_profile,
@@ -380,6 +381,23 @@ def test_catalyst_uses_the_same_profile_schema_with_caller_owned_orchestration()
     assert profile.id not in profile_ids()
     with pytest.raises(ModelNotFoundError):
         get_profile(profile.id)
+
+
+def test_catalyst_prompt_evidence_uses_workbench_sha256_contract():
+    profile = get_catalyst_query_profile("catalyst-query-e4b-qwen14b")
+    evidence = catalyst_query_profile_evidence(profile)
+
+    for public_role, profile_role in (
+        ("writer", "query_generate"),
+        ("reviewer", "query_review"),
+    ):
+        prompt_name = profile.prompts[profile_role]
+        expected = hashlib.sha256(load_prompt(prompt_name).encode("utf-8")).hexdigest()
+        assert evidence[public_role]["systemPrompt"]["promptDigest"] == expected
+        assert len(expected) == 64
+        assert not expected.startswith("sha256:")
+
+    assert len(evidence["profileDigest"]) == 64
 
 
 def test_compiled_profile_configuration_is_immutable():
