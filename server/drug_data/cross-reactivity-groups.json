@@ -1,6 +1,7 @@
 {
   "version": "1.0",
-  "description": "Curated cross-reactivity families that span ATC branches. These groups complement either supported drug-reference source and may be replaced per deployment.",
+  "reviewState": "proposed",
+  "description": "Proposed research cross-reactivity families for exercising code paths that span ATC branches. This package is not clinically approved and cannot activate product warnings.",
   "groups": [
     {
       "name": "NSAID",

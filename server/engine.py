@@ -349,6 +349,8 @@ def _ledger_after_drug_injection(
                     resource_type=existing.resource_type,
                     resource_uuid=existing.resource_uuid,
                     date=mapping.get("date"),
+                    clinical_date=existing.clinical_date,
+                    date_kind=existing.date_kind,
                     text=str(mapping.get("text") or existing.text),
                     mandatory=existing.mandatory,
                     metadata=existing.metadata,
@@ -367,6 +369,10 @@ def _ledger_after_drug_injection(
                 date=mapping.get("date"),
                 text=str(mapping.get("text") or ""),
                 mandatory=resource_type.lower() == "drugreference",
+                metadata={
+                    "review_state": mapping.get("reviewState"),
+                    "package": mapping.get("package"),
+                },
             )
         )
     return EvidenceLedger(
@@ -774,6 +780,10 @@ async def _prepare_context(request: ExecutionRequest, state: _State) -> None:
             stages._latest_user_text(state.messages),
             resolved_reference_date,
             True,
+            exposure_complete=any(
+                bool(metadata.get("patient_ledger_complete"))
+                for metadata in ledger.source_metadata.values()
+            ),
         )
         ledger = _ledger_after_drug_injection(ledger, full_chart, mappings)
         state.ledger = ledger
@@ -1007,15 +1017,18 @@ def _stream_payload(
         payload["temporalGate"] = state.answer_gate
     if in_depth is not None:
         payload["inDepth"] = in_depth
-    safety_status, warnings = stages._compute_safety_warnings(
+    safety_check = stages._compute_safety_check(
         state.drug_context,
         state.answer_text,
         stages._latest_user_text(state.messages),
         bool(request.profile.policies.get("drug_safety")),
     )
-    payload["safetyStatus"] = safety_status
-    if warnings:
-        payload["safetyWarnings"] = warnings
+    payload["safetyStatus"] = safety_check.status
+    payload["safetyCheck"] = safety_check.to_dict()
+    if safety_check.warnings:
+        payload["safetyWarnings"] = [
+            warning.to_dict() for warning in safety_check.warnings
+        ]
     payload["context"] = _context_summary(state)
     return json.dumps(payload)
 
@@ -1084,15 +1097,17 @@ def _raw_result(request: ExecutionRequest, state: _State) -> str:
             "citations": state.citations,
             "blocks": state.blocks,
         }
-        safety_status, warnings = stages._compute_safety_warnings(
+        safety_check = stages._compute_safety_check(
             state.drug_context,
             state.answer_text,
             stages._latest_user_text(state.messages),
             bool(request.profile.policies.get("drug_safety")),
         )
-        payload["safetyStatus"] = safety_status
-        if warnings:
-            payload["safetyWarnings"] = warnings
+        payload["safetyStatus"] = safety_check.status
+        if safety_check.warnings:
+            payload["safetyWarnings"] = [
+                warning.to_dict() for warning in safety_check.warnings
+            ]
         return json.dumps(payload)
     if mode == "combined":
         payload = json.loads(
@@ -1105,15 +1120,17 @@ def _raw_result(request: ExecutionRequest, state: _State) -> str:
                 state.indepth_conf,
             )
         )
-        safety_status, warnings = stages._compute_safety_warnings(
+        safety_check = stages._compute_safety_check(
             state.drug_context,
             state.answer_text,
             stages._latest_user_text(state.messages),
             bool(request.profile.policies.get("drug_safety")),
         )
-        payload["safetyStatus"] = safety_status
-        if warnings:
-            payload["safetyWarnings"] = warnings
+        payload["safetyStatus"] = safety_check.status
+        if safety_check.warnings:
+            payload["safetyWarnings"] = [
+                warning.to_dict() for warning in safety_check.warnings
+            ]
         return json.dumps(payload)
     return stages._fallback_envelope(
         "I could not produce a complete answer for this turn. Please try again."
@@ -2344,7 +2361,9 @@ class StageEngine:
             "answerValidation",
             "inDepth",
             "model",
+            "safetyStatus",
             "safetyWarnings",
+            "safetyCheck",
             "context",
             "temporalGate",
         ):

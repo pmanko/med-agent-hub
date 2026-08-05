@@ -16,7 +16,15 @@ from server import drug_safety as ds
 
 @pytest.fixture()
 def dataset():
-    return ds.load_dataset()
+    loaded = ds.load_dataset()
+    return ds.DrugReferenceDataset(
+        loaded.entries,
+        loaded.cross_reactivity_groups,
+        package_id="approved-test-rules",
+        source_format="test",
+        review_state=ds.REVIEW_CLINICALLY_APPROVED,
+        cross_reactivity_review_state=ds.REVIEW_CLINICALLY_APPROVED,
+    )
 
 
 @pytest.fixture()
@@ -29,7 +37,12 @@ def atc_dataset():
         ds.DrugReferenceEntry(id="N02BA01", name="Acetylsalicylic acid", drug_class="Salicylic acid and derivatives",
                                aliases=["acetylsalicylic acid", "aspirin"], atc_codes=["N02BA01"]),
     ]
-    return ds.DrugReferenceDataset(entries)
+    return ds.DrugReferenceDataset(
+        entries,
+        package_id="approved-test-atc-rules",
+        source_format="test",
+        review_state=ds.REVIEW_CLINICALLY_APPROVED,
+    )
 
 
 def ctx(age=None, drugs=None, allergies=None, conditions=None, atc=None):
@@ -319,7 +332,12 @@ def test_related_active_order_is_still_injected_for_a_drug_specific_query(atc_da
 def test_renders_atc_classification_entry_with_no_rule_sections():
     entry = ds.DrugReferenceEntry(id="M01AE01", name="Ibuprofen", drug_class="Propionic acid derivatives",
                                    aliases=["ibuprofen"], atc_codes=["M01AE01"])
-    one_entry_dataset = ds.DrugReferenceDataset([entry])
+    one_entry_dataset = ds.DrugReferenceDataset(
+        [entry],
+        package_id="approved-test-rules",
+        source_format="test",
+        review_state=ds.REVIEW_CLINICALLY_APPROVED,
+    )
     _, mappings = ds.inject_drug_references("chart\n", [], "what is the ibuprofen dose?", 5, one_entry_dataset)
     injected_text = mappings[0]["text"]
     assert "Drug reference — Ibuprofen" in injected_text

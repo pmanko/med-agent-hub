@@ -63,7 +63,9 @@ Trace packages are appended to `$TEAM_TRACE_DIR/trace.jsonl` (default `/app/trac
 
 ### Drug-safety data
 
-The deterministic drug-safety layer accepts either the bundled curated JSON source or an operator-provided WHO-ATC export through `DRUG_SAFETY_SOURCE_FORMAT` and `DRUG_SAFETY_DATASET_PATH`. Curated cross-reactivity groups load independently through `DRUG_SAFETY_CROSS_REACTIVITY_PATH`, so cross-branch rules work with either entry source. The bundled seed group covers the NSAID branches `M01AE` and `N02BA`; deployments remain responsible for reviewing and extending this clinical data.
+The deterministic drug-safety layer accepts either a package-shaped JSON source or an operator-provided ATC classification export through `DRUG_SAFETY_SOURCE_FORMAT` and `DRUG_SAFETY_DATASET_PATH`. A source package declares its identity, version, provenance, and review state. Only `clinically_approved` packages can emit deterministic product warnings; `proposed`, `evidence_curated`, or `retired` data is reported honestly and cannot be presented as reviewed clinical decision support. The bundled JSON and cross-reactivity data are unreviewed research seeds. ATC supplies classification, not interaction, contraindication, duplicate-therapy, or cross-reactivity rules.
+
+Every product response carries a canonical `drug_safety.v1` result with `checked`, `limited`, or `unavailable` status; package metadata; medication-mapping and patient-exposure coverage; identity confidence; issues; and any approved findings. The legacy `safetyStatus` and `safetyWarnings` fields remain for client compatibility. A missing source, incomplete patient exposure, unresolved active medication, or failed execution can therefore never look like a clean check.
 
 Weight-aware dose checks read the newest fresh numeric Querystore `obs` matching `DRUG_SAFETY_WEIGHT_CONCEPT_UUID` (CIEL weight `5089...` by default). `DRUG_SAFETY_WEIGHT_MAX_AGE_DAYS` defaults to 90. Set the concept value to `none` to disable only the weight-aware arm. Missing, stale, malformed, or unavailable optional safety data degrades to no additional warning and never interrupts an answer.
 

@@ -547,9 +547,14 @@ class QueryStoreSource:
                     raw=raw,
                 )
             )
-        source_metadata = (
-            {self.name: {"context_slice": slice_metadata}} if slice_metadata else {}
-        )
+        source_metadata = {
+            self.name: {
+                # fetch_patient_ledger exhausts the stable paginated read API before this ledger
+                # is returned. Context slicing only ranks that complete patient snapshot.
+                "patient_ledger_complete": True,
+                **({"context_slice": slice_metadata} if slice_metadata else {}),
+            }
+        }
         return EvidenceLedger(
             tuple(records), original_text=chart, source_metadata=source_metadata
         )

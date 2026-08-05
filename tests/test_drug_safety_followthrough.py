@@ -33,7 +33,14 @@ def _atc_dataset(*, with_groups=True):
             note="cross-branch NSAID hypersensitivity",
         )
     ] if with_groups else []
-    return ds.DrugReferenceDataset(entries, cross_reactivity_groups=groups)
+    return ds.DrugReferenceDataset(
+        entries,
+        cross_reactivity_groups=groups,
+        package_id="approved-test-atc-rules",
+        source_format="test",
+        review_state=ds.REVIEW_CLINICALLY_APPROVED,
+        cross_reactivity_review_state=ds.REVIEW_CLINICALLY_APPROVED,
+    )
 
 
 def _ctx(*, weight=None, atc=None, allergies=None):
@@ -50,9 +57,41 @@ def _has(warnings, warning_type, drug):
 
 
 def test_bundled_cross_reactivity_data_loads_nsaid_seed_group():
-    groups = ds.load_dataset().cross_reactivity_groups
+    dataset = ds.load_dataset()
+    groups = dataset.cross_reactivity_groups
     nsaid = next(group for group in groups if group.name == "NSAID")
     assert nsaid.normalized_prefixes() == {"M01AE", "N02BA"}
+    assert dataset.cross_reactivity_review_state == ds.REVIEW_PROPOSED
+
+
+def test_approved_drug_package_cannot_activate_proposed_cross_reactivity_rules():
+    dataset = ds.DrugReferenceDataset(
+        [
+            ds.DrugReferenceEntry(
+                id="M01AE01", name="Ibuprofen", aliases=["ibuprofen"], atc_codes=["M01AE01"]
+            ),
+            ds.DrugReferenceEntry(
+                id="N02BA01", name="Aspirin", aliases=["aspirin"], atc_codes=["N02BA01"]
+            ),
+        ],
+        cross_reactivity_groups=[
+            ds.CrossReactivityGroup(name="NSAID", atc_prefixes=["M01AE", "N02BA"])
+        ],
+        package_id="approved-drug-package",
+        review_state=ds.REVIEW_CLINICALLY_APPROVED,
+        cross_reactivity_review_state=ds.REVIEW_PROPOSED,
+    )
+
+    result = ds.check_answer_safety(
+        "Ibuprofen may be used.",
+        "Can this patient use ibuprofen?",
+        _ctx(allergies={"aspirin"}),
+        dataset,
+    )
+
+    assert result.status == ds.STATUS_LIMITED
+    assert result.warnings == []
+    assert "cross_reactivity_not_clinically_approved" in result.issues
 
 
 def test_weight_aware_per_dose_limit_fires_below_daily_ceiling():
@@ -168,7 +207,7 @@ def test_group_related_active_order_is_injected_for_question_drug():
 
 def test_prose_warnings_parse_and_render_without_becoming_rules(tmp_path):
     path = tmp_path / "drugs.json"
-    path.write_text(json.dumps({"entries": [{
+    path.write_text(json.dumps({"reviewState": "clinically_approved", "entries": [{
         "id": "aspirin", "name": "Aspirin", "aliases": ["aspirin"],
         "warnings": [None, "", "Risk of Reye syndrome in children"],
     }]}), encoding="utf-8")
@@ -198,7 +237,7 @@ def test_malformed_sources_and_runtime_failures_are_fail_safe(tmp_path):
 
 def test_null_rule_elements_render_best_effort_without_literal_null(tmp_path):
     path = tmp_path / "partly-malformed.json"
-    path.write_text(json.dumps({"entries": [
+    path.write_text(json.dumps({"reviewState": "clinically_approved", "entries": [
         {"id": None, "name": "missing id", "aliases": ["drop-me"]},
         {"id": "missing-name", "name": " ", "aliases": ["drop-me-too"]},
         {
@@ -227,6 +266,7 @@ def test_scalar_list_fields_and_broad_atc_prefixes_are_rejected(tmp_path):
     drugs.write_text(
         json.dumps(
             {
+                "reviewState": "clinically_approved",
                 "entries": [
                     {
                         "id": "mangled",
@@ -268,6 +308,7 @@ def test_malformed_age_band_cannot_erase_an_independent_interaction_warning(tmp_
     path.write_text(
         json.dumps(
             {
+                "reviewState": "clinically_approved",
                 "entries": [
                     {
                         "id": "ibuprofen",

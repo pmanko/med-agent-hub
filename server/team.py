@@ -74,6 +74,8 @@ def _prepare_drug_safety(
     question: str,
     anchor: Optional[str],
     enabled: bool,
+    *,
+    exposure_complete: bool = False,
 ) -> Tuple[str, List[Dict[str, Any]], Optional["drug_safety.PatientClinicalContext"]]:
     """Build patient drug context and inject deterministic drug-reference records.
     patient's clinical context from the RAW querystore records (reference_date resolved the same
@@ -89,7 +91,7 @@ def _prepare_drug_safety(
     )
     dataset = drug_safety.load_dataset()
     patient_context = drug_safety.build_patient_context(
-        records, reference_date, dataset
+        records, reference_date, dataset, exposure_complete=exposure_complete
     )
     new_text, new_mappings = drug_safety.inject_drug_references(
         chart_text,
@@ -102,23 +104,28 @@ def _prepare_drug_safety(
     return new_text, new_mappings, patient_context
 
 
-def _compute_safety_warnings(
+def _compute_safety_check(
     patient_context: Optional["drug_safety.PatientClinicalContext"],
     answer_text: str,
     question: str,
     enabled: bool,
-) -> Tuple[str, List[Dict[str, str]]]:
-    """Post-answer drug-safety check (deterministic, no LLM). Always returns an honest status
-    alongside the warnings list (checked/limited/unavailable) — status is unavailable when the
-    policy has drug safety disabled or there is no patient context (no patient ref, or querystore
-    retrieval failed), so a caller can never mistake a skipped check for a clean one.
-    """
-    if not enabled or patient_context is None:
-        return drug_safety.STATUS_UNAVAILABLE, []
-    result = drug_safety.check_answer_safety(
-        answer_text, question, patient_context, drug_safety.load_dataset()
+) -> "drug_safety.SafetyCheckResult":
+    """Post-answer deterministic safety result with package and coverage provenance."""
+    dataset = drug_safety.load_dataset()
+    if not enabled:
+        return drug_safety.SafetyCheckResult(
+            status=drug_safety.STATUS_UNAVAILABLE,
+            warnings=[],
+            package=dataset.package_metadata(),
+            coverage=drug_safety.build_safety_coverage(
+                patient_context, execution_complete=False
+            ),
+            identity_confidence="unavailable",
+            issues=["check_disabled"],
+        )
+    return drug_safety.check_answer_safety(
+        answer_text, question, patient_context, dataset
     )
-    return result.status, [w.to_dict() for w in result.warnings]
 
 
 _INLINE_CITATION_RE = re.compile(r"\[(\d+)\]")

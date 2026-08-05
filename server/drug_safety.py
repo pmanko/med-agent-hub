@@ -21,7 +21,7 @@ _DATASET_PATH = os.environ.get(
     "DRUG_SAFETY_DATASET_PATH",
     os.path.join(os.path.dirname(__file__), "drug_data", "drug-reference.json"))
 
-# Which dataset FORMAT the configured path holds: "json" (curated rules, bundled default) or "atc"
+# Which dataset FORMAT the configured path holds: "json" (package-shaped rules) or "atc"
 # (a WHO ATC classification export the operator supplies). One-or-the-other, deployment-wide — the
 # same source-format selection the ported Java drug-reference layer offered (ADR Decision 24).
 _SOURCE_FORMAT = os.environ.get("DRUG_SAFETY_SOURCE_FORMAT", "json").strip().lower()
@@ -41,7 +41,7 @@ _ATC_SUBGROUP_PREFIX_LENGTH = 5
 # A level-5 ATC substance code is 7 chars: one letter, two digits, two letters, two digits
 # (e.g. M01AE01). Guards against a non-ATC/malformed file turning any 7-char token into a drug.
 _ATC_LEVEL5 = re.compile(r"[A-Z]\d{2}[A-Z]{2}\d{2}")
-# Curated cross-reactivity groups may target ATC levels 2-5, but never the
+# A reviewed cross-reactivity package may target ATC levels 2-5, but never the
 # one-letter anatomical level: that would turn one bad value into a very broad
 # clinical match.
 _ATC_GROUP_PREFIX = re.compile(r"[A-Z]\d{2}(?:[A-Z](?:[A-Z](?:\d{2})?)?)?")
@@ -71,6 +71,17 @@ RESOURCE_TYPE_DRUG_REFERENCE = "drug_reference"
 STATUS_CHECKED = "checked"
 STATUS_LIMITED = "limited"
 STATUS_UNAVAILABLE = "unavailable"
+
+REVIEW_PROPOSED = "proposed"
+REVIEW_EVIDENCE_CURATED = "evidence_curated"
+REVIEW_CLINICALLY_APPROVED = "clinically_approved"
+REVIEW_RETIRED = "retired"
+_REVIEW_STATES = {
+    REVIEW_PROPOSED,
+    REVIEW_EVIDENCE_CURATED,
+    REVIEW_CLINICALLY_APPROVED,
+    REVIEW_RETIRED,
+}
 
 
 def _format_number(value: float) -> str:
@@ -179,7 +190,7 @@ class DrugReferenceEntry:
 
 @dataclass
 class CrossReactivityGroup:
-    """Curated family spanning ATC branches that the ATC hierarchy cannot connect."""
+    """Candidate family spanning ATC branches that the ATC hierarchy cannot connect."""
 
     name: str
     atc_prefixes: List[str] = field(default_factory=list)
@@ -263,9 +274,41 @@ class DrugReferenceDataset:
     """Loaded + indexed drug-reference entries. Mirrors DrugReferenceService's query surface."""
 
     def __init__(self, entries: List[DrugReferenceEntry],
-                 cross_reactivity_groups: Optional[List[CrossReactivityGroup]] = None):
+                 cross_reactivity_groups: Optional[List[CrossReactivityGroup]] = None, *,
+                 package_id: str = "unidentified-drug-reference",
+                 source_format: str = "memory",
+                 source_version: Optional[str] = None,
+                 provenance: Optional[Dict[str, Any]] = None,
+                 review_state: str = REVIEW_PROPOSED,
+                 cross_reactivity_review_state: str = REVIEW_PROPOSED):
         self.entries = entries
         self.cross_reactivity_groups = list(cross_reactivity_groups or [])
+        self.package_id = _clean_text(package_id) or "unidentified-drug-reference"
+        self.source_format = _clean_text(source_format) or "unknown"
+        self.source_version = _clean_text(source_version)
+        self.provenance = dict(provenance or {})
+        normalized_review = _clean_text(review_state) or REVIEW_PROPOSED
+        self.review_state = (
+            normalized_review if normalized_review in _REVIEW_STATES else REVIEW_PROPOSED
+        )
+        normalized_cross_review = (
+            _clean_text(cross_reactivity_review_state) or REVIEW_PROPOSED
+        )
+        self.cross_reactivity_review_state = (
+            normalized_cross_review
+            if normalized_cross_review in _REVIEW_STATES
+            else REVIEW_PROPOSED
+        )
+
+    def package_metadata(self) -> Dict[str, Any]:
+        return {
+            "id": self.package_id,
+            "source_format": self.source_format,
+            "version": self.source_version,
+            "provenance": dict(self.provenance),
+            "review_state": self.review_state,
+            "cross_reactivity_review_state": self.cross_reactivity_review_state,
+        }
 
     def find_by_query(self, text: Optional[str]) -> List[DrugReferenceEntry]:
         if not text or not text.strip():
@@ -298,6 +341,8 @@ class DrugReferenceDataset:
         return upper_code
 
     def groups_for(self, entry: DrugReferenceEntry) -> List[CrossReactivityGroup]:
+        if self.cross_reactivity_review_state != REVIEW_CLINICALLY_APPROVED:
+            return []
         return [group for group in self.cross_reactivity_groups if group.contains_entry(entry)]
 
     def shared_group(self, first: DrugReferenceEntry,
@@ -313,16 +358,20 @@ _lock = threading.Lock()
 _dataset: Optional[DrugReferenceDataset] = None
 
 
-def _load_entries(path: str) -> List[DrugReferenceEntry]:
+def _load_json_document(path: str) -> Dict[str, Any]:
     if not path or not os.path.exists(path):
-        return []
+        return {}
     try:
         with open(path, "r", encoding="utf-8") as f:
             raw = json.load(f)
     except (OSError, json.JSONDecodeError, TypeError, ValueError):
-        return []
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _entries_from_document(raw: Dict[str, Any]) -> List[DrugReferenceEntry]:
     entries: List[DrugReferenceEntry] = []
-    for raw_entry in raw.get("entries", []) if isinstance(raw, dict) else []:
+    for raw_entry in raw.get("entries", []):
         if (not isinstance(raw_entry, dict) or not _clean_text(raw_entry.get("id"))
                 or not _clean_text(raw_entry.get("name"))):
             continue
@@ -333,14 +382,27 @@ def _load_entries(path: str) -> List[DrugReferenceEntry]:
     return entries
 
 
-def _load_cross_reactivity_groups(path: Optional[str]) -> List[CrossReactivityGroup]:
+def _load_entries(path: str) -> List[DrugReferenceEntry]:
+    return _entries_from_document(_load_json_document(path))
+
+
+def _load_cross_reactivity_package(
+    path: Optional[str],
+) -> Tuple[List[CrossReactivityGroup], str]:
     if not path or path.strip().lower() == _DISABLED_SENTINEL or not os.path.exists(path):
-        return []
+        return [], REVIEW_PROPOSED
     try:
         with open(path, "r", encoding="utf-8") as handle:
             raw = json.load(handle)
     except (OSError, json.JSONDecodeError, TypeError, ValueError):
-        return []
+        return [], REVIEW_PROPOSED
+    review_state = (
+        _clean_text(raw.get("reviewState"))
+        if isinstance(raw, dict)
+        else REVIEW_PROPOSED
+    ) or REVIEW_PROPOSED
+    if review_state not in _REVIEW_STATES:
+        review_state = REVIEW_PROPOSED
     groups: List[CrossReactivityGroup] = []
     for item in raw.get("groups", []) if isinstance(raw, dict) else []:
         if not isinstance(item, dict):
@@ -353,7 +415,12 @@ def _load_cross_reactivity_groups(path: Optional[str]) -> List[CrossReactivityGr
         )
         if group.name and group.normalized_prefixes():
             groups.append(group)
-    return groups
+    return groups, review_state
+
+
+def _load_cross_reactivity_groups(path: Optional[str]) -> List[CrossReactivityGroup]:
+    """Compatibility helper for callers that only inspect the parsed classification groups."""
+    return _load_cross_reactivity_package(path)[0]
 
 
 def _load_atc_entries(path: str) -> List[DrugReferenceEntry]:
@@ -404,10 +471,43 @@ def _load_atc_entries(path: str) -> List[DrugReferenceEntry]:
     return out
 
 
-def _load_source(path: str, source_format: str) -> List[DrugReferenceEntry]:
+def _load_source_dataset(
+    path: str,
+    source_format: str,
+    cross_reactivity_groups: List[CrossReactivityGroup],
+    cross_reactivity_review_state: str,
+) -> DrugReferenceDataset:
+    basename = os.path.basename(path) if path else "unavailable"
     if source_format == "atc":
-        return _load_atc_entries(path)
-    return _load_entries(path)
+        return DrugReferenceDataset(
+            _load_atc_entries(path),
+            cross_reactivity_groups,
+            package_id=f"configured-atc:{basename}",
+            source_format="atc",
+            provenance={"dataset": basename},
+            # ATC supplies classification, not reviewed clinical decision rules.
+            review_state=REVIEW_PROPOSED,
+            cross_reactivity_review_state=cross_reactivity_review_state,
+        )
+
+    raw = _load_json_document(path)
+    return DrugReferenceDataset(
+        _entries_from_document(raw),
+        cross_reactivity_groups,
+        package_id=_clean_text(raw.get("packageId")) or f"configured-json:{basename}",
+        source_format="json",
+        source_version=_clean_text(raw.get("version")),
+        provenance={
+            "dataset": basename,
+            **(
+                {"source": raw.get("source")}
+                if _clean_text(raw.get("source"))
+                else {}
+            ),
+        },
+        review_state=_clean_text(raw.get("reviewState")) or REVIEW_PROPOSED,
+        cross_reactivity_review_state=cross_reactivity_review_state,
+    )
 
 
 def load_dataset(path: Optional[str] = None, source_format: Optional[str] = None,
@@ -416,17 +516,16 @@ def load_dataset(path: Optional[str] = None, source_format: Optional[str] = None
     ``source_format`` selects the adapter (``json``|``atc``); defaults to the DRUG_SAFETY_SOURCE_FORMAT env."""
     fmt = (source_format or _SOURCE_FORMAT or "json").strip().lower()
     groups_path = _CROSS_REACTIVITY_PATH if cross_reactivity_path is None else cross_reactivity_path
+    groups, groups_review_state = _load_cross_reactivity_package(groups_path)
     global _dataset
     if path is not None:
-        return DrugReferenceDataset(
-            _load_source(path, fmt), _load_cross_reactivity_groups(groups_path)
-        )
+        return _load_source_dataset(path, fmt, groups, groups_review_state)
     if _dataset is not None:
         return _dataset
     with _lock:
         if _dataset is None:
-            _dataset = DrugReferenceDataset(
-                _load_source(_DATASET_PATH, fmt), _load_cross_reactivity_groups(groups_path)
+            _dataset = _load_source_dataset(
+                _DATASET_PATH, fmt, groups, groups_review_state
             )
     return _dataset
 
@@ -439,6 +538,10 @@ class PatientClinicalContext:
     active_drug_atc_codes: Set[str] = field(default_factory=set)
     allergy_tokens: Set[str] = field(default_factory=set)
     condition_tokens: Set[str] = field(default_factory=set)
+    mapping_complete: bool = True
+    exposure_complete: bool = True
+    active_order_count: int = 0
+    mapped_active_order_count: int = 0
 
     def __post_init__(self):
         self.active_drug_names = {s.strip().lower() for s in self.active_drug_names if s and s.strip()}
@@ -485,13 +588,14 @@ class SafetyWarning:
 
 def build_patient_context(records: List[Dict[str, Any]], reference_date: Optional[str],
                            dataset: Optional[DrugReferenceDataset] = None, *,
+                           exposure_complete: bool = False,
                            weight_concept_uuid: Optional[str] = None,
                            weight_max_age_days: Optional[int] = None) -> PatientClinicalContext:
     """Builds a PatientClinicalContext from raw querystore records (resourceType/metadata),
     mirroring PatientClinicalContextBuilder. querystore does not expose ATC codes on drug_order
     metadata (confirmed against the Java serializer, 2026-07-05), so active-drug ATC codes are
     resolved via a dataset alias lookup on the order's drug name — a stated simplification, fine
-    for the curated demo dataset; a mis-resolution here means a missed interaction/duplicate-
+    for a package-shaped dataset; a mis-resolution here means a missed interaction/duplicate-
     therapy check, never a false positive, since an unresolved name just contributes no ATC code.
     """
     dataset = dataset or load_dataset()
@@ -501,6 +605,8 @@ def build_patient_context(records: List[Dict[str, Any]], reference_date: Optiona
     allergy_tokens: Set[str] = set()
     condition_tokens: Set[str] = set()
     weights: List[Tuple[date, float]] = []
+    active_order_count = 0
+    mapped_active_order_count = 0
     configured_weight_concept = (
         weight_concept_uuid
         if weight_concept_uuid is not None
@@ -530,11 +636,13 @@ def build_patient_context(records: List[Dict[str, Any]], reference_date: Optiona
         elif rtype == "drug_order":
             if not _order_is_active(meta, reference_date):
                 continue
+            active_order_count += 1
             name = meta.get("drug_name") or meta.get("concept_name")
             if name:
                 drug_names.add(name)
                 entry = dataset.lookup_by_token(name)
                 if entry:
+                    mapped_active_order_count += 1
                     atc_codes |= entry.normalized_atc_codes()
         elif rtype == "allergy":
             for key in ("allergen_name", "allergen_non_coded"):
@@ -562,7 +670,11 @@ def build_patient_context(records: List[Dict[str, Any]], reference_date: Optiona
     weight_kg = max(weights, key=lambda item: item[0])[1] if weights else None
     return PatientClinicalContext(age_years=age_years, weight_kg=weight_kg, active_drug_names=drug_names,
                                    active_drug_atc_codes=atc_codes, allergy_tokens=allergy_tokens,
-                                   condition_tokens=condition_tokens)
+                                   condition_tokens=condition_tokens,
+                                   mapping_complete=mapped_active_order_count == active_order_count,
+                                   exposure_complete=bool(exposure_complete),
+                                   active_order_count=active_order_count,
+                                   mapped_active_order_count=mapped_active_order_count)
 
 
 def _order_is_active(meta: Dict[str, Any], reference_date: Optional[str]) -> bool:
@@ -588,7 +700,9 @@ def _related_to_any(order: DrugReferenceEntry, question_drugs: List[DrugReferenc
     )
 
 
-def _render_entry(ref: DrugReferenceEntry, age: Optional[int]) -> str:
+def _render_entry(
+    ref: DrugReferenceEntry, age: Optional[int], review_state: str
+) -> str:
     parts = [f"Drug reference — {ref.name}"]
     paren_bits = []
     if ref.drug_class:
@@ -599,6 +713,14 @@ def _render_entry(ref: DrugReferenceEntry, age: Optional[int]) -> str:
     if paren_bits:
         parts.append(f" ({'; '.join(paren_bits)})")
     parts.append(".")
+
+    if review_state != REVIEW_CLINICALLY_APPROVED:
+        parts.append(
+            " Informational research classification only; this source package is not "
+            "clinically approved for deterministic dosing, interaction, contraindication, "
+            "duplicate-therapy, or cross-reactivity decisions."
+        )
+        return "".join(parts)
 
     band = ref.band_for_age(age)
     if band is not None:
@@ -667,9 +789,16 @@ def _inject_drug_references(
     text = chart_text
     index = len(out_mappings) + 1
     for ref in matched:
-        rendered = _render_entry(ref, age)
-        out_mappings.append({"index": index, "resourceType": RESOURCE_TYPE_DRUG_REFERENCE,
-                              "resourceUuid": ref.id, "date": None, "text": rendered})
+        rendered = _render_entry(ref, age, dataset.review_state)
+        out_mappings.append({
+            "index": index,
+            "resourceType": RESOURCE_TYPE_DRUG_REFERENCE,
+            "resourceUuid": ref.id,
+            "date": None,
+            "text": rendered,
+            "reviewState": dataset.review_state,
+            "package": dataset.package_metadata(),
+        })
         text = text + f"[{index}] {rendered}\n"
         index += 1
     return text, out_mappings
@@ -917,11 +1046,46 @@ def _validate_answer(answer: Optional[str], question: Optional[str], context: Pa
 
 @dataclass
 class SafetyCheckResult:
-    """checked/limited/unavailable per the conformance contract: an empty ``warnings`` list must
-    never be read as "checked" on its own — callers that render a safety status need ``status``
-    alongside it."""
+    """Canonical, provenance-bearing result for one deterministic safety pass."""
     status: str
     warnings: List[SafetyWarning]
+    package: Dict[str, Any] = field(default_factory=dict)
+    coverage: Dict[str, Any] = field(default_factory=dict)
+    identity_confidence: str = "unavailable"
+    issues: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "schema_version": "drug_safety.v1",
+            "status": self.status,
+            "warnings": [warning.to_dict() for warning in self.warnings],
+            "package": dict(self.package),
+            "coverage": dict(self.coverage),
+            "identity_confidence": self.identity_confidence,
+            "issues": list(self.issues),
+        }
+
+
+def build_safety_coverage(
+    context: Optional[PatientClinicalContext], *, execution_complete: bool
+) -> Dict[str, Any]:
+    return {
+        "mapping_complete": bool(context and context.mapping_complete),
+        "exposure_complete": bool(context and context.exposure_complete),
+        "execution_complete": execution_complete,
+        "active_order_count": context.active_order_count if context else 0,
+        "mapped_active_order_count": context.mapped_active_order_count if context else 0,
+    }
+
+
+def _package_metadata(dataset: Any) -> Dict[str, Any]:
+    if dataset is None:
+        return {}
+    try:
+        metadata = dataset.package_metadata()
+    except (AttributeError, TypeError, ValueError, RuntimeError):
+        return {}
+    return dict(metadata) if isinstance(metadata, dict) else {}
 
 
 def check_answer_safety(answer: Optional[str], question: Optional[str],
@@ -929,14 +1093,66 @@ def check_answer_safety(answer: Optional[str], question: Optional[str],
                         dataset: Optional[DrugReferenceDataset], *, warn_dose: bool = True,
                         warn_interactions: bool = True,
                         warn_contraindications: bool = True) -> SafetyCheckResult:
-    """The status-carrying superset of validate_answer. ``unavailable`` when there is no reference
-    dataset or no resolved patient context to check against (mirrors the real "no patient ref /
-    querystore retrieval failed" case in team.py) or when the check raised; ``limited`` when the
-    caller asked for only a subset of dose/interaction/contraindication checks; ``checked`` only
-    when a full check ran to completion against real reference data and a real patient context.
+    """Run the approved deterministic checks and disclose why a pass was incomplete.
+
+    Only a ``clinically_approved`` package may emit product warnings. Proposed, evidence-curated,
+    retired, missing, and malformed sources remain visible through status/package/issues but cannot
+    masquerade as reviewed clinical decision support.
     """
-    if dataset is None or context is None:
-        return SafetyCheckResult(status=STATUS_UNAVAILABLE, warnings=[])
+    package = _package_metadata(dataset)
+    entries = getattr(dataset, "entries", None) if dataset is not None else None
+    if dataset is None or not entries or context is None:
+        issues = []
+        if not entries:
+            issues.append("source_unavailable")
+        if context is None:
+            issues.append("patient_context_unavailable")
+        return SafetyCheckResult(
+            status=STATUS_UNAVAILABLE,
+            warnings=[],
+            package=package,
+            coverage=build_safety_coverage(context, execution_complete=False),
+            identity_confidence="unavailable",
+            issues=issues,
+        )
+
+    issues: List[str] = []
+    if not context.mapping_complete:
+        issues.append("mapping_incomplete")
+    if not context.exposure_complete:
+        issues.append("exposure_incomplete")
+    review_state = getattr(dataset, "review_state", REVIEW_PROPOSED)
+    if review_state == REVIEW_RETIRED:
+        issues.append("source_retired")
+    elif review_state != REVIEW_CLINICALLY_APPROVED:
+        issues.append("source_not_clinically_approved")
+    if (
+        dataset.cross_reactivity_groups
+        and dataset.cross_reactivity_review_state != REVIEW_CLINICALLY_APPROVED
+    ):
+        issues.append("cross_reactivity_not_clinically_approved")
+    if not (warn_dose and warn_interactions and warn_contraindications):
+        issues.append("check_scope_limited")
+
+    # Unapproved source material can be represented as research context, but it cannot produce
+    # deterministic warnings or CDS cards. The policy check itself completed successfully.
+    if review_state != REVIEW_CLINICALLY_APPROVED:
+        return SafetyCheckResult(
+            status=(
+                STATUS_UNAVAILABLE
+                if review_state == REVIEW_RETIRED
+                else STATUS_LIMITED
+            ),
+            warnings=[],
+            package=package,
+            coverage=build_safety_coverage(context, execution_complete=True),
+            identity_confidence=(
+                "high"
+                if context.mapping_complete and context.exposure_complete
+                else "limited"
+            ),
+            issues=issues,
+        )
     try:
         warnings = _validate_answer(
             answer, question, context, dataset,
@@ -945,10 +1161,24 @@ def check_answer_safety(answer: Optional[str], question: Optional[str],
             warn_contraindications=warn_contraindications,
         )
     except (AttributeError, KeyError, TypeError, ValueError, RuntimeError):
-        return SafetyCheckResult(status=STATUS_UNAVAILABLE, warnings=[])
-    if not (warn_dose and warn_interactions and warn_contraindications):
-        return SafetyCheckResult(status=STATUS_LIMITED, warnings=warnings)
-    return SafetyCheckResult(status=STATUS_CHECKED, warnings=warnings)
+        return SafetyCheckResult(
+            status=STATUS_UNAVAILABLE,
+            warnings=[],
+            package=package,
+            coverage=build_safety_coverage(context, execution_complete=False),
+            identity_confidence="unavailable",
+            issues=[*issues, "execution_failed"],
+        )
+    return SafetyCheckResult(
+        status=STATUS_LIMITED if issues else STATUS_CHECKED,
+        warnings=warnings,
+        package=package,
+        coverage=build_safety_coverage(context, execution_complete=True),
+        identity_confidence=(
+            "high" if context.mapping_complete and context.exposure_complete else "limited"
+        ),
+        issues=issues,
+    )
 
 
 def validate_answer(answer: Optional[str], question: Optional[str], context: PatientClinicalContext,
