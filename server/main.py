@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .config import llm_config, validate_config
 from .generic_role import router as generic_role_router
-from .levels_loader import validate_profiles
+from .levels_loader import validate_catalyst_query_profiles, validate_profiles
 from .openai_compat import router as openai_router
 
 logging.basicConfig(level=logging.INFO)
@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 server_start_time = time.time()
 validate_config()
 validate_profiles()
+validate_catalyst_query_profiles()
 
 app = FastAPI(
     title="med-agent-hub",
@@ -57,9 +58,7 @@ def health_check():
     memory_info = {}
     try:
         process = psutil.Process()
-        memory_info["process_memory_gb"] = round(
-            process.memory_info().rss / 1024**3, 2
-        )
+        memory_info["process_memory_gb"] = round(process.memory_info().rss / 1024**3, 2)
         memory_info["process_memory_percent"] = round(process.memory_percent(), 1)
     except Exception:  # pragma: no cover — defensive against psutil failures
         pass

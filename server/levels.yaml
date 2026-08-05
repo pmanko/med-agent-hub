@@ -11,6 +11,34 @@ stage_sets:
   team_product: &team_product [context, gather, answer, gate, resolve_refs, review, gate, final_resolve_refs, ground_verdicts, indepth, indepth_gate]
 
 profiles:
+  # The shared Profile schema supports caller-orchestrated workflows. Catalyst
+  # owns SQL/catalog/lint/execution logic; Hub owns these configured role calls.
+  catalyst-query-e4b-qwen14b:
+    workflow: catalyst_query
+    label: "Catalyst query — Gemma 4 E4B writer, Qwen 2.5 14B reviewer"
+    topology: caller
+    stages: [context, query_generate, query_lint, query_review, query_finalize]
+    models:
+      query_generate: google/gemma-4-e4b
+      query_review: qwen2.5-14b-instruct-mlx
+    prompts:
+      query_generate: catalyst-query-generate
+      query_review: catalyst-query-review
+    knobs:
+      query_generate: {temperature: 0, dry: 0, maxTokens: 1024}
+      query_review: {temperature: 0, dry: 0, maxTokens: 1024}
+    policies:
+      orchestration_owner: catalyst
+      generation_attempts: 3
+      allowed_operation: select
+      collaborative_review: true
+      model_classes:
+        query_generate: gemma-4-e4b
+        query_review: qwen2.5-14b
+    visibility: product
+    selection_priority: 10
+    outputContracts: [catalyst.query.v1]
+
   single-e4b-checked:
     label: Fast checked answer (E4B)
     topology: single

@@ -16,10 +16,13 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 import yaml
 
+from .prompt_loader import load_prompt
+
 _PATH = Path(__file__).parent / "levels.yaml"
 _PROMPTS = Path(__file__).parent / "prompts"
 _TEMPORAL_GATE_MODES = {"off", "warn", "enforce"}
-_TOPOLOGIES = {"single", "team", "leg"}
+_CLINICAL_TOPOLOGIES = {"single", "team", "leg"}
+_WORKFLOWS = {"clinical_answer", "catalyst_query"}
 _OUTPUT_MODES = {"bare", "combined", "product", "review", "indepth"}
 _ANSWER_CONTRACTS = {"caller", "chart_answer"}
 _ALLOWED_STAGES = {
@@ -33,6 +36,16 @@ _ALLOWED_STAGES = {
     "ground_verdicts",
     "indepth",
     "indepth_gate",
+}
+_QUERY_REQUIRED_ROLE = "query_generate"
+_QUERY_OPTIONAL_ROLE = "query_review"
+_QUERY_ALLOWED_ROLES = {_QUERY_REQUIRED_ROLE, _QUERY_OPTIONAL_ROLE}
+_QUERY_ALLOWED_STAGES = {
+    "context",
+    "query_generate",
+    "query_lint",
+    "query_review",
+    "query_finalize",
 }
 
 StagePlan = Tuple[str, ...]
@@ -58,6 +71,7 @@ class Profile:
     models: Mapping[str, str]
     prompts: Mapping[str, str]
     policies: Mapping[str, Any]
+    workflow: str = "clinical_answer"
     supplemental_sources: Tuple[str, ...] = ()
     knobs: Mapping[str, Any] = field(default_factory=dict)
     visibility: str = "experimental"
@@ -169,15 +183,116 @@ def _dynamic_profile(profile_id: str) -> Optional[Profile]:
     return None
 
 
-def _load_raw() -> Dict[str, dict]:
+def _load_document() -> Dict[str, Any]:
     try:
         document = yaml.safe_load(_PATH.read_text(encoding="utf-8")) or {}
     except FileNotFoundError as exc:
         raise FileNotFoundError(f"profiles file not found at {_PATH}") from exc
+    if not isinstance(document, dict):
+        raise ValueError(f"{_PATH} must contain an object")
+    return document
+
+
+def _load_raw() -> Dict[str, dict]:
+    document = _load_document()
     profiles = document.get("profiles")
     if not isinstance(profiles, dict) or not profiles:
         raise ValueError(f"{_PATH} must contain a non-empty top-level profiles mapping")
     return profiles
+
+
+def catalyst_query_profile_ids() -> List[str]:
+    return [
+        profile_id
+        for profile_id, spec in _load_raw().items()
+        if str((spec or {}).get("workflow") or "clinical_answer") == "catalyst_query"
+    ]
+
+
+def get_catalyst_query_profile(profile_id: str) -> Profile:
+    raw = _load_raw()
+    if profile_id not in catalyst_query_profile_ids():
+        raise ModelNotFoundError(profile_id, catalyst_query_profile_ids())
+    return _from_spec(profile_id, raw[profile_id] or {})
+
+
+def validate_catalyst_query_profiles() -> Tuple[Profile, ...]:
+    """Validate every configured Catalyst query profile at Hub startup."""
+    return tuple(
+        get_catalyst_query_profile(profile_id)
+        for profile_id in catalyst_query_profile_ids()
+    )
+
+
+def catalyst_query_profile_evidence(profile: Profile) -> Dict[str, Any]:
+    """Credential-free evidence for the exact Hub profile execution contract."""
+    model_classes = profile.policies.get("model_classes") or {}
+
+    def role_evidence(public_role: str, role: str) -> Dict[str, Any]:
+        prompt_name = str(profile.prompts[role])
+        prompt_text = load_prompt(prompt_name)
+        return {
+            "role": public_role,
+            "providerId": "med-agent-hub",
+            "modelClass": str(
+                model_classes.get(role) or str(profile.models[role]).split("-", 1)[0]
+            ),
+            "modelId": profile.models[role],
+            "config": _jsonable(profile.knobs[role]),
+            "systemPrompt": {
+                "promptId": prompt_name,
+                "version": "1",
+                "promptRef": f"med-agent-hub:server/prompts/{prompt_name}.txt",
+                "promptDigest": _sha256(prompt_text),
+                "text": prompt_text,
+            },
+        }
+
+    evidence: Dict[str, Any] = {
+        "profileId": profile.id,
+        "profileName": profile.label,
+        "writer": role_evidence("writer", _QUERY_REQUIRED_ROLE),
+    }
+    if _QUERY_OPTIONAL_ROLE in profile.models:
+        evidence["reviewer"] = role_evidence("reviewer", _QUERY_OPTIONAL_ROLE)
+    compact = _jsonable(evidence)
+    compact["writer"]["systemPrompt"].pop("text")
+    if "reviewer" in compact:
+        compact["reviewer"]["systemPrompt"].pop("text")
+    encoded = json.dumps(compact, sort_keys=True, separators=(",", ":"))
+    evidence["profileDigest"] = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+    return evidence
+
+
+def catalyst_query_profile_metadata(
+    profile: Profile, *, backend_models: set[str] | None
+) -> Dict[str, Any]:
+    unavailable_reasons = (
+        ["model_backend_unreachable"]
+        if backend_models is None
+        else [
+            f"model_not_advertised:{model}"
+            for model in sorted(set(profile.models.values()) - backend_models)
+        ]
+    )
+    available = not unavailable_reasons
+    return {
+        "id": profile.id,
+        "label": profile.label,
+        "workflow": profile.workflow,
+        "topology": profile.topology,
+        "available": available,
+        "required_models": sorted(set(profile.models.values())),
+        "role_models": _jsonable(profile.models),
+        "role_knobs": _jsonable(profile.knobs),
+        "policies": _jsonable(profile.policies),
+        "stages": list(profile.stages),
+        "unavailable_reasons": unavailable_reasons,
+        "capabilities": {"staged": False, "validation": True, "modelRouter": available},
+        "outputContracts": list(profile.output_contracts),
+        "revisionCapable": True,
+        "profileEvidence": catalyst_query_profile_evidence(profile),
+    }
 
 
 def _from_spec(profile_id: str, spec: Mapping[str, Any]) -> Profile:
@@ -197,6 +312,7 @@ def _from_spec(profile_id: str, spec: Mapping[str, Any]) -> Profile:
         models=dict(spec.get("models") or {}),
         prompts=dict(spec.get("prompts") or {}),
         policies=dict(spec.get("policies") or {}),
+        workflow=str(spec.get("workflow") or "clinical_answer").strip().lower(),
         supplemental_sources=tuple(supplemental_sources),
         knobs=dict(spec.get("knobs") or {}),
         visibility=str(spec.get("visibility") or "experimental"),
@@ -210,10 +326,97 @@ def _from_spec(profile_id: str, spec: Mapping[str, Any]) -> Profile:
     return compile_profile(profile)
 
 
+def _compile_catalyst_query_profile(profile: Profile) -> Profile:
+    if profile.topology != "caller":
+        raise ValueError(
+            f"Catalyst query profile {profile.id!r} topology must be caller"
+        )
+    if not profile.stages or profile.stages[0] != "context":
+        raise ValueError(
+            f"Catalyst query profile {profile.id!r} must start with context"
+        )
+    unknown = [stage for stage in profile.stages if stage not in _QUERY_ALLOWED_STAGES]
+    if unknown:
+        raise ValueError(
+            f"Catalyst query profile {profile.id!r} has unknown stages {unknown}"
+        )
+    expected_stages = (
+        "context",
+        "query_generate",
+        "query_lint",
+        *((("query_review",)) if _QUERY_OPTIONAL_ROLE in profile.models else ()),
+        "query_finalize",
+    )
+    if profile.stages != expected_stages:
+        raise ValueError(
+            f"Catalyst query profile {profile.id!r} stages must be {expected_stages}"
+        )
+    if (
+        _QUERY_REQUIRED_ROLE not in profile.models
+        or set(profile.models) - _QUERY_ALLOWED_ROLES
+    ):
+        raise ValueError(
+            f"Catalyst query profile {profile.id!r} must define only query_generate and optional query_review"
+        )
+    has_review = _QUERY_OPTIONAL_ROLE in profile.models
+    if has_review != ("query_review" in profile.stages):
+        raise ValueError(
+            f"Catalyst query profile {profile.id!r} reviewer role and stage must agree"
+        )
+    for role, model in profile.models.items():
+        if not isinstance(model, str) or not model.strip():
+            raise ValueError(
+                f"Catalyst query profile {profile.id!r} has invalid {role} model"
+            )
+        prompt = profile.prompts.get(role)
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise ValueError(
+                f"Catalyst query profile {profile.id!r} has no {role} prompt"
+            )
+        load_prompt(prompt)
+        role_knobs = profile.knobs.get(role)
+        if not isinstance(role_knobs, Mapping) or any(
+            key not in role_knobs for key in ("temperature", "dry", "maxTokens")
+        ):
+            raise ValueError(
+                f"Catalyst query profile {profile.id!r} needs temperature, dry, and maxTokens for {role}"
+            )
+    if profile.default:
+        raise ValueError(
+            f"Catalyst query profile {profile.id!r} cannot replace the clinical default"
+        )
+    if "catalyst.query.v1" not in profile.output_contracts:
+        raise ValueError(
+            f"Catalyst query profile {profile.id!r} must declare catalyst.query.v1"
+        )
+    return Profile(
+        id=profile.id,
+        label=profile.label,
+        topology=profile.topology,
+        stages=tuple(profile.stages),
+        models=_freeze_mapping(profile.models),
+        prompts=_freeze_mapping(profile.prompts),
+        policies=_freeze_mapping(profile.policies),
+        workflow=profile.workflow,
+        supplemental_sources=(),
+        knobs=_freeze_mapping(profile.knobs),
+        visibility=profile.visibility,
+        default=False,
+        selection_priority=profile.selection_priority,
+        output_contracts=tuple(profile.output_contracts),
+    )
+
+
 def compile_profile(profile: Profile) -> Profile:
     if not profile.id or not profile.label:
         raise ValueError("profile id and label are required")
-    if profile.topology not in _TOPOLOGIES:
+    if profile.workflow not in _WORKFLOWS:
+        raise ValueError(
+            f"profile {profile.id!r} has invalid workflow {profile.workflow!r}"
+        )
+    if profile.workflow == "catalyst_query":
+        return _compile_catalyst_query_profile(profile)
+    if profile.topology not in _CLINICAL_TOPOLOGIES:
         raise ValueError(
             f"profile {profile.id!r} has invalid topology {profile.topology!r}"
         )
@@ -379,6 +582,7 @@ def compile_profile(profile: Profile) -> Profile:
         models=_freeze_mapping(profile.models),
         prompts=_freeze_mapping(profile.prompts),
         policies=_freeze_mapping(profile.policies),
+        workflow=profile.workflow,
         supplemental_sources=supplemental_sources,
         knobs=_freeze_mapping(profile.knobs),
         visibility=profile.visibility,
@@ -406,7 +610,11 @@ def _freeze_mapping(value: Mapping[str, Any]) -> Mapping[str, Any]:
 
 def profile_ids() -> List[str]:
     raw = _load_raw()
-    ids = list(raw)
+    ids = [
+        profile_id
+        for profile_id, spec in raw.items()
+        if str((spec or {}).get("workflow") or "clinical_answer") == "clinical_answer"
+    ]
     defaults = [
         profile_id for profile_id in ids if bool((raw[profile_id] or {}).get("default"))
     ]
@@ -445,8 +653,8 @@ def get_profile(profile_id: str) -> Profile:
     if dynamic is not None:
         return dynamic
     raw = _load_raw()
-    if profile_id not in raw:
-        raise ModelNotFoundError(profile_id, list(raw))
+    if profile_id not in profile_ids():
+        raise ModelNotFoundError(profile_id, profile_ids())
     return _from_spec(profile_id, raw[profile_id] or {})
 
 
@@ -485,6 +693,7 @@ def _profile_configuration_digest(profile: Profile) -> str:
     configuration = {
         "id": profile.id,
         "label": profile.label,
+        "workflow": profile.workflow,
         "topology": profile.topology,
         "stages": profile.stages,
         "models": profile.models,
@@ -548,11 +757,14 @@ def profile_metadata(
     metadata = {
         "id": profile.id,
         "label": profile.label,
+        "workflow": profile.workflow,
         "staged": profile.staged,
         "validation": profile.validation,
         "temporal_enforcement": str(profile.policies.get("temporal_gate", "off")),
         "available": bool(available),
-        "default": profile.default if effective_default is None else bool(effective_default),
+        "default": (
+            profile.default if effective_default is None else bool(effective_default)
+        ),
         "selection_priority": profile.selection_priority,
         "topology": profile.topology,
         "visibility": profile.visibility,

@@ -1,6 +1,11 @@
 # med-agent-hub
 
-med-agent-hub is the client-facing clinical answer service used by ChartSearchAI, the validation harness, and direct OpenAI-compatible clients. A request selects a validated profile or an explicit low-level leg. Profiles compose one shared stage engine; clients do not orchestrate the stages themselves.
+med-agent-hub is the shared profile and model-execution service used by
+ChartSearchAI, Catalyst, the validation harness, and direct OpenAI-compatible
+clients. All configured workflows use the same `Profile` schema. Hosted
+clinical profiles compose the Hub's clinical stage engine; caller-orchestrated
+profiles configure named roles that an application such as Catalyst invokes
+while retaining its own domain workflow.
 
 ## Architecture
 
@@ -27,7 +32,18 @@ When Answer checks change a model draft, `answerValidation.originalAnswer` prese
 
 ## Profiles
 
-Configured profiles live in `server/levels.yaml` and declare a human label, topology, ordered stages, role models, prompts, validation policies, and context budget. The preferred product profile is `single-e4b-checked`; discovery marks it as the effective default only when it is available, otherwise the hub marks the available product profile with the lowest explicit `selection_priority`. Product envelopes always enforce deterministic temporal validation, regardless of discovery visibility, require exact tokenizer-backed context counting, and apply the hub-owned `chart_answer` JSON schema. A product request cannot replace that contract; low-level legs retain their existing caller-controlled `response_format` behavior.
+Configured profiles live in `server/levels.yaml` and declare a workflow,
+human label, topology, ordered stages, role models, prompts, knobs, and policies.
+`workflow: clinical_answer` profiles use the hosted clinical stage engine. The
+`workflow: catalyst_query` profile uses `topology: caller`: Hub owns its models,
+prompts, and knobs while Catalyst owns catalog context, SQL policy/lint,
+writer/reviewer orchestration, execution, and lineage. The preferred clinical
+product profile is `single-e4b-checked`; clinical discovery marks it as the
+effective default only when available. Product envelopes always enforce
+deterministic temporal validation, regardless of discovery visibility, require
+exact tokenizer-backed context counting, and apply the hub-owned `chart_answer`
+JSON schema. A product request cannot replace that contract; low-level legs
+retain their existing caller-controlled `response_format` behavior.
 
 Low-level experiment legs use these ids:
 
@@ -76,6 +92,13 @@ Weight-aware dose checks read the newest fresh numeric Querystore `obs` matching
   router-advertised model IDs) for generic clients that own their own profiles.
   Router model IDs are public identifiers and must not embed credentials;
   endpoint and model metadata are credential-sanitized separately.
+- `GET /v1/hub/query-profiles`: caller-orchestrated Catalyst query profiles,
+  exact role/model/prompt/knob evidence, and live router availability.
+- `POST /v1/hub/query-profiles/{profile}/roles/{role}/generate`: execute one
+  configured query role. Callers provide non-system messages and an optional
+  response format; callers cannot override the role model, prompt, or knobs.
+- `POST /v1/hub/generate`: raw single-model compatibility endpoint for generic
+  consumers that own their own profile configuration. Catalyst does not use it.
 - `GET /health`: service health, uptime, and process memory.
 - `GET /`: concise service status.
 
