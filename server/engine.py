@@ -2256,6 +2256,18 @@ async def _execute_stages(
                 "answer": "",
                 "error": "In-Depth was not generated.",
             }
+            safety_check = stages._compute_safety_check(
+                state.drug_context,
+                str(payload.get("answer") or ""),
+                stages._latest_user_text(state.messages),
+                bool(request.profile.policies.get("drug_safety")),
+            )
+            payload["safetyStatus"] = safety_check.status
+            payload["safetyCheck"] = safety_check.to_dict()
+            if safety_check.warnings:
+                payload["safetyWarnings"] = [
+                    warning.to_dict() for warning in safety_check.warnings
+                ]
             write_execution_trace(answer_text=str(payload.get("answer") or ""))
             yield "done", json.dumps(payload)
         else:

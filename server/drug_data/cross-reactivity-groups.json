@@ -1,6 +1,8 @@
 {
+  "packageId": "chartsearchai-research-cross-reactivity-seed-v1",
   "version": "1.0",
   "reviewState": "proposed",
+  "source": "OpenClinAI research seed",
   "description": "Proposed research cross-reactivity families for exercising code paths that span ATC branches. This package is not clinically approved and cannot activate product warnings.",
   "groups": [
     {

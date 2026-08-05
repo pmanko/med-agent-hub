@@ -214,6 +214,13 @@ class CrossReactivityGroup:
         return any(self.contains_code(code) for code in entry.normalized_atc_codes())
 
 
+@dataclass
+class _CrossReactivityLoad:
+    groups: List[CrossReactivityGroup]
+    package: Dict[str, Any]
+    issues: List[str]
+
+
 def _entry_from_dict(d: Dict[str, Any]) -> DrugReferenceEntry:
     age_bands = []
     for band in d.get("ageBands") or []:
@@ -280,7 +287,10 @@ class DrugReferenceDataset:
                  source_version: Optional[str] = None,
                  provenance: Optional[Dict[str, Any]] = None,
                  review_state: str = REVIEW_PROPOSED,
-                 cross_reactivity_review_state: str = REVIEW_PROPOSED):
+                 cross_reactivity_review_state: str = REVIEW_PROPOSED,
+                 source_issues: Optional[List[str]] = None,
+                 cross_reactivity_package: Optional[Dict[str, Any]] = None,
+                 cross_reactivity_issues: Optional[List[str]] = None):
         self.entries = entries
         self.cross_reactivity_groups = list(cross_reactivity_groups or [])
         self.package_id = _clean_text(package_id) or "unidentified-drug-reference"
@@ -299,6 +309,24 @@ class DrugReferenceDataset:
             if normalized_cross_review in _REVIEW_STATES
             else REVIEW_PROPOSED
         )
+        self.source_issues = list(dict.fromkeys(source_issues or []))
+        self.cross_reactivity_issues = list(
+            dict.fromkeys(cross_reactivity_issues or [])
+        )
+        default_cross_package = {
+            "id": "in-memory-cross-reactivity",
+            "source_format": "memory",
+            "version": None,
+            "provenance": {},
+            "review_state": self.cross_reactivity_review_state,
+            "issues": list(self.cross_reactivity_issues),
+        }
+        self.cross_reactivity_package = {
+            **default_cross_package,
+            **dict(cross_reactivity_package or {}),
+            "review_state": self.cross_reactivity_review_state,
+            "issues": list(self.cross_reactivity_issues),
+        }
 
     def package_metadata(self) -> Dict[str, Any]:
         return {
@@ -307,7 +335,9 @@ class DrugReferenceDataset:
             "version": self.source_version,
             "provenance": dict(self.provenance),
             "review_state": self.review_state,
+            "issues": list(self.source_issues),
             "cross_reactivity_review_state": self.cross_reactivity_review_state,
+            "cross_reactivity": dict(self.cross_reactivity_package),
         }
 
     def find_by_query(self, text: Optional[str]) -> List[DrugReferenceEntry]:
@@ -369,16 +399,81 @@ def _load_json_document(path: str) -> Dict[str, Any]:
     return raw if isinstance(raw, dict) else {}
 
 
-def _entries_from_document(raw: Dict[str, Any]) -> List[DrugReferenceEntry]:
+def _append_issue(issues: List[str], issue: str) -> None:
+    if issue not in issues:
+        issues.append(issue)
+
+
+def _entry_has_rejected_content(raw: Dict[str, Any], parsed: DrugReferenceEntry) -> bool:
+    for key, accepted in (
+        ("aliases", parsed.aliases),
+        ("atcCodes", parsed.atc_codes),
+        ("warnings", parsed.warnings),
+    ):
+        value = raw.get(key, [])
+        if key in raw and (not isinstance(value, list) or len(accepted) != len(value)):
+            return True
+    if any(not _ATC_LEVEL5.fullmatch(code.strip().upper()) for code in parsed.atc_codes):
+        return True
+
+    for key in ("drugClass", "source"):
+        if key in raw and raw.get(key) is not None and not isinstance(raw.get(key), str):
+            return True
+
+    age_bands = raw.get("ageBands", [])
+    if "ageBands" in raw and (
+        not isinstance(age_bands, list) or len(parsed.age_bands) != len(age_bands)
+    ):
+        return True
+
+    interactions = raw.get("interactions", [])
+    if "interactions" in raw and not isinstance(interactions, list):
+        return True
+    for interaction in interactions if isinstance(interactions, list) else []:
+        if not isinstance(interaction, dict) or not (
+            _clean_text(interaction.get("token")) or _clean_text(interaction.get("atc"))
+        ):
+            return True
+        atc = _clean_text(interaction.get("atc"))
+        if atc and not _ATC_LEVEL5.fullmatch(atc.upper()):
+            return True
+
+    contraindications = raw.get("contraindications", [])
+    if "contraindications" in raw and not isinstance(contraindications, list):
+        return True
+    for contraindication in contraindications if isinstance(contraindications, list) else []:
+        if (
+            not isinstance(contraindication, dict)
+            or (_clean_text(contraindication.get("type")) or "").lower()
+            not in {"allergy", "condition"}
+            or not _clean_text(contraindication.get("token"))
+        ):
+            return True
+    return False
+
+
+def _entries_from_document(
+    raw: Dict[str, Any], issues: Optional[List[str]] = None
+) -> List[DrugReferenceEntry]:
+    diagnostics = issues if issues is not None else []
     entries: List[DrugReferenceEntry] = []
-    for raw_entry in raw.get("entries", []):
+    raw_entries = raw.get("entries", [])
+    if not isinstance(raw_entries, list):
+        _append_issue(diagnostics, "source_data_partially_invalid")
+        return entries
+    for raw_entry in raw_entries:
         if (not isinstance(raw_entry, dict) or not _clean_text(raw_entry.get("id"))
                 or not _clean_text(raw_entry.get("name"))):
+            _append_issue(diagnostics, "source_data_partially_invalid")
             continue
         try:
-            entries.append(_entry_from_dict(raw_entry))
+            parsed = _entry_from_dict(raw_entry)
         except (KeyError, TypeError, ValueError):
+            _append_issue(diagnostics, "source_data_partially_invalid")
             continue
+        if _entry_has_rejected_content(raw_entry, parsed):
+            _append_issue(diagnostics, "source_data_partially_invalid")
+        entries.append(parsed)
     return entries
 
 
@@ -388,24 +483,56 @@ def _load_entries(path: str) -> List[DrugReferenceEntry]:
 
 def _load_cross_reactivity_package(
     path: Optional[str],
-) -> Tuple[List[CrossReactivityGroup], str]:
+) -> _CrossReactivityLoad:
+    basename = os.path.basename(path) if path else "unavailable"
+    package = {
+        "id": f"configured-cross-reactivity:{basename}",
+        "source_format": "json" if path else "unavailable",
+        "version": None,
+        "provenance": {"dataset": basename} if path else {},
+        "review_state": REVIEW_PROPOSED,
+        "issues": [],
+    }
+    issues: List[str] = []
     if not path or path.strip().lower() == _DISABLED_SENTINEL or not os.path.exists(path):
-        return [], REVIEW_PROPOSED
+        _append_issue(issues, "cross_reactivity_source_unavailable")
+        package["source_format"] = "disabled" if path else "unavailable"
+        package["issues"] = list(issues)
+        return _CrossReactivityLoad([], package, issues)
     try:
         with open(path, "r", encoding="utf-8") as handle:
             raw = json.load(handle)
     except (OSError, json.JSONDecodeError, TypeError, ValueError):
-        return [], REVIEW_PROPOSED
+        _append_issue(issues, "cross_reactivity_data_invalid")
+        package["issues"] = list(issues)
+        return _CrossReactivityLoad([], package, issues)
+    if not isinstance(raw, dict):
+        _append_issue(issues, "cross_reactivity_data_invalid")
+        package["issues"] = list(issues)
+        return _CrossReactivityLoad([], package, issues)
     review_state = (
         _clean_text(raw.get("reviewState"))
-        if isinstance(raw, dict)
-        else REVIEW_PROPOSED
     ) or REVIEW_PROPOSED
     if review_state not in _REVIEW_STATES:
+        _append_issue(issues, "cross_reactivity_data_partially_invalid")
         review_state = REVIEW_PROPOSED
+    package.update({
+        "id": _clean_text(raw.get("packageId")) or package["id"],
+        "version": _clean_text(raw.get("version")),
+        "provenance": {
+            "dataset": basename,
+            **({"source": raw.get("source")} if _clean_text(raw.get("source")) else {}),
+        },
+        "review_state": review_state,
+    })
     groups: List[CrossReactivityGroup] = []
-    for item in raw.get("groups", []) if isinstance(raw, dict) else []:
+    raw_groups = raw.get("groups", [])
+    if not isinstance(raw_groups, list):
+        _append_issue(issues, "cross_reactivity_data_partially_invalid")
+        raw_groups = []
+    for item in raw_groups:
         if not isinstance(item, dict):
+            _append_issue(issues, "cross_reactivity_data_partially_invalid")
             continue
         name = item.get("name")
         group = CrossReactivityGroup(
@@ -415,12 +542,17 @@ def _load_cross_reactivity_package(
         )
         if group.name and group.normalized_prefixes():
             groups.append(group)
-    return groups, review_state
+            if len(group.normalized_prefixes()) != len(group.atc_prefixes):
+                _append_issue(issues, "cross_reactivity_data_partially_invalid")
+        else:
+            _append_issue(issues, "cross_reactivity_data_partially_invalid")
+    package["issues"] = list(issues)
+    return _CrossReactivityLoad(groups, package, issues)
 
 
 def _load_cross_reactivity_groups(path: Optional[str]) -> List[CrossReactivityGroup]:
     """Compatibility helper for callers that only inspect the parsed classification groups."""
-    return _load_cross_reactivity_package(path)[0]
+    return _load_cross_reactivity_package(path).groups
 
 
 def _load_atc_entries(path: str) -> List[DrugReferenceEntry]:
@@ -474,26 +606,37 @@ def _load_atc_entries(path: str) -> List[DrugReferenceEntry]:
 def _load_source_dataset(
     path: str,
     source_format: str,
-    cross_reactivity_groups: List[CrossReactivityGroup],
-    cross_reactivity_review_state: str,
+    cross_reactivity: _CrossReactivityLoad,
 ) -> DrugReferenceDataset:
     basename = os.path.basename(path) if path else "unavailable"
     if source_format == "atc":
         return DrugReferenceDataset(
             _load_atc_entries(path),
-            cross_reactivity_groups,
+            cross_reactivity.groups,
             package_id=f"configured-atc:{basename}",
             source_format="atc",
             provenance={"dataset": basename},
             # ATC supplies classification, not reviewed clinical decision rules.
             review_state=REVIEW_PROPOSED,
-            cross_reactivity_review_state=cross_reactivity_review_state,
+            cross_reactivity_review_state=cross_reactivity.package["review_state"],
+            source_issues=[] if path and os.path.exists(path) else ["source_unavailable"],
+            cross_reactivity_package=cross_reactivity.package,
+            cross_reactivity_issues=cross_reactivity.issues,
         )
 
+    source_issues: List[str] = []
     raw = _load_json_document(path)
+    if not path or not os.path.exists(path):
+        _append_issue(source_issues, "source_unavailable")
+    elif not raw:
+        _append_issue(source_issues, "source_data_invalid")
+    review_state = _clean_text(raw.get("reviewState")) or REVIEW_PROPOSED
+    if review_state not in _REVIEW_STATES:
+        _append_issue(source_issues, "source_data_partially_invalid")
+        review_state = REVIEW_PROPOSED
     return DrugReferenceDataset(
-        _entries_from_document(raw),
-        cross_reactivity_groups,
+        _entries_from_document(raw, source_issues),
+        cross_reactivity.groups,
         package_id=_clean_text(raw.get("packageId")) or f"configured-json:{basename}",
         source_format="json",
         source_version=_clean_text(raw.get("version")),
@@ -505,8 +648,11 @@ def _load_source_dataset(
                 else {}
             ),
         },
-        review_state=_clean_text(raw.get("reviewState")) or REVIEW_PROPOSED,
-        cross_reactivity_review_state=cross_reactivity_review_state,
+        review_state=review_state,
+        cross_reactivity_review_state=cross_reactivity.package["review_state"],
+        source_issues=source_issues,
+        cross_reactivity_package=cross_reactivity.package,
+        cross_reactivity_issues=cross_reactivity.issues,
     )
 
 
@@ -516,16 +662,16 @@ def load_dataset(path: Optional[str] = None, source_format: Optional[str] = None
     ``source_format`` selects the adapter (``json``|``atc``); defaults to the DRUG_SAFETY_SOURCE_FORMAT env."""
     fmt = (source_format or _SOURCE_FORMAT or "json").strip().lower()
     groups_path = _CROSS_REACTIVITY_PATH if cross_reactivity_path is None else cross_reactivity_path
-    groups, groups_review_state = _load_cross_reactivity_package(groups_path)
+    cross_reactivity = _load_cross_reactivity_package(groups_path)
     global _dataset
     if path is not None:
-        return _load_source_dataset(path, fmt, groups, groups_review_state)
+        return _load_source_dataset(path, fmt, cross_reactivity)
     if _dataset is not None:
         return _dataset
     with _lock:
         if _dataset is None:
             _dataset = _load_source_dataset(
-                _DATASET_PATH, fmt, groups, groups_review_state
+                _DATASET_PATH, fmt, cross_reactivity
             )
     return _dataset
 
@@ -940,8 +1086,6 @@ def _add_interactions(warnings: List[SafetyWarning], ref: DrugReferenceEntry,
 def _add_class_contraindications(warnings: List[SafetyWarning], ref: DrugReferenceEntry,
                                   context: PatientClinicalContext, dataset: DrugReferenceDataset) -> None:
     ref_classes = ref.atc_subgroups()
-    if not ref_classes:
-        return
     seen_allergens: Set[str] = set()
     for allergy_token in context.allergy_tokens:
         allergen = dataset.lookup_by_token(allergy_token)
@@ -951,6 +1095,11 @@ def _add_class_contraindications(warnings: List[SafetyWarning], ref: DrugReferen
         if allergen is ref or allergen.id == ref.id:
             warnings.append(SafetyWarning(TYPE_CONTRAINDICATION, ref.name,
                                            f"the patient has a recorded allergy to {ref.name}"))
+            continue
+        if (
+            dataset.cross_reactivity_review_state != REVIEW_CLINICALLY_APPROVED
+            or not ref_classes
+        ):
             continue
         shared = next((cls for cls in allergen.atc_subgroups() if cls in ref_classes), None)
         if shared:
@@ -968,6 +1117,8 @@ def _add_class_contraindications(warnings: List[SafetyWarning], ref: DrugReferen
 
 def _add_class_interactions(warnings: List[SafetyWarning], ref: DrugReferenceEntry,
                              context: PatientClinicalContext, dataset: DrugReferenceDataset) -> None:
+    if dataset.cross_reactivity_review_state != REVIEW_CLINICALLY_APPROVED:
+        return
     ref_classes = ref.atc_subgroups()
     if not ref_classes:
         return
@@ -1117,22 +1268,32 @@ def check_answer_safety(answer: Optional[str], question: Optional[str],
         )
 
     issues: List[str] = []
+    for issue in getattr(dataset, "source_issues", []):
+        _append_issue(issues, issue)
+    for issue in getattr(dataset, "cross_reactivity_issues", []):
+        _append_issue(issues, issue)
     if not context.mapping_complete:
-        issues.append("mapping_incomplete")
+        _append_issue(issues, "mapping_incomplete")
     if not context.exposure_complete:
-        issues.append("exposure_incomplete")
+        _append_issue(issues, "exposure_incomplete")
     review_state = getattr(dataset, "review_state", REVIEW_PROPOSED)
     if review_state == REVIEW_RETIRED:
-        issues.append("source_retired")
+        _append_issue(issues, "source_retired")
     elif review_state != REVIEW_CLINICALLY_APPROVED:
-        issues.append("source_not_clinically_approved")
-    if (
-        dataset.cross_reactivity_groups
-        and dataset.cross_reactivity_review_state != REVIEW_CLINICALLY_APPROVED
+        _append_issue(issues, "source_not_clinically_approved")
+    cross_review_state = getattr(
+        dataset, "cross_reactivity_review_state", REVIEW_PROPOSED
+    )
+    if cross_review_state == REVIEW_RETIRED:
+        _append_issue(issues, "cross_reactivity_source_retired")
+    elif (
+        cross_review_state != REVIEW_CLINICALLY_APPROVED
+        and "cross_reactivity_source_unavailable" not in issues
+        and "cross_reactivity_data_invalid" not in issues
     ):
-        issues.append("cross_reactivity_not_clinically_approved")
+        _append_issue(issues, "cross_reactivity_not_clinically_approved")
     if not (warn_dose and warn_interactions and warn_contraindications):
-        issues.append("check_scope_limited")
+        _append_issue(issues, "check_scope_limited")
 
     # Unapproved source material can be represented as research context, but it cannot produce
     # deterministic warnings or CDS cards. The policy check itself completed successfully.

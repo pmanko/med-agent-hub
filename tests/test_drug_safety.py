@@ -11,7 +11,8 @@ from server import drug_safety as ds
 
 # ---------------------------------------------------------------------------
 # Fixtures: real bundled dataset + a small ATC-only dataset (mirrors the Java
-# atc-sample.tsv fixture: entries that carry ATC codes but NO curated rules).
+# atc-sample.tsv fixture. Tests that assert class relationships explicitly opt the
+# in-memory relationship policy into clinically-approved state.
 # ---------------------------------------------------------------------------
 
 @pytest.fixture()
@@ -42,6 +43,7 @@ def atc_dataset():
         package_id="approved-test-atc-rules",
         source_format="test",
         review_state=ds.REVIEW_CLINICALLY_APPROVED,
+        cross_reactivity_review_state=ds.REVIEW_CLINICALLY_APPROVED,
     )
 
 

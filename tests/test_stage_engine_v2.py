@@ -596,6 +596,9 @@ def test_product_pipeline_fallback_records_enforced_temporal_gate(monkeypatch):
     assert gate["mode"] == "enforce"
     assert gate["applied"] == "fallback"
     assert events["done"]["answerValidation"]["status"] == "needs_review"
+    assert events["done"]["safetyStatus"] in {"limited", "unavailable"}
+    assert events["done"]["safetyCheck"]["schema_version"] == "drug_safety.v1"
+    assert events["done"]["safetyCheck"]["issues"]
     assert traces[0]["temporal_gate"] == gate
 
 

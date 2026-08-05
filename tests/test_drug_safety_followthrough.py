@@ -94,6 +94,33 @@ def test_approved_drug_package_cannot_activate_proposed_cross_reactivity_rules()
     assert "cross_reactivity_not_clinically_approved" in result.issues
 
 
+def test_approved_drug_package_cannot_activate_proposed_same_atc_class_rules():
+    dataset = ds.DrugReferenceDataset(
+        [
+            ds.DrugReferenceEntry(
+                id="M01AE01", name="Ibuprofen", aliases=["ibuprofen"], atc_codes=["M01AE01"]
+            ),
+            ds.DrugReferenceEntry(
+                id="M01AE02", name="Naproxen", aliases=["naproxen"], atc_codes=["M01AE02"]
+            ),
+        ],
+        package_id="approved-drug-package",
+        review_state=ds.REVIEW_CLINICALLY_APPROVED,
+        cross_reactivity_review_state=ds.REVIEW_PROPOSED,
+    )
+
+    result = ds.check_answer_safety(
+        "Naproxen may be used.",
+        "Can this patient use naproxen?",
+        _ctx(allergies={"ibuprofen"}, atc={"M01AE01"}),
+        dataset,
+    )
+
+    assert result.status == ds.STATUS_LIMITED
+    assert result.warnings == []
+    assert "cross_reactivity_not_clinically_approved" in result.issues
+
+
 def test_weight_aware_per_dose_limit_fires_below_daily_ceiling():
     warnings = ds.validate_answer(
         "Ibuprofen 600 mg every 8 hours can be given.",
@@ -235,6 +262,56 @@ def test_malformed_sources_and_runtime_failures_are_fail_safe(tmp_path):
     assert ds.validate_answer("Ibuprofen 600 mg.", None, _ctx(), BrokenDataset()) == []
 
 
+def test_missing_cross_reactivity_package_makes_an_approved_check_limited(tmp_path):
+    path = tmp_path / "approved-drugs.json"
+    path.write_text(json.dumps({
+        "packageId": "approved-drugs",
+        "reviewState": "clinically_approved",
+        "entries": [{"id": "ibuprofen", "name": "Ibuprofen", "aliases": ["ibuprofen"]}],
+    }), encoding="utf-8")
+
+    dataset = ds.load_dataset(
+        str(path), source_format="json", cross_reactivity_path=str(tmp_path / "missing.json")
+    )
+    result = ds.check_answer_safety("Ibuprofen may be used.", None, _ctx(), dataset)
+
+    assert result.status == ds.STATUS_LIMITED
+    assert "cross_reactivity_source_unavailable" in result.issues
+    assert result.package["cross_reactivity"]["id"].endswith("missing.json")
+    assert result.package["cross_reactivity"]["review_state"] == ds.REVIEW_PROPOSED
+
+
+def test_cross_reactivity_package_has_independent_identity_and_provenance(tmp_path):
+    drugs = tmp_path / "approved-drugs.json"
+    groups = tmp_path / "approved-groups.json"
+    drugs.write_text(json.dumps({
+        "packageId": "approved-drugs",
+        "reviewState": "clinically_approved",
+        "entries": [{"id": "ibuprofen", "name": "Ibuprofen", "aliases": ["ibuprofen"]}],
+    }), encoding="utf-8")
+    groups.write_text(json.dumps({
+        "packageId": "approved-relationships",
+        "version": "2026.08",
+        "source": "review board",
+        "reviewState": "clinically_approved",
+        "groups": [{"name": "NSAID", "atcPrefixes": ["M01AE", "N02BA"]}],
+    }), encoding="utf-8")
+
+    dataset = ds.load_dataset(
+        str(drugs), source_format="json", cross_reactivity_path=str(groups)
+    )
+    relationship_package = dataset.package_metadata()["cross_reactivity"]
+
+    assert relationship_package == {
+        "id": "approved-relationships",
+        "source_format": "json",
+        "version": "2026.08",
+        "provenance": {"dataset": "approved-groups.json", "source": "review board"},
+        "review_state": ds.REVIEW_CLINICALLY_APPROVED,
+        "issues": [],
+    }
+
+
 def test_null_rule_elements_render_best_effort_without_literal_null(tmp_path):
     path = tmp_path / "partly-malformed.json"
     path.write_text(json.dumps({"reviewState": "clinically_approved", "entries": [
@@ -258,6 +335,10 @@ def test_null_rule_elements_render_best_effort_without_literal_null(tmp_path):
     assert "test condition" in text
     assert "note-only interaction" in text
     assert "null" not in text.lower()
+
+    result = ds.check_answer_safety("Mangled may be used.", None, _ctx(), dataset)
+    assert result.status == ds.STATUS_LIMITED
+    assert "source_data_partially_invalid" in result.issues
 
 
 def test_scalar_list_fields_and_broad_atc_prefixes_are_rejected(tmp_path):
@@ -301,6 +382,11 @@ def test_scalar_list_fields_and_broad_atc_prefixes_are_rejected(tmp_path):
     assert dataset.entries[0].warnings == []
     assert dataset.cross_reactivity_groups == []
     assert dataset.find_by_query("Can I use ibuprofen?") == []
+
+    result = ds.check_answer_safety("Mangled may be used.", None, _ctx(), dataset)
+    assert result.status == ds.STATUS_LIMITED
+    assert "source_data_partially_invalid" in result.issues
+    assert "cross_reactivity_data_partially_invalid" in result.issues
 
 
 def test_malformed_age_band_cannot_erase_an_independent_interaction_warning(tmp_path):
@@ -349,3 +435,10 @@ def test_malformed_age_band_cannot_erase_an_independent_interaction_warning(tmp_
     assert len(warnings) == 1
     assert warnings[0].type == ds.TYPE_INTERACTION
     assert warnings[0].drug == "Ibuprofen"
+
+    result = ds.check_answer_safety(
+        "Ibuprofen 600 mg may be used.", None, context, dataset
+    )
+    assert result.status == ds.STATUS_LIMITED
+    assert "source_data_partially_invalid" in result.issues
+    assert len(result.warnings) == 1
