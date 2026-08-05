@@ -4,6 +4,7 @@ import hashlib
 from dataclasses import replace
 
 import pytest
+import rfc8785
 
 from server.levels_loader import (
     ModelNotFoundError,
@@ -16,8 +17,8 @@ from server.levels_loader import (
     profile_ids,
     profile_metadata,
     resolve_temporal_policy,
-    validate_profiles,
     validate_catalyst_query_profiles,
+    validate_profiles,
 )
 from server.prompt_loader import load_prompt
 
@@ -398,6 +399,29 @@ def test_catalyst_prompt_evidence_uses_workbench_sha256_contract():
         assert not expected.startswith("sha256:")
 
     assert len(evidence["profileDigest"]) == 64
+    compact = {
+        **evidence,
+        "writer": {
+            **evidence["writer"],
+            "systemPrompt": {
+                key: value
+                for key, value in evidence["writer"]["systemPrompt"].items()
+                if key != "text"
+            },
+        },
+        "reviewer": {
+            **evidence["reviewer"],
+            "systemPrompt": {
+                key: value
+                for key, value in evidence["reviewer"]["systemPrompt"].items()
+                if key != "text"
+            },
+        },
+    }
+    compact.pop("profileDigest")
+    assert (
+        evidence["profileDigest"] == hashlib.sha256(rfc8785.dumps(compact)).hexdigest()
+    )
 
 
 def test_compiled_profile_configuration_is_immutable():

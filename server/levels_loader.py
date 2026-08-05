@@ -14,6 +14,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
+import rfc8785
 import yaml
 
 from .prompt_loader import load_prompt
@@ -259,8 +260,7 @@ def catalyst_query_profile_evidence(profile: Profile) -> Dict[str, Any]:
     compact["writer"]["systemPrompt"].pop("text")
     if "reviewer" in compact:
         compact["reviewer"]["systemPrompt"].pop("text")
-    encoded = json.dumps(compact, sort_keys=True, separators=(",", ":"))
-    evidence["profileDigest"] = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+    evidence["profileDigest"] = hashlib.sha256(rfc8785.dumps(compact)).hexdigest()
     return evidence
 
 
