@@ -9,6 +9,8 @@ parts of the safety result contract.
 import json
 from pathlib import Path
 
+import pytest
+
 from server import drug_safety as ds
 
 FIXTURE = Path(__file__).resolve().parent / "conformance" / "dual-provider-conformance.v1.json"
@@ -204,6 +206,179 @@ def test_malformed_nested_rules_are_removed_before_validation():
     assert entries[0].atc_codes == []
     assert entries[0].interactions == []
     assert "source_data_partially_invalid" in issues
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("minYears", "2"),
+        ("minYears", 2.0),
+        ("maxYears", True),
+        ("mgPerKgMin", "1"),
+        ("mgPerKgMax", False),
+        ("maxDailyDoseMg", float("inf")),
+        ("maxDailyDoseMg", 10**1000),
+    ],
+)
+def test_age_band_numbers_require_the_same_json_types_as_java(field, value):
+    band = {
+        "minYears": 2,
+        "maxYears": 11,
+        "mgPerKgMin": 5,
+        "mgPerKgMax": 10.5,
+        "maxDailyDoseMg": 1200,
+    }
+    band[field] = value
+    issues = []
+
+    entries = ds._entries_from_document(
+        {
+            "entries": [
+                {
+                    "id": "ibuprofen",
+                    "name": "Ibuprofen",
+                    "aliases": ["ibuprofen"],
+                    "ageBands": [band],
+                }
+            ]
+        },
+        issues,
+    )
+
+    assert entries[0].age_bands == []
+    assert "source_data_partially_invalid" in issues
+
+
+def test_age_band_bounds_must_fit_the_shared_32_bit_contract():
+    issues = []
+    entries = ds._entries_from_document(
+        {
+            "entries": [
+                {
+                    "id": "ibuprofen",
+                    "name": "Ibuprofen",
+                    "ageBands": [
+                        {
+                            "minYears": 4_294_967_298,
+                            "maxYears": 4_294_967_307,
+                        }
+                    ],
+                }
+            ]
+        },
+        issues,
+    )
+
+    assert entries[0].age_bands == []
+    assert "source_data_partially_invalid" in issues
+
+
+def test_default_interaction_severity_floor_matches_java(monkeypatch):
+    monkeypatch.delenv("DRUG_SAFETY_MIN_INTERACTION_SEVERITY", raising=False)
+    entries = ds._entries_from_document(
+        {
+            "entries": [
+                {
+                    "id": "test-drug",
+                    "name": "Test Drug",
+                    "aliases": ["test drug"],
+                    "interactions": [
+                        {"token": "unknown partner", "severity": "Unknown"},
+                        {"token": "minor partner", "severity": "Minor"},
+                        {"token": "curated partner"},
+                    ],
+                }
+            ]
+        }
+    )
+    dataset = ds.DrugReferenceDataset(
+        entries,
+        package_id="reviewed-package",
+        review_state=ds.REVIEW_CLINICALLY_APPROVED,
+        cross_reactivity_review_state=ds.REVIEW_CLINICALLY_APPROVED,
+    )
+    context = ds.PatientClinicalContext(
+        age_years=40,
+        active_drug_names={"unknown partner", "minor partner", "curated partner"},
+    )
+
+    result = ds.check_answer_safety("Test Drug may be used.", None, context, dataset)
+    details = [warning.detail for warning in result.warnings]
+
+    assert not any("unknown partner" in detail for detail in details)
+    assert any("minor partner" in detail for detail in details)
+    assert any("curated partner" in detail for detail in details)
+    rendered = ds._render_entry(entries[0], age=None, rules_usable=True)
+    assert "unknown partner" not in rendered
+    assert "minor partner" in rendered
+    assert "curated partner" in rendered
+
+
+def test_malformed_interaction_severity_is_rejected_but_absent_is_unrated():
+    issues = []
+    entries = ds._entries_from_document(
+        {
+            "entries": [
+                {
+                    "id": "test-drug",
+                    "name": "Test Drug",
+                    "interactions": [
+                        {"token": "misspelled", "severity": "Majro"},
+                        {"token": "numeric", "severity": 3},
+                        {"token": "blank", "severity": ""},
+                        {"token": "unrated"},
+                        {"token": "rated", "severity": "Major"},
+                    ],
+                }
+            ]
+        },
+        issues,
+    )
+
+    assert [interaction.token for interaction in entries[0].interactions] == [
+        "unrated",
+        "rated",
+    ]
+    assert entries[0].interactions[0].severity is None
+    assert entries[0].interactions[1].severity == "Major"
+    assert "source_data_partially_invalid" in issues
+    dataset = ds.DrugReferenceDataset(
+        entries,
+        review_state=ds.REVIEW_CLINICALLY_APPROVED,
+        source_issues=issues,
+    )
+    assert not dataset.primary_rules_usable()
+
+
+def test_present_invalid_severity_never_bypasses_the_floor():
+    entry = ds.DrugReferenceEntry(
+        id="test-drug",
+        name="Test Drug",
+        aliases=["test drug"],
+        interactions=[
+            ds.Interaction(token="misspelled", severity="Majro"),
+            ds.Interaction(token="unrated"),
+        ],
+    )
+    context = ds.PatientClinicalContext(
+        age_years=40,
+        active_drug_names={"misspelled", "unrated"},
+    )
+    dataset = ds.DrugReferenceDataset(
+        [entry],
+        package_id="reviewed-package",
+        review_state=ds.REVIEW_CLINICALLY_APPROVED,
+        cross_reactivity_review_state=ds.REVIEW_CLINICALLY_APPROVED,
+    )
+
+    result = ds.check_answer_safety("Test Drug may be used.", None, context, dataset)
+    details = [warning.detail for warning in result.warnings]
+
+    assert not any("misspelled" in detail for detail in details)
+    assert any("unrated" in detail for detail in details)
+    rendered = ds._render_entry(entry, age=None, rules_usable=True)
+    assert "misspelled" not in rendered
+    assert "unrated" in rendered
 
 
 def test_approved_json_without_package_identity_cannot_emit_warnings(tmp_path):

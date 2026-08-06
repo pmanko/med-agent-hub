@@ -33,8 +33,17 @@ _CROSS_REACTIVITY_PATH = os.environ.get(
 
 DEFAULT_WEIGHT_CONCEPT_UUID = "5089AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 DEFAULT_WEIGHT_MAX_AGE_DAYS = 90
+DEFAULT_MIN_INTERACTION_SEVERITY = "minor"
 _DISABLED_SENTINEL = "none"
 _KILOGRAM_UNITS = {"kg", "kilogram", "kilograms"}
+_INTERACTION_SEVERITY_RANKS = {
+    "unknown": 0,
+    "minor": 1,
+    "moderate": 2,
+    "major": 3,
+}
+_MIN_INT32 = -(2**31)
+_MAX_INT32 = 2**31 - 1
 
 _ATC_SUBGROUP_PREFIX_LENGTH = 5
 
@@ -101,19 +110,25 @@ def _clean_text_list(values: Any) -> List[str]:
 
 
 def _finite_number(value: Any) -> float:
-    if isinstance(value, bool):
-        raise ValueError("boolean is not a numeric clinical value")
-    parsed = float(value)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("clinical value must be a JSON number")
+    try:
+        parsed = float(value)
+    except OverflowError as exc:
+        raise ValueError(
+            "clinical value is outside the supported numeric range"
+        ) from exc
     if not math.isfinite(parsed):
         raise ValueError("clinical value must be finite")
     return parsed
 
 
 def _whole_year(value: Any) -> int:
-    parsed = _finite_number(value)
-    if not parsed.is_integer():
-        raise ValueError("age-band bounds must be whole years")
-    return int(parsed)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("age-band bounds must be integral JSON numbers")
+    if value < _MIN_INT32 or value > _MAX_INT32:
+        raise ValueError("age-band bounds must fit a signed 32-bit integer")
+    return value
 
 
 @dataclass
@@ -130,6 +145,27 @@ class Interaction:
     token: Optional[str] = None
     atc: Optional[str] = None
     note: Optional[str] = None
+    severity: Optional[str] = None
+
+
+def _interaction_from_dict(value: Any) -> Optional[Interaction]:
+    if not isinstance(value, dict):
+        return None
+    token = _clean_text(value.get("token"))
+    atc = _clean_text(value.get("atc"))
+    if not (token or atc) or (atc and not _ATC_LEVEL5.fullmatch(atc.upper())):
+        return None
+    severity = None
+    if "severity" in value and value.get("severity") is not None:
+        severity = _clean_text(value.get("severity"))
+        if severity is None or severity.lower() not in _INTERACTION_SEVERITY_RANKS:
+            return None
+    return Interaction(
+        token=token,
+        atc=atc,
+        note=_clean_text(value.get("note")),
+        severity=severity,
+    )
 
 
 @dataclass
@@ -256,13 +292,9 @@ def _entry_from_dict(d: Dict[str, Any]) -> DrugReferenceEntry:
                    if _ATC_LEVEL5.fullmatch(code.upper())],
         age_bands=age_bands,
         interactions=[
-            Interaction(token=token, atc=atc, note=_clean_text(item.get("note")))
+            parsed
             for item in (d.get("interactions") or [])
-            if isinstance(item, dict)
-            for token, atc in [
-                (_clean_text(item.get("token")), _clean_text(item.get("atc")))
-            ]
-            if (token or atc) and (not atc or _ATC_LEVEL5.fullmatch(atc.upper()))
+            if (parsed := _interaction_from_dict(item)) is not None
         ],
         contraindications=[
             Contraindication(type=rule_type, token=token,
@@ -439,6 +471,8 @@ def _entry_has_rejected_content(raw: Dict[str, Any], parsed: DrugReferenceEntry)
     interactions = raw.get("interactions", [])
     if "interactions" in raw and not isinstance(interactions, list):
         return True
+    if isinstance(interactions, list) and len(parsed.interactions) != len(interactions):
+        return True
     for interaction in interactions if isinstance(interactions, list) else []:
         if not isinstance(interaction, dict) or not (
             _clean_text(interaction.get("token")) or _clean_text(interaction.get("atc"))
@@ -447,6 +481,10 @@ def _entry_has_rejected_content(raw: Dict[str, Any], parsed: DrugReferenceEntry)
         atc = _clean_text(interaction.get("atc"))
         if atc and not _ATC_LEVEL5.fullmatch(atc.upper()):
             return True
+        if "severity" in interaction and interaction.get("severity") is not None:
+            severity = _clean_text(interaction.get("severity"))
+            if severity is None or severity.lower() not in _INTERACTION_SEVERITY_RANKS:
+                return True
 
     contraindications = raw.get("contraindications", [])
     if "contraindications" in raw and not isinstance(contraindications, list):
@@ -504,9 +542,18 @@ def _load_cross_reactivity_package(
         "issues": [],
     }
     issues: List[str] = []
-    if not path or path.strip().lower() == _DISABLED_SENTINEL or not os.path.exists(path):
+    if not path:
         _append_issue(issues, "cross_reactivity_source_unavailable")
-        package["source_format"] = "disabled" if path else "unavailable"
+        package["source_format"] = "unavailable"
+        package["issues"] = list(issues)
+        return _CrossReactivityLoad([], package, issues)
+    if path.strip().lower() == _DISABLED_SENTINEL:
+        _append_issue(issues, "cross_reactivity_source_unavailable")
+        package["source_format"] = "disabled"
+        package["issues"] = list(issues)
+        return _CrossReactivityLoad([], package, issues)
+    if not os.path.exists(path):
+        _append_issue(issues, "cross_reactivity_source_unavailable")
         package["issues"] = list(issues)
         return _CrossReactivityLoad([], package, issues)
     try:
@@ -913,8 +960,9 @@ def _render_entry(
 
     if ref.interactions:
         notes = []
+        severity_floor = _configured_interaction_severity_floor()
         for i in ref.interactions:
-            if i is None:
+            if i is None or not _clears_interaction_severity_floor(i, severity_floor):
                 continue
             label = _clean_text(i.token) or _clean_text(i.atc)
             note = _clean_text(i.note)
@@ -1095,10 +1143,31 @@ def _add_contraindications(warnings: List[SafetyWarning], ref: DrugReferenceEntr
                                            f"contraindicated by {against}: {note}"))
 
 
+def _configured_interaction_severity_floor() -> int:
+    configured = os.environ.get(
+        "DRUG_SAFETY_MIN_INTERACTION_SEVERITY",
+        DEFAULT_MIN_INTERACTION_SEVERITY,
+    ).strip().lower()
+    return _INTERACTION_SEVERITY_RANKS.get(
+        configured, _INTERACTION_SEVERITY_RANKS[DEFAULT_MIN_INTERACTION_SEVERITY]
+    )
+
+
+def _clears_interaction_severity_floor(
+    interaction: Interaction, severity_floor: int
+) -> bool:
+    if interaction.severity is None:
+        return True
+    severity = (_clean_text(interaction.severity) or "").lower()
+    rank = _INTERACTION_SEVERITY_RANKS.get(severity)
+    return rank is not None and rank >= severity_floor
+
+
 def _add_interactions(warnings: List[SafetyWarning], ref: DrugReferenceEntry,
                        context: PatientClinicalContext) -> None:
+    severity_floor = _configured_interaction_severity_floor()
     for i in ref.interactions:
-        if i is None:
+        if i is None or not _clears_interaction_severity_floor(i, severity_floor):
             continue
         if context.has_active_drug(i.token, i.atc):
             label = _clean_text(i.token) or _clean_text(i.atc)

@@ -2709,6 +2709,9 @@ def test_indepth_citation_cannot_inherit_answer_verified_verdict(monkeypatch):
     assert final["confidence"]["in_depth"]["level"] == "red"
     assert "withheld" in final["confidence"]["in_depth"]["note"]
     assert final["inDepth"]["validation"]["citation_checks"][0]["status"] == "fail"
+    assert "not supported by its cited source" in final["inDepth"]["validation"][
+        "summary"
+    ]
     assert "evidence checks rejected every claim" in final["inDepth"]["error"]
     assert final["references"][0]["groundingStatus"] == "verified"
     assert all(
@@ -2921,6 +2924,7 @@ def test_uncited_indepth_claim_is_withheld_and_cannot_report_complete(monkeypatc
     check = final["inDepth"]["validation"]["citation_checks"][0]
     assert check["status"] == "fail"
     assert "no source citation" in check["reason"]
+    assert "no source citation" in final["inDepth"]["validation"]["summary"]
 
 
 def test_named_sse_emits_heartbeats_while_a_leg_stalls():

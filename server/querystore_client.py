@@ -114,6 +114,15 @@ class QueryStoreClient:
                     raise ValueError(
                         "Querystore did not return a valid patient chart page"
                     )
+                chart_truncated = body.get("chartTruncated")
+                if not isinstance(chart_truncated, bool):
+                    raise ValueError(
+                        "Querystore did not return patient chart completeness metadata"
+                    )
+                if chart_truncated:
+                    raise ValueError(
+                        "Querystore returned an incomplete patient chart"
+                    )
                 for record in page:
                     if not isinstance(record, dict):
                         raise ValueError(

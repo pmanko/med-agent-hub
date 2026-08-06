@@ -69,6 +69,8 @@ Every product response carries a canonical `drug_safety.v1` result with `checked
 
 Weight-aware dose checks read the newest fresh numeric Querystore `obs` matching `DRUG_SAFETY_WEIGHT_CONCEPT_UUID` (CIEL weight `5089...` by default). `DRUG_SAFETY_WEIGHT_MAX_AGE_DAYS` defaults to 90. Set the concept value to `none` to disable only the weight-aware arm. Missing, stale, malformed, or unavailable optional safety data degrades to no additional warning and never interrupts an answer.
 
+Interaction rules preserve their source-assigned `severity`. `DRUG_SAFETY_MIN_INTERACTION_SEVERITY` defaults to `minor`, matching the bundled provider: rated `Unknown` rules are omitted, while `Minor`, `Moderate`, `Major`, and unrated curated rules remain eligible. An unrecognized setting falls back to `minor` rather than silently disabling rated warnings.
+
 ## Endpoints
 
 - `POST /v1/chat/completions`: blocking or staged streaming profile execution.

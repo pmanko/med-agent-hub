@@ -232,6 +232,24 @@ def test_group_related_active_order_is_injected_for_question_drug():
     assert "Drug reference — Ibuprofen" in text
 
 
+def test_unusable_relationship_package_cannot_select_an_active_order_reference():
+    dataset = _atc_dataset()
+    dataset.cross_reactivity_review_state = ds.REVIEW_PROPOSED
+    dataset.cross_reactivity_package["review_state"] = ds.REVIEW_PROPOSED
+
+    text, _ = ds.inject_drug_references(
+        "chart\n",
+        [],
+        "is acetylsalicylic acid safe?",
+        40,
+        dataset,
+        active_order_atc_codes={"M01AE01"},
+    )
+
+    assert "Drug reference — Acetylsalicylic acid" in text
+    assert "Drug reference — Ibuprofen" not in text
+
+
 def test_prose_warnings_parse_and_render_without_becoming_rules(tmp_path):
     path = tmp_path / "drugs.json"
     path.write_text(json.dumps({
@@ -284,6 +302,7 @@ def test_missing_cross_reactivity_package_makes_an_approved_check_limited(tmp_pa
     assert result.status == ds.STATUS_LIMITED
     assert "cross_reactivity_source_unavailable" in result.issues
     assert result.package["cross_reactivity"]["id"].endswith("missing.json")
+    assert result.package["cross_reactivity"]["source_format"] == "json"
     assert result.package["cross_reactivity"]["review_state"] == ds.REVIEW_PROPOSED
 
 

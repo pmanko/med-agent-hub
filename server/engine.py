@@ -1058,15 +1058,63 @@ def _capture_indepth_review_artifact(state: _State) -> None:
     )
 
 
+def _indepth_validation_summary(
+    validation: Mapping[str, Any], error: str = ""
+) -> str:
+    status = str(validation.get("status") or "unavailable")
+    lead = {
+        "checked": "In-Depth claims were checked against chart, citation, and temporal rules.",
+        "edited": (
+            "In-Depth was updated after checks; claims that did not pass were removed "
+            "or corrected."
+        ),
+        "needs_review": (
+            "No complete In-Depth response passed the chart, citation, and temporal "
+            "checks."
+        ),
+        "unavailable": "The In-Depth checks could not be completed.",
+    }.get(status, "The In-Depth check finished with an unknown status.")
+    reasons: list[str] = []
+
+    def add_reason(value: Any) -> None:
+        cleaned = " ".join(str(value or "").split())
+        if cleaned and cleaned not in reasons:
+            reasons.append(cleaned)
+
+    add_reason(validation.get("review_issues"))
+    for check in validation.get("citation_checks") or []:
+        if isinstance(check, Mapping) and check.get("status") == "fail":
+            add_reason(check.get("reason"))
+    for claim_check in validation.get("checks") or []:
+        if not isinstance(claim_check, Mapping):
+            continue
+        claim_gate = claim_check.get("gate")
+        if not isinstance(claim_gate, Mapping):
+            continue
+        for check in claim_gate.get("checks") or []:
+            if isinstance(check, Mapping) and check.get("status") == "fail":
+                add_reason(check.get("reason"))
+    if not reasons and error:
+        add_reason(error)
+    return " ".join([lead, *reasons[:2]])
+
+
 def _in_depth_payload(state: _State) -> Dict[str, Any]:
     final_answer = (
         "" if state.indepth_error else "\n".join("- " + claim for claim in state.claims)
     )
+    validation = dict(state.indepth_gate or {})
+    if state.indepth_error and not validation.get("status"):
+        validation["status"] = "needs_review"
+    if validation and not validation.get("summary"):
+        validation["summary"] = _indepth_validation_summary(
+            validation, state.indepth_error or ""
+        )
     payload: Dict[str, Any] = {
         "status": "needs_review" if state.indepth_error else "complete",
         "answer": final_answer,
         "error": state.indepth_error or "",
-        "validation": state.indepth_gate,
+        "validation": validation or None,
     }
     if state.indepth_error_code:
         payload["errorCode"] = state.indepth_error_code
