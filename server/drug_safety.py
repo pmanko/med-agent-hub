@@ -252,25 +252,28 @@ def _entry_from_dict(d: Dict[str, Any]) -> DrugReferenceEntry:
         name=_clean_text(d.get("name")) or "",
         drug_class=_clean_text(d.get("drugClass")),
         aliases=_clean_text_list(d.get("aliases")),
-        atc_codes=_clean_text_list(d.get("atcCodes")),
+        atc_codes=[code for code in _clean_text_list(d.get("atcCodes"))
+                   if _ATC_LEVEL5.fullmatch(code.upper())],
         age_bands=age_bands,
         interactions=[
-            Interaction(
-                token=_clean_text(item.get("token")),
-                atc=_clean_text(item.get("atc")),
-                note=_clean_text(item.get("note")),
-            )
+            Interaction(token=token, atc=atc, note=_clean_text(item.get("note")))
             for item in (d.get("interactions") or [])
             if isinstance(item, dict)
+            for token, atc in [
+                (_clean_text(item.get("token")), _clean_text(item.get("atc")))
+            ]
+            if (token or atc) and (not atc or _ATC_LEVEL5.fullmatch(atc.upper()))
         ],
         contraindications=[
-            Contraindication(
-                type=_clean_text(item.get("type")) or "",
-                token=_clean_text(item.get("token")) or "",
-                note=_clean_text(item.get("note")),
-            )
+            Contraindication(type=rule_type, token=token,
+                             note=_clean_text(item.get("note")))
             for item in (d.get("contraindications") or [])
             if isinstance(item, dict)
+            for rule_type, token in [[
+                (_clean_text(item.get("type")) or "").lower(),
+                _clean_text(item.get("token")),
+            ]]
+            if rule_type in {"allergy", "condition"} and token
         ],
         warnings=_clean_text_list(d.get("warnings")),
         source=_clean_text(d.get("source")),
@@ -340,6 +343,13 @@ class DrugReferenceDataset:
             "cross_reactivity": dict(self.cross_reactivity_package),
         }
 
+    def primary_rules_usable(self) -> bool:
+        return self.review_state == REVIEW_CLINICALLY_APPROVED and not self.source_issues
+
+    def relationship_rules_usable(self) -> bool:
+        return (self.cross_reactivity_review_state == REVIEW_CLINICALLY_APPROVED
+                and not self.cross_reactivity_issues)
+
     def find_by_query(self, text: Optional[str]) -> List[DrugReferenceEntry]:
         if not text or not text.strip():
             return []
@@ -371,7 +381,7 @@ class DrugReferenceDataset:
         return upper_code
 
     def groups_for(self, entry: DrugReferenceEntry) -> List[CrossReactivityGroup]:
-        if self.cross_reactivity_review_state != REVIEW_CLINICALLY_APPROVED:
+        if not self.relationship_rules_usable():
             return []
         return [group for group in self.cross_reactivity_groups if group.contains_entry(entry)]
 
@@ -457,9 +467,9 @@ def _entries_from_document(
 ) -> List[DrugReferenceEntry]:
     diagnostics = issues if issues is not None else []
     entries: List[DrugReferenceEntry] = []
-    raw_entries = raw.get("entries", [])
+    raw_entries = raw.get("entries")
     if not isinstance(raw_entries, list):
-        _append_issue(diagnostics, "source_data_partially_invalid")
+        _append_issue(diagnostics, "source_data_invalid")
         return entries
     for raw_entry in raw_entries:
         if (not isinstance(raw_entry, dict) or not _clean_text(raw_entry.get("id"))
@@ -513,6 +523,10 @@ def _load_cross_reactivity_package(
     review_state = (
         _clean_text(raw.get("reviewState"))
     ) or REVIEW_PROPOSED
+    if not all(
+        _clean_text(raw.get(field)) for field in ("packageId", "version", "source")
+    ):
+        _append_issue(issues, "cross_reactivity_package_identity_incomplete")
     if review_state not in _REVIEW_STATES:
         _append_issue(issues, "cross_reactivity_data_partially_invalid")
         review_state = REVIEW_PROPOSED
@@ -526,24 +540,33 @@ def _load_cross_reactivity_package(
         "review_state": review_state,
     })
     groups: List[CrossReactivityGroup] = []
-    raw_groups = raw.get("groups", [])
+    raw_groups = raw.get("groups")
     if not isinstance(raw_groups, list):
-        _append_issue(issues, "cross_reactivity_data_partially_invalid")
+        _append_issue(issues, "cross_reactivity_data_invalid")
         raw_groups = []
     for item in raw_groups:
         if not isinstance(item, dict):
             _append_issue(issues, "cross_reactivity_data_partially_invalid")
             continue
+        raw_prefixes = item.get("atcPrefixes")
+        prefixes_valid = (
+            isinstance(raw_prefixes, list)
+            and bool(raw_prefixes)
+            and all(
+                isinstance(prefix, str)
+                and bool(prefix.strip())
+                and bool(_ATC_GROUP_PREFIX.fullmatch(prefix.strip().upper()))
+                for prefix in raw_prefixes
+            )
+        )
         name = item.get("name")
         group = CrossReactivityGroup(
             name=name.strip() if isinstance(name, str) else "",
             atc_prefixes=_clean_text_list(item.get("atcPrefixes")),
             note=_clean_text(item.get("note")),
         )
-        if group.name and group.normalized_prefixes():
+        if group.name and prefixes_valid:
             groups.append(group)
-            if len(group.normalized_prefixes()) != len(group.atc_prefixes):
-                _append_issue(issues, "cross_reactivity_data_partially_invalid")
         else:
             _append_issue(issues, "cross_reactivity_data_partially_invalid")
     package["issues"] = list(issues)
@@ -630,6 +653,10 @@ def _load_source_dataset(
         _append_issue(source_issues, "source_unavailable")
     elif not raw:
         _append_issue(source_issues, "source_data_invalid")
+    if raw and not all(
+        _clean_text(raw.get(field)) for field in ("packageId", "version", "source")
+    ):
+        _append_issue(source_issues, "source_package_identity_incomplete")
     review_state = _clean_text(raw.get("reviewState")) or REVIEW_PROPOSED
     if review_state not in _REVIEW_STATES:
         _append_issue(source_issues, "source_data_partially_invalid")
@@ -847,7 +874,7 @@ def _related_to_any(order: DrugReferenceEntry, question_drugs: List[DrugReferenc
 
 
 def _render_entry(
-    ref: DrugReferenceEntry, age: Optional[int], review_state: str
+    ref: DrugReferenceEntry, age: Optional[int], rules_usable: bool
 ) -> str:
     parts = [f"Drug reference — {ref.name}"]
     paren_bits = []
@@ -860,7 +887,7 @@ def _render_entry(
         parts.append(f" ({'; '.join(paren_bits)})")
     parts.append(".")
 
-    if review_state != REVIEW_CLINICALLY_APPROVED:
+    if not rules_usable:
         parts.append(
             " Informational research classification only; this source package is not "
             "clinically approved for deterministic dosing, interaction, contraindication, "
@@ -935,7 +962,7 @@ def _inject_drug_references(
     text = chart_text
     index = len(out_mappings) + 1
     for ref in matched:
-        rendered = _render_entry(ref, age, dataset.review_state)
+        rendered = _render_entry(ref, age, dataset.primary_rules_usable())
         out_mappings.append({
             "index": index,
             "resourceType": RESOURCE_TYPE_DRUG_REFERENCE,
@@ -1096,10 +1123,7 @@ def _add_class_contraindications(warnings: List[SafetyWarning], ref: DrugReferen
             warnings.append(SafetyWarning(TYPE_CONTRAINDICATION, ref.name,
                                            f"the patient has a recorded allergy to {ref.name}"))
             continue
-        if (
-            dataset.cross_reactivity_review_state != REVIEW_CLINICALLY_APPROVED
-            or not ref_classes
-        ):
+        if not dataset.relationship_rules_usable() or not ref_classes:
             continue
         shared = next((cls for cls in allergen.atc_subgroups() if cls in ref_classes), None)
         if shared:
@@ -1117,7 +1141,7 @@ def _add_class_contraindications(warnings: List[SafetyWarning], ref: DrugReferen
 
 def _add_class_interactions(warnings: List[SafetyWarning], ref: DrugReferenceEntry,
                              context: PatientClinicalContext, dataset: DrugReferenceDataset) -> None:
-    if dataset.cross_reactivity_review_state != REVIEW_CLINICALLY_APPROVED:
+    if not dataset.relationship_rules_usable():
         return
     ref_classes = ref.atc_subgroups()
     if not ref_classes:
@@ -1252,12 +1276,16 @@ def check_answer_safety(answer: Optional[str], question: Optional[str],
     """
     package = _package_metadata(dataset)
     entries = getattr(dataset, "entries", None) if dataset is not None else None
+    issues: List[str] = []
+    for issue in getattr(dataset, "source_issues", []):
+        _append_issue(issues, issue)
+    for issue in getattr(dataset, "cross_reactivity_issues", []):
+        _append_issue(issues, issue)
     if dataset is None or not entries or context is None:
-        issues = []
         if not entries:
-            issues.append("source_unavailable")
+            _append_issue(issues, "source_unavailable")
         if context is None:
-            issues.append("patient_context_unavailable")
+            _append_issue(issues, "patient_context_unavailable")
         return SafetyCheckResult(
             status=STATUS_UNAVAILABLE,
             warnings=[],
@@ -1266,12 +1294,6 @@ def check_answer_safety(answer: Optional[str], question: Optional[str],
             identity_confidence="unavailable",
             issues=issues,
         )
-
-    issues: List[str] = []
-    for issue in getattr(dataset, "source_issues", []):
-        _append_issue(issues, issue)
-    for issue in getattr(dataset, "cross_reactivity_issues", []):
-        _append_issue(issues, issue)
     if not context.mapping_complete:
         _append_issue(issues, "mapping_incomplete")
     if not context.exposure_complete:
@@ -1297,7 +1319,7 @@ def check_answer_safety(answer: Optional[str], question: Optional[str],
 
     # Unapproved source material can be represented as research context, but it cannot produce
     # deterministic warnings or CDS cards. The policy check itself completed successfully.
-    if review_state != REVIEW_CLINICALLY_APPROVED:
+    if not dataset.primary_rules_usable():
         return SafetyCheckResult(
             status=(
                 STATUS_UNAVAILABLE

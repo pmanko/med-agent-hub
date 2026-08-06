@@ -175,3 +175,244 @@ def test_result_serializes_one_canonical_safety_check_object():
         "identity_confidence": "high",
         "issues": [],
     }
+
+
+def test_malformed_nested_rules_are_removed_before_validation():
+    issues = []
+    entries = ds._entries_from_document(
+        {
+            "entries": [
+                {
+                    "id": "unsafe",
+                    "name": "Unsafe Drug",
+                    "aliases": ["unsafe"],
+                    "atcCodes": ["NOT-ATC"],
+                    "interactions": [{"token": ""}],
+                },
+                {
+                    "id": "safe",
+                    "name": "Safe Drug",
+                    "aliases": ["safe"],
+                    "atcCodes": ["M01AE01"],
+                },
+            ]
+        },
+        issues,
+    )
+
+    assert [entry.id for entry in entries] == ["unsafe", "safe"]
+    assert entries[0].atc_codes == []
+    assert entries[0].interactions == []
+    assert "source_data_partially_invalid" in issues
+
+
+def test_approved_json_without_package_identity_cannot_emit_warnings(tmp_path):
+    primary = tmp_path / "primary.json"
+    primary.write_text(
+        json.dumps(
+            {
+                "reviewState": "clinically_approved",
+                "entries": [
+                    {
+                        "id": "ibuprofen",
+                        "name": "Ibuprofen",
+                        "aliases": ["ibuprofen"],
+                        "atcCodes": ["M01AE01"],
+                        "ageBands": [
+                            {"minYears": 2, "maxYears": 11, "maxDailyDoseMg": 1200}
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    relationships = tmp_path / "relationships.json"
+    relationships.write_text(
+        json.dumps(
+            {
+                "packageId": "reviewed-relationships",
+                "version": "1",
+                "source": "test formulary",
+                "reviewState": "clinically_approved",
+                "groups": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    dataset = ds.load_dataset(
+        str(primary), source_format="json", cross_reactivity_path=str(relationships)
+    )
+
+    result = ds.check_answer_safety(
+        "Ibuprofen 600 mg every 6 hours can be given for pain.",
+        None,
+        ds.PatientClinicalContext(age_years=5),
+        dataset,
+    )
+
+    assert result.status == "limited"
+    assert result.warnings == []
+    assert "source_package_identity_incomplete" in result.issues
+
+
+def test_approved_relationships_without_identity_cannot_emit_relationship_warnings(tmp_path):
+    primary = tmp_path / "primary.json"
+    primary.write_text(
+        json.dumps(
+            {
+                "packageId": "reviewed-medication-rules",
+                "version": "1",
+                "source": "test formulary",
+                "reviewState": "clinically_approved",
+                "entries": [
+                    {
+                        "id": "ibuprofen",
+                        "name": "Ibuprofen",
+                        "aliases": ["ibuprofen"],
+                        "atcCodes": ["M01AE01"],
+                        "ageBands": [
+                            {"minYears": 2, "maxYears": 11, "maxDailyDoseMg": 1200}
+                        ],
+                    },
+                    {
+                        "id": "naproxen",
+                        "name": "Naproxen",
+                        "aliases": ["naproxen"],
+                        "atcCodes": ["M01AE02"],
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    relationships = tmp_path / "relationships.json"
+    relationships.write_text(
+        json.dumps(
+            {
+                "reviewState": "clinically_approved",
+                "groups": [
+                    {"name": "NSAID relationship", "atcPrefixes": ["M01AE"]}
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    dataset = ds.load_dataset(
+        str(primary), source_format="json", cross_reactivity_path=str(relationships)
+    )
+    context = ds.PatientClinicalContext(age_years=5, allergy_tokens={"naproxen"})
+
+    result = ds.check_answer_safety(
+        "Ibuprofen 600 mg every 6 hours can be given for pain.", None, context, dataset
+    )
+
+    assert result.status == "limited"
+    assert any(warning.type == ds.TYPE_OVERDOSE for warning in result.warnings)
+    assert not any(warning.type == ds.TYPE_CONTRAINDICATION for warning in result.warnings)
+    assert "cross_reactivity_package_identity_incomplete" in result.issues
+
+
+def test_malformed_primary_diagnostic_survives_unavailable_result():
+    dataset = ds.DrugReferenceDataset(
+        [],
+        [],
+        package_id="invalid-primary",
+        source_format="json",
+        source_version="1",
+        provenance={"source": "test formulary"},
+        review_state=ds.REVIEW_CLINICALLY_APPROVED,
+        source_issues=["source_data_invalid"],
+    )
+
+    result = ds.check_answer_safety(
+        "No medication recommendation.",
+        None,
+        ds.PatientClinicalContext(age_years=30),
+        dataset,
+    )
+
+    assert result.status == "unavailable"
+    assert "source_data_invalid" in result.issues
+    assert "source_unavailable" in result.issues
+
+
+def test_missing_primary_entries_is_invalid_not_an_empty_approved_package(tmp_path):
+    primary = tmp_path / "primary.json"
+    primary.write_text(
+        json.dumps(
+            {
+                "packageId": "reviewed-medication-rules",
+                "version": "1",
+                "source": "test formulary",
+                "reviewState": "clinically_approved",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    dataset = ds.load_dataset(
+        str(primary), source_format="json", cross_reactivity_path="none"
+    )
+    result = ds.check_answer_safety(
+        "No medication recommendation.",
+        None,
+        ds.PatientClinicalContext(age_years=30),
+        dataset,
+    )
+
+    assert "source_data_invalid" in dataset.source_issues
+    assert not dataset.primary_rules_usable()
+    assert result.status == "unavailable"
+    assert "source_data_invalid" in result.issues
+    assert "source_unavailable" in result.issues
+
+
+def test_missing_relationship_groups_is_invalid_not_an_empty_approved_package(tmp_path):
+    primary = tmp_path / "primary.json"
+    primary.write_text(
+        json.dumps(
+            {
+                "packageId": "reviewed-medication-rules",
+                "version": "1",
+                "source": "test formulary",
+                "reviewState": "clinically_approved",
+                "entries": [
+                    {
+                        "id": "ibuprofen",
+                        "name": "Ibuprofen",
+                        "aliases": ["ibuprofen"],
+                        "atcCodes": ["M01AE01"],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    relationships = tmp_path / "relationships.json"
+    relationships.write_text(
+        json.dumps(
+            {
+                "packageId": "reviewed-relationships",
+                "version": "1",
+                "source": "test formulary",
+                "reviewState": "clinically_approved",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    dataset = ds.load_dataset(
+        str(primary), source_format="json", cross_reactivity_path=str(relationships)
+    )
+    result = ds.check_answer_safety(
+        "No medication recommendation.",
+        None,
+        ds.PatientClinicalContext(age_years=30),
+        dataset,
+    )
+
+    assert "cross_reactivity_data_invalid" in dataset.cross_reactivity_issues
+    assert not dataset.relationship_rules_usable()
+    assert result.status == "limited"
+    assert "cross_reactivity_data_invalid" in result.issues

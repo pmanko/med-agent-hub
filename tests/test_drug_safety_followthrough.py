@@ -234,9 +234,13 @@ def test_group_related_active_order_is_injected_for_question_drug():
 
 def test_prose_warnings_parse_and_render_without_becoming_rules(tmp_path):
     path = tmp_path / "drugs.json"
-    path.write_text(json.dumps({"reviewState": "clinically_approved", "entries": [{
+    path.write_text(json.dumps({
+        "packageId": "approved-drugs",
+        "version": "1",
+        "source": "test formulary",
+        "reviewState": "clinically_approved", "entries": [{
         "id": "aspirin", "name": "Aspirin", "aliases": ["aspirin"],
-        "warnings": [None, "", "Risk of Reye syndrome in children"],
+        "warnings": ["Risk of Reye syndrome in children"],
     }]}), encoding="utf-8")
     dataset = ds.load_dataset(str(path), source_format="json", cross_reactivity_path="none")
     text, _ = ds.inject_drug_references("chart\n", [], "is aspirin safe?", 5, dataset)
@@ -266,6 +270,8 @@ def test_missing_cross_reactivity_package_makes_an_approved_check_limited(tmp_pa
     path = tmp_path / "approved-drugs.json"
     path.write_text(json.dumps({
         "packageId": "approved-drugs",
+        "version": "1",
+        "source": "test formulary",
         "reviewState": "clinically_approved",
         "entries": [{"id": "ibuprofen", "name": "Ibuprofen", "aliases": ["ibuprofen"]}],
     }), encoding="utf-8")
@@ -286,6 +292,8 @@ def test_cross_reactivity_package_has_independent_identity_and_provenance(tmp_pa
     groups = tmp_path / "approved-groups.json"
     drugs.write_text(json.dumps({
         "packageId": "approved-drugs",
+        "version": "1",
+        "source": "test formulary",
         "reviewState": "clinically_approved",
         "entries": [{"id": "ibuprofen", "name": "Ibuprofen", "aliases": ["ibuprofen"]}],
     }), encoding="utf-8")
@@ -312,9 +320,13 @@ def test_cross_reactivity_package_has_independent_identity_and_provenance(tmp_pa
     }
 
 
-def test_null_rule_elements_render_best_effort_without_literal_null(tmp_path):
+def test_null_rule_elements_are_removed_without_losing_record_identity(tmp_path):
     path = tmp_path / "partly-malformed.json"
-    path.write_text(json.dumps({"reviewState": "clinically_approved", "entries": [
+    path.write_text(json.dumps({
+        "packageId": "partly-malformed",
+        "version": "1",
+        "source": "test formulary",
+        "reviewState": "clinically_approved", "entries": [
         {"id": None, "name": "missing id", "aliases": ["drop-me"]},
         {"id": "missing-name", "name": " ", "aliases": ["drop-me-too"]},
         {
@@ -331,9 +343,10 @@ def test_null_rule_elements_render_best_effort_without_literal_null(tmp_path):
     text, mappings = ds.inject_drug_references("chart\n", [], "is mangled safe?", 40, dataset)
     assert len(mappings) == 1
     assert "ATC J01CA04" in text
-    assert "Real warning survives" in text
-    assert "test condition" in text
-    assert "note-only interaction" in text
+    assert "Informational research classification only" in text
+    assert "Real warning survives" not in text
+    assert "test condition" not in text
+    assert "note-only interaction" not in text
     assert "null" not in text.lower()
 
     result = ds.check_answer_safety("Mangled may be used.", None, _ctx(), dataset)
@@ -347,6 +360,9 @@ def test_scalar_list_fields_and_broad_atc_prefixes_are_rejected(tmp_path):
     drugs.write_text(
         json.dumps(
             {
+                "packageId": "scalar-lists",
+                "version": "1",
+                "source": "test formulary",
                 "reviewState": "clinically_approved",
                 "entries": [
                     {
@@ -389,11 +405,14 @@ def test_scalar_list_fields_and_broad_atc_prefixes_are_rejected(tmp_path):
     assert "cross_reactivity_data_partially_invalid" in result.issues
 
 
-def test_malformed_age_band_cannot_erase_an_independent_interaction_warning(tmp_path):
+def test_malformed_age_band_preserves_valid_sibling_but_blocks_package_warnings(tmp_path):
     path = tmp_path / "bad-age-band.json"
     path.write_text(
         json.dumps(
             {
+                "packageId": "bad-age-band",
+                "version": "1",
+                "source": "test formulary",
                 "reviewState": "clinically_approved",
                 "entries": [
                     {
@@ -432,13 +451,12 @@ def test_malformed_age_band_cannot_erase_an_independent_interaction_warning(tmp_
     )
 
     assert dataset.entries[0].age_bands == []
-    assert len(warnings) == 1
-    assert warnings[0].type == ds.TYPE_INTERACTION
-    assert warnings[0].drug == "Ibuprofen"
+    assert len(dataset.entries[0].interactions) == 1
+    assert warnings == []
 
     result = ds.check_answer_safety(
         "Ibuprofen 600 mg may be used.", None, context, dataset
     )
     assert result.status == ds.STATUS_LIMITED
     assert "source_data_partially_invalid" in result.issues
-    assert len(result.warnings) == 1
+    assert result.warnings == []
