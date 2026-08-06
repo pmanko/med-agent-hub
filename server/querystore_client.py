@@ -38,6 +38,7 @@ class PatientLedgerFetch:
     records: Optional[list[dict[str, Any]]] = None
     snapshot_id: Optional[str] = None
     etag: Optional[str] = None
+    projection_complete: bool = True
 
 
 @dataclass(frozen=True)
@@ -51,6 +52,8 @@ class ContextSliceFetch:
     chart_truncated: bool
     effective_types: tuple[str, ...]
     temporal_applied: bool
+    chart_snapshot_id: str
+    projection_complete: bool = True
 
 
 class QueryStoreClient:
@@ -123,6 +126,11 @@ class QueryStoreClient:
                     raise ValueError(
                         "Querystore returned an incomplete patient chart"
                     )
+                projection_complete = body.get("projectionComplete")
+                if not isinstance(projection_complete, bool):
+                    raise ValueError(
+                        "Querystore did not return projection completeness metadata"
+                    )
                 for record in page:
                     if not isinstance(record, dict):
                         raise ValueError(
@@ -184,7 +192,11 @@ class QueryStoreClient:
                 f"expected {expected_total} records, received {len(records)}"
             )
         return PatientLedgerFetch(
-            not_modified=False, records=records, snapshot_id=snapshot_id, etag=etag
+            not_modified=False,
+            records=records,
+            snapshot_id=snapshot_id,
+            etag=etag,
+            projection_complete=projection_complete,
         )
 
     async def fetch_context_slice(
@@ -201,9 +213,12 @@ class QueryStoreClient:
 
         The caller's question interpretation rides as ``types`` (typed-complete resource
         types) and ``temporal`` (recency anchor applies). Each returned record carries a
-        ``tier`` — ``mandatory`` records are never droppable downstream. Like ranked search
-        this window is question-dependent and uncached: no full-chart ``snapshotId``/``ETag``.
-        Every page does carry one ``sliceId`` for the complete ordered selection; mixed pages
+        ``tier`` — mandatory, exact, typed, and panel records are protected downstream.
+        Similarity-tier rows
+        carry their 1-based ``rank``, allowing clients to reuse the selection without issuing a
+        second ranked query. Like ranked search this window is question-dependent and uncached:
+        no HTTP ``ETag``. Every page carries the source ``chartSnapshotId`` and one ``sliceId``
+        for the complete ordered selection; mixed pages
         are rejected instead of silently joining two question-context versions.
         """
         base_params: dict[str, Any] = {
@@ -222,7 +237,9 @@ class QueryStoreClient:
         records: list[dict[str, Any]] = []
         seen_ids: set[tuple[str, str]] = set()
         start = 0
-        expected: Optional[tuple[str, int, int, bool, tuple[str, ...], bool]] = None
+        expected: Optional[
+            tuple[str, str, int, int, bool, bool, tuple[str, ...], bool]
+        ] = None
         async with httpx.AsyncClient(timeout=self._timeout, auth=self._auth) as client:
             while True:
                 params = {**base_params, "startIndex": start}
@@ -236,7 +253,9 @@ class QueryStoreClient:
                 total = body.get("totalCount")
                 chart_size = body.get("chartSize")
                 chart_truncated = body.get("chartTruncated")
+                projection_complete = body.get("projectionComplete")
                 slice_id = body.get("sliceId")
+                chart_snapshot_id = body.get("chartSnapshotId")
                 effective_types = body.get("effectiveTypes")
                 temporal_applied = body.get("temporalApplied")
                 if (
@@ -245,8 +264,11 @@ class QueryStoreClient:
                     or type(chart_size) is not int
                     or chart_size < 0
                     or not isinstance(chart_truncated, bool)
+                    or not isinstance(projection_complete, bool)
                     or not isinstance(slice_id, str)
                     or not slice_id.strip()
+                    or not isinstance(chart_snapshot_id, str)
+                    or not chart_snapshot_id.strip()
                     or not isinstance(effective_types, list)
                     or any(
                         not isinstance(item, str) or not item.strip()
@@ -259,9 +281,11 @@ class QueryStoreClient:
                     )
                 page_identity = (
                     slice_id,
+                    chart_snapshot_id,
                     total,
                     chart_size,
                     chart_truncated,
+                    projection_complete,
                     tuple(effective_types),
                     temporal_applied,
                 )
@@ -303,8 +327,8 @@ class QueryStoreClient:
                 if not rows or start >= total:
                     break
 
-        if expected is None or len(records) != expected[1]:
-            expected_total = expected[1] if expected else None
+        if expected is None or len(records) != expected[2]:
+            expected_total = expected[2] if expected else None
             raise ValueError(
                 "Querystore returned a truncated context slice: "
                 f"expected {expected_total} records, received {len(records)}"
@@ -312,11 +336,13 @@ class QueryStoreClient:
         return ContextSliceFetch(
             records=records,
             slice_id=expected[0],
-            total_count=expected[1],
-            chart_size=expected[2],
-            chart_truncated=expected[3],
-            effective_types=expected[4],
-            temporal_applied=expected[5],
+            chart_snapshot_id=expected[1],
+            total_count=expected[2],
+            chart_size=expected[3],
+            chart_truncated=expected[4],
+            projection_complete=expected[5],
+            effective_types=expected[6],
+            temporal_applied=expected[7],
         )
 
     async def search_patient_records(

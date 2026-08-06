@@ -81,6 +81,66 @@ STATUS_CHECKED = "checked"
 STATUS_LIMITED = "limited"
 STATUS_UNAVAILABLE = "unavailable"
 
+_DRUG_SAFETY_QUESTION = re.compile(
+    r"\b(?:safe(?:ty)?|contraindicat(?:ed|ion)?|interact(?:ion|ions)?|"
+    r"dose|dosing|overdose|allergic|allergy)\b",
+    re.IGNORECASE,
+)
+_QUESTION_DRUG_SPANS = (
+    re.compile(
+        r"\b(?:is|are)\s+(.{1,120}?)\s+(?:safe|contraindicated)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:interactions?|contraindications?)\s+(?:between|with|for)\s+"
+        r"(.{1,120}?)(?:[?.!]|$)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:take|use|combine)\s+(.{1,120}?)(?:\s+(?:safely|together)|[?.!]|$)",
+        re.IGNORECASE,
+    ),
+)
+_DRUG_MENTION_SEPARATOR = re.compile(r"\s*(?:,|\band\b|\bwith\b|\bplus\b|/)\s*", re.IGNORECASE)
+_ANSWER_DRUG_ACTION = re.compile(
+    r"\b(?:start|take|prescribe|recommend|consider|give|switch\s+to)\s+"
+    r"(?P<candidate>(?:(?:oral|intravenous|iv|topical|inhaled)\s+)?"
+    r"[A-Za-z][A-Za-z0-9-]*(?:\s+[A-Za-z][A-Za-z0-9-]*){0,2}?)"
+    r"(?=\s+(?:for|to|because|as|if|when|with|at|once|twice|daily|every)\b|[.,;!?]|$)",
+    re.IGNORECASE,
+)
+_DRUG_LIKE_SUFFIX = re.compile(
+    r"(?:cillin|cycline|floxacin|azole|mab|nib|pril|sartan|olol|statin|prazole|"
+    r"triptan|caine|vir|mycin|parin|formin|profen)$",
+    re.IGNORECASE,
+)
+_NON_DRUG_MENTION_WORDS = frozenset(
+    {
+        "any",
+        "clinical",
+        "close",
+        "drug",
+        "drugs",
+        "exercise",
+        "further",
+        "medication",
+        "medications",
+        "monitoring",
+        "my",
+        "patient",
+        "review",
+        "that",
+        "the",
+        "there",
+        "this",
+    }
+)
+_ROUTE_PREFIX = re.compile(r"^(?:oral|intravenous|iv|topical|inhaled)\s+", re.IGNORECASE)
+_QUESTION_TRAILING_CONTEXT = re.compile(
+    r"\s+(?:together|for\s+(?:this|the)\s+patient|in\s+this\s+patient)$",
+    re.IGNORECASE,
+)
+
 REVIEW_PROPOSED = "proposed"
 REVIEW_EVIDENCE_CURATED = "evidence_curated"
 REVIEW_CLINICALLY_APPROVED = "clinically_approved"
@@ -339,13 +399,13 @@ class DrugReferenceDataset:
         normalized_cross_review = (
             _clean_text(cross_reactivity_review_state) or REVIEW_PROPOSED
         )
-        self.cross_reactivity_review_state = (
+        normalized_cross_review = (
             normalized_cross_review
             if normalized_cross_review in _REVIEW_STATES
             else REVIEW_PROPOSED
         )
         self.source_issues = list(dict.fromkeys(source_issues or []))
-        self.cross_reactivity_issues = list(
+        normalized_cross_issues = list(
             dict.fromkeys(cross_reactivity_issues or [])
         )
         default_cross_package = {
@@ -353,15 +413,36 @@ class DrugReferenceDataset:
             "source_format": "memory",
             "version": None,
             "provenance": {},
-            "review_state": self.cross_reactivity_review_state,
-            "issues": list(self.cross_reactivity_issues),
+            "review_state": normalized_cross_review,
+            "issues": list(normalized_cross_issues),
         }
         self.cross_reactivity_package = {
             **default_cross_package,
             **dict(cross_reactivity_package or {}),
-            "review_state": self.cross_reactivity_review_state,
-            "issues": list(self.cross_reactivity_issues),
+            "review_state": normalized_cross_review,
+            "issues": list(normalized_cross_issues),
         }
+
+    @property
+    def cross_reactivity_review_state(self) -> str:
+        value = _clean_text(self.cross_reactivity_package.get("review_state"))
+        return value if value in _REVIEW_STATES else REVIEW_PROPOSED
+
+    @cross_reactivity_review_state.setter
+    def cross_reactivity_review_state(self, value: str) -> None:
+        normalized = _clean_text(value) or REVIEW_PROPOSED
+        self.cross_reactivity_package["review_state"] = (
+            normalized if normalized in _REVIEW_STATES else REVIEW_PROPOSED
+        )
+
+    @property
+    def cross_reactivity_issues(self) -> List[str]:
+        raw = self.cross_reactivity_package.get("issues")
+        return list(raw) if isinstance(raw, list) else []
+
+    @cross_reactivity_issues.setter
+    def cross_reactivity_issues(self, value: List[str]) -> None:
+        self.cross_reactivity_package["issues"] = list(dict.fromkeys(value or []))
 
     def package_metadata(self) -> Dict[str, Any]:
         return {
@@ -525,10 +606,6 @@ def _entries_from_document(
     return entries
 
 
-def _load_entries(path: str) -> List[DrugReferenceEntry]:
-    return _entries_from_document(_load_json_document(path))
-
-
 def _load_cross_reactivity_package(
     path: Optional[str],
 ) -> _CrossReactivityLoad:
@@ -618,11 +695,6 @@ def _load_cross_reactivity_package(
             _append_issue(issues, "cross_reactivity_data_partially_invalid")
     package["issues"] = list(issues)
     return _CrossReactivityLoad(groups, package, issues)
-
-
-def _load_cross_reactivity_groups(path: Optional[str]) -> List[CrossReactivityGroup]:
-    """Compatibility helper for callers that only inspect the parsed classification groups."""
-    return _load_cross_reactivity_package(path).groups
 
 
 def _load_atc_entries(path: str) -> List[DrugReferenceEntry]:
@@ -1322,6 +1394,40 @@ def build_safety_coverage(
     }
 
 
+def _unresolved_named_drugs(
+    question: Optional[str], answer: Optional[str], dataset: DrugReferenceDataset
+) -> List[str]:
+    unresolved: List[str] = []
+    candidates: List[str] = []
+    if question and _DRUG_SAFETY_QUESTION.search(question):
+        for pattern in _QUESTION_DRUG_SPANS:
+            for match in pattern.finditer(question):
+                span = _QUESTION_TRAILING_CONTEXT.sub("", match.group(1).strip())
+                candidates.extend(_DRUG_MENTION_SEPARATOR.split(span))
+    candidates.extend(
+        match.group("candidate") for match in _ANSWER_DRUG_ACTION.finditer(answer or "")
+    )
+    for raw_candidate in candidates:
+        candidate = _ROUTE_PREFIX.sub("", raw_candidate.strip(" \t\r\n.,;:!?()[]{}")).strip()
+        if not candidate:
+            continue
+        normalized = candidate.casefold()
+        words = normalized.split()
+        if not words or all(word in _NON_DRUG_MENTION_WORDS for word in words):
+            continue
+        if dataset.lookup_by_token(normalized) is not None:
+            continue
+        plausible = any(_DRUG_LIKE_SUFFIX.search(word) for word in words)
+        plausible = plausible or (
+            candidate[0].isupper()
+            and len(words) <= 3
+            and not any(word in _NON_DRUG_MENTION_WORDS for word in words)
+        )
+        if plausible:
+            unresolved.append(normalized)
+    return list(dict.fromkeys(unresolved))
+
+
 def _package_metadata(dataset: Any) -> Dict[str, Any]:
     if dataset is None:
         return {}
@@ -1385,6 +1491,12 @@ def check_answer_safety(answer: Optional[str], question: Optional[str],
         _append_issue(issues, "cross_reactivity_not_clinically_approved")
     if not (warn_dose and warn_interactions and warn_contraindications):
         _append_issue(issues, "check_scope_limited")
+    try:
+        unresolved_named_drugs = _unresolved_named_drugs(question, answer, dataset)
+    except (AttributeError, TypeError, ValueError, RuntimeError):
+        unresolved_named_drugs = ["resolution_failed"]
+    for drug in unresolved_named_drugs:
+        _append_issue(issues, f"named_drug_unresolved:{drug}")
 
     # Unapproved source material can be represented as research context, but it cannot produce
     # deterministic warnings or CDS cards. The policy check itself completed successfully.

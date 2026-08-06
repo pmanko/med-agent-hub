@@ -176,7 +176,7 @@ class _State:
     indepth_gate: Optional[Dict[str, Any]] = None
     indepth_error: str = ""
     indepth_error_code: Optional[str] = None
-    indepth_mandatory_source_ids: List[str] = field(default_factory=list)
+    indepth_required_source_ids: List[str] = field(default_factory=list)
     drug_context: Any = None
     raw_review_content: Optional[str] = None
     history: Optional[HistoryView] = None
@@ -834,7 +834,7 @@ async def _prepare_context(request: ExecutionRequest, state: _State) -> None:
                 request, messages, temporal_block
             ),
             mandatory_text=mandatory_text,
-            mandatory_ids=tuple(record.stable_id for record in mandatory),
+            required_ids=tuple(record.stable_id for record in mandatory),
             input_measure=lambda messages: _count_answer_input(
                 request, state, mandatory_text, messages=messages
             ),
@@ -1033,19 +1033,38 @@ def _stream_payload(
     return json.dumps(payload)
 
 
-def _initial_indepth_draft_claims(state: _State) -> List[str]:
-    """Return the first model draft later review/gates had an opportunity to change."""
-    for step in state.steps:
-        if step.get("role") not in {"indepth", "indepth_synth", "indepth_resynth"}:
+def _latest_indepth_draft_claims(state: _State) -> List[str]:
+    """Return the latest model draft that review or gates rejected or changed."""
+    synthesis_roles = {"indepth", "indepth_synth", "indepth_resynth"}
+    rejected: List[List[str]] = []
+    fallback: List[List[str]] = []
+    for index, step in enumerate(state.steps):
+        if step.get("role") not in synthesis_roles:
             continue
-        claims = step.get("original_claims") or step.get("claims") or []
-        if isinstance(claims, list):
-            return [str(claim) for claim in claims if str(claim).strip()]
+        raw_claims = step.get("original_claims") or step.get("claims") or []
+        if not isinstance(raw_claims, list):
+            continue
+        claims = [str(claim) for claim in raw_claims if str(claim).strip()]
+        if not claims:
+            continue
+        fallback.append(claims)
+        for later in state.steps[index + 1 :]:
+            if later.get("role") in synthesis_roles:
+                break
+            if later.get("role") != "indepth_validator":
+                continue
+            if later.get("status") == "unavailable" or later.get("drop"):
+                rejected.append(claims)
+            break
+    if rejected:
+        return rejected[-1]
+    if fallback:
+        return fallback[-1]
     return [str(claim) for claim in state.claims if str(claim).strip()]
 
 
 def _capture_indepth_review_artifact(state: _State) -> None:
-    claims = _initial_indepth_draft_claims(state)
+    claims = _latest_indepth_draft_claims(state)
     if not claims:
         return
     state.indepth_review_draft = "\n".join("- " + claim for claim in claims)
@@ -1118,7 +1137,7 @@ def _in_depth_payload(state: _State) -> Dict[str, Any]:
     }
     if state.indepth_error_code:
         payload["errorCode"] = state.indepth_error_code
-        payload["mandatorySourceIds"] = list(state.indepth_mandatory_source_ids)
+        payload["requiredSourceIds"] = list(state.indepth_required_source_ids)
     if (
         state.indepth_review_draft
         and state.indepth_review_draft.strip() != final_answer.strip()
@@ -2026,15 +2045,15 @@ async def _execute_stages(
                         _capture_indepth_review_artifact(state)
                         state.indepth_error = str(exc)
                         state.indepth_error_code = exc.code
-                        state.indepth_mandatory_source_ids = list(
-                            exc.mandatory_ids
+                        state.indepth_required_source_ids = list(
+                            exc.required_ids
                         )
                         state.steps.append(
                             {
                                 "role": "indepth_withheld",
                                 "reason": exc.code,
-                                "mandatory_source_ids": list(
-                                    exc.mandatory_ids
+                                "required_source_ids": list(
+                                    exc.required_ids
                                 ),
                             }
                         )

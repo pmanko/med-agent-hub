@@ -235,7 +235,8 @@ def test_group_related_active_order_is_injected_for_question_drug():
 def test_unusable_relationship_package_cannot_select_an_active_order_reference():
     dataset = _atc_dataset()
     dataset.cross_reactivity_review_state = ds.REVIEW_PROPOSED
-    dataset.cross_reactivity_package["review_state"] = ds.REVIEW_PROPOSED
+
+    assert dataset.cross_reactivity_package["review_state"] == ds.REVIEW_PROPOSED
 
     text, _ = ds.inject_drug_references(
         "chart\n",

@@ -491,7 +491,115 @@ def test_mandatory_overflow_returns_insufficient_context():
                 fixed_text="fixed",
             )
         )
-    assert caught.value.mandatory_ids == ("safety",)
+    assert caught.value.required_ids == ("safety",)
+
+
+def test_typed_complete_overflow_returns_insufficient_context():
+    ledger = EvidenceLedger(
+        (
+            _record("safety", "allergy evidence", mandatory=True),
+            EvidenceRecord(
+                "typed-med",
+                "querystore",
+                50,
+                "drug_order",
+                "typed-med",
+                "2026-01-01",
+                "medication " * 20,
+                slice_tier="typed",
+            ),
+        )
+    )
+
+    with pytest.raises(InsufficientContextError) as caught:
+        asyncio.run(
+            select_context(
+                ledger,
+                question="What medications is the patient taking?",
+                model="fixture-model",
+                budget=ContextBudget(context_window=8, reserved_output_tokens=1),
+                counter=ExactWordCounter(),
+                fixed_text="fixed",
+                recent_core_limit=0,
+            )
+        )
+
+    assert caught.value.required_ids == ("safety", "typed-med")
+
+
+@pytest.mark.parametrize("slice_tier", ["exact", "panel"])
+def test_protected_slice_tier_overflow_returns_insufficient_context(slice_tier):
+    protected_id = f"{slice_tier}-record"
+    ledger = EvidenceLedger(
+        (
+            EvidenceRecord(
+                protected_id,
+                "querystore",
+                50,
+                "Observation",
+                protected_id,
+                "2026-01-01",
+                "required evidence " * 20,
+                slice_tier=slice_tier,
+            ),
+        )
+    )
+
+    with pytest.raises(InsufficientContextError) as caught:
+        asyncio.run(
+            select_context(
+                ledger,
+                question="What does the chart show?",
+                model="fixture-model",
+                budget=ContextBudget(context_window=8, reserved_output_tokens=1),
+                counter=ExactWordCounter(),
+                fixed_text="fixed",
+                recent_core_limit=0,
+            )
+        )
+
+    assert caught.value.required_ids == (protected_id,)
+
+
+def test_exact_match_is_protected_before_optional_similarity_evidence():
+    ledger = EvidenceLedger(
+        (
+            EvidenceRecord(
+                "similar-new",
+                "querystore",
+                50,
+                "Observation",
+                "similar-new",
+                "2026-01-01",
+                "medication " * 20,
+                querystore_rank=1,
+            ),
+            EvidenceRecord(
+                "exact-old",
+                "querystore",
+                50,
+                "Observation",
+                "exact-old",
+                "2020-01-01",
+                "Lab code WT-71",
+            ),
+        )
+    )
+
+    view = asyncio.run(
+        select_context(
+            ledger,
+            question="Find WT-71",
+            model="fixture-model",
+            budget=ContextBudget(context_window=10, reserved_output_tokens=1),
+            counter=ExactWordCounter(),
+            fixed_text="fixed",
+            recent_core_limit=0,
+        )
+    )
+
+    assert view.included_ids == ("exact-old",)
+    assert view.excluded[0].stable_id == "similar-new"
 
 
 def test_prior_turn_citations_are_stripped_before_current_source_ledger_resolution():

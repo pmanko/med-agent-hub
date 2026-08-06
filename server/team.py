@@ -1042,7 +1042,7 @@ async def _chat(
                 f"The exact {model!r} request requires {input_tokens} input plus "
                 f"{output_tokens} output tokens, exceeding its "
                 f"{budget.context_window}-token context window.",
-                mandatory_ids=(),
+                required_ids=(),
             )
 
     headers = {"Content-Type": "application/json"}
