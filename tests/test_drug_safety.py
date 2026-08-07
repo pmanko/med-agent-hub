@@ -11,12 +11,21 @@ from server import drug_safety as ds
 
 # ---------------------------------------------------------------------------
 # Fixtures: real bundled dataset + a small ATC-only dataset (mirrors the Java
-# atc-sample.tsv fixture: entries that carry ATC codes but NO curated rules).
+# atc-sample.tsv fixture. Tests that assert class relationships explicitly opt the
+# in-memory relationship policy into clinically-approved state.
 # ---------------------------------------------------------------------------
 
 @pytest.fixture()
 def dataset():
-    return ds.load_dataset()
+    loaded = ds.load_dataset()
+    return ds.DrugReferenceDataset(
+        loaded.entries,
+        loaded.cross_reactivity_groups,
+        package_id="approved-test-rules",
+        source_format="test",
+        review_state=ds.REVIEW_CLINICALLY_APPROVED,
+        cross_reactivity_review_state=ds.REVIEW_CLINICALLY_APPROVED,
+    )
 
 
 @pytest.fixture()
@@ -29,7 +38,13 @@ def atc_dataset():
         ds.DrugReferenceEntry(id="N02BA01", name="Acetylsalicylic acid", drug_class="Salicylic acid and derivatives",
                                aliases=["acetylsalicylic acid", "aspirin"], atc_codes=["N02BA01"]),
     ]
-    return ds.DrugReferenceDataset(entries)
+    return ds.DrugReferenceDataset(
+        entries,
+        package_id="approved-test-atc-rules",
+        source_format="test",
+        review_state=ds.REVIEW_CLINICALLY_APPROVED,
+        cross_reactivity_review_state=ds.REVIEW_CLINICALLY_APPROVED,
+    )
 
 
 def ctx(age=None, drugs=None, allergies=None, conditions=None, atc=None):
@@ -92,6 +107,94 @@ def test_no_false_positive_when_answer_needs_no_reference(dataset):
     warnings = ds.validate_answer("The patient's most recent blood pressure is 120/80 mmHg [1].",
                                    None, ctx(age=40, drugs=["warfarin"], allergies=["nsaid"]), dataset)
     assert warnings == []
+
+
+def test_unknown_drug_in_safety_question_cannot_report_checked(dataset):
+    result = ds.check_answer_safety(
+        "There is no reference warning.",
+        "Is frovatriptan safe for this patient?",
+        ctx(age=40),
+        dataset,
+    )
+
+    assert result.status == ds.STATUS_LIMITED
+    assert "named_drug_unresolved:frovatriptan" in result.issues
+
+
+def test_mixed_known_and_unknown_question_resolves_each_drug(dataset):
+    result = ds.check_answer_safety(
+        "No interaction was found.",
+        "Are ibuprofen and frovatriptan safe together?",
+        ctx(age=40),
+        dataset,
+    )
+
+    assert result.status == ds.STATUS_LIMITED
+    assert "named_drug_unresolved:frovatriptan" in result.issues
+    assert "named_drug_unresolved:ibuprofen" not in result.issues
+
+
+def test_generic_interaction_question_does_not_invent_an_unknown_drug(dataset):
+    result = ds.check_answer_safety(
+        "No reference warning was found.",
+        "Are there any medication interactions?",
+        ctx(age=40),
+        dataset,
+    )
+
+    assert not any(issue.startswith("named_drug_unresolved:") for issue in result.issues)
+
+
+def test_unknown_recommended_drug_cannot_report_checked(dataset):
+    result = ds.check_answer_safety(
+        "Consider frovatriptan for this patient.",
+        "What treatment could be used?",
+        ctx(age=40),
+        dataset,
+    )
+
+    assert result.status == ds.STATUS_LIMITED
+    assert "named_drug_unresolved:frovatriptan" in result.issues
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "Consider close clinical monitoring.",
+        "Recommend exercise as tolerated.",
+    ],
+)
+def test_non_drug_recommendations_do_not_create_unknown_drug_issues(dataset, answer):
+    result = ds.check_answer_safety(
+        answer,
+        "What should be done next?",
+        ctx(age=40),
+        dataset,
+    )
+
+    assert not any(issue.startswith("named_drug_unresolved:") for issue in result.issues)
+
+
+def test_route_modifier_does_not_hide_unknown_recommended_drug(dataset):
+    result = ds.check_answer_safety(
+        "Start oral frovatriptan for migraine.",
+        "What treatment could be used?",
+        ctx(age=40),
+        dataset,
+    )
+
+    assert "named_drug_unresolved:frovatriptan" in result.issues
+
+
+def test_known_multiword_drug_is_resolved_as_one_mention(atc_dataset):
+    result = ds.check_answer_safety(
+        "Consider acetylsalicylic acid for pain.",
+        "What treatment could be used?",
+        ctx(age=40),
+        atc_dataset,
+    )
+
+    assert not any(issue.startswith("named_drug_unresolved:") for issue in result.issues)
 
 
 @pytest.mark.parametrize("window,expected", [
@@ -319,7 +422,12 @@ def test_related_active_order_is_still_injected_for_a_drug_specific_query(atc_da
 def test_renders_atc_classification_entry_with_no_rule_sections():
     entry = ds.DrugReferenceEntry(id="M01AE01", name="Ibuprofen", drug_class="Propionic acid derivatives",
                                    aliases=["ibuprofen"], atc_codes=["M01AE01"])
-    one_entry_dataset = ds.DrugReferenceDataset([entry])
+    one_entry_dataset = ds.DrugReferenceDataset(
+        [entry],
+        package_id="approved-test-rules",
+        source_format="test",
+        review_state=ds.REVIEW_CLINICALLY_APPROVED,
+    )
     _, mappings = ds.inject_drug_references("chart\n", [], "what is the ibuprofen dose?", 5, one_entry_dataset)
     injected_text = mappings[0]["text"]
     assert "Drug reference — Ibuprofen" in injected_text

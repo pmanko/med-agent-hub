@@ -27,7 +27,7 @@ from . import kb
 from .chart_serializer import render_chart
 from .config import llm_config, querystore_config
 from .patient_ledger_cache import PatientLedgerCache, default_patient_ledger_cache
-from .querystore_client import ContextSliceFetch, QueryStoreClient
+from .querystore_client import ContextSliceFetch, InconsistentSnapshotError, QueryStoreClient
 from .ranked_candidates import resolve_ranked_hits_with_retry
 
 _CHART_MARKER = "Patient records (most recent first):"
@@ -131,8 +131,8 @@ class ContextSourceError(RuntimeError):
 
 
 class InsufficientContextError(ContextSourceError):
-    def __init__(self, message: str, *, mandatory_ids: Sequence[str]) -> None:
-        self.mandatory_ids = tuple(mandatory_ids)
+    def __init__(self, message: str, *, required_ids: Sequence[str]) -> None:
+        self.required_ids = tuple(required_ids)
         super().__init__("insufficient_context", message, source="selector")
 
 
@@ -166,7 +166,7 @@ class EvidenceRecord:
     # querystore record that simply wasn't ranked for this particular question.
     querystore_rank: Optional[int] = None
     # The shared context-slice selection tier (querystore ADR Decision 17:
-    # mandatory | recency_anchor | typed | similarity | panel) for querystore-sourced records
+    # mandatory | exact | recency_anchor | typed | similarity | panel) for querystore-sourced records
     # this turn; None for other sources and when the slice was unavailable. A slice-selected
     # record is never zero-relevance; slice-mandatory records are mandatory.
     slice_tier: Optional[str] = None
@@ -497,7 +497,7 @@ class QueryStoreSource:
         # reconfigured querystore or service account never reuses another one's cached ledger.
         cache_key = (self.client.base_url, self.client.username, request.patient)
         try:
-            raw_records = await self.cache.get_records(
+            cached_ledger = await self.cache.get_ledger(
                 cache_key,
                 lambda if_none_match: self.client.fetch_patient_ledger(
                     request.patient, if_none_match=if_none_match
@@ -509,8 +509,34 @@ class QueryStoreSource:
                 f"Querystore could not retrieve patient {request.patient!r}: {exc}",
                 source=self.name,
             ) from exc
-        rank_by_identity = await self._ranked_candidate_identities(request, raw_records)
-        slice_tiers, slice_metadata = await self._slice_selection(request)
+        for attempt in range(2):
+            try:
+                slice_tiers, slice_ranks, slice_metadata = await self._slice_selection(
+                    request, expected_snapshot_id=cached_ledger.snapshot_id
+                )
+                break
+            except InconsistentSnapshotError:
+                if attempt:
+                    raise ContextSourceError(
+                        "context_source_failed",
+                        "Querystore changed the patient chart while selecting context.",
+                        source=self.name,
+                    )
+                cached_ledger = await self.cache.get_ledger(
+                    cache_key,
+                    lambda if_none_match: self.client.fetch_patient_ledger(
+                        request.patient, if_none_match=if_none_match
+                    ),
+                )
+        raw_records = list(cached_ledger.records)
+        # A current QueryStore slice already ran the question-aware ranked selection. Reuse its
+        # similarity order instead of issuing the same embedding/index query a second time. The
+        # separate ranked endpoint remains a compatibility fallback for older deployments.
+        rank_by_identity = (
+            slice_ranks
+            if slice_metadata.get("similarity_ranks_complete") is True
+            else await self._ranked_candidate_identities(request, raw_records)
+        )
         chart, mappings = render_chart(raw_records)
         records: list[EvidenceRecord] = []
         raw_by_key = {
@@ -547,24 +573,33 @@ class QueryStoreSource:
                     raw=raw,
                 )
             )
-        source_metadata = (
-            {self.name: {"context_slice": slice_metadata}} if slice_metadata else {}
-        )
+        source_metadata = {
+            self.name: {
+                # fetch_patient_ledger exhausts the stable paginated read API before this ledger
+                # is returned. Context slicing only ranks that complete patient snapshot.
+                "patient_ledger_complete": cached_ledger.projection_complete,
+                **({"context_slice": slice_metadata} if slice_metadata else {}),
+            }
+        }
         return EvidenceLedger(
             tuple(records), original_text=chart, source_metadata=source_metadata
         )
 
     async def _slice_selection(
-        self, request: ContextRequest
+        self, request: ContextRequest, *, expected_snapshot_id: str
     ) -> tuple[
-        dict[tuple[Optional[str], Optional[str]], str], dict[str, Any]
+        dict[tuple[Optional[str], Optional[str]], str],
+        dict[tuple[Optional[str], Optional[str]], int],
+        dict[str, Any],
     ]:
-        """Selection tier per record identity from querystore's shared context slice, or
-        ``{}`` when the client predates the contract or the slice call fails — the local
-        policy remains the degradation path, never a blocked turn."""
+        """Selection tiers and similarity ranks from Querystore's shared context slice.
+
+        Empty metadata means the client predates the contract or the slice call failed. The
+        caller then uses the legacy ranked endpoint and local policy as a degradation path.
+        """
         fetch = getattr(self.client, "fetch_context_slice", None)
         if fetch is None:
-            return {}, {}
+            return {}, {}, {}
         try:
             # interpret=True: cue routing, temporal gating, and retrieval preprocessing run
             # server-side (querystore ADR Decision 18) — the RAW question goes over, so the
@@ -572,22 +607,40 @@ class QueryStoreSource:
             result = await fetch(
                 request.patient, request.question.strip(), interpret=True
             )
+        except InconsistentSnapshotError:
+            raise
         except Exception:
-            return {}, {}
+            return {}, {}, {}
         if not isinstance(result, ContextSliceFetch):
-            return {}, {}
+            return {}, {}, {}
+        if result.chart_snapshot_id != expected_snapshot_id:
+            raise InconsistentSnapshotError(
+                "Querystore context slice does not match the validated patient ledger"
+            )
         tiers: dict[tuple[Optional[str], Optional[str]], str] = {}
+        ranks: dict[tuple[Optional[str], Optional[str]], int] = {}
+        similarity_ranks_complete = True
         for row in result.records:
             if not isinstance(row, Mapping):
                 continue
             tier = row.get("tier")
             if isinstance(tier, str) and tier:
-                tiers[(row.get("resourceType"), row.get("resourceUuid"))] = tier
-        return tiers, {
+                identity = (row.get("resourceType"), row.get("resourceUuid"))
+                tiers[identity] = tier
+                if tier == "similarity":
+                    provided_rank = row.get("rank")
+                    if type(provided_rank) is int and provided_rank > 0:
+                        ranks[identity] = provided_rank
+                    else:
+                        similarity_ranks_complete = False
+        return tiers, ranks, {
             "slice_id": result.slice_id,
+            "chart_snapshot_id": result.chart_snapshot_id,
             "total_count": result.total_count,
             "chart_size": result.chart_size,
             "chart_truncated": result.chart_truncated,
+            "projection_complete": result.projection_complete,
+            "similarity_ranks_complete": similarity_ranks_complete,
             "effective_types": list(result.effective_types),
             "temporal_applied": result.temporal_applied,
         }
@@ -1033,7 +1086,7 @@ async def fit_message_history(
     counter: TokenCounter,
     fixed_renderer: Callable[[Sequence[Mapping[str, Any]]], str],
     mandatory_text: str = "",
-    mandatory_ids: Sequence[str] = (),
+    required_ids: Sequence[str] = (),
     input_measure: Optional[
         Callable[[Sequence[Mapping[str, Any]]], Awaitable[int]]
     ] = None,
@@ -1130,7 +1183,7 @@ async def fit_message_history(
         raise InsufficientContextError(
             "The current question, latest completed turn, prompts, and mandatory evidence "
             "exceed the exact model input budget.",
-            mandatory_ids=mandatory_ids,
+            required_ids=required_ids,
         )
     return HistoryView(
         messages=fitted,
@@ -1324,7 +1377,7 @@ async def select_context(
     if budget.input_limit <= 0:
         raise InsufficientContextError(
             "Reserved output tokens consume the entire context window.",
-            mandatory_ids=tuple(
+            required_ids=tuple(
                 record.stable_id for record in ledger.records if record.mandatory
             ),
         )
@@ -1408,22 +1461,35 @@ async def select_context(
             preamble=ledger.preamble,
         )
 
-    mandatory = [record for record, reason in eligible if reason == "mandatory"]
-    mandatory = canonical(mandatory)
-    mandatory_tokens = await measure(render_selected(mandatory))
-    if mandatory_tokens > budget.input_limit:
-        raise InsufficientContextError(
-            "Mandatory evidence exceeds the exact model input budget.",
-            mandatory_ids=tuple(record.stable_id for record in mandatory),
+    protected_slice_tiers = {"exact", "typed", "panel"}
+
+    def is_protected(record: EvidenceRecord, reason: str) -> bool:
+        return (
+            reason in {"mandatory", "exact_match"}
+            or record.slice_tier in protected_slice_tiers
         )
 
-    nonmandatory = [record for record, reason in eligible if reason != "mandatory"]
-    selected = list(mandatory)
-    current_tokens = mandatory_tokens
-    available_tokens = budget.input_limit - mandatory_tokens
+    protected = [
+        record for record, reason in eligible if is_protected(record, reason)
+    ]
+    protected = canonical(protected)
+    protected_tokens = await measure(render_selected(protected))
+    if protected_tokens > budget.input_limit:
+        raise InsufficientContextError(
+            "Required mandatory, exact, typed-complete, or panel evidence exceeds "
+            "the exact model input budget.",
+            required_ids=tuple(record.stable_id for record in protected),
+        )
+
+    optional = [
+        record for record, reason in eligible if not is_protected(record, reason)
+    ]
+    selected = list(protected)
+    current_tokens = protected_tokens
+    available_tokens = budget.input_limit - protected_tokens
     rendered_records = tuple(
         _render_records((record,), (source_indices[id(record)],))
-        for record in nonmandatory
+        for record in optional
     )
     count_records = getattr(counter, "count_records", None)
     if callable(count_records):
@@ -1436,7 +1502,7 @@ async def select_context(
                 *(counter.count(model, rendered) for rendered in rendered_records)
             )
         )
-    if len(record_cost_values) != len(nonmandatory) or any(
+    if len(record_cost_values) != len(optional) or any(
         not isinstance(cost, int) or cost < 0 for cost in record_cost_values
     ):
         raise ContextSourceError(
@@ -1446,14 +1512,14 @@ async def select_context(
         )
     costs = {
         record.stable_id: max(1, cost)
-        for record, cost in zip(nonmandatory, record_cost_values)
+        for record, cost in zip(optional, record_cost_values)
     }
     unit_budget = available_tokens
     for _attempt in range(_MAX_CONTEXT_FIT_ATTEMPTS):
         remaining_units = unit_budget
         packed: list[EvidenceRecord] = []
         used_units = 0
-        for record in nonmandatory:
+        for record in optional:
             cost = costs[record.stable_id]
             if cost <= remaining_units:
                 packed.append(record)
@@ -1462,7 +1528,7 @@ async def select_context(
 
         if not packed:
             break
-        trial_records = canonical(mandatory + packed)
+        trial_records = canonical(protected + packed)
         trial_tokens = await measure(render_selected(trial_records))
         if trial_tokens <= budget.input_limit:
             selected = trial_records
@@ -1476,13 +1542,13 @@ async def select_context(
         singleton_tokens = (
             trial_tokens
             if len(packed) == 1
-            else await measure(render_selected(mandatory + [first_record]))
+            else await measure(render_selected(protected + [first_record]))
         )
         if singleton_tokens > budget.input_limit:
             costs[first_record.stable_id] = available_tokens + 1
             continue
 
-        trial_variable_tokens = max(1, trial_tokens - mandatory_tokens)
+        trial_variable_tokens = max(1, trial_tokens - protected_tokens)
         adjusted_budget = int(
             unit_budget
             * (available_tokens / trial_variable_tokens)

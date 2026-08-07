@@ -4,7 +4,7 @@ import asyncio
 import json
 from unittest.mock import patch
 
-from server import engine, team
+from server import drug_safety, engine, team
 from tests.factories import (
     make_profile,
     patient_source_registry,
@@ -34,6 +34,30 @@ _IBUPROFEN_ENVELOPE = json.dumps(
         "blocks": [],
     }
 )
+
+
+def _approved_dataset():
+    loaded = drug_safety.load_dataset()
+    return drug_safety.DrugReferenceDataset(
+        [
+            *loaded.entries,
+            drug_safety.DrugReferenceEntry(
+                id="warfarin",
+                name="Warfarin",
+                aliases=["warfarin"],
+                atc_codes=["B01AA03"],
+            ),
+        ],
+        loaded.cross_reactivity_groups,
+        package_id="approved-integration-rules",
+        source_format="test",
+        source_version="1",
+        review_state=drug_safety.REVIEW_CLINICALLY_APPROVED,
+        cross_reactivity_review_state=drug_safety.REVIEW_CLINICALLY_APPROVED,
+    )
+
+
+_APPROVED_DATASET = _approved_dataset()
 
 
 def run(coro):
@@ -141,7 +165,9 @@ def _product_profile(*, drug_safety=False):
 
 
 def test_profile_drain_attaches_safety_warnings_when_enabled():
-    with patch.object(team, "_chat", side_effect=_fake_chat_ibuprofen_answer):
+    with patch.object(team, "_chat", side_effect=_fake_chat_ibuprofen_answer), patch.object(
+        drug_safety, "load_dataset", return_value=_APPROVED_DATASET
+    ):
         out = run(
             run_profile(
                 _answer_profile(drug_safety=True),
@@ -173,7 +199,9 @@ def test_profile_drain_uses_fresh_querystore_weight_for_per_dose_limit():
             })
         }
 
-    with patch.object(team, "_chat", side_effect=fake_weighted_answer):
+    with patch.object(team, "_chat", side_effect=fake_weighted_answer), patch.object(
+        drug_safety, "load_dataset", return_value=_APPROVED_DATASET
+    ):
         out = run(
             run_profile(
                 _answer_profile(drug_safety=True),
@@ -211,7 +239,9 @@ def test_profile_drain_omits_safety_warnings_key_when_disabled_default():
 
 
 def test_profile_drain_reports_checked_status_when_enabled():
-    with patch.object(team, "_chat", side_effect=_fake_chat_ibuprofen_answer):
+    with patch.object(team, "_chat", side_effect=_fake_chat_ibuprofen_answer), patch.object(
+        drug_safety, "load_dataset", return_value=_APPROVED_DATASET
+    ):
         out = run(
             run_profile(
                 _answer_profile(drug_safety=True),
@@ -289,6 +319,8 @@ def test_profile_stream_done_event_carries_safety_warnings():
             team, "_apply_temporal_gate", side_effect=fake_gate
         ), patch.object(
             team, "_write_trace", lambda *_a, **_k: None
+        ), patch.object(
+            drug_safety, "load_dataset", return_value=_APPROVED_DATASET
         ):
             async for name, data in stream_profile(
                 _product_profile(drug_safety=True),
@@ -312,6 +344,8 @@ def test_profile_stream_done_event_carries_safety_warnings():
     assert by_name["answer_done"]["safetyWarnings"] == by_name["done"]["safetyWarnings"]
     assert by_name["done"]["safetyStatus"] == "checked"
     assert by_name["answer_done"]["safetyStatus"] == "checked"
+    assert by_name["done"]["safetyCheck"]["package"]["id"] == "approved-integration-rules"
+    assert by_name["done"]["safetyCheck"]["coverage"]["mapping_complete"] is True
 
 
 def test_profile_stream_omits_safety_warnings_when_disabled_default():

@@ -121,4 +121,4 @@ def test_mandatory_overflow_abstains_per_fixture():
             )
         )
 
-    assert caught.value.mandatory_ids == ("mandatory-1",)
+    assert caught.value.required_ids == ("mandatory-1",)

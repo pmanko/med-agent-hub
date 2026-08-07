@@ -93,13 +93,20 @@ def test_load_dataset_dispatches_to_the_atc_source_by_format():
     assert dataset.lookup_by_token("ibuprofen").drug_class == "Propionic acid derivatives"
 
 
-def test_atc_sourced_entries_drive_class_level_safety_end_to_end():
-    # The whole point of the ATC source: entries carry NO curated contraindication rules, yet a
-    # class-level warning still fires because naproxen (M01AE02) and the patient's ibuprofen
-    # (M01AE01) allergy share the ATC level-4 subgroup M01AE. Proves the rule-less classification
-    # turns into safety warnings via ATC-class reasoning — through the real validate_answer path.
+def test_atc_classification_cannot_emit_deterministic_product_warnings():
+    # ATC establishes class membership; it is not a reviewed cross-reactivity rule package.
     dataset = ds.load_dataset(path=_ATC_SAMPLE, source_format="atc")
-    context = ds.PatientClinicalContext(age_years=40, allergy_tokens={"ibuprofen"})
-    warnings = ds.validate_answer("Naproxen could be considered for this patient.", None, context, dataset)
-    assert any(w.type == "contraindication" and "naproxen" in w.drug.lower() for w in warnings), \
-        f"expected a class-level contraindication on naproxen; got {[w.to_dict() for w in warnings]}"
+    context = ds.PatientClinicalContext(
+        age_years=40,
+        allergy_tokens={"ibuprofen"},
+        mapping_complete=True,
+        exposure_complete=True,
+    )
+    result = ds.check_answer_safety(
+        "Naproxen could be considered for this patient.", None, context, dataset
+    )
+
+    assert result.status == "limited"
+    assert result.warnings == []
+    assert result.package["source_format"] == "atc"
+    assert "source_not_clinically_approved" in result.issues

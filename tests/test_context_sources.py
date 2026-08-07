@@ -24,8 +24,7 @@ from server.context_sources import (
     select_context,
 )
 from server.patient_ledger_cache import PatientLedgerCache
-from server.querystore_client import PatientLedgerFetch
-from server.querystore_client import ContextSliceFetch
+from server.querystore_client import ContextSliceFetch, PatientLedgerFetch
 
 
 class WordTokenCounter:
@@ -587,24 +586,41 @@ class _FakeQueryStoreClient:
     base_url = "http://openmrs"
     username = "service"
 
-    def __init__(self, records, *, snapshot_id="snap-1", etag='"etag-1"', ranked_hits=None):
+    def __init__(
+        self,
+        records,
+        *,
+        snapshot_id="snap-1",
+        etag='"etag-1"',
+        ranked_hits=None,
+        projection_complete=True,
+    ):
         self._records = records
         self._snapshot_id = snapshot_id
         self._etag = etag
         self._ranked_hits = ranked_hits if ranked_hits is not None else []
+        self._projection_complete = projection_complete
+        self.ledger_snapshots: list[str] = []
         self.calls: list[Optional[str]] = []
         self.search_calls: list[str] = []
-        self.slice_records: list = []
+        self.slice_records: Optional[list] = None
+        self.slice_snapshot_id = snapshot_id
         self.slice_error: Optional[BaseException] = None
         self.slice_calls: list = []
 
     async def fetch_patient_ledger(self, _patient, *, if_none_match=None):
         self.calls.append(if_none_match)
+        snapshot_id = (
+            self.ledger_snapshots.pop(0)
+            if self.ledger_snapshots
+            else self._snapshot_id
+        )
         return PatientLedgerFetch(
             not_modified=False,
             records=self._records,
-            snapshot_id=self._snapshot_id,
+            snapshot_id=snapshot_id,
             etag=self._etag,
+            projection_complete=self._projection_complete,
         )
 
     async def search_patient_records(self, _patient, query, *, limit=20):
@@ -615,6 +631,8 @@ class _FakeQueryStoreClient:
         self.slice_calls.append((question, interpret))
         if self.slice_error is not None:
             raise self.slice_error
+        if self.slice_records is None:
+            raise NotImplementedError("context slice is not available")
         return ContextSliceFetch(
             records=list(self.slice_records),
             slice_id="slice-1",
@@ -623,6 +641,8 @@ class _FakeQueryStoreClient:
             chart_truncated=False,
             effective_types=("drug_order",),
             temporal_applied=True,
+            chart_snapshot_id=self.slice_snapshot_id,
+            projection_complete=self._projection_complete,
         )
 
 
@@ -671,6 +691,28 @@ def test_querystore_allergy_record_is_mandatory_without_source_metadata():
     )
 
     assert ledger.records[0].mandatory is True
+
+
+def test_querystore_incomplete_projection_is_not_reported_as_complete_ledger():
+    client = _FakeQueryStoreClient(
+        [
+            {
+                "resourceType": "drug_order",
+                "resourceUuid": "med-1",
+                "date": "2026-01-01",
+                "text": "Drug order: Ibuprofen",
+            }
+        ],
+        projection_complete=False,
+    )
+
+    ledger = asyncio.run(
+        QueryStoreSource(client, cache=PatientLedgerCache()).fetch(
+            ContextRequest(patient="patient-1", messages=_messages())
+        )
+    )
+
+    assert ledger.source_metadata["querystore"]["patient_ledger_complete"] is False
 
 
 def test_querystore_failure_is_explicit_not_an_empty_chart():
@@ -783,6 +825,105 @@ def test_querystore_source_marks_resolved_ranked_hits_with_their_rank():
     by_uuid = {record.resource_uuid: record for record in ledger.records}
     assert by_uuid["obs-1"].querystore_rank == 1
     assert by_uuid["enc-1"].querystore_rank == 2
+
+
+def test_querystore_source_reuses_context_slice_similarity_rank_without_second_search():
+    client = _FakeQueryStoreClient(
+        [
+            {
+                "resourceType": "Observation",
+                "resourceUuid": "obs-1",
+                "date": "2026-01-02",
+                "text": "Weight: 58 kg",
+            },
+            {
+                "resourceType": "Encounter",
+                "resourceUuid": "enc-1",
+                "date": "2026-01-01",
+                "text": "Visit",
+            },
+        ],
+        ranked_hits=[{"resourceType": "Encounter", "resourceUuid": "enc-1"}],
+    )
+    client.slice_records = [
+        {
+            "resourceType": "Observation",
+            "resourceUuid": "obs-1",
+            "tier": "similarity",
+            "rank": 1,
+        },
+        {
+            "resourceType": "Encounter",
+            "resourceUuid": "enc-1",
+            "tier": "similarity",
+            "rank": 2,
+        },
+    ]
+
+    ledger = asyncio.run(
+        QueryStoreSource(client, cache=PatientLedgerCache()).fetch(
+            ContextRequest(
+                patient="patient-1",
+                messages=_messages(),
+                question="what was the weight?",
+            )
+        )
+    )
+
+    assert client.search_calls == []
+    by_uuid = {record.resource_uuid: record for record in ledger.records}
+    assert by_uuid["obs-1"].querystore_rank == 1
+    assert by_uuid["enc-1"].querystore_rank == 2
+
+
+def test_querystore_source_uses_ranked_fallback_when_slice_omits_similarity_ranks():
+    client = _FakeQueryStoreClient(
+        [
+            {
+                "resourceType": "Observation",
+                "resourceUuid": "obs-1",
+                "date": "2026-01-02",
+                "text": "Weight: 58 kg",
+            },
+            {
+                "resourceType": "Encounter",
+                "resourceUuid": "enc-1",
+                "date": "2026-01-01",
+                "text": "Visit",
+            },
+        ],
+        ranked_hits=[
+            {"resourceType": "Encounter", "resourceUuid": "enc-1"},
+            {"resourceType": "Observation", "resourceUuid": "obs-1"},
+        ],
+    )
+    client.slice_records = [
+        {
+            "resourceType": "Observation",
+            "resourceUuid": "obs-1",
+            "tier": "similarity",
+        },
+        {
+            "resourceType": "Encounter",
+            "resourceUuid": "enc-1",
+            "tier": "similarity",
+        },
+    ]
+
+    ledger = asyncio.run(
+        QueryStoreSource(client, cache=PatientLedgerCache()).fetch(
+            ContextRequest(
+                patient="patient-1",
+                messages=_messages(),
+                question="what was the weight?",
+            )
+        )
+    )
+
+    assert client.search_calls == ["what was the weight?"]
+    by_uuid = {record.resource_uuid: record for record in ledger.records}
+    assert by_uuid["enc-1"].querystore_rank == 1
+    assert by_uuid["obs-1"].querystore_rank == 2
 
 
 def test_querystore_source_leaves_unranked_records_with_no_rank():
@@ -1482,7 +1623,7 @@ def test_mandatory_context_overflow_abstains_instead_of_truncating():
         )
 
     assert caught.value.code == "insufficient_context"
-    assert caught.value.mandatory_ids == ("safety",)
+    assert caught.value.required_ids == ("safety",)
 
 
 def test_multiturn_budget_strips_old_refs_and_drops_oldest_complete_turn():
@@ -1535,7 +1676,7 @@ def test_multiturn_minimum_overflow_abstains_without_dropping_latest_turn():
                     str(item["content"]) for item in items
                 ),
                 mandatory_text="mandatory evidence",
-                mandatory_ids=("safety",),
+                required_ids=("safety",),
             )
         )
 
@@ -1558,7 +1699,7 @@ def test_history_measurement_defers_when_no_old_turn_can_be_dropped():
                 str(item["content"]) for item in items
             ),
             mandatory_text="mandatory evidence",
-            mandatory_ids=("safety",),
+            required_ids=("safety",),
             defer_when_no_droppable=True,
         )
     )
@@ -1631,9 +1772,12 @@ def test_querystore_slice_tiers_annotate_records_and_mandatory_tier_wins():
     assert by_uuid["noise-1"].slice_tier is None
     assert ledger.source_metadata["querystore"]["context_slice"] == {
         "slice_id": "slice-1",
+        "chart_snapshot_id": "snap-1",
         "total_count": 2,
         "chart_size": 3,
         "chart_truncated": False,
+        "projection_complete": True,
+        "similarity_ranks_complete": True,
         "effective_types": ["drug_order"],
         "temporal_applied": True,
     }
@@ -1642,6 +1786,78 @@ def test_querystore_slice_tiers_annotate_records_and_mandatory_tier_wins():
     question, interpret = client.slice_calls[0]
     assert question == "What medications is the patient on?"
     assert interpret is True
+
+
+def test_querystore_source_retries_when_slice_and_ledger_snapshots_differ():
+    client = _FakeQueryStoreClient(
+        [
+            {
+                "resourceType": "Observation",
+                "resourceUuid": "obs-1",
+                "date": "2026-01-02",
+                "text": "Weight: 58 kg",
+            }
+        ]
+    )
+    client.ledger_snapshots = ["snap-1", "snap-2"]
+    client.slice_snapshot_id = "snap-2"
+    client.slice_records = [
+        {
+            "resourceType": "Observation",
+            "resourceUuid": "obs-1",
+            "tier": "similarity",
+            "rank": 1,
+        }
+    ]
+
+    ledger = asyncio.run(
+        QueryStoreSource(client, cache=PatientLedgerCache()).fetch(
+            ContextRequest(
+                patient="patient-1",
+                messages=_messages(),
+                question="what was the weight?",
+            )
+        )
+    )
+
+    assert len(client.calls) == 2
+    assert len(client.slice_calls) == 2
+    assert ledger.source_metadata["querystore"]["context_slice"][
+        "chart_snapshot_id"
+    ] == "snap-2"
+
+
+def test_querystore_source_fails_when_snapshot_race_persists():
+    client = _FakeQueryStoreClient(
+        [
+            {
+                "resourceType": "Observation",
+                "resourceUuid": "obs-1",
+                "date": "2026-01-02",
+                "text": "Weight: 58 kg",
+            }
+        ]
+    )
+    client.slice_snapshot_id = "different-snapshot"
+    client.slice_records = [
+        {
+            "resourceType": "Observation",
+            "resourceUuid": "obs-1",
+            "tier": "similarity",
+            "rank": 1,
+        }
+    ]
+
+    with pytest.raises(ContextSourceError, match="changed the patient chart"):
+        asyncio.run(
+            QueryStoreSource(client, cache=PatientLedgerCache()).fetch(
+                ContextRequest(
+                    patient="patient-1",
+                    messages=_messages(),
+                    question="what was the weight?",
+                )
+            )
+        )
 
 
 def test_querystore_slice_failure_degrades_to_the_local_policy():

@@ -1414,7 +1414,7 @@ def test_grounding_batch_splits_until_each_request_fits(monkeypatch):
         calls.append(len(pairs))
         if len(pairs) > 2:
             raise InsufficientContextError(
-                "grounding batch exceeds context", mandatory_ids=()
+                "grounding batch exceeds context", required_ids=()
             )
         return [True] * len(pairs)
 
@@ -1680,7 +1680,7 @@ def test_gen_indepth_refits_review_and_retry_subcalls(monkeypatch):
     assert synth_calls[1][1] == fitted_retry_messages
 
 
-def test_product_indepth_mandatory_overflow_has_structured_terminal_metadata(
+def test_product_indepth_required_source_overflow_has_structured_terminal_metadata(
     monkeypatch,
 ):
     _stub_common(monkeypatch)
@@ -1690,7 +1690,7 @@ def test_product_indepth_mandatory_overflow_has_structured_terminal_metadata(
 
     async def overflow(*_args, **_kwargs):
         raise InsufficientContextError(
-            "mandatory evidence cannot fit", mandatory_ids=("source-1",)
+            "required evidence cannot fit", required_ids=("source-1",)
         )
 
     monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
@@ -1698,7 +1698,7 @@ def test_product_indepth_mandatory_overflow_has_structured_terminal_metadata(
 
     events = dict(_collect(_product_profile()))
     assert events["indepth_error"]["inDepth"]["errorCode"] == "insufficient_context"
-    assert events["done"]["inDepth"]["mandatorySourceIds"] == ["source-1"]
+    assert events["done"]["inDepth"]["requiredSourceIds"] == ["source-1"]
     assert events["done"]["answer"] == "Supported answer [1]."
 
 
@@ -1727,7 +1727,7 @@ def test_product_review_context_overflow_reaches_structured_terminal_metadata(
 
     async def review_overflow(*_args, **_kwargs):
         raise InsufficientContextError(
-            "review evidence cannot fit", mandatory_ids=("source-1",)
+            "review evidence cannot fit", required_ids=("source-1",)
         )
 
     monkeypatch.setattr(team, "_gen_indepth", real_gen_indepth)
@@ -1739,7 +1739,7 @@ def test_product_review_context_overflow_reaches_structured_terminal_metadata(
 
     events = dict(_collect(_product_profile(review_model="review")))
     assert events["indepth_error"]["inDepth"]["errorCode"] == "insufficient_context"
-    assert events["done"]["inDepth"]["mandatorySourceIds"] == ["source-1"]
+    assert events["done"]["inDepth"]["requiredSourceIds"] == ["source-1"]
 
 
 def test_nested_references_resolve_against_current_source_ledger():
@@ -2565,8 +2565,18 @@ def test_successful_indepth_retry_keeps_first_rejected_draft(monkeypatch):
                     "claims": ["First rejected claim [2]."],
                 },
                 {
+                    "role": "indepth_validator",
+                    "status": "checked",
+                    "drop": [1],
+                },
+                {
                     "role": "indepth_resynth",
                     "claims": ["Accepted retry claim [1]."],
+                },
+                {
+                    "role": "indepth_validator",
+                    "status": "checked",
+                    "drop": [],
                 },
             ]
         )
@@ -2591,6 +2601,51 @@ def test_successful_indepth_retry_keeps_first_rejected_draft(monkeypatch):
         for reference in final["inDepth"]["reviewReferences"]
     ] == [2]
     assert final["confidence"]["in_depth"]["level"] == "yellow"
+
+
+def test_failed_second_indepth_attempt_exposes_the_latest_rejected_draft(monkeypatch):
+    _stub_common(monkeypatch)
+
+    async def fake_answer(*_args, **_kwargs):
+        return "Supported answer [1].", [1], []
+
+    async def both_rejected(*_args, **kwargs):
+        kwargs["steps"].extend(
+            [
+                {
+                    "role": "indepth_synth",
+                    "claims": ["First rejected claim [1]."],
+                },
+                {
+                    "role": "indepth_validator",
+                    "status": "checked",
+                    "drop": [1],
+                },
+                {
+                    "role": "indepth_resynth",
+                    "claims": ["Latest rejected claim [2]."],
+                },
+                {
+                    "role": "indepth_validator",
+                    "status": "checked",
+                    "drop": [1],
+                },
+            ]
+        )
+        return [], {
+            "level": "red",
+            "status": "edited",
+            "removed": 1,
+            "issues": "Both attempts were unsupported.",
+            "review_attempts": 2,
+        }
+
+    monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
+    monkeypatch.setattr(team, "_gen_indepth", both_rejected)
+
+    final = dict(_collect(_product_profile(review_model="review")))["done"]
+
+    assert final["inDepth"]["reviewDraft"] == "- Latest rejected claim [2]."
 
 
 @pytest.mark.parametrize(
@@ -2709,6 +2764,9 @@ def test_indepth_citation_cannot_inherit_answer_verified_verdict(monkeypatch):
     assert final["confidence"]["in_depth"]["level"] == "red"
     assert "withheld" in final["confidence"]["in_depth"]["note"]
     assert final["inDepth"]["validation"]["citation_checks"][0]["status"] == "fail"
+    assert "not supported by its cited source" in final["inDepth"]["validation"][
+        "summary"
+    ]
     assert "evidence checks rejected every claim" in final["inDepth"]["error"]
     assert final["references"][0]["groundingStatus"] == "verified"
     assert all(
@@ -2921,6 +2979,7 @@ def test_uncited_indepth_claim_is_withheld_and_cannot_report_complete(monkeypatc
     check = final["inDepth"]["validation"]["citation_checks"][0]
     assert check["status"] == "fail"
     assert "no source citation" in check["reason"]
+    assert "no source citation" in final["inDepth"]["validation"]["summary"]
 
 
 def test_named_sse_emits_heartbeats_while_a_leg_stalls():
