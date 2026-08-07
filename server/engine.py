@@ -176,7 +176,7 @@ class _State:
     indepth_gate: Optional[Dict[str, Any]] = None
     indepth_error: str = ""
     indepth_error_code: Optional[str] = None
-    indepth_mandatory_source_ids: List[str] = field(default_factory=list)
+    indepth_required_source_ids: List[str] = field(default_factory=list)
     drug_context: Any = None
     raw_review_content: Optional[str] = None
     history: Optional[HistoryView] = None
@@ -349,6 +349,8 @@ def _ledger_after_drug_injection(
                     resource_type=existing.resource_type,
                     resource_uuid=existing.resource_uuid,
                     date=mapping.get("date"),
+                    clinical_date=existing.clinical_date,
+                    date_kind=existing.date_kind,
                     text=str(mapping.get("text") or existing.text),
                     mandatory=existing.mandatory,
                     metadata=existing.metadata,
@@ -367,6 +369,10 @@ def _ledger_after_drug_injection(
                 date=mapping.get("date"),
                 text=str(mapping.get("text") or ""),
                 mandatory=resource_type.lower() == "drugreference",
+                metadata={
+                    "review_state": mapping.get("reviewState"),
+                    "package": mapping.get("package"),
+                },
             )
         )
     return EvidenceLedger(
@@ -774,6 +780,10 @@ async def _prepare_context(request: ExecutionRequest, state: _State) -> None:
             stages._latest_user_text(state.messages),
             resolved_reference_date,
             True,
+            exposure_complete=any(
+                bool(metadata.get("patient_ledger_complete"))
+                for metadata in ledger.source_metadata.values()
+            ),
         )
         ledger = _ledger_after_drug_injection(ledger, full_chart, mappings)
         state.ledger = ledger
@@ -824,7 +834,7 @@ async def _prepare_context(request: ExecutionRequest, state: _State) -> None:
                 request, messages, temporal_block
             ),
             mandatory_text=mandatory_text,
-            mandatory_ids=tuple(record.stable_id for record in mandatory),
+            required_ids=tuple(record.stable_id for record in mandatory),
             input_measure=lambda messages: _count_answer_input(
                 request, state, mandatory_text, messages=messages
             ),
@@ -1007,32 +1017,54 @@ def _stream_payload(
         payload["temporalGate"] = state.answer_gate
     if in_depth is not None:
         payload["inDepth"] = in_depth
-    safety_status, warnings = stages._compute_safety_warnings(
+    safety_check = stages._compute_safety_check(
         state.drug_context,
         state.answer_text,
         stages._latest_user_text(state.messages),
         bool(request.profile.policies.get("drug_safety")),
     )
-    payload["safetyStatus"] = safety_status
-    if warnings:
-        payload["safetyWarnings"] = warnings
+    payload["safetyStatus"] = safety_check.status
+    payload["safetyCheck"] = safety_check.to_dict()
+    if safety_check.warnings:
+        payload["safetyWarnings"] = [
+            warning.to_dict() for warning in safety_check.warnings
+        ]
     payload["context"] = _context_summary(state)
     return json.dumps(payload)
 
 
-def _initial_indepth_draft_claims(state: _State) -> List[str]:
-    """Return the first model draft later review/gates had an opportunity to change."""
-    for step in state.steps:
-        if step.get("role") not in {"indepth", "indepth_synth", "indepth_resynth"}:
+def _latest_indepth_draft_claims(state: _State) -> List[str]:
+    """Return the latest model draft that review or gates rejected or changed."""
+    synthesis_roles = {"indepth", "indepth_synth", "indepth_resynth"}
+    rejected: List[List[str]] = []
+    fallback: List[List[str]] = []
+    for index, step in enumerate(state.steps):
+        if step.get("role") not in synthesis_roles:
             continue
-        claims = step.get("original_claims") or step.get("claims") or []
-        if isinstance(claims, list):
-            return [str(claim) for claim in claims if str(claim).strip()]
+        raw_claims = step.get("original_claims") or step.get("claims") or []
+        if not isinstance(raw_claims, list):
+            continue
+        claims = [str(claim) for claim in raw_claims if str(claim).strip()]
+        if not claims:
+            continue
+        fallback.append(claims)
+        for later in state.steps[index + 1 :]:
+            if later.get("role") in synthesis_roles:
+                break
+            if later.get("role") != "indepth_validator":
+                continue
+            if later.get("status") == "unavailable" or later.get("drop"):
+                rejected.append(claims)
+            break
+    if rejected:
+        return rejected[-1]
+    if fallback:
+        return fallback[-1]
     return [str(claim) for claim in state.claims if str(claim).strip()]
 
 
 def _capture_indepth_review_artifact(state: _State) -> None:
-    claims = _initial_indepth_draft_claims(state)
+    claims = _latest_indepth_draft_claims(state)
     if not claims:
         return
     state.indepth_review_draft = "\n".join("- " + claim for claim in claims)
@@ -1045,19 +1077,67 @@ def _capture_indepth_review_artifact(state: _State) -> None:
     )
 
 
+def _indepth_validation_summary(
+    validation: Mapping[str, Any], error: str = ""
+) -> str:
+    status = str(validation.get("status") or "unavailable")
+    lead = {
+        "checked": "In-Depth claims were checked against chart, citation, and temporal rules.",
+        "edited": (
+            "In-Depth was updated after checks; claims that did not pass were removed "
+            "or corrected."
+        ),
+        "needs_review": (
+            "No complete In-Depth response passed the chart, citation, and temporal "
+            "checks."
+        ),
+        "unavailable": "The In-Depth checks could not be completed.",
+    }.get(status, "The In-Depth check finished with an unknown status.")
+    reasons: list[str] = []
+
+    def add_reason(value: Any) -> None:
+        cleaned = " ".join(str(value or "").split())
+        if cleaned and cleaned not in reasons:
+            reasons.append(cleaned)
+
+    add_reason(validation.get("review_issues"))
+    for check in validation.get("citation_checks") or []:
+        if isinstance(check, Mapping) and check.get("status") == "fail":
+            add_reason(check.get("reason"))
+    for claim_check in validation.get("checks") or []:
+        if not isinstance(claim_check, Mapping):
+            continue
+        claim_gate = claim_check.get("gate")
+        if not isinstance(claim_gate, Mapping):
+            continue
+        for check in claim_gate.get("checks") or []:
+            if isinstance(check, Mapping) and check.get("status") == "fail":
+                add_reason(check.get("reason"))
+    if not reasons and error:
+        add_reason(error)
+    return " ".join([lead, *reasons[:2]])
+
+
 def _in_depth_payload(state: _State) -> Dict[str, Any]:
     final_answer = (
         "" if state.indepth_error else "\n".join("- " + claim for claim in state.claims)
     )
+    validation = dict(state.indepth_gate or {})
+    if state.indepth_error and not validation.get("status"):
+        validation["status"] = "needs_review"
+    if validation and not validation.get("summary"):
+        validation["summary"] = _indepth_validation_summary(
+            validation, state.indepth_error or ""
+        )
     payload: Dict[str, Any] = {
         "status": "needs_review" if state.indepth_error else "complete",
         "answer": final_answer,
         "error": state.indepth_error or "",
-        "validation": state.indepth_gate,
+        "validation": validation or None,
     }
     if state.indepth_error_code:
         payload["errorCode"] = state.indepth_error_code
-        payload["mandatorySourceIds"] = list(state.indepth_mandatory_source_ids)
+        payload["requiredSourceIds"] = list(state.indepth_required_source_ids)
     if (
         state.indepth_review_draft
         and state.indepth_review_draft.strip() != final_answer.strip()
@@ -1084,15 +1164,17 @@ def _raw_result(request: ExecutionRequest, state: _State) -> str:
             "citations": state.citations,
             "blocks": state.blocks,
         }
-        safety_status, warnings = stages._compute_safety_warnings(
+        safety_check = stages._compute_safety_check(
             state.drug_context,
             state.answer_text,
             stages._latest_user_text(state.messages),
             bool(request.profile.policies.get("drug_safety")),
         )
-        payload["safetyStatus"] = safety_status
-        if warnings:
-            payload["safetyWarnings"] = warnings
+        payload["safetyStatus"] = safety_check.status
+        if safety_check.warnings:
+            payload["safetyWarnings"] = [
+                warning.to_dict() for warning in safety_check.warnings
+            ]
         return json.dumps(payload)
     if mode == "combined":
         payload = json.loads(
@@ -1105,15 +1187,17 @@ def _raw_result(request: ExecutionRequest, state: _State) -> str:
                 state.indepth_conf,
             )
         )
-        safety_status, warnings = stages._compute_safety_warnings(
+        safety_check = stages._compute_safety_check(
             state.drug_context,
             state.answer_text,
             stages._latest_user_text(state.messages),
             bool(request.profile.policies.get("drug_safety")),
         )
-        payload["safetyStatus"] = safety_status
-        if warnings:
-            payload["safetyWarnings"] = warnings
+        payload["safetyStatus"] = safety_check.status
+        if safety_check.warnings:
+            payload["safetyWarnings"] = [
+                warning.to_dict() for warning in safety_check.warnings
+            ]
         return json.dumps(payload)
     return stages._fallback_envelope(
         "I could not produce a complete answer for this turn. Please try again."
@@ -1961,15 +2045,15 @@ async def _execute_stages(
                         _capture_indepth_review_artifact(state)
                         state.indepth_error = str(exc)
                         state.indepth_error_code = exc.code
-                        state.indepth_mandatory_source_ids = list(
-                            exc.mandatory_ids
+                        state.indepth_required_source_ids = list(
+                            exc.required_ids
                         )
                         state.steps.append(
                             {
                                 "role": "indepth_withheld",
                                 "reason": exc.code,
-                                "mandatory_source_ids": list(
-                                    exc.mandatory_ids
+                                "required_source_ids": list(
+                                    exc.required_ids
                                 ),
                             }
                         )
@@ -2239,6 +2323,18 @@ async def _execute_stages(
                 "answer": "",
                 "error": "In-Depth was not generated.",
             }
+            safety_check = stages._compute_safety_check(
+                state.drug_context,
+                str(payload.get("answer") or ""),
+                stages._latest_user_text(state.messages),
+                bool(request.profile.policies.get("drug_safety")),
+            )
+            payload["safetyStatus"] = safety_check.status
+            payload["safetyCheck"] = safety_check.to_dict()
+            if safety_check.warnings:
+                payload["safetyWarnings"] = [
+                    warning.to_dict() for warning in safety_check.warnings
+                ]
             write_execution_trace(answer_text=str(payload.get("answer") or ""))
             yield "done", json.dumps(payload)
         else:
@@ -2344,7 +2440,9 @@ class StageEngine:
             "answerValidation",
             "inDepth",
             "model",
+            "safetyStatus",
             "safetyWarnings",
+            "safetyCheck",
             "context",
             "temporalGate",
         ):

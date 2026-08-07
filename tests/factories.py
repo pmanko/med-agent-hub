@@ -58,7 +58,15 @@ def patient_source_registry(
         )
     return SourceRegistry(
         [
-            _StaticPatientSource(EvidenceLedger(tuple(records), original_text=chart)),
+            _StaticPatientSource(
+                EvidenceLedger(
+                    tuple(records),
+                    original_text=chart,
+                    source_metadata={
+                        "test-patient": {"patient_ledger_complete": True}
+                    },
+                )
+            ),
             StaticKnowledgeSource(),
         ]
     )

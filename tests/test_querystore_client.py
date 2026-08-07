@@ -34,9 +34,22 @@ class _FakeResponses:
         return self._responses.pop(0)
 
 
-def _page(records, total, snapshot_id="snap-1", etag='"etag-1"', status=200):
+def _page(
+    records,
+    total,
+    snapshot_id="snap-1",
+    etag='"etag-1"',
+    status=200,
+    chart_truncated=False,
+    projection_complete=True,
+):
     request = httpx.Request("GET", "http://openmrs/querystore")
-    body = {"results": records, "totalCount": total}
+    body = {
+        "results": records,
+        "totalCount": total,
+        "chartTruncated": chart_truncated,
+        "projectionComplete": projection_complete,
+    }
     if snapshot_id is not None:
         body["snapshotId"] = snapshot_id
     headers = {"ETag": etag} if etag is not None else {}
@@ -52,6 +65,8 @@ def _context_page(
     chart_truncated=False,
     effective_types=None,
     temporal_applied=True,
+    chart_snapshot_id="snap-1",
+    projection_complete=True,
 ):
     request = httpx.Request("GET", "http://openmrs/querystore")
     return httpx.Response(
@@ -60,8 +75,10 @@ def _context_page(
             "results": records,
             "totalCount": total,
             "sliceId": slice_id,
+            "chartSnapshotId": chart_snapshot_id,
             "chartSize": chart_size,
             "chartTruncated": chart_truncated,
+            "projectionComplete": projection_complete,
             "effectiveTypes": effective_types or ["drug_order"],
             "temporalApplied": temporal_applied,
         },
@@ -128,7 +145,49 @@ def test_full_chart_accepts_thin_endpoint_envelope(monkeypatch):
         records=[{"resourceType": "obs", "resourceUuid": "one"}],
         snapshot_id="snap-1",
         etag='"etag-1"',
+        projection_complete=True,
     )
+
+
+def test_full_chart_preserves_incomplete_projection_status(monkeypatch):
+    fake = _FakeResponses(
+        [
+            _page(
+                [{"resourceType": "obs", "resourceUuid": "one"}],
+                total=1,
+                projection_complete=False,
+            )
+        ]
+    )
+    monkeypatch.setattr("server.querystore_client.httpx.AsyncClient", fake)
+
+    result = _run(
+        QueryStoreClient("http://openmrs", "service", "secret").fetch_patient_ledger(
+            "patient-1"
+        )
+    )
+
+    assert result.projection_complete is False
+
+
+def test_full_chart_rejects_backend_reported_incomplete_chart(monkeypatch):
+    fake = _FakeResponses(
+        [
+            _page(
+                [{"resourceType": "obs", "resourceUuid": "one"}],
+                total=1,
+                chart_truncated=True,
+            )
+        ]
+    )
+    monkeypatch.setattr("server.querystore_client.httpx.AsyncClient", fake)
+
+    with pytest.raises(ValueError, match="incomplete patient chart"):
+        _run(
+            QueryStoreClient("http://openmrs", "service", "secret").fetch_patient_ledger(
+                "patient-1"
+            )
+        )
 
 
 @pytest.mark.parametrize(
@@ -280,6 +339,7 @@ def test_context_slice_continues_past_server_cap_and_preserves_selection_metadat
         chart_truncated=True,
         effective_types=("drug_order", "medication_dispense"),
         temporal_applied=True,
+        chart_snapshot_id="snap-1",
     )
     assert [request["params"]["startIndex"] for request in fake.requests] == [0, 2]
     assert all(request["params"]["limit"] == 500 for request in fake.requests)

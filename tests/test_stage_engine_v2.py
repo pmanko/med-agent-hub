@@ -283,7 +283,17 @@ def test_product_context_resolves_temporal_date_once_for_drug_safety_and_facts(
         resolve_calls.append((anchor, timezone_name, chart))
         return "2026-07-10"
 
-    def prepare_drugs(chart, mappings, _records, _question, reference_date, _enabled):
+    def prepare_drugs(
+        chart,
+        mappings,
+        _records,
+        _question,
+        reference_date,
+        _enabled,
+        *,
+        exposure_complete,
+    ):
+        assert exposure_complete is True
         drug_dates.append(reference_date)
         return chart, mappings, None
 
@@ -421,7 +431,14 @@ def test_prompt_selection_does_not_shrink_temporal_or_safety_evidence(monkeypatc
     safety_inputs = []
 
     def capture_safety_input(
-        chart, mappings, records, question, reference_date, enabled
+        chart,
+        mappings,
+        records,
+        question,
+        reference_date,
+        enabled,
+        *,
+        exposure_complete,
     ):
         safety_inputs.append(
             {
@@ -431,6 +448,7 @@ def test_prompt_selection_does_not_shrink_temporal_or_safety_evidence(monkeypatc
                 "question": question,
                 "reference_date": reference_date,
                 "enabled": enabled,
+                "exposure_complete": exposure_complete,
             }
         )
         return chart, mappings, None
@@ -578,6 +596,9 @@ def test_product_pipeline_fallback_records_enforced_temporal_gate(monkeypatch):
     assert gate["mode"] == "enforce"
     assert gate["applied"] == "fallback"
     assert events["done"]["answerValidation"]["status"] == "needs_review"
+    assert events["done"]["safetyStatus"] in {"limited", "unavailable"}
+    assert events["done"]["safetyCheck"]["schema_version"] == "drug_safety.v1"
+    assert events["done"]["safetyCheck"]["issues"]
     assert traces[0]["temporal_gate"] == gate
 
 

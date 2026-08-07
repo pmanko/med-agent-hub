@@ -32,6 +32,18 @@ def test_a_cold_key_fetches_with_no_if_none_match():
     assert calls == [None]
 
 
+def test_ledger_view_preserves_the_snapshot_bound_to_its_records():
+    cache = PatientLedgerCache()
+
+    async def fetch(_if_none_match):
+        return _modified([{"resourceUuid": "one"}], snapshot_id="snapshot-7")
+
+    ledger = asyncio.run(cache.get_ledger("patient-1", fetch))
+
+    assert list(ledger.records) == [{"resourceUuid": "one"}]
+    assert ledger.snapshot_id == "snapshot-7"
+
+
 def test_every_call_revalidates_even_when_unchanged():
     cache = PatientLedgerCache()
     calls = []

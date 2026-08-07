@@ -1,6 +1,15 @@
 # med-agent-hub
 
-med-agent-hub is the client-facing clinical answer service used by ChartSearchAI, the validation harness, and direct OpenAI-compatible clients. A request selects a validated profile or an explicit low-level leg. Profiles compose one shared stage engine; clients do not orchestrate the stages themselves.
+med-agent-hub is the shared profile and model-execution service used by
+ChartSearchAI, Catalyst, the validation harness, and direct OpenAI-compatible
+clients. All configured workflows use the same `Profile` schema. Hosted
+clinical profiles compose the Hub's clinical stage engine; caller-orchestrated
+profiles configure named roles that an application such as Catalyst invokes
+while retaining its own domain workflow.
+
+The hosted clinical workflow remains the client-facing clinical answer service;
+the caller-orchestrated workflow does not move Catalyst's SQL business logic
+into the Hub.
 
 ## Architecture
 
@@ -27,7 +36,18 @@ When Answer checks change a model draft, `answerValidation.originalAnswer` prese
 
 ## Profiles
 
-Configured profiles live in `server/levels.yaml` and declare a human label, topology, ordered stages, role models, prompts, validation policies, and context budget. The preferred product profile is `single-e4b-checked`; discovery marks it as the effective default only when it is available, otherwise the hub marks the available product profile with the lowest explicit `selection_priority`. Product envelopes always enforce deterministic temporal validation, regardless of discovery visibility, require exact tokenizer-backed context counting, and apply the hub-owned `chart_answer` JSON schema. A product request cannot replace that contract; low-level legs retain their existing caller-controlled `response_format` behavior.
+Configured profiles live in `server/levels.yaml` and declare a workflow,
+human label, topology, ordered stages, role models, prompts, knobs, and policies.
+`workflow: clinical_answer` profiles use the hosted clinical stage engine. The
+`workflow: catalyst_query` profile uses `topology: caller`: Hub owns its models,
+prompts, and knobs while Catalyst owns catalog context, SQL policy/lint,
+writer/reviewer orchestration, execution, and lineage. The preferred clinical
+product profile is `single-e4b-checked`; clinical discovery marks it as the
+effective default only when available. Product envelopes always enforce
+deterministic temporal validation, regardless of discovery visibility, require
+exact tokenizer-backed context counting, and apply the hub-owned `chart_answer`
+JSON schema. A product request cannot replace that contract; low-level legs
+retain their existing caller-controlled `response_format` behavior.
 
 Low-level experiment legs use these ids:
 
@@ -63,9 +83,13 @@ Trace packages are appended to `$TEAM_TRACE_DIR/trace.jsonl` (default `/app/trac
 
 ### Drug-safety data
 
-The deterministic drug-safety layer accepts either the bundled curated JSON source or an operator-provided WHO-ATC export through `DRUG_SAFETY_SOURCE_FORMAT` and `DRUG_SAFETY_DATASET_PATH`. Curated cross-reactivity groups load independently through `DRUG_SAFETY_CROSS_REACTIVITY_PATH`, so cross-branch rules work with either entry source. The bundled seed group covers the NSAID branches `M01AE` and `N02BA`; deployments remain responsible for reviewing and extending this clinical data.
+The deterministic drug-safety layer accepts either a package-shaped JSON source or an operator-provided ATC classification export through `DRUG_SAFETY_SOURCE_FORMAT` and `DRUG_SAFETY_DATASET_PATH`. A source package declares its identity, version, provenance, and review state. Only `clinically_approved` packages can emit deterministic product warnings; `proposed`, `evidence_curated`, or `retired` data is reported honestly and cannot be presented as reviewed clinical decision support. The bundled JSON and cross-reactivity data are unreviewed research seeds. ATC supplies classification, not interaction, contraindication, duplicate-therapy, or cross-reactivity rules.
+
+Every product response carries a canonical `drug_safety.v1` result with `checked`, `limited`, or `unavailable` status; package metadata; medication-mapping and patient-exposure coverage; identity confidence; issues; and any approved findings. The legacy `safetyStatus` and `safetyWarnings` fields remain for client compatibility. A missing source, incomplete patient exposure, unresolved active medication, or failed execution can therefore never look like a clean check.
 
 Weight-aware dose checks read the newest fresh numeric Querystore `obs` matching `DRUG_SAFETY_WEIGHT_CONCEPT_UUID` (CIEL weight `5089...` by default). `DRUG_SAFETY_WEIGHT_MAX_AGE_DAYS` defaults to 90. Set the concept value to `none` to disable only the weight-aware arm. Missing, stale, malformed, or unavailable optional safety data degrades to no additional warning and never interrupts an answer.
+
+Interaction rules preserve their source-assigned `severity`. `DRUG_SAFETY_MIN_INTERACTION_SEVERITY` defaults to `minor`, matching the bundled provider: rated `Unknown` rules are omitted, while `Minor`, `Moderate`, `Major`, and unrated curated rules remain eligible. An unrecognized setting falls back to `minor` rather than silently disabling rated warnings.
 
 ## Endpoints
 
@@ -76,6 +100,13 @@ Weight-aware dose checks read the newest fresh numeric Querystore `obs` matching
   router-advertised model IDs) for generic clients that own their own profiles.
   Router model IDs are public identifiers and must not embed credentials;
   endpoint and model metadata are credential-sanitized separately.
+- `GET /v1/hub/query-profiles`: caller-orchestrated Catalyst query profiles,
+  exact role/model/prompt/knob evidence, and live router availability.
+- `POST /v1/hub/query-profiles/{profile}/roles/{role}/generate`: execute one
+  configured query role. Callers provide non-system messages and an optional
+  response format; callers cannot override the role model, prompt, or knobs.
+- `POST /v1/hub/generate`: raw single-model compatibility endpoint for generic
+  consumers that own their own profile configuration. Catalyst does not use it.
 - `GET /health`: service health, uptime, and process memory.
 - `GET /`: concise service status.
 

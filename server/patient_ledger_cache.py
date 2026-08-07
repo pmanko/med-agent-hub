@@ -10,9 +10,9 @@ duplicate full-chart fetch, so a burst of turns for one patient cannot stampede 
 first caller completes, the rest each still revalidate (typically a cheap 304) before returning —
 this cache never substitutes another caller's answer for a stopped-short fetch of its own.
 
-Never serves a cached ledger after a failed fetch or an unresolved snapshot race (this module's
-``get_records`` only ever returns records it just validated) — the roadmap's "never serve stale
-context after source or validation failure." A chart mutated mid-pagination
+Never serves a cached ledger after a failed fetch or an unresolved snapshot race (``get_ledger``
+and its ``get_records`` compatibility view return only a just-validated ledger) — the roadmap's
+"never serve stale context after source or validation failure." A chart mutated mid-pagination
 (:class:`~server.querystore_client.InconsistentSnapshotError`) is retried once before that failure
 propagates; every other failure propagates immediately without a retry.
 """
@@ -33,6 +33,14 @@ class _CacheEntry:
     records: tuple[dict[str, Any], ...]
     snapshot_id: str
     etag: str
+    projection_complete: bool
+
+
+@dataclass(frozen=True)
+class CachedPatientLedger:
+    records: tuple[dict[str, Any], ...]
+    snapshot_id: str
+    projection_complete: bool
 
 
 class PatientLedgerCache:
@@ -56,8 +64,8 @@ class PatientLedgerCache:
             self._locks[key] = lock
         return lock
 
-    async def get_records(self, key: Hashable, fetch: FetchFn) -> list[dict[str, Any]]:
-        """Return the patient's current chart records for ``key``, single-flighted per key."""
+    async def get_ledger(self, key: Hashable, fetch: FetchFn) -> CachedPatientLedger:
+        """Return the current records and their verified snapshot, single-flighted per key."""
         async with self._lock_for(key):
             cached = self._entries.get(key)
             if_none_match = cached.etag if cached else None
@@ -72,7 +80,9 @@ class PatientLedgerCache:
                         "Querystore reported 304 Not Modified for an uncached patient chart"
                     )
                 self._entries.move_to_end(key)
-                return list(cached.records)
+                return CachedPatientLedger(
+                    cached.records, cached.snapshot_id, cached.projection_complete
+                )
 
             assert result.records is not None
             assert result.snapshot_id is not None
@@ -81,13 +91,21 @@ class PatientLedgerCache:
                 records=tuple(result.records),
                 snapshot_id=result.snapshot_id,
                 etag=result.etag,
+                projection_complete=result.projection_complete,
             )
             self._entries[key] = entry
             self._entries.move_to_end(key)
             while len(self._entries) > self._max_entries:
                 evicted_key, _ = self._entries.popitem(last=False)
                 self._forget_lock_if_idle(evicted_key)
-            return list(entry.records)
+            return CachedPatientLedger(
+                entry.records, entry.snapshot_id, entry.projection_complete
+            )
+
+    async def get_records(self, key: Hashable, fetch: FetchFn) -> list[dict[str, Any]]:
+        """Compatibility view of :meth:`get_ledger` for callers needing records only."""
+        ledger = await self.get_ledger(key, fetch)
+        return list(ledger.records)
 
     def _forget_lock_if_idle(self, key: Hashable) -> None:
         # Bounds `_locks` alongside `_entries`. Skips a lock some other task currently holds for
