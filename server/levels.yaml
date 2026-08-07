@@ -39,6 +39,28 @@ profiles:
     selection_priority: 10
     outputContracts: [catalyst.query.v1]
 
+  catalyst-query-gemma-4-12b:
+    workflow: catalyst_query
+    label: "Catalyst query — Gemma 4 12B writer"
+    topology: caller
+    stages: [context, query_generate, query_lint, query_finalize]
+    models:
+      query_generate: gemma-4-12b-q4
+    prompts:
+      query_generate: catalyst-query-generate
+    knobs:
+      query_generate: {temperature: 0, dry: 0, maxTokens: 1024}
+    policies:
+      orchestration_owner: catalyst
+      generation_attempts: 3
+      allowed_operation: select
+      collaborative_review: false
+      model_classes:
+        query_generate: gemma-4-12b
+    visibility: product
+    selection_priority: 20
+    outputContracts: [catalyst.query.v1]
+
   single-e4b-checked:
     label: Fast checked answer (E4B)
     topology: single

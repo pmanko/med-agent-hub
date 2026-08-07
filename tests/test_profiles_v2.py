@@ -356,7 +356,10 @@ def test_all_configured_profiles_and_prompts_validate_at_startup():
 
 
 def test_catalyst_uses_the_same_profile_schema_with_caller_owned_orchestration():
-    assert catalyst_query_profile_ids() == ["catalyst-query-e4b-qwen14b"]
+    assert catalyst_query_profile_ids() == [
+        "catalyst-query-e4b-qwen14b",
+        "catalyst-query-gemma-4-12b",
+    ]
     profile = get_catalyst_query_profile("catalyst-query-e4b-qwen14b")
 
     assert isinstance(profile, Profile)
@@ -375,7 +378,16 @@ def test_catalyst_uses_the_same_profile_schema_with_caller_owned_orchestration()
         "query_finalize",
     )
     assert profile.output_contracts == ("catalyst.query.v1",)
-    assert validate_catalyst_query_profiles() == (profile,)
+    writer_only = get_catalyst_query_profile("catalyst-query-gemma-4-12b")
+    assert writer_only.models == {"query_generate": "gemma-4-12b-q4"}
+    assert writer_only.stages == (
+        "context",
+        "query_generate",
+        "query_lint",
+        "query_finalize",
+    )
+    assert writer_only.policies["collaborative_review"] is False
+    assert validate_catalyst_query_profiles() == (profile, writer_only)
 
     # Clinical execution/discovery cannot accidentally run a caller-owned SQL
     # profile through the ChartSearchAI stage engine.
