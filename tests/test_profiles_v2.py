@@ -359,6 +359,9 @@ def test_catalyst_uses_the_same_profile_schema_with_caller_owned_orchestration()
     assert catalyst_query_profile_ids() == [
         "catalyst-query-e4b-qwen14b",
         "catalyst-query-gemma-4-12b",
+        "catalyst-query-gemma-4-12b-qwen2.5-14b-checked",
+        "catalyst-query-gemma-4-12b-q4-checked",
+        "catalyst-query-qwen-coder-1.5b",
     ]
     profile = get_catalyst_query_profile("catalyst-query-e4b-qwen14b")
 
@@ -367,8 +370,8 @@ def test_catalyst_uses_the_same_profile_schema_with_caller_owned_orchestration()
     assert profile.topology == "caller"
     assert profile.policies["orchestration_owner"] == "catalyst"
     assert profile.models == {
-        "query_generate": "google/gemma-4-e4b",
-        "query_review": "qwen2.5-14b-instruct-mlx",
+        "query_generate": "gemma-e4b",
+        "query_review": "qwen2.5-14b",
     }
     assert profile.stages == (
         "context",
@@ -387,7 +390,25 @@ def test_catalyst_uses_the_same_profile_schema_with_caller_owned_orchestration()
         "query_finalize",
     )
     assert writer_only.policies["collaborative_review"] is False
-    assert validate_catalyst_query_profiles() == (profile, writer_only)
+    validated = validate_catalyst_query_profiles()
+    assert len(validated) == len(catalyst_query_profile_ids())
+    assert validated[:2] == (profile, writer_only)
+
+
+def test_catalyst_query_models_are_llama_server_aliases():
+    """Every Catalyst role model must name a llama-server (GGUF) alias.
+
+    The MVP stack routes Hub through the llama.cpp router, so a provider-prefixed
+    or MLX-suffixed id (an LM Studio alias) is never advertised by the backend and
+    silently strands the profile as `model_not_advertised`.
+    """
+    for profile_id in catalyst_query_profile_ids():
+        profile = get_catalyst_query_profile(profile_id)
+        for role, model in profile.models.items():
+            assert "/" not in model, f"{profile_id}.{role} is provider-prefixed: {model}"
+            assert not model.endswith("-mlx"), (
+                f"{profile_id}.{role} is an MLX alias: {model}"
+            )
 
     # Clinical execution/discovery cannot accidentally run a caller-owned SQL
     # profile through the ChartSearchAI stage engine.

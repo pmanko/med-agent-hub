@@ -19,8 +19,8 @@ profiles:
     topology: caller
     stages: [context, query_generate, query_lint, query_review, query_finalize]
     models:
-      query_generate: google/gemma-4-e4b
-      query_review: qwen2.5-14b-instruct-mlx
+      query_generate: gemma-e4b
+      query_review: qwen2.5-14b
     prompts:
       query_generate: catalyst-query-generate
       query_review: catalyst-query-review
@@ -59,6 +59,88 @@ profiles:
         query_generate: gemma-4-12b
     visibility: product
     selection_priority: 20
+    outputContracts: [catalyst.query.v1]
+
+  # Cross-family reviewed lane: the reviewer is a different model family from the
+  # writer, so review is genuinely independent rather than a model re-reading its
+  # own output. Both stay resident on a 24G-class GPU once warm.
+  catalyst-query-gemma-4-12b-qwen2.5-14b-checked:
+    workflow: catalyst_query
+    label: "Catalyst query — Gemma 4 12B writer, Qwen 2.5 14B reviewer"
+    topology: caller
+    stages: [context, query_generate, query_lint, query_review, query_finalize]
+    models:
+      query_generate: gemma-4-12b
+      query_review: qwen2.5-14b
+    prompts:
+      query_generate: catalyst-query-generate
+      query_review: catalyst-query-review
+    knobs:
+      query_generate: {temperature: 0, dry: 0, maxTokens: 1024}
+      query_review: {temperature: 0, dry: 0, maxTokens: 1024}
+    policies:
+      orchestration_owner: catalyst
+      generation_attempts: 3
+      allowed_operation: select
+      collaborative_review: true
+      model_classes:
+        query_generate: gemma-4
+        query_review: qwen2.5
+    visibility: product
+    selection_priority: 15
+    outputContracts: [catalyst.query.v1]
+
+  # Self-checked single-model lane: one Q4 writer fills both roles, so a second
+  # pass is available on a CPU-only host without loading a second large model.
+  # Not collaborative — same model class reviewing itself.
+  catalyst-query-gemma-4-12b-q4-checked:
+    workflow: catalyst_query
+    label: "Catalyst query — Gemma 4 12B (Q4, self-checked)"
+    topology: caller
+    stages: [context, query_generate, query_lint, query_review, query_finalize]
+    models:
+      query_generate: gemma-4-12b-q4
+      query_review: gemma-4-12b-q4
+    prompts:
+      query_generate: catalyst-query-generate
+      query_review: catalyst-query-review
+    knobs:
+      query_generate: {temperature: 0, dry: 0, maxTokens: 1024}
+      query_review: {temperature: 0, dry: 0, maxTokens: 1024}
+    policies:
+      orchestration_owner: catalyst
+      generation_attempts: 3
+      allowed_operation: select
+      collaborative_review: false
+      model_classes:
+        query_generate: gemma-4-q4
+        query_review: gemma-4-q4
+    visibility: product
+    selection_priority: 30
+    outputContracts: [catalyst.query.v1]
+
+  # Smallest writer-only lane: runs on any host. Deterministic lint decides
+  # whether the single candidate can be finalized; there is no reviewer role.
+  catalyst-query-qwen-coder-1.5b:
+    workflow: catalyst_query
+    label: "Catalyst query — Qwen 2.5 Coder 1.5B (Q4, writer only)"
+    topology: caller
+    stages: [context, query_generate, query_lint, query_finalize]
+    models:
+      query_generate: qwen2.5-coder-1.5b-instruct-q4_k_m
+    prompts:
+      query_generate: catalyst-query-generate
+    knobs:
+      query_generate: {temperature: 0, dry: 0, maxTokens: 1024}
+    policies:
+      orchestration_owner: catalyst
+      generation_attempts: 3
+      allowed_operation: select
+      collaborative_review: false
+      model_classes:
+        query_generate: qwen2.5-coder
+    visibility: product
+    selection_priority: 40
     outputContracts: [catalyst.query.v1]
 
   single-e4b-checked:
