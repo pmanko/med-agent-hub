@@ -121,8 +121,8 @@ def test_catalyst_query_profile_owns_model_prompt_and_knobs(monkeypatch):
         generic_role,
         "_served_backend_model_metadata",
         lambda: {
-            "google/gemma-4-e4b": {},
-            "qwen2.5-14b-instruct-mlx": {},
+            "gemma-e4b": {},
+            "qwen2.5-14b": {},
         },
     )
 
@@ -140,9 +140,9 @@ def test_catalyst_query_profile_owns_model_prompt_and_knobs(monkeypatch):
         )
 
     assert response.status_code == 200
-    assert response.json()["model"] == "google/gemma-4-e4b"
+    assert response.json()["model"] == "gemma-e4b"
     assert response.json()["profile_id"] == "catalyst-query-e4b-qwen14b"
-    assert captured["model"] == "google/gemma-4-e4b"
+    assert captured["model"] == "gemma-e4b"
     assert captured["messages"][0]["role"] == "system"
     assert "Catalyst governed analytics-query" in captured["messages"][0]["content"]
     assert captured["kwargs"]["temperature"] == 0.0
@@ -154,8 +154,8 @@ def test_catalyst_query_profile_rejects_caller_model_and_knob_overrides(monkeypa
         generic_role,
         "_served_backend_model_metadata",
         lambda: {
-            "google/gemma-4-e4b": {},
-            "qwen2.5-14b-instruct-mlx": {},
+            "gemma-e4b": {},
+            "qwen2.5-14b": {},
         },
     )
     response = TestClient(app).post(
@@ -174,7 +174,7 @@ def test_catalyst_query_profile_reports_missing_model_without_generating(monkeyp
     monkeypatch.setattr(
         generic_role,
         "_served_backend_model_metadata",
-        lambda: {"google/gemma-4-e4b": {}},
+        lambda: {"gemma-e4b": {}},
     )
     response = TestClient(app).post(
         "/v1/hub/query-profiles/catalyst-query-e4b-qwen14b/roles/query_review/generate",
@@ -185,7 +185,7 @@ def test_catalyst_query_profile_reports_missing_model_without_generating(monkeyp
     assert response.json()["detail"] == {
         "code": "profile_unavailable",
         "profileId": "catalyst-query-e4b-qwen14b",
-        "unavailableReasons": ["model_not_advertised:qwen2.5-14b-instruct-mlx"],
+        "unavailableReasons": ["model_not_advertised:qwen2.5-14b"],
     }
 
 
@@ -194,8 +194,8 @@ def test_catalyst_query_profile_rejects_caller_system_prompt(monkeypatch):
         generic_role,
         "_served_backend_model_metadata",
         lambda: {
-            "google/gemma-4-e4b": {},
-            "qwen2.5-14b-instruct-mlx": {},
+            "gemma-e4b": {},
+            "qwen2.5-14b": {},
         },
     )
     response = TestClient(app).post(
