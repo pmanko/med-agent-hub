@@ -1171,6 +1171,7 @@ def _raw_result(request: ExecutionRequest, state: _State) -> str:
             bool(request.profile.policies.get("drug_safety")),
         )
         payload["safetyStatus"] = safety_check.status
+        payload["safetyCheck"] = safety_check.to_dict()
         if safety_check.warnings:
             payload["safetyWarnings"] = [
                 warning.to_dict() for warning in safety_check.warnings
