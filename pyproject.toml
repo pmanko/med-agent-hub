@@ -16,6 +16,7 @@ psutil = "^5.9.0"
 httpx = "^0.28.1"
 python-dotenv = "^1.0.1"
 PyYAML = "^6.0"
+rfc8785 = "^0.1.4"
 
 [tool.poetry.group.dev.dependencies]
 black = "^23.0.0"

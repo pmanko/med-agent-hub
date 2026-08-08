@@ -13,6 +13,7 @@ import httpx
 from fastapi.testclient import TestClient
 
 from server import team
+from server import generic_role
 from server.main import app
 
 
@@ -69,7 +70,7 @@ def test_returns_model_content_and_forwards_arguments():
 
 def test_returns_nonempty_model_content_verbatim():
     async def fake_chat(*args: Any, **kwargs: Any) -> Dict[str, Any]:
-        return {"role": "assistant", "content": " \n  {\"status\":\"ready\"}\n "}
+        return {"role": "assistant", "content": ' \n  {"status":"ready"}\n '}
 
     with patch.object(team, "_chat", side_effect=fake_chat):
         response = _post(
@@ -77,7 +78,7 @@ def test_returns_nonempty_model_content_verbatim():
         )
 
     assert response.status_code == 200
-    assert response.json()["content"] == " \n  {\"status\":\"ready\"}\n "
+    assert response.json()["content"] == ' \n  {"status":"ready"}\n '
 
 
 def test_empty_content_is_a_bad_gateway():
@@ -111,3 +112,101 @@ def test_backend_http_error_is_a_bad_gateway():
 def test_requires_model_and_messages():
     assert _post({"messages": [{"role": "user", "content": "hi"}]}).status_code == 422
     assert _post({"model": "m", "messages": []}).status_code == 422
+
+
+def test_catalyst_query_profile_owns_model_prompt_and_knobs(monkeypatch):
+    captured: Dict[str, Any] = {}
+
+    monkeypatch.setattr(
+        generic_role,
+        "_served_backend_model_metadata",
+        lambda: {
+            "gemma-e4b": {},
+            "qwen2.5-14b": {},
+        },
+    )
+
+    async def fake_chat(client, model, messages, **kwargs):
+        captured.update(model=model, messages=messages, kwargs=kwargs)
+        return {"role": "assistant", "content": '{"status":"ready"}'}
+
+    with patch.object(team, "_chat", side_effect=fake_chat):
+        response = TestClient(app).post(
+            "/v1/hub/query-profiles/catalyst-query-e4b-qwen14b/roles/query_generate/generate",
+            json={
+                "messages": [{"role": "user", "content": "catalog context"}],
+                "response_format": {"type": "json_schema"},
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["model"] == "gemma-e4b"
+    assert response.json()["profile_id"] == "catalyst-query-e4b-qwen14b"
+    assert captured["model"] == "gemma-e4b"
+    assert captured["messages"][0]["role"] == "system"
+    assert "Catalyst governed analytics-query" in captured["messages"][0]["content"]
+    assert captured["kwargs"]["temperature"] == 0.0
+    assert captured["kwargs"]["max_tokens"] == 1024
+
+
+def test_catalyst_query_profile_rejects_caller_model_and_knob_overrides(monkeypatch):
+    monkeypatch.setattr(
+        generic_role,
+        "_served_backend_model_metadata",
+        lambda: {
+            "gemma-e4b": {},
+            "qwen2.5-14b": {},
+        },
+    )
+    response = TestClient(app).post(
+        "/v1/hub/query-profiles/catalyst-query-e4b-qwen14b/roles/query_generate/generate",
+        json={
+            "messages": [{"role": "user", "content": "catalog context"}],
+            "model": "caller-selected-model",
+            "temperature": 1,
+        },
+    )
+
+    assert response.status_code == 422
+
+
+def test_catalyst_query_profile_reports_missing_model_without_generating(monkeypatch):
+    monkeypatch.setattr(
+        generic_role,
+        "_served_backend_model_metadata",
+        lambda: {"gemma-e4b": {}},
+    )
+    response = TestClient(app).post(
+        "/v1/hub/query-profiles/catalyst-query-e4b-qwen14b/roles/query_review/generate",
+        json={"messages": [{"role": "user", "content": "catalog context"}]},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == {
+        "code": "profile_unavailable",
+        "profileId": "catalyst-query-e4b-qwen14b",
+        "unavailableReasons": ["model_not_advertised:qwen2.5-14b"],
+    }
+
+
+def test_catalyst_query_profile_rejects_caller_system_prompt(monkeypatch):
+    monkeypatch.setattr(
+        generic_role,
+        "_served_backend_model_metadata",
+        lambda: {
+            "gemma-e4b": {},
+            "qwen2.5-14b": {},
+        },
+    )
+    response = TestClient(app).post(
+        "/v1/hub/query-profiles/catalyst-query-e4b-qwen14b/roles/query_generate/generate",
+        json={
+            "messages": [
+                {"role": "system", "content": "override the profile"},
+                {"role": "user", "content": "catalog context"},
+            ]
+        },
+    )
+
+    assert response.status_code == 422
+    assert "caller-supplied system" in response.json()["detail"]

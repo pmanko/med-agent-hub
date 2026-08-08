@@ -4,14 +4,20 @@ import hashlib
 from dataclasses import replace
 
 import pytest
+import rfc8785
 
 from server.levels_loader import (
     ModelNotFoundError,
+    Profile,
+    catalyst_query_profile_evidence,
+    catalyst_query_profile_ids,
     compile_profile,
+    get_catalyst_query_profile,
     get_profile,
     profile_ids,
     profile_metadata,
     resolve_temporal_policy,
+    validate_catalyst_query_profiles,
     validate_profiles,
 )
 from server.prompt_loader import load_prompt
@@ -36,6 +42,7 @@ def test_default_product_profile_is_human_readable_single_e4b():
     profile = get_profile("single-e4b-checked")
 
     assert profile.label == "Fast checked answer (E4B)"
+    assert profile.workflow == "clinical_answer"
     assert profile.default is True
     assert profile.topology == "single"
     assert "orchestrator" not in profile.models
@@ -252,6 +259,7 @@ def test_discovery_metadata_is_authoritative_and_dynamic_legs_are_not_advertised
     assert metadata == {
         "id": "single-e4b-checked",
         "label": "Fast checked answer (E4B)",
+        "workflow": "clinical_answer",
         "staged": True,
         "validation": True,
         "temporal_enforcement": "enforce",
@@ -345,6 +353,108 @@ def test_only_one_configured_profile_is_default():
 def test_all_configured_profiles_and_prompts_validate_at_startup():
     profiles = validate_profiles()
     assert len(profiles) == len(profile_ids())
+
+
+def test_catalyst_uses_the_same_profile_schema_with_caller_owned_orchestration():
+    assert catalyst_query_profile_ids() == [
+        "catalyst-query-e4b-qwen14b",
+        "catalyst-query-gemma-4-12b",
+        "catalyst-query-gemma-4-12b-qwen2.5-14b-checked",
+        "catalyst-query-gemma-4-12b-q4-checked",
+        "catalyst-query-qwen-coder-1.5b",
+    ]
+    profile = get_catalyst_query_profile("catalyst-query-e4b-qwen14b")
+
+    assert isinstance(profile, Profile)
+    assert profile.workflow == "catalyst_query"
+    assert profile.topology == "caller"
+    assert profile.policies["orchestration_owner"] == "catalyst"
+    assert profile.models == {
+        "query_generate": "gemma-e4b",
+        "query_review": "qwen2.5-14b",
+    }
+    assert profile.stages == (
+        "context",
+        "query_generate",
+        "query_lint",
+        "query_review",
+        "query_finalize",
+    )
+    assert profile.output_contracts == ("catalyst.query.v1",)
+    writer_only = get_catalyst_query_profile("catalyst-query-gemma-4-12b")
+    assert writer_only.models == {"query_generate": "gemma-4-12b-q4"}
+    assert writer_only.stages == (
+        "context",
+        "query_generate",
+        "query_lint",
+        "query_finalize",
+    )
+    assert writer_only.policies["collaborative_review"] is False
+    validated = validate_catalyst_query_profiles()
+    assert len(validated) == len(catalyst_query_profile_ids())
+    assert validated[:2] == (profile, writer_only)
+
+
+def test_catalyst_query_models_are_llama_server_aliases():
+    """Every Catalyst role model must name a llama-server (GGUF) alias.
+
+    The MVP stack routes Hub through the llama.cpp router, so a provider-prefixed
+    or MLX-suffixed id (an LM Studio alias) is never advertised by the backend and
+    silently strands the profile as `model_not_advertised`.
+    """
+    for profile_id in catalyst_query_profile_ids():
+        profile = get_catalyst_query_profile(profile_id)
+        for role, model in profile.models.items():
+            assert "/" not in model, f"{profile_id}.{role} is provider-prefixed: {model}"
+            assert not model.endswith("-mlx"), (
+                f"{profile_id}.{role} is an MLX alias: {model}"
+            )
+
+        # Clinical execution/discovery cannot accidentally run a caller-owned SQL
+        # profile through the ChartSearchAI stage engine.
+        assert profile.id not in profile_ids()
+        with pytest.raises(ModelNotFoundError):
+            get_profile(profile.id)
+
+
+def test_catalyst_prompt_evidence_uses_workbench_sha256_contract():
+    profile = get_catalyst_query_profile("catalyst-query-e4b-qwen14b")
+    evidence = catalyst_query_profile_evidence(profile)
+
+    for public_role, profile_role in (
+        ("writer", "query_generate"),
+        ("reviewer", "query_review"),
+    ):
+        prompt_name = profile.prompts[profile_role]
+        expected = hashlib.sha256(load_prompt(prompt_name).encode("utf-8")).hexdigest()
+        assert evidence[public_role]["systemPrompt"]["promptDigest"] == expected
+        assert len(expected) == 64
+        assert not expected.startswith("sha256:")
+
+    assert len(evidence["profileDigest"]) == 64
+    compact = {
+        **evidence,
+        "writer": {
+            **evidence["writer"],
+            "systemPrompt": {
+                key: value
+                for key, value in evidence["writer"]["systemPrompt"].items()
+                if key != "text"
+            },
+        },
+        "reviewer": {
+            **evidence["reviewer"],
+            "systemPrompt": {
+                key: value
+                for key, value in evidence["reviewer"]["systemPrompt"].items()
+                if key != "text"
+            },
+        },
+    }
+    compact.pop("profileDigest")
+    assert (
+        evidence["profileDigest"] == hashlib.sha256(rfc8785.dumps(compact)).hexdigest()
+    )
 
 
 def test_compiled_profile_configuration_is_immutable():
