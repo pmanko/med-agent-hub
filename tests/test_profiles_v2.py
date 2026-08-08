@@ -410,11 +410,11 @@ def test_catalyst_query_models_are_llama_server_aliases():
                 f"{profile_id}.{role} is an MLX alias: {model}"
             )
 
-    # Clinical execution/discovery cannot accidentally run a caller-owned SQL
-    # profile through the ChartSearchAI stage engine.
-    assert profile.id not in profile_ids()
-    with pytest.raises(ModelNotFoundError):
-        get_profile(profile.id)
+        # Clinical execution/discovery cannot accidentally run a caller-owned SQL
+        # profile through the ChartSearchAI stage engine.
+        assert profile.id not in profile_ids()
+        with pytest.raises(ModelNotFoundError):
+            get_profile(profile.id)
 
 
 def test_catalyst_prompt_evidence_uses_workbench_sha256_contract():
