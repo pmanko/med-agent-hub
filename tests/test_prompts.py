@@ -311,3 +311,21 @@ def test_team_passes_through_a_schema_valid_two_section_table_envelope():
     assert [c["key"] for c in block["columns"]] == ["medication", "action"]
     first_cell = block["rows"][0]["cells"]["medication"]
     assert first_cell["text"] == "Lamivudine" and first_cell["refs"] == [29]
+
+
+def test_query_generate_prompt_ranks_the_session_context_layers():
+    """The writer is told what standing guidance is, and what it outranks.
+
+    Position alone is ambiguous to a model: without saying so, pinned
+    guidance reads either as another old instruction to ignore or as an
+    override of the request in front of it. Both are wrong.
+    """
+    prompt = prompt_loader.load_prompt("catalyst-query-generate")
+
+    assert "sessionContext" in prompt
+    # Standing, but under the current instruction.
+    assert "guidance" in prompt
+    assert "current instruction" in prompt
+    # Examples and failures inform; they do not command.
+    assert "verifiedExamples" in prompt
+    assert "relevantFailure" in prompt
