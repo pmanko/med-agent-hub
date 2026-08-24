@@ -210,3 +210,84 @@ def test_catalyst_query_profile_rejects_caller_system_prompt(monkeypatch):
 
     assert response.status_code == 422
     assert "caller-supplied system" in response.json()["detail"]
+
+
+def test_a_role_generation_counts_its_rendered_request_first(monkeypatch):
+    """Exact token evidence: the model's own template and tokenizer, counted
+    before the call, with the window and reserve it will run under.
+
+    A character count is not token evidence, so the accounting names the
+    tokenizer (the model itself) and comes from the router's /apply-template
+    and /tokenize -- the same code that will consume the prompt.
+    """
+    monkeypatch.setattr(
+        generic_role,
+        "_served_backend_model_metadata",
+        lambda: {"gemma-e4b": {}, "qwen2.5-14b": {}},
+    )
+    counted: Dict[str, Any] = {}
+
+    async def fake_accounting(model, messages, max_tokens):
+        counted.update(model=model, turns=len(messages), reserve=max_tokens)
+        return {
+            "tokenizer": model,
+            "contextWindow": 24576,
+            "outputReserve": max_tokens,
+            "promptTokens": 1234,
+        }
+
+    async def fake_chat(client, model, messages, **kwargs):
+        return {"role": "assistant", "content": '{"status":"ready"}'}
+
+    with (
+        patch.object(generic_role, "_token_accounting", side_effect=fake_accounting),
+        patch.object(team, "_chat", side_effect=fake_chat),
+    ):
+        response = TestClient(app).post(
+            "/v1/hub/query-profiles/catalyst-query-e4b-qwen14b/roles/query_generate/generate",
+            json={"messages": [{"role": "user", "content": "catalog context"}]},
+        )
+
+    assert response.status_code == 200
+    accounting = response.json()["token_accounting"]
+    assert accounting == {
+        "tokenizer": "gemma-e4b",
+        "contextWindow": 24576,
+        "outputReserve": 1024,
+        "promptTokens": 1234,
+    }
+    # Counted over the fully rendered request: system prompt plus the caller's.
+    assert counted == {"model": "gemma-e4b", "turns": 2, "reserve": 1024}
+
+
+def test_an_uncountable_request_is_answered_with_no_accounting_not_a_guess(
+    monkeypatch,
+):
+    """When the router cannot tokenize, the honest evidence is absence.
+
+    Substituting a character estimate would satisfy the shape while lying
+    about the one property the field exists to prove.
+    """
+    monkeypatch.setattr(
+        generic_role,
+        "_served_backend_model_metadata",
+        lambda: {"gemma-e4b": {}, "qwen2.5-14b": {}},
+    )
+
+    async def broken_accounting(model, messages, max_tokens):
+        return None
+
+    async def fake_chat(client, model, messages, **kwargs):
+        return {"role": "assistant", "content": '{"status":"ready"}'}
+
+    with (
+        patch.object(generic_role, "_token_accounting", side_effect=broken_accounting),
+        patch.object(team, "_chat", side_effect=fake_chat),
+    ):
+        response = TestClient(app).post(
+            "/v1/hub/query-profiles/catalyst-query-e4b-qwen14b/roles/query_generate/generate",
+            json={"messages": [{"role": "user", "content": "catalog context"}]},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["token_accounting"] is None
