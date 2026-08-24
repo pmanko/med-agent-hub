@@ -31,6 +31,7 @@ from .levels_loader import (
     get_catalyst_query_profile,
 )
 from .openai_compat import _backend_discovery_metadata, _served_backend_model_metadata
+from .config import llm_config
 from .prompt_loader import load_prompt
 
 router = APIRouter()
@@ -64,11 +65,80 @@ class ProfileGenerateRequest(BaseModel):
 class ProfileGenerateResponse(GenerateResponse):
     profile_id: str
     role: str
+    # Exact token evidence for the fully rendered request, counted with the
+    # model's own template and tokenizer before the call. None when the
+    # router could not count -- absence is honest, a character estimate is not.
+    token_accounting: Optional[Dict[str, Any]] = None
 
 
 def _backend_models() -> set[str] | None:
     discovered = _served_backend_model_metadata()
     return None if discovered is None else set(discovered)
+
+
+_CONTEXT_WINDOWS: Dict[str, int] = {}
+
+
+def _context_window(model: str) -> Optional[int]:
+    """The --ctx-size the router actually launched this model with."""
+    cached = _CONTEXT_WINDOWS.get(model)
+    if cached:
+        return cached
+    metadata = _served_backend_model_metadata() or {}
+    entry = metadata.get(model) or {}
+    args = list(((entry.get("status") or {}).get("args")) or [])
+    for index, item in enumerate(args[:-1]):
+        if item in ("--ctx-size", "-c"):
+            try:
+                _CONTEXT_WINDOWS[model] = int(args[index + 1])
+                return _CONTEXT_WINDOWS[model]
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+async def _token_accounting(
+    model: str, messages: List[Dict[str, Any]], max_tokens: Optional[int]
+) -> Optional[Dict[str, Any]]:
+    """Count the rendered request with the model's own template and tokenizer.
+
+    /apply-template renders the exact prompt the model will consume --
+    special tokens included -- and /tokenize counts it with the model's own
+    vocabulary, so the number is the one the context window will see.
+    """
+    window = _context_window(model)
+    if window is None or max_tokens is None:
+        return None
+    base = llm_config.base_url.rstrip("/")
+    headers = {}
+    if llm_config.api_key:
+        headers["Authorization"] = f"Bearer {llm_config.api_key}"
+    try:
+        async with httpx.AsyncClient(headers=headers, timeout=30.0) as client:
+            rendered = await client.post(
+                f"{base}/apply-template",
+                json={"model": model, "messages": messages},
+            )
+            rendered.raise_for_status()
+            prompt = rendered.json().get("prompt")
+            if not isinstance(prompt, str):
+                return None
+            tokenized = await client.post(
+                f"{base}/tokenize",
+                json={"model": model, "content": prompt},
+            )
+            tokenized.raise_for_status()
+            tokens = tokenized.json().get("tokens")
+            if not isinstance(tokens, list):
+                return None
+    except Exception:
+        return None
+    return {
+        "tokenizer": model,
+        "contextWindow": window,
+        "outputReserve": int(max_tokens),
+        "promptTokens": len(tokens),
+    }
 
 
 def _profile_or_404(profile_id: str):
@@ -184,12 +254,16 @@ async def generate_query_role(
             },
         )
     knobs = profile.knobs[role]
+    rendered_messages = [
+        {"role": "system", "content": load_prompt(profile.prompts[role])},
+        *req.messages,
+    ]
+    accounting = await _token_accounting(
+        profile.models[role], rendered_messages, int(knobs["maxTokens"])
+    )
     content = await _chat_or_bad_gateway(
         model=profile.models[role],
-        messages=[
-            {"role": "system", "content": load_prompt(profile.prompts[role])},
-            *req.messages,
-        ],
+        messages=rendered_messages,
         response_format=req.response_format,
         temperature=float(knobs["temperature"]),
         dry_multiplier=float(knobs["dry"]),
@@ -200,4 +274,5 @@ async def generate_query_role(
         role=role,
         model=profile.models[role],
         content=content,
+        token_accounting=accounting,
     )
