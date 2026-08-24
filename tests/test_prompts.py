@@ -311,3 +311,54 @@ def test_team_passes_through_a_schema_valid_two_section_table_envelope():
     assert [c["key"] for c in block["columns"]] == ["medication", "action"]
     first_cell = block["rows"][0]["cells"]["medication"]
     assert first_cell["text"] == "Lamivudine" and first_cell["refs"] == [29]
+
+
+def test_query_generate_prompt_ranks_the_session_context_layers():
+    """The writer is told what standing guidance is, and what it outranks.
+
+    Position alone is ambiguous to a model: without saying so, pinned
+    guidance reads either as another old instruction to ignore or as an
+    override of the request in front of it. Both are wrong.
+    """
+    prompt = prompt_loader.load_prompt("catalyst-query-generate")
+
+    assert "sessionContext" in prompt
+    # Standing, but under the current instruction.
+    assert "guidance" in prompt
+    assert "current instruction" in prompt
+    # Examples and failures inform; they do not command.
+    assert "verifiedExamples" in prompt
+    assert "relevantFailure" in prompt
+
+
+def test_query_generate_prompt_offers_all_three_writer_answers():
+    """A schema branch the prompt forbids is a branch the writer never takes.
+
+    Catalyst's generation grammar admits `ready`, `needs_clarification` and
+    `unsupported`. While the prompt said the stage was constrained to a
+    `ready` candidate, the other two were unreachable in practice and the
+    writer's only way out of an ambiguous or unanswerable question was to
+    invent a query for it.
+    """
+    prompt = prompt_loader.load_prompt("catalyst-query-generate")
+
+    assert "constrained to a `ready` candidate" not in prompt
+    for status in ("ready", "needs_clarification", "unsupported"):
+        assert f"`{status}`" in prompt
+    # Asking and declining are different acts and are not interchangeable:
+    # one is answerable, the other is not.
+    assert "clarification" in prompt
+    assert "message" in prompt
+
+
+def test_query_generate_prompt_handles_a_revision_with_no_editor():
+    """The reply to a question revises nothing, and must not be treated as one.
+
+    Told only that `revision` means "apply the instruction to the editor
+    artifact", a writer handed a revision with no `editorSnapshot` has no
+    stated behaviour to fall back on.
+    """
+    prompt = prompt_loader.load_prompt("catalyst-query-generate")
+
+    assert "revision.editorSnapshot" in prompt
+    assert "no `editorSnapshot`" in prompt
