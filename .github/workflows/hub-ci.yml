@@ -5,6 +5,12 @@ on:
   push:
     branches: [main, "feat/**", "fix/**", harness-integration]
 
+# A newer push supersedes any older run for the same branch. In particular,
+# an older main build must not finish later and move `latest` backwards.
+concurrency:
+  group: hub-ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   # The fast deterministic suite: levels/config parsing, validator, prompts,
   # temporal, KB, roles, and the /v1 OpenAI-compat contract (test_bridge) that
