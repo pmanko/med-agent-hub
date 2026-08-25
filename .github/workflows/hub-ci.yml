@@ -63,35 +63,74 @@ jobs:
           docker rm -f hub-smoke >/dev/null
           exit 1
 
-  # Publish so consumers can pin an image instead of vendoring this repo and
-  # building from source. Catalyst's demo stack in particular has no other
-  # reason to require a checkout of the hub.
+      # Preserve the tested bytes for the separately permissioned publish job.
+      # Pull requests prove the build and startup path but do not upload or push.
+      - name: Export the tested image
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: docker save --output /tmp/hub-ci-candidate.tar hub-ci-candidate
+
+      - name: Transfer the tested image to the publish job
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: hub-ci-candidate-${{ github.sha }}
+          path: /tmp/hub-ci-candidate.tar
+          retention-days: 1
+          if-no-files-found: error
+
+  # Only reviewed main commits may publish. This job receives the exact image
+  # that passed /health; it never rebuilds the source tree.
   publish:
-    # Only from main: a published tag should always name reviewed, merged code,
-    # and pull requests (especially from forks) cannot push packages anyway.
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: [unit-and-contract, docker-build]
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
+    outputs:
+      published-image: ${{ steps.publish.outputs.image }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Download the tested image
+        uses: actions/download-artifact@v4
+        with:
+          name: hub-ci-candidate-${{ github.sha }}
+          path: /tmp
 
-      - uses: docker/login-action@v3
+      - name: Load and verify the tested image
+        run: |
+          docker load --input /tmp/hub-ci-candidate.tar
+          revision="$(docker image inspect --format \
+            '{{index .Config.Labels "org.opencontainers.image.revision"}}' \
+            hub-ci-candidate)"
+          test "${revision}" = "${GITHUB_SHA}"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Both tags point at the same image. The commit-SHA tag is the one to
-      # deploy: it is immutable and reproducible, which `latest` is not.
-      - uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          build-args: |
-            HUB_BUILD_REVISION=${{ github.sha }}
-          tags: |
-            ghcr.io/${{ github.repository }}:${{ github.sha }}
-            ghcr.io/${{ github.repository }}:latest
+      # Publish the exact local image that passed /health. Tags are convenient
+      # lookup names and can move; deployments must pin the recorded digest.
+      - name: Publish the tested image and record its immutable digest
+        id: publish
+        env:
+          IMAGE_NAME: ghcr.io/${{ github.repository }}
+        run: |
+          docker tag hub-ci-candidate "${IMAGE_NAME}:${GITHUB_SHA}"
+          docker tag hub-ci-candidate "${IMAGE_NAME}:latest"
+          docker push "${IMAGE_NAME}:${GITHUB_SHA}"
+          docker push "${IMAGE_NAME}:latest"
+
+          digest="$(docker buildx imagetools inspect \
+            "${IMAGE_NAME}:${GITHUB_SHA}" --format '{{.Manifest.Digest}}')"
+          case "${digest}" in
+            sha256:????????????????????????????????????????????????????????????????) ;;
+            *) echo "Could not resolve the published manifest digest: ${digest}" >&2; exit 1 ;;
+          esac
+
+          immutable_image="${IMAGE_NAME}@${digest}"
+          echo "image=${immutable_image}" >> "${GITHUB_OUTPUT}"
+          echo "### Published tested Hub image" >> "${GITHUB_STEP_SUMMARY}"
+          echo "\`${immutable_image}\`" >> "${GITHUB_STEP_SUMMARY}"
