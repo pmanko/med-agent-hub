@@ -34,7 +34,11 @@ from .levels_loader import (
     catalyst_query_profile_metadata,
     get_catalyst_query_profile,
 )
-from .openai_compat import _backend_discovery_metadata, _served_backend_model_metadata
+from .openai_compat import (
+    ROUTER_PROBE_TIMEOUT_SECONDS,
+    _backend_discovery_metadata,
+    _served_backend_model_metadata,
+)
 from .prompt_loader import load_prompt
 
 router = APIRouter()
@@ -129,7 +133,10 @@ async def _prompt_measurement(
     if llm_config.api_key:
         headers["Authorization"] = f"Bearer {llm_config.api_key}"
     try:
-        async with httpx.AsyncClient(headers=headers, timeout=30.0) as client:
+        async with httpx.AsyncClient(
+            headers=headers,
+            timeout=ROUTER_PROBE_TIMEOUT_SECONDS,
+        ) as client:
             try:
                 rendered = await client.post(
                     f"{base}/apply-template",

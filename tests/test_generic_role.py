@@ -374,6 +374,7 @@ def test_a_configured_role_records_the_exact_request_passed_to_chat(monkeypatch)
 
 def test_prompt_measurement_records_exact_rendering_count_and_fit(monkeypatch):
     calls: list[tuple[str, Dict[str, Any]]] = []
+    client_options: Dict[str, Any] = {}
 
     class Response:
         def __init__(self, payload):
@@ -387,7 +388,7 @@ def test_prompt_measurement_records_exact_rendering_count_and_fit(monkeypatch):
 
     class Client:
         def __init__(self, *args, **kwargs):
-            pass
+            client_options.update(kwargs)
 
         async def __aenter__(self):
             return self
@@ -432,6 +433,7 @@ def test_prompt_measurement_records_exact_rendering_count_and_fit(monkeypatch):
         "add_special": False,
         "parse_special": True,
     }
+    assert client_options["timeout"] == generic_role.ROUTER_PROBE_TIMEOUT_SECONDS
 
 
 def test_context_window_is_read_from_current_router_metadata(monkeypatch):
