@@ -75,8 +75,7 @@ def _is_sensitive_metadata_key(normalized: str, parts: tuple[str, ...]) -> bool:
     if normalized in _SENSITIVE_METADATA_KEYS:
         return True
     if any(
-        part in {"credential", "credentials", "password", "secret"}
-        for part in parts
+        part in {"credential", "credentials", "password", "secret"} for part in parts
     ):
         return True
     pairs = set(zip(parts, parts[1:]))
@@ -141,6 +140,9 @@ def _sanitize_backend_metadata(value: Any, *, key: str = "") -> Any:
     return value
 
 
+ROUTER_PROBE_TIMEOUT_SECONDS = 3.0
+
+
 def _served_backend_model_metadata() -> Optional[Dict[str, Dict[str, Any]]]:
     """Return the router catalog's per-model metadata, or ``None`` when discovery itself fails."""
     headers = {}
@@ -150,7 +152,7 @@ def _served_backend_model_metadata() -> Optional[Dict[str, Dict[str, Any]]]:
         response = httpx.get(
             f"{llm_config.base_url.rstrip('/')}/v1/models",
             headers=headers,
-            timeout=3.0,
+            timeout=ROUTER_PROBE_TIMEOUT_SECONDS,
         )
         response.raise_for_status()
         result: Dict[str, Dict[str, Any]] = {}

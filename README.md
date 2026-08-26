@@ -105,6 +105,16 @@ Interaction rules preserve their source-assigned `severity`. `DRUG_SAFETY_MIN_IN
 - `POST /v1/hub/query-profiles/{profile}/roles/{role}/generate`: execute one
   configured query role. Callers provide non-system messages and an optional
   response format; callers cannot override the role model, prompt, or knobs.
+  Every request that reaches the model returns versioned request evidence with
+  the exact system and caller messages, selected profile/role/model, response
+  format and model settings, and an RFC 8785 canonical SHA-256 digest. When the
+  router supports it, the same evidence includes the exact rendered prompt and
+  token count against the model's advertised context window and the role's
+  configured output allowance. Missing rendering, counting, or window
+  information is reported with a stable reason and is never estimated. For an
+  otherwise valid request, only a known overflow blocks the model call; it
+  returns `422` with the same evidence. The existing `token_accounting` field
+  keeps its compatible successful shape.
 - `POST /v1/hub/generate`: raw single-model compatibility endpoint for generic
   consumers that own their own profile configuration. Catalyst does not use it.
 - `GET /health`: service health, uptime, and process memory.
