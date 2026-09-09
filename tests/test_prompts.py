@@ -351,6 +351,13 @@ def test_query_generate_prompt_offers_all_three_writer_answers():
     assert "message" in prompt
 
 
+def test_query_generate_prompt_leaves_canonical_target_metadata_to_catalyst():
+    prompt = prompt_loader.load_prompt("catalyst-query-generate")
+
+    assert "Catalyst supplies the target" in prompt
+    assert "do not return `target`" in prompt
+
+
 def test_query_generate_prompt_handles_a_revision_with_no_editor():
     """The reply to a question revises nothing, and must not be treated as one.
 

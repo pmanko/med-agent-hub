@@ -167,7 +167,7 @@ def test_catalyst_query_profile_owns_model_prompt_and_knobs(monkeypatch):
     assert captured["messages"][0]["role"] == "system"
     assert "Catalyst governed analytics-query" in captured["messages"][0]["content"]
     assert captured["kwargs"]["temperature"] == 0.0
-    assert captured["kwargs"]["max_tokens"] == 1024
+    assert captured["kwargs"]["max_tokens"] == 2048
 
 
 def test_catalyst_query_profile_rejects_caller_model_and_knob_overrides(monkeypatch):
@@ -282,11 +282,11 @@ def test_a_role_generation_counts_its_rendered_request_first(monkeypatch):
     assert accounting == {
         "tokenizer": "gemma-e4b",
         "contextWindow": 24576,
-        "outputReserve": 1024,
+        "outputReserve": 2048,
         "promptTokens": 1234,
     }
     # Counted over the fully rendered request: system prompt plus the caller's.
-    assert counted == {"model": "gemma-e4b", "turns": 2, "reserve": 1024}
+    assert counted == {"model": "gemma-e4b", "turns": 2, "reserve": 2048}
 
 
 def test_a_configured_role_records_the_exact_request_passed_to_chat(monkeypatch):
@@ -306,16 +306,16 @@ def test_a_configured_role_records_the_exact_request_passed_to_chat(monkeypatch)
         "tokens": {
             "tokenizer": "gemma-e4b",
             "contextWindow": 24576,
-            "outputReserve": 1024,
+            "outputReserve": 2048,
             "promptTokens": 1200,
-            "requiredTokens": 2224,
+            "requiredTokens": 3248,
             "fits": True,
         },
     }
 
     async def fake_measurement(model, messages, output_reserve):
         assert model == "gemma-e4b"
-        assert output_reserve == 1024
+        assert output_reserve == 2048
         return measurement
 
     async def fake_chat(client, model, messages, **kwargs):
@@ -354,7 +354,7 @@ def test_a_configured_role_records_the_exact_request_passed_to_chat(monkeypatch)
         "config": {
             "temperature": 0.0,
             "dryMultiplier": 0.0,
-            "maxTokens": 1024,
+            "maxTokens": 2048,
         },
     }
     assert captured["messages"][1:] == caller_messages
@@ -362,7 +362,7 @@ def test_a_configured_role_records_the_exact_request_passed_to_chat(monkeypatch)
         "response_format": response_format,
         "temperature": 0.0,
         "dry_multiplier": 0.0,
-        "max_tokens": 1024,
+        "max_tokens": 2048,
     }
     assert (
         evidence["requestDigest"]
@@ -580,9 +580,9 @@ def test_known_role_request_overflow_returns_evidence_without_calling_model(
         "tokens": {
             "tokenizer": "gemma-e4b",
             "contextWindow": 1500,
-            "outputReserve": 1024,
+            "outputReserve": 2048,
             "promptTokens": 800,
-            "requiredTokens": 1824,
+            "requiredTokens": 2848,
             "fits": False,
         },
     }
@@ -629,9 +629,9 @@ def test_a_configured_role_backend_failure_still_returns_request_evidence(
         "tokens": {
             "tokenizer": "gemma-e4b",
             "contextWindow": 24576,
-            "outputReserve": 1024,
+            "outputReserve": 2048,
             "promptTokens": 1200,
-            "requiredTokens": 2224,
+            "requiredTokens": 3248,
             "fits": True,
         },
     }
@@ -684,9 +684,9 @@ def test_a_configured_role_empty_response_still_returns_request_evidence(
         "tokens": {
             "tokenizer": "gemma-e4b",
             "contextWindow": 24576,
-            "outputReserve": 1024,
+            "outputReserve": 2048,
             "promptTokens": 1200,
-            "requiredTokens": 2224,
+            "requiredTokens": 3248,
             "fits": True,
         },
     }
@@ -729,9 +729,9 @@ def test_a_configured_role_malformed_backend_response_keeps_request_evidence(
         "tokens": {
             "tokenizer": "gemma-e4b",
             "contextWindow": 24576,
-            "outputReserve": 1024,
+            "outputReserve": 2048,
             "promptTokens": 1200,
-            "requiredTokens": 2224,
+            "requiredTokens": 3248,
             "fits": True,
         },
     }
@@ -811,7 +811,7 @@ def test_an_uncountable_request_is_answered_with_no_accounting_not_a_guess(
     assert response.json()["request_evidence"]["tokens"] == {
         "tokenizer": "gemma-e4b",
         "contextWindow": 24576,
-        "outputReserve": 1024,
+        "outputReserve": 2048,
         "promptTokens": None,
         "promptTokensUnavailableReason": "rendered_prompt_unavailable",
         "requiredTokens": None,

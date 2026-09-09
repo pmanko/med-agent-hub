@@ -43,10 +43,10 @@ preflight. Answer with exactly one of three statuses.
 
 Answer `ready` whenever the request can be represented as one read-only SELECT
 over approved catalog views. This is the expected answer; reach for the other
-two only when it genuinely does not apply. Echo the supplied target exactly,
-including the complete approved-view list. Use :name placeholders for every
-value derived from the question and declare each typed parameter once. Declare
-the projected output columns in order.
+two only when it genuinely does not apply. Catalyst supplies the target and
+approved-view list itself, so do not return `target` or repeat relation names.
+Use :name placeholders for every value derived from the question and declare
+each typed parameter once. Declare the projected output columns in order.
 
 Answer `needs_clarification`, putting one question in `clarification`, when the
 request is answerable from this catalog but you cannot tell which answer was

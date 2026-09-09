@@ -381,6 +381,9 @@ def test_catalyst_uses_the_same_profile_schema_with_caller_owned_orchestration()
         "query_finalize",
     )
     assert profile.output_contracts == ("catalyst.query.v1",)
+    for profile_id in catalyst_query_profile_ids():
+        configured = get_catalyst_query_profile(profile_id)
+        assert all(role_knobs["maxTokens"] == 2048 for role_knobs in configured.knobs.values())
     writer_only = get_catalyst_query_profile("catalyst-query-gemma-4-12b")
     assert writer_only.models == {"query_generate": "gemma-4-12b-q4"}
     assert writer_only.stages == (
