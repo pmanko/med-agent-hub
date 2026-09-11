@@ -116,6 +116,40 @@ def test_requires_model_and_messages():
     assert _post({"model": "m", "messages": []}).status_code == 422
 
 
+def test_query_profile_catalog_reports_fast_writer_availability(monkeypatch):
+    monkeypatch.setattr(
+        generic_role,
+        "_served_backend_model_metadata",
+        lambda: {"gemma-4-12b-q4": {}},
+    )
+    response = TestClient(app).get("/v1/hub/query-profiles")
+
+    assert response.status_code == 200
+    fast = next(
+        item
+        for item in response.json()["data"]
+        if item["id"] == "catalyst-query-gemma-4-e4b"
+    )
+    assert fast["label"] == "Faster question preparation"
+    assert fast["required_models"] == ["gemma-e4b"]
+    assert fast["available"] is False
+    assert fast["unavailable_reasons"] == ["model_not_advertised:gemma-e4b"]
+
+    monkeypatch.setattr(
+        generic_role,
+        "_served_backend_model_metadata",
+        lambda: {"gemma-e4b": {}, "gemma-4-12b-q4": {}},
+    )
+    available = TestClient(app).get("/v1/hub/query-profiles")
+    fast = next(
+        item
+        for item in available.json()["data"]
+        if item["id"] == "catalyst-query-gemma-4-e4b"
+    )
+    assert fast["available"] is True
+    assert fast["unavailable_reasons"] == []
+
+
 def test_catalyst_query_profile_owns_model_prompt_and_knobs(monkeypatch):
     captured: Dict[str, Any] = {}
 
