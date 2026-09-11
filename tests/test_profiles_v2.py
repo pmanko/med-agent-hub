@@ -11,6 +11,7 @@ from server.levels_loader import (
     Profile,
     catalyst_query_profile_evidence,
     catalyst_query_profile_ids,
+    catalyst_query_profile_metadata,
     compile_profile,
     get_catalyst_query_profile,
     get_profile,
@@ -358,6 +359,7 @@ def test_all_configured_profiles_and_prompts_validate_at_startup():
 def test_catalyst_uses_the_same_profile_schema_with_caller_owned_orchestration():
     assert catalyst_query_profile_ids() == [
         "catalyst-query-e4b-qwen14b",
+        "catalyst-query-gemma-4-e4b",
         "catalyst-query-gemma-4-12b",
         "catalyst-query-gemma-4-12b-qwen2.5-14b-checked",
         "catalyst-query-gemma-4-12b-q4-checked",
@@ -384,7 +386,31 @@ def test_catalyst_uses_the_same_profile_schema_with_caller_owned_orchestration()
     for profile_id in catalyst_query_profile_ids():
         configured = get_catalyst_query_profile(profile_id)
         assert all(role_knobs["maxTokens"] == 2048 for role_knobs in configured.knobs.values())
+    fast_writer = get_catalyst_query_profile("catalyst-query-gemma-4-e4b")
+    assert fast_writer.label == "Faster question preparation"
+    assert fast_writer.models == {"query_generate": "gemma-e4b"}
+    assert fast_writer.stages == (
+        "context",
+        "query_generate",
+        "query_lint",
+        "query_finalize",
+    )
+    assert fast_writer.policies["collaborative_review"] is False
+    unavailable = catalyst_query_profile_metadata(
+        fast_writer, backend_models={"gemma-4-12b-q4"}
+    )
+    assert unavailable["available"] is False
+    assert unavailable["unavailable_reasons"] == [
+        "model_not_advertised:gemma-e4b"
+    ]
+    available = catalyst_query_profile_metadata(
+        fast_writer, backend_models={"gemma-e4b"}
+    )
+    assert available["available"] is True
+    assert available["unavailable_reasons"] == []
+
     writer_only = get_catalyst_query_profile("catalyst-query-gemma-4-12b")
+    assert writer_only.label == "Standard question preparation"
     assert writer_only.models == {"query_generate": "gemma-4-12b-q4"}
     assert writer_only.stages == (
         "context",
@@ -395,7 +421,7 @@ def test_catalyst_uses_the_same_profile_schema_with_caller_owned_orchestration()
     assert writer_only.policies["collaborative_review"] is False
     validated = validate_catalyst_query_profiles()
     assert len(validated) == len(catalyst_query_profile_ids())
-    assert validated[:2] == (profile, writer_only)
+    assert validated[:3] == (profile, fast_writer, writer_only)
 
 
 def test_catalyst_query_models_are_llama_server_aliases():

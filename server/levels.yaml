@@ -39,9 +39,33 @@ profiles:
     selection_priority: 10
     outputContracts: [catalyst.query.v1]
 
+  # Fast writer-only lane. It stays visibly unavailable until the model router
+  # advertises gemma-e4b; Catalyst never substitutes another profile.
+  catalyst-query-gemma-4-e4b:
+    workflow: catalyst_query
+    label: "Faster question preparation"
+    topology: caller
+    stages: [context, query_generate, query_lint, query_finalize]
+    models:
+      query_generate: gemma-e4b
+    prompts:
+      query_generate: catalyst-query-generate
+    knobs:
+      query_generate: {temperature: 0, dry: 0, maxTokens: 2048}
+    policies:
+      orchestration_owner: catalyst
+      generation_attempts: 3
+      allowed_operation: select
+      collaborative_review: false
+      model_classes:
+        query_generate: gemma-4-e4b
+    visibility: product
+    selection_priority: 5
+    outputContracts: [catalyst.query.v1]
+
   catalyst-query-gemma-4-12b:
     workflow: catalyst_query
-    label: "Catalyst query — Gemma 4 12B writer"
+    label: "Standard question preparation"
     topology: caller
     stages: [context, query_generate, query_lint, query_finalize]
     models:
