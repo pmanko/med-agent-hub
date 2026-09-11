@@ -17,13 +17,14 @@ or inject a system prompt into those requests.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from copy import deepcopy
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Annotated, Any, Dict, List, Mapping, Optional
 
 import httpx
 import rfc8785
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from . import team
@@ -353,6 +354,60 @@ def list_query_profiles() -> Dict[str, Any]:
     response_model=ProfileGenerateResponse,
 )
 async def generate_query_role(
+    profile_id: str,
+    role: str,
+    req: ProfileGenerateRequest,
+    request: Request,
+    timeout_seconds: Annotated[
+        Optional[float],
+        Header(alias="X-Request-Timeout-Seconds", gt=0, allow_inf_nan=False),
+    ] = None,
+) -> ProfileGenerateResponse:
+    """Bound queueing and generation to the caller's remaining request lifetime."""
+
+    async def disconnected() -> None:
+        # FastAPI has already consumed and validated the request body.
+        while (await request.receive())["type"] != "http.disconnect":
+            pass
+
+    timeout = min(
+        timeout_seconds
+        if timeout_seconds is not None
+        else llm_config.request_timeout_seconds,
+        llm_config.request_timeout_seconds,
+    )
+    work = asyncio.create_task(_generate_query_role(profile_id, role, req))
+    disconnect = asyncio.create_task(disconnected())
+    try:
+        done, _ = await asyncio.wait(
+            {work, disconnect}, timeout=timeout, return_when=asyncio.FIRST_COMPLETED
+        )
+        if work in done:
+            return await work
+        if disconnect in done:
+            await disconnect
+        work.cancel()
+        try:
+            await work
+        except asyncio.CancelledError:
+            pass
+        timed_out = disconnect not in done
+        raise HTTPException(
+            status_code=504 if timed_out else 499,
+            detail={
+                "code": "generation_timeout" if timed_out else "generation_cancelled",
+                "message": "Model preparation timed out."
+                if timed_out
+                else "Model preparation was cancelled.",
+            },
+        )
+    finally:
+        work.cancel()
+        disconnect.cancel()
+        await asyncio.gather(work, disconnect, return_exceptions=True)
+
+
+async def _generate_query_role(
     profile_id: str, role: str, req: ProfileGenerateRequest
 ) -> ProfileGenerateResponse:
     """Execute a Hub-configured query role without caller-controlled model settings."""
