@@ -358,6 +358,14 @@ def test_query_generate_prompt_leaves_canonical_target_metadata_to_catalyst():
     assert "do not return `target`" in prompt
 
 
+def test_query_generate_prompt_requires_named_derived_projections():
+    prompt = prompt_loader.load_prompt("catalyst-query-generate")
+
+    assert "aggregate or calculated expression" in prompt
+    assert "explicit `AS` alias" in prompt
+    assert "exactly match `expectedColumns`" in prompt
+
+
 def test_query_generate_prompt_handles_a_revision_with_no_editor():
     """The reply to a question revises nothing, and must not be treated as one.
 

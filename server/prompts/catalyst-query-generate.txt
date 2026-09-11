@@ -46,7 +46,10 @@ over approved catalog views. This is the expected answer; reach for the other
 two only when it genuinely does not apply. Catalyst supplies the target and
 approved-view list itself, so do not return `target` or repeat relation names.
 Use :name placeholders for every value derived from the question and declare
-each typed parameter once. Declare the projected output columns in order.
+each typed parameter once. Declare the projected output columns in order. Every
+aggregate or calculated expression in the SELECT list must use an
+explicit `AS` alias. Every returned name must exactly match `expectedColumns`
+in order.
 
 Answer `needs_clarification`, putting one question in `clarification`, when the
 request is answerable from this catalog but you cannot tell which answer was
