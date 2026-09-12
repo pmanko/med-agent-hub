@@ -24,7 +24,7 @@ from typing import Annotated, Any, Dict, List, Mapping, Optional
 
 import httpx
 import rfc8785
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, Header, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from . import team
@@ -365,17 +365,59 @@ async def generate_query_role(
 ) -> ProfileGenerateResponse:
     """Bound queueing and generation to the caller's remaining request lifetime."""
 
+    timeout = min(
+        (
+            timeout_seconds
+            if timeout_seconds is not None
+            else llm_config.request_timeout_seconds
+        ),
+        llm_config.request_timeout_seconds,
+    )
+    return await _run_query_role(
+        profile_id,
+        role,
+        req,
+        request,
+        timeout=timeout,
+    )
+
+
+@router.post(
+    "/v1/hub/query-profiles/{profile_id}/roles/{role}/warm",
+    status_code=204,
+)
+async def warm_query_role(
+    profile_id: str,
+    role: str,
+    req: ProfileGenerateRequest,
+    request: Request,
+) -> Response:
+    """Warm an internal Catalyst prefix until it completes or disconnects.
+
+    This endpoint is only for deployment lifecycle work. It deliberately does
+    not reuse the caller-facing request deadline: an interrupted lifecycle
+    still cancels the model work through its HTTP disconnect.
+    """
+
+    await _run_query_role(profile_id, role, req, request, timeout=None)
+    return Response(status_code=204)
+
+
+async def _run_query_role(
+    profile_id: str,
+    role: str,
+    req: ProfileGenerateRequest,
+    request: Request,
+    *,
+    timeout: float | None,
+) -> ProfileGenerateResponse:
+    """Run one configured role until completion, disconnect, or its deadline."""
+
     async def disconnected() -> None:
         # FastAPI has already consumed and validated the request body.
         while (await request.receive())["type"] != "http.disconnect":
             pass
 
-    timeout = min(
-        timeout_seconds
-        if timeout_seconds is not None
-        else llm_config.request_timeout_seconds,
-        llm_config.request_timeout_seconds,
-    )
     work = asyncio.create_task(_generate_query_role(profile_id, role, req))
     disconnect = asyncio.create_task(disconnected())
     try:
@@ -396,9 +438,11 @@ async def generate_query_role(
             status_code=504 if timed_out else 499,
             detail={
                 "code": "generation_timeout" if timed_out else "generation_cancelled",
-                "message": "Model preparation timed out."
-                if timed_out
-                else "Model preparation was cancelled.",
+                "message": (
+                    "Model preparation timed out."
+                    if timed_out
+                    else "Model preparation was cancelled."
+                ),
             },
         )
     finally:
