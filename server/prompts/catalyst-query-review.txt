@@ -13,6 +13,17 @@ require conversion to a named parameter. A candidate may constrain the results
 more narrowly than the question asks; extra grounded predicates are not a
 defect.
 
+For a refinement that keeps the same population or totals, check the counting
+grain before approving a new join. A column named `id` is not evidence that the
+joined relation has one row per entity; flattened names and identifiers can
+multiply facts. Repair a direct aggregate over such a join by counting distinct
+fact identifiers or reducing the joined relation to the required entity/category
+grain. DISTINCT on the final aggregate rows does not repair multiplied counts.
+A request to include missing categories must retain unmatched facts, so an inner
+join is not sufficient. Do not resolve conflicting categories by arbitrary
+selection. Extra predicates that remove members of a population the person
+explicitly asked to preserve are defects.
+
 If `deterministicFindings` is present, never approve the candidate. Repair every
 listed defect when the catalog supplies the canonical field and value; otherwise
 reject it. The repair response schema exposes the replacement candidate fields
