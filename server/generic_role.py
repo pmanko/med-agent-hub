@@ -283,18 +283,19 @@ async def _chat_or_bad_gateway(
     temperature: Optional[float],
     dry_multiplier: Optional[float],
     max_tokens: Optional[int],
+    request_timeout: float | None | object = team._REQUEST_TIMEOUT_UNSET,
 ) -> str:
     async with httpx.AsyncClient() as client:
         try:
-            message = await team._chat(
-                client,
-                model,
-                messages,
-                response_format=response_format,
-                temperature=temperature,
-                dry_multiplier=dry_multiplier,
-                max_tokens=max_tokens,
-            )
+            chat_kwargs = {
+                "response_format": response_format,
+                "temperature": temperature,
+                "dry_multiplier": dry_multiplier,
+                "max_tokens": max_tokens,
+            }
+            if request_timeout is not team._REQUEST_TIMEOUT_UNSET:
+                chat_kwargs["request_timeout"] = request_timeout
+            message = await team._chat(client, model, messages, **chat_kwargs)
         except httpx.HTTPStatusError as error:
             raise HTTPException(
                 status_code=502,
@@ -418,7 +419,11 @@ async def _run_query_role(
         while (await request.receive())["type"] != "http.disconnect":
             pass
 
-    work = asyncio.create_task(_generate_query_role(profile_id, role, req))
+    work = asyncio.create_task(
+        _generate_query_role(profile_id, role, req, request_timeout=None)
+        if timeout is None
+        else _generate_query_role(profile_id, role, req)
+    )
     disconnect = asyncio.create_task(disconnected())
     try:
         done, _ = await asyncio.wait(
@@ -452,7 +457,11 @@ async def _run_query_role(
 
 
 async def _generate_query_role(
-    profile_id: str, role: str, req: ProfileGenerateRequest
+    profile_id: str,
+    role: str,
+    req: ProfileGenerateRequest,
+    *,
+    request_timeout: float | None | object = team._REQUEST_TIMEOUT_UNSET,
 ) -> ProfileGenerateResponse:
     """Execute a Hub-configured query role without caller-controlled model settings."""
     profile = _profile_or_404(profile_id)
@@ -513,14 +522,17 @@ async def _generate_query_role(
             },
         )
     try:
-        content = await _chat_or_bad_gateway(
-            model=model,
-            messages=rendered_messages,
-            response_format=response_format,
-            temperature=temperature,
-            dry_multiplier=dry_multiplier,
-            max_tokens=max_tokens,
-        )
+        chat_kwargs = {
+            "model": model,
+            "messages": rendered_messages,
+            "response_format": response_format,
+            "temperature": temperature,
+            "dry_multiplier": dry_multiplier,
+            "max_tokens": max_tokens,
+        }
+        if request_timeout is not team._REQUEST_TIMEOUT_UNSET:
+            chat_kwargs["request_timeout"] = request_timeout
+        content = await _chat_or_bad_gateway(**chat_kwargs)
     except HTTPException as error:
         raise HTTPException(
             status_code=error.status_code,

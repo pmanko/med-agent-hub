@@ -970,6 +970,7 @@ class ChatBudgetPolicy:
 _CHAT_BUDGET: ContextVar[Optional[ChatBudgetPolicy]] = ContextVar(
     "med_agent_hub_chat_budget", default=None
 )
+_REQUEST_TIMEOUT_UNSET = object()
 
 
 def activate_chat_budget(policy: ChatBudgetPolicy) -> Token:
@@ -991,6 +992,7 @@ async def _chat(
     max_tokens: Optional[int] = None,
     repeat_penalty: Optional[float] = None,
     dry_multiplier: Optional[float] = None,
+    request_timeout: float | None | object = _REQUEST_TIMEOUT_UNSET,
 ) -> Dict[str, Any]:
     """One OpenAI-compatible backend call. Returns the first choice's message."""
     payload: Dict[str, Any] = {
@@ -1057,18 +1059,23 @@ async def _chat(
         bool(response_format),
     )
     # Hold the lock for the WHOLE request (load + generate) so the router never sees a second
-    # request while it is loading/evicting a model. Timeout covers a cold big-model load + a long
-    # thinking generation. The lock makes loads strictly sequential — no eviction-vs-serve race.
+    # request while it is loading or evicting a model. The lock makes loads strictly sequential —
+    # no eviction-versus-serve race.
     slot_evidence = _ROUTER_SLOT_EVIDENCE.get()
     await _ROUTER_LOCK.acquire()
     if slot_evidence is not None:
         slot_evidence.acquired()
     try:
+        router_timeout = (
+            llm_config.request_timeout_seconds
+            if request_timeout is _REQUEST_TIMEOUT_UNSET
+            else request_timeout
+        )
         resp = await client.post(
             url,
             json=payload,
             headers=headers,
-            timeout=llm_config.request_timeout_seconds,
+            timeout=router_timeout,
         )
     finally:
         _ROUTER_LOCK.release()

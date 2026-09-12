@@ -139,8 +139,10 @@ def test_warm_route_does_not_inherit_the_interactive_deadline(monkeypatch):
         complete = asyncio.Event()
         stopped = asyncio.Event()
         messages = []
+        observed = {}
 
-        async def warm_work(*_args):
+        async def warm_work(*_args, **kwargs):
+            observed.update(kwargs)
             started.set()
             try:
                 await complete.wait()
@@ -200,6 +202,7 @@ def test_warm_route_does_not_inherit_the_interactive_deadline(monkeypatch):
             await asyncio.wait_for(task, 1)
             assert messages[0]["status"] == 204
             assert stopped.is_set()
+            assert observed["request_timeout"] is None
         finally:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)

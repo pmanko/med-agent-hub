@@ -104,3 +104,76 @@ def test_interruption_reaches_model_over_real_http(monkeypatch, interruption):
                 sock.close()
 
     asyncio.run(scenario())
+
+
+def test_warm_route_ignores_internal_model_request_timeout(monkeypatch):
+    """Lifecycle warmup is allowed to finish after the normal model deadline."""
+
+    async def scenario():
+        model_app = FastAPI()
+
+        @model_app.post("/v1/chat/completions")
+        async def delayed_model():
+            await asyncio.sleep(0.05)
+            return {"choices": [{"message": {"role": "assistant", "content": "ready"}}]}
+
+        sockets = [socket.socket(), socket.socket()]
+        for sock in sockets:
+            sock.bind(("127.0.0.1", 0))
+        model_url = f"http://127.0.0.1:{sockets[0].getsockname()[1]}"
+        hub_url = f"http://127.0.0.1:{sockets[1].getsockname()[1]}"
+        monkeypatch.setattr(
+            team,
+            "llm_config",
+            replace(
+                team.llm_config,
+                base_url=model_url,
+                api_key="",
+                request_timeout_seconds=0.01,
+            ),
+        )
+        monkeypatch.setattr(team, "_ROUTER_LOCK", asyncio.Lock())
+        monkeypatch.setattr(
+            generic_role,
+            "_served_backend_model_metadata",
+            lambda: {"gemma-4-12b-q4": {}},
+        )
+
+        async def measured(*args):
+            return {"prompt": {}, "tokens": {"fits": True}}
+
+        monkeypatch.setattr(generic_role, "_prompt_measurement", measured)
+        servers = [
+            uvicorn.Server(
+                uvicorn.Config(
+                    application, lifespan="off", access_log=False, log_level="error"
+                )
+            )
+            for application in (model_app, app)
+        ]
+        tasks = [
+            asyncio.create_task(server.serve(sockets=[sock]))
+            for server, sock in zip(servers, sockets)
+        ]
+        try:
+
+            async def ready():
+                while not all(server.started for server in servers):
+                    await asyncio.sleep(0.01)
+
+            await asyncio.wait_for(ready(), 3)
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"{hub_url}/v1/hub/query-profiles/"
+                    "catalyst-query-gemma-4-12b/roles/query_generate/warm",
+                    json={"messages": [{"role": "user", "content": "Warm up"}]},
+                )
+            assert response.status_code == 204
+        finally:
+            for server in servers:
+                server.should_exit = True
+            await asyncio.wait_for(asyncio.gather(*tasks), 3)
+            for sock in sockets:
+                sock.close()
+
+    asyncio.run(scenario())
