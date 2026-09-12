@@ -122,6 +122,12 @@ Interaction rules preserve their source-assigned `severity`. `DRUG_SAFETY_MIN_IN
   disconnect cancels the outstanding model HTTP request and releases any slot
   held by that request. An interrupted waiter never releases another caller's
   slot. Transport interruption cannot supply a completed model response.
+- `POST /v1/hub/query-profiles/{profile}/roles/{role}/warm`: internal
+  deployment-lifecycle warmup for Catalyst's reusable writer prefix. It accepts
+  the same caller context and applies the same fixed profile, but waits for the
+  prefix to complete rather than inheriting an interactive request deadline.
+  Disconnecting the lifecycle caller cancels the model work. It returns no
+  model content or request evidence and must not be used for a person’s query.
 - `POST /v1/hub/generate`: raw single-model compatibility endpoint for generic
   consumers that own their own profile configuration. Catalyst does not use it.
 - `GET /health`: service health, uptime, and process memory.
