@@ -13,8 +13,7 @@ from server import generic_role, team
 from server.main import app
 
 
-@pytest.mark.parametrize("interruption", ["disconnect", "deadline"])
-def test_interruption_reaches_model_over_real_http(monkeypatch, interruption):
+def test_disconnect_reaches_model_over_real_http(monkeypatch):
     async def scenario():
         model_app = FastAPI()
         model_started = asyncio.Event()
@@ -76,21 +75,12 @@ def test_interruption_reaches_model_over_real_http(monkeypatch, interruption):
                         json={
                             "messages": [{"role": "user", "content": "Count patients"}]
                         },
-                        headers={
-                            "X-Request-Timeout-Seconds": "0.5"
-                            if interruption == "deadline"
-                            else "5"
-                        },
                     )
                 )
                 await asyncio.wait_for(model_started.wait(), 2)
-                if interruption == "disconnect":
-                    request_task.cancel()
-                    with pytest.raises(asyncio.CancelledError):
-                        await request_task
-                else:
-                    response = await asyncio.wait_for(request_task, 2)
-                    assert response.status_code == 504
+                request_task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await request_task
                 await asyncio.wait_for(model_disconnected.wait(), 2)
                 assert not team._ROUTER_LOCK.locked()
         finally:
@@ -106,8 +96,13 @@ def test_interruption_reaches_model_over_real_http(monkeypatch, interruption):
     asyncio.run(scenario())
 
 
-def test_warm_route_ignores_internal_model_request_timeout(monkeypatch):
-    """Lifecycle warmup is allowed to finish after the normal model deadline."""
+@pytest.mark.parametrize(
+    ("endpoint", "expected_status"), [("generate", 200), ("warm", 204)]
+)
+def test_named_query_routes_ignore_internal_model_request_timeout(
+    monkeypatch, endpoint, expected_status
+):
+    """Named routes wait for the configured role instead of a model deadline."""
 
     async def scenario():
         model_app = FastAPI()
@@ -165,10 +160,10 @@ def test_warm_route_ignores_internal_model_request_timeout(monkeypatch):
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     f"{hub_url}/v1/hub/query-profiles/"
-                    "catalyst-query-gemma-4-12b/roles/query_generate/warm",
+                    f"catalyst-query-gemma-4-12b/roles/query_generate/{endpoint}",
                     json={"messages": [{"role": "user", "content": "Warm up"}]},
                 )
-            assert response.status_code == 204
+            assert response.status_code == expected_status
         finally:
             for server in servers:
                 server.should_exit = True

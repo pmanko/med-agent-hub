@@ -6,15 +6,13 @@ from dataclasses import replace
 
 import httpx
 import pytest
-from fastapi.testclient import TestClient
 
 from server import generic_role, team
 from server.main import app
 
 
 @pytest.mark.parametrize("queued", [False, True])
-@pytest.mark.parametrize("interruption", ["disconnect", "deadline"])
-def test_named_role_interruption_releases_work(monkeypatch, queued, interruption):
+def test_named_role_disconnect_releases_work(monkeypatch, queued):
     async def scenario():
         monkeypatch.setattr(
             generic_role,
@@ -60,11 +58,9 @@ def test_named_role_interruption_releases_work(monkeypatch, queued, interruption
                     ).encode(),
                 }
             await reached.wait()
-            if interruption == "disconnect":
-                # Let the model call acquire (or wait for) its actual router lock.
-                await asyncio.sleep(0.01)
-                return {"type": "http.disconnect"}
-            await asyncio.Event().wait()
+            # Let the model call acquire (or wait for) its actual router lock.
+            await asyncio.sleep(0.01)
+            return {"type": "http.disconnect"}
 
         async def send(message):
             messages.append(message)
@@ -79,13 +75,7 @@ def test_named_role_interruption_releases_work(monkeypatch, queued, interruption
             "path": path,
             "raw_path": path.encode(),
             "query_string": b"",
-            "headers": [
-                (b"content-type", b"application/json"),
-                (
-                    b"x-request-timeout-seconds",
-                    b"0.05" if interruption == "deadline" else b"5",
-                ),
-            ],
+            "headers": [(b"content-type", b"application/json")],
             "client": ("127.0.0.1", 1234),
             "server": ("testserver", 80),
         }
@@ -95,7 +85,7 @@ def test_named_role_interruption_releases_work(monkeypatch, queued, interruption
             done, _ = await asyncio.wait({task}, timeout=0.5)
             assert task in done, "Hub continued work after the caller stopped"
             await task
-            assert messages[0]["status"] == (504 if interruption == "deadline" else 499)
+            assert messages[0]["status"] == 499
             if queued:
                 assert calls == []
                 assert lock.locked(), "Cancellation released another request's lock"
@@ -115,24 +105,17 @@ def test_named_role_interruption_releases_work(monkeypatch, queued, interruption
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("budget", ["0", "-1", "nan", "inf", "invalid"])
-def test_role_rejects_invalid_deadline_before_dispatch(monkeypatch, budget):
-    def unexpected_discovery():
-        pytest.fail("Invalid timeout reached profile/model discovery")
-
-    monkeypatch.setattr(
-        generic_role, "_served_backend_model_metadata", unexpected_discovery
-    )
-    response = TestClient(app).post(
-        "/v1/hub/query-profiles/catalyst-query-gemma-4-12b/roles/query_generate/generate",
-        json={"messages": [{"role": "user", "content": "Count patients"}]},
-        headers={"X-Request-Timeout-Seconds": budget},
-    )
-    assert response.status_code == 422
-
-
-def test_warm_route_does_not_inherit_the_interactive_deadline(monkeypatch):
-    """Lifecycle warmup completes after the interactive request budget expires."""
+@pytest.mark.parametrize(
+    ("endpoint", "expected_status", "content"),
+    [
+        ("generate", 200, "Count patients"),
+        ("warm", 204, "Warm up"),
+    ],
+)
+def test_named_query_routes_do_not_inherit_the_model_deadline(
+    monkeypatch, endpoint, expected_status, content
+):
+    """Named routes run until completion even when the shared default is tiny."""
 
     async def scenario():
         started = asyncio.Event()
@@ -171,7 +154,7 @@ def test_warm_route_does_not_inherit_the_interactive_deadline(monkeypatch):
                 return {
                     "type": "http.request",
                     "body": json.dumps(
-                        {"messages": [{"role": "user", "content": "Warm up"}]}
+                        {"messages": [{"role": "user", "content": content}]}
                     ).encode(),
                 }
             await asyncio.Event().wait()
@@ -179,7 +162,10 @@ def test_warm_route_does_not_inherit_the_interactive_deadline(monkeypatch):
         async def send(message):
             messages.append(message)
 
-        path = "/v1/hub/query-profiles/catalyst-query-gemma-4-12b/roles/query_generate/warm"
+        path = (
+            "/v1/hub/query-profiles/catalyst-query-gemma-4-12b/roles/"
+            f"query_generate/{endpoint}"
+        )
         scope = {
             "type": "http",
             "asgi": {"version": "3.0"},
@@ -197,10 +183,10 @@ def test_warm_route_does_not_inherit_the_interactive_deadline(monkeypatch):
         try:
             await asyncio.wait_for(started.wait(), 1)
             await asyncio.sleep(0.05)
-            assert not task.done(), "warmup inherited an interactive deadline"
+            assert not task.done(), "named route inherited an automatic deadline"
             complete.set()
             await asyncio.wait_for(task, 1)
-            assert messages[0]["status"] == 204
+            assert messages[0]["status"] == expected_status
             assert stopped.is_set()
             assert observed["request_timeout"] is None
         finally:

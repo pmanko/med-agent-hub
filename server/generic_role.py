@@ -20,11 +20,11 @@ from __future__ import annotations
 import asyncio
 import hashlib
 from copy import deepcopy
-from typing import Annotated, Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 import httpx
 import rfc8785
-from fastapi import APIRouter, Header, HTTPException, Request, Response
+from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from . import team
@@ -359,28 +359,10 @@ async def generate_query_role(
     role: str,
     req: ProfileGenerateRequest,
     request: Request,
-    timeout_seconds: Annotated[
-        Optional[float],
-        Header(alias="X-Request-Timeout-Seconds", gt=0, allow_inf_nan=False),
-    ] = None,
 ) -> ProfileGenerateResponse:
-    """Bound queueing and generation to the caller's remaining request lifetime."""
+    """Run a named Catalyst role until it completes or the caller disconnects."""
 
-    timeout = min(
-        (
-            timeout_seconds
-            if timeout_seconds is not None
-            else llm_config.request_timeout_seconds
-        ),
-        llm_config.request_timeout_seconds,
-    )
-    return await _run_query_role(
-        profile_id,
-        role,
-        req,
-        request,
-        timeout=timeout,
-    )
+    return await _run_query_role(profile_id, role, req, request)
 
 
 @router.post(
@@ -400,7 +382,7 @@ async def warm_query_role(
     still cancels the model work through its HTTP disconnect.
     """
 
-    await _run_query_role(profile_id, role, req, request, timeout=None)
+    await _run_query_role(profile_id, role, req, request)
     return Response(status_code=204)
 
 
@@ -409,10 +391,8 @@ async def _run_query_role(
     role: str,
     req: ProfileGenerateRequest,
     request: Request,
-    *,
-    timeout: float | None,
 ) -> ProfileGenerateResponse:
-    """Run one configured role until completion, disconnect, or its deadline."""
+    """Run one configured role until completion or caller disconnect."""
 
     async def disconnected() -> None:
         # FastAPI has already consumed and validated the request body.
@@ -421,13 +401,11 @@ async def _run_query_role(
 
     work = asyncio.create_task(
         _generate_query_role(profile_id, role, req, request_timeout=None)
-        if timeout is None
-        else _generate_query_role(profile_id, role, req)
     )
     disconnect = asyncio.create_task(disconnected())
     try:
         done, _ = await asyncio.wait(
-            {work, disconnect}, timeout=timeout, return_when=asyncio.FIRST_COMPLETED
+            {work, disconnect}, return_when=asyncio.FIRST_COMPLETED
         )
         if work in done:
             return await work
@@ -438,16 +416,11 @@ async def _run_query_role(
             await work
         except asyncio.CancelledError:
             pass
-        timed_out = disconnect not in done
         raise HTTPException(
-            status_code=504 if timed_out else 499,
+            status_code=499,
             detail={
-                "code": "generation_timeout" if timed_out else "generation_cancelled",
-                "message": (
-                    "Model preparation timed out."
-                    if timed_out
-                    else "Model preparation was cancelled."
-                ),
+                "code": "generation_cancelled",
+                "message": "Model preparation was cancelled.",
             },
         )
     finally:
