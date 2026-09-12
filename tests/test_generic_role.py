@@ -397,6 +397,7 @@ def test_a_configured_role_records_the_exact_request_passed_to_chat(monkeypatch)
         "temperature": 0.0,
         "dry_multiplier": 0.0,
         "max_tokens": 2048,
+        "request_timeout": None,
     }
     assert (
         evidence["requestDigest"]
