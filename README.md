@@ -69,6 +69,62 @@ Querystore is not a startup dependency. Inline requests work without it, and alt
 
 Small charts retain their original chart text. For larger charts, the model input limit is a safety ceiling, not a target to fill. The deterministic selector admits mandatory safety records, exact matches, a 32-record clinical core that prioritizes active conditions and then recency, and records with meaningful normalized query overlap. It stops when eligible evidence is exhausted, even when capacity remains; other records are traced as `zero_relevance`. When eligible evidence exceeds the ceiling, one batched model-tokenizer request computes the rendered record costs. The selector ranks once, can skip an individually oversized record, and performs only bounded exact checks of assembled candidates. The final admitted prompt count is reused by dispatch, so a normal stage does not tokenize the same prompt twice. Router capability detection and the older `/apply-template` plus `/tokenize` fallback are cached for the process, while exact prompt counts stay in a small request-scoped cache. The selected view preserves canonical citation indices, includes whole records only, and discloses every included or excluded source id and reason in trace metadata. Answer, In-Depth synthesis, In-Depth review, and the bounded retry each fit a stage-local prompt view with the exact model tokenizer; all views derive from the same complete ledger. Temporal facts and deterministic checks always use that complete ledger. Mandatory-context overflow returns structured `insufficient_context` metadata rather than silently truncating evidence.
 
+### QueryStore context and freshness
+
+For QueryStore sources, shared selection and date semantics belong to the
+[QueryStore API](https://github.com/pmanko/openmrs-module-querystore/blob/main/docs/rest-api.md)
+and its ADR Decisions 16–18. Send the raw question with opt-in interpretation;
+consume the protected selection tiers and trace effective types, temporal policy,
+included/excluded IDs and budget decisions. The local selector described above
+continues to serve non-QueryStore sources. Mandatory or typed-complete evidence
+that cannot fit fails explicitly rather than being silently omitted.
+
+The bounded, memory-only, single-flight patient ledger cache is keyed by source,
+authorization scope and patient. Revalidate every turn using the first-page ETag;
+reuse only after `304`. Changed charts require all pages from one snapshot. Retry
+an inconsistent acquisition once, then report source failure. Never serve stale
+context after failed revalidation or persist patient ledgers to disk. Context
+slices must match the ledger snapshot; ranked hits must resolve by stable identity
+and content digest, with one refresh/retry before explicit failure. Recompute
+reference-date-dependent temporal facts on every turn.
+
+OpenMRS owns durable conversation/audit state; the Hub receives prior turns and
+retains only disposable execution state. It does not cache final clinical answers
+or silently select a different provider, mode or model. Inline and alternate
+sources remain usable without QueryStore.
+
+Cache scope reflects the configured source service principal; it is not a claim
+of per-user authorization. The OpenMRS caller authorizes patient access before
+relay. Generalizing this cache to other callers/sources requires a trusted scope,
+never a client-selected cache namespace, and reauthorization/invalidation when
+permissions or source configuration change. Hits retain the same provenance as
+fresh reads. Operating cache metrics contain identities/hashes, not chart text.
+
+Any generic `ContextSource` cache extension (research checkpoint C2) must retain
+immutable ledger provenance, single-flight requests, bounded entries/bytes and
+explicit purge, keyed by source/configuration, patient, trusted scope and ledger
+format revision. Sources without usable validators bypass reuse unless an explicit
+product freshness policy is approved. Do not cache conversation history,
+question-conditioned views, temporal classification, gate results or grounding.
+This is extension direction, not a claim that the existing QueryStore cache
+already implements every generic-source feature.
+
+### Deferred full-chart prefix reuse
+
+Cross-project gate `OPENMRS-DUAL-PROVIDER-PARITY-2026-07-20:G13` is deferred, not a
+claim of implemented Hub prompt reuse. If activated, full-chart mode requires the
+complete deterministic ledger in stable bytes before question-specific material,
+with explicit overflow and no silent truncation. The full ledger still drives
+checks even when a prompt uses selected context.
+
+In-memory prefix reuse must be scoped by patient snapshot, authorization,
+provider/profile, model artifact, tokenizer/template and system-prompt digest.
+Request `cache_prompt` where supported and record actual reused/input tokens and
+backend prompt timing. Changed fingerprints invalidate reuse; cache misses stay
+correct. TTL-only chart reuse, cross-patient reuse and disk-persisted patient KV
+state are outside this work. Scheduling and any later benchmark/security decision
+belong to [OpenClinAI delivery](https://github.com/pmanko/openclinai.org/blob/main/specs/roadmap.md#5-track-a-openmrs-contribution-delivery).
+
 ## Validation and Evidence
 
 - Every product Answer receives deterministic substance, date, temporal, date-value, and trend checks before `answer_done`.
@@ -156,7 +212,7 @@ curl -fsS http://localhost:8080/v1/chat/completions \
   }'
 ```
 
-For a product profile, supply `patient` with a configured patient source or provide an inline chart. See the parent harness `make chartsearchai-local` workflow for the integrated OpenMRS setup.
+For a product profile, supply `patient` with a configured patient source or provide an inline chart. Use the [OpenClinAI umbrella](https://github.com/pmanko/openclinai.org#readme) for the assembled OpenMRS setup; the harness only runs configured experiments.
 
 ## Runtime Layout
 
