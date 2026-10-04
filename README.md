@@ -42,8 +42,8 @@ human label, topology, ordered stages, role models, prompts, knobs, and policies
 `workflow: catalyst_query` profile uses `topology: caller`: Hub owns its models,
 prompts, and knobs while Catalyst owns catalog context, SQL policy/lint,
 writer/reviewer orchestration, execution, and lineage. The preferred clinical
-product profile is `single-e4b-checked`; clinical discovery marks it as the
-effective default only when available. Product envelopes always enforce
+product profile is `single-12b-checked` (Gemma 4 12B); clinical discovery marks
+it as the effective default only when available. Product envelopes always enforce
 deterministic temporal validation, regardless of discovery visibility, require
 exact tokenizer-backed context counting, and apply the hub-owned `chart_answer`
 JSON schema. A product request cannot replace that contract; low-level legs
