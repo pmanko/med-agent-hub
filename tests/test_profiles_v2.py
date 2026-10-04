@@ -39,15 +39,15 @@ def test_configured_catalog_contains_only_current_product_eval_and_debug_profile
     }
 
 
-def test_default_product_profile_is_human_readable_single_e4b():
-    profile = get_profile("single-e4b-checked")
+def test_default_product_profile_is_human_readable_single_12b():
+    profile = get_profile("single-12b-checked")
 
-    assert profile.label == "Fast checked answer (E4B)"
+    assert profile.label == "Checked answer (12B)"
     assert profile.workflow == "clinical_answer"
     assert profile.default is True
     assert profile.topology == "single"
     assert "orchestrator" not in profile.models
-    assert profile.models["answer"] == "gemma-e4b"
+    assert set(profile.models.values()) == {"gemma-4-12b"}
     assert profile.supplemental_sources == ("knowledge-base",)
     assert profile.stages == (
         "context",
@@ -265,7 +265,7 @@ def test_discovery_metadata_is_authoritative_and_dynamic_legs_are_not_advertised
         "validation": True,
         "temporal_enforcement": "enforce",
         "available": True,
-        "default": True,
+        "default": False,
         "selection_priority": 10,
         "topology": "single",
         "visibility": "product",
@@ -348,7 +348,7 @@ def test_only_one_configured_profile_is_default():
     defaults = [
         profile_id for profile_id in profile_ids() if get_profile(profile_id).default
     ]
-    assert defaults == ["single-e4b-checked"]
+    assert defaults == ["single-12b-checked"]
 
 
 def test_all_configured_profiles_and_prompts_validate_at_startup():

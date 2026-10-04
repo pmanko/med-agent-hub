@@ -86,7 +86,7 @@ def test_invalid_dynamic_options_fail_loud():
 
 
 def test_product_single_profile_has_no_fake_orchestrator_and_correct_order():
-    profile = levels_loader.get_profile("single-e4b-checked")
+    profile = levels_loader.get_profile("single-12b-checked")
     assert profile.topology == "single"
     assert "orchestrator" not in profile.models
     assert profile.default is True
