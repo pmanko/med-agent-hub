@@ -415,8 +415,25 @@ def _fixed_context_text(
     return "\n\n".join(parts)
 
 
+def requester_line(context: Optional[Mapping[str, Any]]) -> str:
+    """One line naming who is asking, from the account context ChartSearchAI captured.
+
+    Only the assigned roles and the session location's name reach the model; the account's
+    identifiers, effective roles and locale stay in ChartSearchAI's audit record.
+    """
+    account = (context or {}).get("account_context")
+    if not isinstance(account, Mapping) or account.get("source") != "openmrs_session":
+        return ""
+    roles = [str(role).strip() for role in account.get("assigned_roles") or () if str(role).strip()]
+    location = account.get("session_location")
+    place = str(location.get("name") or "").strip() if isinstance(location, Mapping) else ""
+    if not roles and not place:
+        return ""
+    return "Requester: " + (", ".join(roles) or "unknown role") + (f" at {place}" if place else "")
+
+
 def _replace_chart_message(
-    messages: List[Dict[str, Any]], chart: str
+    messages: List[Dict[str, Any]], chart: str, requester: str = ""
 ) -> List[Dict[str, Any]]:
     out = [
         message
@@ -433,7 +450,9 @@ def _replace_chart_message(
             at,
             {
                 "role": "user",
-                "content": "Patient records (most recent first):\n" + chart,
+                "content": (requester + "\n\n" if requester else "")
+                + "Patient records (most recent first):\n"
+                + chart,
             },
         )
     return out
@@ -454,7 +473,7 @@ async def _count_answer_input(
             source="llama-router",
         )
     base_messages = [dict(message) for message in (messages or state.messages)]
-    actual_messages = _replace_chart_message(base_messages, chart)
+    actual_messages = _replace_chart_message(base_messages, chart, requester_line(request.context))
     user = _prompt(request.profile, "answer", "synthesis-answer")
     if state.gathered:
         user += "\n\n" + state.gathered
@@ -496,7 +515,7 @@ async def _select_answer_context(
         input_measure=lambda chart: _count_answer_input(request, state, chart),
     )
     state.chart = state.view.render()
-    state.messages = _replace_chart_message(state.messages, state.chart)
+    state.messages = _replace_chart_message(state.messages, state.chart, requester_line(request.context))
 
 
 async def _count_indepth_input(
@@ -513,7 +532,7 @@ async def _count_indepth_input(
             "The profile requires an exact token counter.",
             source="llama-router",
         )
-    messages = _replace_chart_message(state.messages, chart)
+    messages = _replace_chart_message(state.messages, chart, requester_line(request.context))
     messages = stages._indepth_messages(
         messages,
         _prompt(request.profile, "indepth", "synthesis-indepth"),
@@ -560,7 +579,7 @@ async def _select_indepth_context(
         ),
     )
     chart = view.render()
-    messages = _replace_chart_message(state.messages, chart)
+    messages = _replace_chart_message(state.messages, chart, requester_line(request.context))
     state.steps.append(
         {
             "role": "context_selection",
@@ -872,7 +891,10 @@ async def _prepare_context(request: ExecutionRequest, state: _State) -> None:
         or state.view.mode == "selected"
         or state.ledger.source_names != ("inline",)
     ):
-        state.messages = _replace_chart_message(state.messages, state.chart)
+        state.messages = _replace_chart_message(state.messages, state.chart, requester_line(request.context))
+    requester = requester_line(request.context)
+    if requester:
+        state.steps.append({"role": "requester", "line": requester})
     timing["total_ms"] = round((time.perf_counter() - context_started) * 1000)
     state.steps.append({"role": "context_preparation_timing", **timing})
     state.steps.append({"role": "context", **_context_summary(state)})
