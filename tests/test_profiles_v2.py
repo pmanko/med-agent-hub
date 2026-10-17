@@ -29,6 +29,7 @@ def test_configured_catalog_contains_only_current_product_eval_and_debug_profile
         "single-e2b-checked",
         "single-e4b-checked",
         "single-12b-checked",
+        "single-12b-fast",
         "single-a4b-checked",
         "team-med-checked",
         "debug-team-high-checked",

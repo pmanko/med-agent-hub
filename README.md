@@ -43,7 +43,9 @@ human label, topology, ordered stages, role models, prompts, knobs, and policies
 prompts, and knobs while Catalyst owns catalog context, SQL policy/lint,
 writer/reviewer orchestration, execution, and lineage. The preferred clinical
 product profile is `single-12b-checked` (Gemma 4 12B); clinical discovery marks
-it as the effective default only when available. Product envelopes always enforce
+it as the effective default only when available. `single-12b-fast` runs the same
+Answer checks without In-Depth, as an explicit faster choice; a product profile
+may leave out In-Depth but never its gate. Product envelopes always enforce
 deterministic temporal validation, regardless of discovery visibility, require
 exact tokenizer-backed context counting, and apply the hub-owned `chart_answer`
 JSON schema. A product request cannot replace that contract; low-level legs
@@ -67,7 +69,7 @@ Low-level legs are callable but are not advertised by `GET /v1/models`. Unknown 
 
 Querystore is not a startup dependency. Inline requests work without it, and alternate sources can implement the same `ContextSource` contract. A caller can request a source list with `context.sources`; otherwise the hub selects one patient source or the inline chart. Team gather profiles add static knowledge as a supplemental source in the same evidence ledger, so KB facts retain stable provenance and citation mappings instead of traveling through a parallel context path.
 
-Small charts retain their original chart text. For larger charts, the model input limit is a safety ceiling, not a target to fill. The deterministic selector admits mandatory safety records, exact matches, a 32-record clinical core that prioritizes active conditions and then recency, and records with meaningful normalized query overlap. It stops when eligible evidence is exhausted, even when capacity remains; other records are traced as `zero_relevance`. When eligible evidence exceeds the ceiling, one batched model-tokenizer request computes the rendered record costs. The selector ranks once, can skip an individually oversized record, and performs only bounded exact checks of assembled candidates. The final admitted prompt count is reused by dispatch, so a normal stage does not tokenize the same prompt twice. Router capability detection and the older `/apply-template` plus `/tokenize` fallback are cached for the process, while exact prompt counts stay in a small request-scoped cache. The selected view preserves canonical citation indices, includes whole records only, and discloses every included or excluded source id and reason in trace metadata. Answer, In-Depth synthesis, In-Depth review, and the bounded retry each fit a stage-local prompt view with the exact model tokenizer; all views derive from the same complete ledger. Temporal facts and deterministic checks always use that complete ledger. Mandatory-context overflow returns structured `insufficient_context` metadata rather than silently truncating evidence.
+Small charts retain their original chart text. For larger charts, the model input limit is a safety ceiling, not a target to fill. The deterministic selector admits mandatory safety records, exact matches, QueryStore's question-scoped slice (or, when that slice is unavailable, a 32-record clinical core that prioritizes active conditions and then recency), and records with meaningful normalized query overlap. It stops when eligible evidence is exhausted, even when capacity remains; other records are traced as `zero_relevance`. When eligible evidence exceeds the ceiling, one batched model-tokenizer request computes the rendered record costs. The selector ranks once, can skip an individually oversized record, and performs only bounded exact checks of assembled candidates. The final admitted prompt count is reused by dispatch, so a normal stage does not tokenize the same prompt twice. Router capability detection and the older `/apply-template` plus `/tokenize` fallback are cached for the process, while exact prompt counts stay in a small request-scoped cache. The selected view preserves canonical citation indices, includes whole records only, and discloses every included or excluded source id and reason in trace metadata. Answer, In-Depth synthesis, In-Depth review, and the bounded retry each fit a stage-local prompt view with the exact model tokenizer; all views derive from the same complete ledger. Temporal facts and deterministic checks always use that complete ledger. Mandatory-context overflow returns structured `insufficient_context` metadata rather than silently truncating evidence.
 
 ### QueryStore context and freshness
 
@@ -109,21 +111,19 @@ question-conditioned views, temporal classification, gate results or grounding.
 This is extension direction, not a claim that the existing QueryStore cache
 already implements every generic-source feature.
 
-### Deferred full-chart prefix reuse
+### Prompt reuse within an answer
 
-Cross-project gate `OPENMRS-DUAL-PROVIDER-PARITY-2026-07-20:G13` is deferred, not a
-claim of implemented Hub prompt reuse. If activated, full-chart mode requires the
-complete deterministic ledger in stable bytes before question-specific material,
-with explicit overflow and no silent truncation. The full ledger still drives
-checks even when a prompt uses selected context.
-
-In-memory prefix reuse must be scoped by patient snapshot, authorization,
-provider/profile, model artifact, tokenizer/template and system-prompt digest.
-Request `cache_prompt` where supported and record actual reused/input tokens and
-backend prompt timing. Changed fingerprints invalidate reuse; cache misses stay
-correct. TTL-only chart reuse, cross-patient reuse and disk-persisted patient KV
-state are outside this work. Scheduling and any later benchmark/security decision
-belong to [OpenClinAI delivery](https://github.com/pmanko/openclinai.org/blob/main/specs/roadmap.md#5-track-a-openmrs-contribution-delivery).
+Every stage of one answer (answer, review, In-Depth, In-Depth review) sends the
+same context message first and its own instructions after it. That message holds
+the gathered evidence, led by the chart-wide temporal facts, then the selected
+patient records, so later answers on the same chart can reuse its start too. A later
+stage keeps the answer's selected records whenever its prompt fits the window,
+and selects its own only when it does not. The router's exact-token prompt cache
+then reads that message once per answer; Gemma 4 needs `--swa-full` for that. The
+Hub keeps no prompt state of its own, so a cache miss costs time, never
+correctness. Reusing a full chart across answers (gate G13) is tracked in
+OpenClinAI's [provider parity](https://github.com/pmanko/openclinai.org/blob/main/specs/provider-parity.md)
+thread.
 
 ## Validation and Evidence
 

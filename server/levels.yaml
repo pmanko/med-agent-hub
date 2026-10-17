@@ -8,6 +8,7 @@
 stage_sets:
   single_answer: &single_answer [context, answer, gate]
   product: &product [context, answer, gate, resolve_refs, review, gate, final_resolve_refs, ground_verdicts, indepth, indepth_gate]
+  product_fast: &product_fast [context, answer, gate, resolve_refs, review, gate, final_resolve_refs, ground_verdicts]
   team_product: &team_product [context, gather, answer, gate, resolve_refs, review, gate, final_resolve_refs, ground_verdicts, indepth, indepth_gate]
 
 profiles:
@@ -213,6 +214,18 @@ profiles:
     visibility: product
     default: true
     selection_priority: 30
+    context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true, supplemental_sources: [knowledge-base]}
+    knobs: {answer: {temperature: 0}}
+
+  single-12b-fast:
+    label: Fast checked answer (12B, no In-Depth)
+    topology: single
+    stages: *product_fast
+    models: {answer: gemma-4-12b, review: gemma-4-12b, grounding: gemma-4-12b}
+    prompts: {answer: synthesis-answer, review: validation-rewrite}
+    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true}
+    visibility: product
+    selection_priority: 35
     context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true, supplemental_sources: [knowledge-base]}
     knobs: {answer: {temperature: 0}}
 
