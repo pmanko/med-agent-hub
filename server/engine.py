@@ -450,12 +450,32 @@ def _replace_chart_message(
             at,
             {
                 "role": "user",
-                "content": (requester + "\n\n" if requester else "")
-                + "Patient records (most recent first):\n"
-                + chart,
+                "content": stages.records_message(chart)["content"]
+                + ("\n\n" + requester if requester else ""),
             },
         )
     return out
+
+
+async def _reuse_answer_chart(
+    state: _State, measure: Callable[[str], Awaitable[int]], stage: str
+) -> bool:
+    """Whether a later stage can keep the answer's records, so the router reuses their prefix."""
+    if not state.chart or state.context_budget is None:
+        return False
+    tokens = await measure(state.chart)
+    if tokens > state.context_budget.input_limit:
+        return False
+    state.steps.append(
+        {
+            "role": "context_selection",
+            "stage": stage,
+            "mode": "answer_records",
+            "input_tokens": tokens,
+            "input_limit": state.context_budget.input_limit,
+        }
+    )
+    return True
 
 
 async def _count_answer_input(
@@ -567,6 +587,14 @@ async def _select_indepth_context(
             "The profile requires exact context selection.",
             source="llama-router",
         )
+    def measure(chart: str) -> Awaitable[int]:
+        return _count_indepth_input(request, state, chart, prior_answer, extra_msgs)
+
+    if state.view is not None and await _reuse_answer_chart(state, measure, stage):
+        messages = _replace_chart_message(
+            state.messages, state.chart, requester_line(request.context)
+        )
+        return state.view, messages, state.chart
     selector = request.context_selector or select_context
     view = await selector(
         state.ledger,
@@ -574,9 +602,7 @@ async def _select_indepth_context(
         model=request.profile.models["indepth"],
         budget=state.context_budget,
         counter=state.token_counter,
-        input_measure=lambda chart: _count_indepth_input(
-            request, state, chart, prior_answer, extra_msgs
-        ),
+        input_measure=measure,
     )
     chart = view.render()
     messages = _replace_chart_message(state.messages, chart, requester_line(request.context))
@@ -647,6 +673,8 @@ async def _select_answer_review_context(
         )
         return await counter.count(reviewer_model, rendered)
 
+    if await _reuse_answer_chart(state, measure, stage):
+        return state.chart
     selector = request.context_selector or select_context
     view = await selector(
         state.ledger,
@@ -717,6 +745,8 @@ async def _select_indepth_review_context(
         )
         return await counter.count(reviewer_model, rendered)
 
+    if await _reuse_answer_chart(state, measure, "indepth_review"):
+        return state.chart
     selector = request.context_selector or select_context
     view = await selector(
         state.ledger,

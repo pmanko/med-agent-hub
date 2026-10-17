@@ -109,21 +109,17 @@ question-conditioned views, temporal classification, gate results or grounding.
 This is extension direction, not a claim that the existing QueryStore cache
 already implements every generic-source feature.
 
-### Deferred full-chart prefix reuse
+### Prompt reuse within an answer
 
-Cross-project gate `OPENMRS-DUAL-PROVIDER-PARITY-2026-07-20:G13` is deferred, not a
-claim of implemented Hub prompt reuse. If activated, full-chart mode requires the
-complete deterministic ledger in stable bytes before question-specific material,
-with explicit overflow and no silent truncation. The full ledger still drives
-checks even when a prompt uses selected context.
-
-In-memory prefix reuse must be scoped by patient snapshot, authorization,
-provider/profile, model artifact, tokenizer/template and system-prompt digest.
-Request `cache_prompt` where supported and record actual reused/input tokens and
-backend prompt timing. Changed fingerprints invalidate reuse; cache misses stay
-correct. TTL-only chart reuse, cross-patient reuse and disk-persisted patient KV
-state are outside this work. Scheduling and any later benchmark/security decision
-belong to [OpenClinAI delivery](https://github.com/pmanko/openclinai.org/blob/main/specs/roadmap.md#5-track-a-openmrs-contribution-delivery).
+Every stage of one answer (answer, review, In-Depth, In-Depth review) sends the
+same patient records message first and its own instructions after it. A later
+stage keeps the answer's selected records whenever its prompt fits the window,
+and selects its own only when it does not. The router's exact-token prompt cache
+then reads the records once per answer; Gemma 4 needs `--swa-full` for that. The
+Hub keeps no prompt state of its own, so a cache miss costs time, never
+correctness. Reusing a full chart across answers (gate G13) is tracked in
+OpenClinAI's [provider parity](https://github.com/pmanko/openclinai.org/blob/main/specs/provider-parity.md)
+thread.
 
 ## Validation and Evidence
 

@@ -16,6 +16,7 @@ import httpx
 from . import drug_safety, temporal
 from .config import EXPERT_DRY_MULTIPLIER, llm_config, resolve_hub_build_revision
 from .context_sources import (
+    CHART_MARKER,
     ChatTokenCounter,
     ContextSourceError,
     InsufficientContextError,
@@ -1848,6 +1849,20 @@ async def _validate_answer_rewrite(
     }
 
 
+_LEDGER_NOTE = (
+    "The numbered evidence ledger is the patient records message above "
+    "(patient records and KnowledgeReference records)."
+)
+
+
+def records_message(chart: str) -> Dict[str, Any]:
+    """The records message every stage sends first, so the router can reuse its prefix."""
+    return {
+        "role": "user",
+        "content": CHART_MARKER + "\n" + (chart or "(none)"),
+    }
+
+
 def _answer_validation_messages(
     *,
     chart: str,
@@ -1858,14 +1873,14 @@ def _answer_validation_messages(
     instruction = load_prompt(validation_prompt + "-answer")
     audit_user = (
         instruction
-        + "\n\n=== NUMBERED EVIDENCE LEDGER (patient records and KnowledgeReference records) ===\n"
-        + (chart or "(none)")
+        + "\n\n"
+        + _LEDGER_NOTE
         + "\n\n=== GATHERED KB / EVIDENCE (the guidance the team retrieved) ===\n"
         + (gathered or "(none)")
         + "\n\n=== DRAFT ANSWER ===\n"
         + answer_text
     )
-    return [{"role": "user", "content": audit_user}]
+    return [records_message(chart), {"role": "user", "content": audit_user}]
 
 
 async def _validate_indepth_verdict(
@@ -1957,8 +1972,8 @@ def _indepth_validation_messages(
     numbered = "\n".join(f"{i}. {c}" for i, c in enumerate(claims, start=1))
     audit_user = (
         instruction
-        + "\n\n=== NUMBERED EVIDENCE LEDGER (patient records and KnowledgeReference records) ===\n"
-        + (chart or "(none)")
+        + "\n\n"
+        + _LEDGER_NOTE
         + "\n\n=== GATHERED KB / EVIDENCE (the guidance the team retrieved) ===\n"
         + (gathered or "(none)")
         + "\n\n=== DIRECT ANSWER (context) ===\n"
@@ -1966,7 +1981,7 @@ def _indepth_validation_messages(
         + "\n\n=== IN-DEPTH CLAIMS (numbered; return the numbers to DROP) ===\n"
         + numbered
     )
-    return [{"role": "user", "content": audit_user}]
+    return [records_message(chart), {"role": "user", "content": audit_user}]
 
 
 def _answer_note(level: str, first_issue: str, last_issue: str) -> str:
