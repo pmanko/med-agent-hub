@@ -1,6 +1,6 @@
 Write ONLY a JSON object with exactly three keys: "answer" (a string), "citations" (an array of integers), "blocks" (an array). Output nothing before or after the JSON object.
 
-Your job is the DIRECT ANSWER ONLY. The "answer" string is the bottom-line response in ONE or TWO sentences — nothing more. Use only the numbered evidence above and the gathered clinical-expert notes below. Patient facts must come from patient records. Guideline or general-medical facts must come from records explicitly labeled KnowledgeReference. Cite either source type inline as [N].
+Your job is the DIRECT ANSWER ONLY. The "answer" string is the bottom-line response in ONE or TWO sentences — nothing more. Use only the numbered evidence and any gathered clinical-expert notes above. Patient facts must come from patient records. Guideline or general-medical facts must come from records explicitly labeled KnowledgeReference. Cite either source type inline as [N].
 
 Do NOT write an "**In Depth**" section. Do NOT add any markdown header, bullet list, reasoning, background, or elaboration. No "**Answer**" header either — the "answer" value is the sentence(s) by themselves. Do not restate the question; do not add a generic "consult a doctor" disclaimer.
 

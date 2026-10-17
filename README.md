@@ -112,10 +112,12 @@ already implements every generic-source feature.
 ### Prompt reuse within an answer
 
 Every stage of one answer (answer, review, In-Depth, In-Depth review) sends the
-same patient records message first and its own instructions after it. A later
+same context message first and its own instructions after it. That message holds
+the gathered evidence, led by the chart-wide temporal facts, then the selected
+patient records, so later answers on the same chart can reuse its start too. A later
 stage keeps the answer's selected records whenever its prompt fits the window,
 and selects its own only when it does not. The router's exact-token prompt cache
-then reads the records once per answer; Gemma 4 needs `--swa-full` for that. The
+then reads that message once per answer; Gemma 4 needs `--swa-full` for that. The
 Hub keeps no prompt state of its own, so a cache miss costs time, never
 correctness. Reusing a full chart across answers (gate G13) is tracked in
 OpenClinAI's [provider parity](https://github.com/pmanko/openclinai.org/blob/main/specs/provider-parity.md)
