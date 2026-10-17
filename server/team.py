@@ -1657,7 +1657,7 @@ async def _synthesize_answer(
     """Answer synthesis bound to chartsearchai's response_format. Returns the (answer_text,
     citations, blocks) parsed from the envelope. FAIL-OPEN: returns ("", [], []) on any error.
     """
-    user = answer_instruction + ("\n\n" + gathered if gathered else "")
+    user = with_gathered(answer_instruction, gathered, base_messages)
     messages = (
         list(base_messages) + [{"role": "user", "content": user}] + (extra_msgs or [])
     )
@@ -1736,11 +1736,13 @@ def _indepth_messages(
     *,
     extra_msgs: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
-    user = (
+    user = with_gathered(
         indepth_instruction
         + "\n\n=== DIRECT ANSWER (elaborate THIS; do not restate it) ===\n"
-        + answer_text
-        + ("\n\n=== GATHERED KB / EVIDENCE ===\n" + gathered if gathered else "")
+        + answer_text,
+        gathered,
+        base_messages,
+        header="=== GATHERED KB / EVIDENCE ===\n",
     )
     return (
         list(base_messages) + [{"role": "user", "content": user}] + (extra_msgs or [])
@@ -1850,17 +1852,39 @@ async def _validate_answer_rewrite(
 
 
 _LEDGER_NOTE = (
-    "The numbered evidence ledger is the patient records message above "
-    "(patient records and KnowledgeReference records)."
+    "The first message above holds any gathered KB / evidence and the numbered "
+    "evidence ledger (patient records and KnowledgeReference records)."
 )
 
 
-def records_message(chart: str) -> Dict[str, Any]:
-    """The records message every stage sends first, so the router can reuse its prefix."""
+def records_message(chart: str, gathered: str = "") -> Dict[str, Any]:
+    """The context message every stage sends first, so the router reads it once.
+
+    Gathered evidence (the chart-wide temporal facts, then any team notes) comes before
+    the question-specific records, so later answers on the same chart can reuse it too.
+    """
     return {
         "role": "user",
-        "content": CHART_MARKER + "\n" + (chart or "(none)"),
+        "content": (gathered + "\n\n" if gathered else "")
+        + CHART_MARKER
+        + "\n"
+        + (chart or "(none)"),
     }
+
+
+def with_gathered(
+    instruction: str,
+    gathered: str,
+    base_messages: List[Dict[str, Any]],
+    header: str = "",
+) -> str:
+    """Append gathered evidence only when the context message does not already carry it."""
+    if not gathered or any(
+        isinstance(message.get("content"), str) and gathered in message["content"]
+        for message in base_messages
+    ):
+        return instruction
+    return instruction + "\n\n" + header + gathered
 
 
 def _answer_validation_messages(
@@ -1875,12 +1899,10 @@ def _answer_validation_messages(
         instruction
         + "\n\n"
         + _LEDGER_NOTE
-        + "\n\n=== GATHERED KB / EVIDENCE (the guidance the team retrieved) ===\n"
-        + (gathered or "(none)")
         + "\n\n=== DRAFT ANSWER ===\n"
         + answer_text
     )
-    return [records_message(chart), {"role": "user", "content": audit_user}]
+    return [records_message(chart, gathered), {"role": "user", "content": audit_user}]
 
 
 async def _validate_indepth_verdict(
@@ -1974,14 +1996,12 @@ def _indepth_validation_messages(
         instruction
         + "\n\n"
         + _LEDGER_NOTE
-        + "\n\n=== GATHERED KB / EVIDENCE (the guidance the team retrieved) ===\n"
-        + (gathered or "(none)")
         + "\n\n=== DIRECT ANSWER (context) ===\n"
         + answer_text
         + "\n\n=== IN-DEPTH CLAIMS (numbered; return the numbers to DROP) ===\n"
         + numbered
     )
-    return [records_message(chart), {"role": "user", "content": audit_user}]
+    return [records_message(chart, gathered), {"role": "user", "content": audit_user}]
 
 
 def _answer_note(level: str, first_issue: str, last_issue: str) -> str:

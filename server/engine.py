@@ -433,7 +433,7 @@ def requester_line(context: Optional[Mapping[str, Any]]) -> str:
 
 
 def _replace_chart_message(
-    messages: List[Dict[str, Any]], chart: str, requester: str = ""
+    messages: List[Dict[str, Any]], chart: str, requester: str = "", gathered: str = ""
 ) -> List[Dict[str, Any]]:
     out = [
         message
@@ -450,7 +450,7 @@ def _replace_chart_message(
             at,
             {
                 "role": "user",
-                "content": stages.records_message(chart)["content"]
+                "content": stages.records_message(chart, gathered)["content"]
                 + ("\n\n" + requester if requester else ""),
             },
         )
@@ -493,10 +493,10 @@ async def _count_answer_input(
             source="llama-router",
         )
     base_messages = [dict(message) for message in (messages or state.messages)]
-    actual_messages = _replace_chart_message(base_messages, chart, requester_line(request.context))
-    user = _prompt(request.profile, "answer", "synthesis-answer")
-    if state.gathered:
-        user += "\n\n" + state.gathered
+    actual_messages = _replace_chart_message(base_messages, chart, requester_line(request.context), state.gathered)
+    user = stages.with_gathered(
+        _prompt(request.profile, "answer", "synthesis-answer"), state.gathered, actual_messages
+    )
     actual_messages.append({"role": "user", "content": user})
     count_chat = getattr(counter, "count_chat", None)
     if callable(count_chat):
@@ -535,7 +535,7 @@ async def _select_answer_context(
         input_measure=lambda chart: _count_answer_input(request, state, chart),
     )
     state.chart = state.view.render()
-    state.messages = _replace_chart_message(state.messages, state.chart, requester_line(request.context))
+    state.messages = _replace_chart_message(state.messages, state.chart, requester_line(request.context), state.gathered)
 
 
 async def _count_indepth_input(
@@ -552,7 +552,7 @@ async def _count_indepth_input(
             "The profile requires an exact token counter.",
             source="llama-router",
         )
-    messages = _replace_chart_message(state.messages, chart, requester_line(request.context))
+    messages = _replace_chart_message(state.messages, chart, requester_line(request.context), state.gathered)
     messages = stages._indepth_messages(
         messages,
         _prompt(request.profile, "indepth", "synthesis-indepth"),
@@ -592,7 +592,7 @@ async def _select_indepth_context(
 
     if state.view is not None and await _reuse_answer_chart(state, measure, stage):
         messages = _replace_chart_message(
-            state.messages, state.chart, requester_line(request.context)
+            state.messages, state.chart, requester_line(request.context), state.gathered
         )
         return state.view, messages, state.chart
     selector = request.context_selector or select_context
@@ -605,7 +605,7 @@ async def _select_indepth_context(
         input_measure=measure,
     )
     chart = view.render()
-    messages = _replace_chart_message(state.messages, chart, requester_line(request.context))
+    messages = _replace_chart_message(state.messages, chart, requester_line(request.context), state.gathered)
     state.steps.append(
         {
             "role": "context_selection",
@@ -921,7 +921,7 @@ async def _prepare_context(request: ExecutionRequest, state: _State) -> None:
         or state.view.mode == "selected"
         or state.ledger.source_names != ("inline",)
     ):
-        state.messages = _replace_chart_message(state.messages, state.chart, requester_line(request.context))
+        state.messages = _replace_chart_message(state.messages, state.chart, requester_line(request.context), state.gathered)
     requester = requester_line(request.context)
     if requester:
         state.steps.append({"role": "requester", "line": requester})
@@ -1378,7 +1378,11 @@ async def _execute_stages(
                             if "expert" in request.profile.models
                             else ""
                         ),
-                        messages=state.messages,
+                        # The orchestrator reads the records alone, as before gathered
+                        # evidence joined the shared context message.
+                        messages=_replace_chart_message(
+                            state.messages, state.chart, requester_line(request.context)
+                        ),
                         chart=state.chart,
                         max_tokens=request.max_tokens,
                         orch_temp=sampling["orchestrator_temperature"],

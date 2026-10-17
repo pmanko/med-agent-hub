@@ -1,4 +1,4 @@
-"""Every stage of one answer starts with the same records message, so the router reuses it."""
+"""Every stage of one answer starts with the same context message, so the router reads it once."""
 
 import asyncio
 
@@ -49,21 +49,21 @@ def _prepared():
     return request, state
 
 
-def test_every_stage_starts_with_the_answers_records_and_keeps_its_instructions_after_them():
+def test_every_stage_starts_with_the_same_evidence_and_records_and_keeps_its_instructions_after_them():
     request, state = _prepared()
     _view, indepth, _chart = asyncio.run(engine._select_indepth_context(request, state, ANSWER))
     review = stages._answer_validation_messages(
         chart=asyncio.run(engine._select_answer_review_context(request, state, ANSWER, [])),
-        gathered="",
+        gathered=state.gathered,
         answer_text=ANSWER,
     )
     indepth_review = stages._indepth_validation_messages(
         chart=asyncio.run(engine._select_indepth_review_context(request, state, ANSWER, CLAIMS)),
-        gathered="",
+        gathered=state.gathered,
         answer_text=ANSWER,
         claims=CLAIMS,
     )
-    records = stages.records_message(state.chart)
+    records = stages.records_message(state.chart, state.gathered)
 
     assert "Requester:" not in records["content"]
     assert state.messages[0]["content"] == (
@@ -71,6 +71,10 @@ def test_every_stage_starts_with_the_answers_records_and_keeps_its_instructions_
     )
     assert indepth[0] == state.messages[0]
     assert review[0] == indepth_review[0] == records
+    assert state.gathered and records["content"].startswith(state.gathered)
+    for messages in (state.messages, indepth, review, indepth_review):
+        text = "\n".join(str(m.get("content")) for m in messages)
+        assert text.count(state.gathered) == 1
     assert [s["stage"] for s in state.steps if s.get("mode") == "answer_records"] == [
         "indepth",
         "answer_review",
