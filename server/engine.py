@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import dataclasses
 import hashlib
 import json
 import os
@@ -341,20 +342,13 @@ def _ledger_after_drug_injection(
         if existing is None:
             existing = existing_by_uuid.get(uuid)
         if existing is not None:
+            # Keep every other field, QueryStore's slice tier and rank included: a dropped
+            # one silently sends the selector back to its local fallback ranking.
             records.append(
-                EvidenceRecord(
-                    stable_id=existing.stable_id,
-                    source=existing.source,
-                    source_priority=existing.source_priority,
-                    resource_type=existing.resource_type,
-                    resource_uuid=existing.resource_uuid,
+                dataclasses.replace(
+                    existing,
                     date=mapping.get("date"),
-                    clinical_date=existing.clinical_date,
-                    date_kind=existing.date_kind,
                     text=str(mapping.get("text") or existing.text),
-                    mandatory=existing.mandatory,
-                    metadata=existing.metadata,
-                    raw=existing.raw,
                 )
             )
             continue
