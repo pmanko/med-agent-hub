@@ -1138,6 +1138,7 @@ def _indepth_validation_summary(
             "checks."
         ),
         "unavailable": "The In-Depth checks could not be completed.",
+        "no_claims": "No In-Depth claims were written; nothing beyond the answer was fully supported.",
     }.get(status, "The In-Depth check finished with an unknown status.")
     reasons: list[str] = []
 
@@ -1148,7 +1149,7 @@ def _indepth_validation_summary(
 
     add_reason(validation.get("review_issues"))
     for check in validation.get("citation_checks") or []:
-        if isinstance(check, Mapping) and check.get("status") == "fail":
+        if isinstance(check, Mapping) and check.get("status") in {"fail", "warn"}:
             add_reason(check.get("reason"))
     for claim_check in validation.get("checks") or []:
         if not isinstance(claim_check, Mapping):
@@ -2120,12 +2121,22 @@ async def _execute_stages(
                     continue
 
                 if stage == "indepth_gate":
+                    # A synthesis that wrote no claims answered as its prompt asks when nothing more is
+                    # fully supported; review that rejected claims leaves its own status on the conf.
+                    wrote_no_claims = (
+                        not state.claims
+                        and not state.indepth_error
+                        and not state.indepth_conf.get("status")
+                    )
                     state.indepth_gate = temporal.gate_indepth_claims(
                         stages._latest_user_text(state.messages),
                         state.claims,
                         state.temporal_facts,
                         mode=temporal_mode,
                     )
+                    if wrote_no_claims:
+                        state.indepth_gate["status"] = "no_claims"
+                        state.indepth_conf = {}
                     if state.indepth_conf.get("status") == "unavailable":
                         state.indepth_gate["review_status"] = "unavailable"
                     elif state.indepth_conf.get("status") == "edited":
@@ -2142,6 +2153,10 @@ async def _execute_stages(
                         if state.indepth_gate.get("status") == "checked":
                             state.indepth_gate["status"] = "edited"
                     state.claims = list(state.indepth_gate["claims"])
+                    indepth_reviewed = (
+                        "review" in request.profile.models
+                        and request.profile.output_mode != "indepth"
+                    )
                     citation_checks: list[dict[str, Any]] = []
                     candidates: list[tuple[int, str, list[dict[str, Any]]]] = []
                     for claim_index, claim in enumerate(state.claims, 1):
@@ -2233,11 +2248,14 @@ async def _execute_stages(
                             if reference.get("groundingStatus") == "unchecked"
                         ]
                         if unchecked:
+                            # A claim the In-Depth review passed is shown, its confidence saying the
+                            # citation check could not reach it; an unreviewed claim had no check at
+                            # all and stays withheld.
                             citation_checks.append(
                                 {
                                     "claim_index": claim_index,
                                     "claim": claim,
-                                    "status": "fail",
+                                    "status": "warn" if indepth_reviewed else "fail",
                                     "reason": "In-Depth citation support could not be checked within the grounding limits.",
                                     "source_indices": [
                                         reference.get("index")
@@ -2245,7 +2263,8 @@ async def _execute_stages(
                                     ],
                                 }
                             )
-                            continue
+                            if not indepth_reviewed:
+                                continue
                         accepted_claims.append(claim)
                         indepth_references.extend(grounded_references)
 
@@ -2253,9 +2272,19 @@ async def _execute_stages(
                     state.indepth_gate["claims"] = accepted_claims
                     if citation_checks:
                         state.indepth_gate["citation_checks"] = citation_checks
+                    if any(check["status"] == "fail" for check in citation_checks):
                         state.indepth_gate["status"] = (
                             "edited" if accepted_claims else "needs_review"
                         )
+                    if (
+                        any(check["status"] == "warn" for check in citation_checks)
+                        and state.indepth_conf.get("level") == "green"
+                    ):
+                        state.indepth_conf = {
+                            **state.indepth_conf,
+                            "level": "yellow",
+                            "note": "Some In-Depth citations could not be checked within the grounding limits.",
+                        }
                     for reference in indepth_references:
                         existing = next(
                             (
