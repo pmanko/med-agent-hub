@@ -175,6 +175,8 @@ class _State:
         default_factory=lambda: {"level": "green", "note": ""}
     )
     indepth_gate: Optional[Dict[str, Any]] = None
+    # 1-based In-Depth claim index -> what each check marked on it; shown beside the claim.
+    indepth_marks: Dict[int, List[str]] = field(default_factory=dict)
     indepth_error: str = ""
     indepth_error_code: Optional[str] = None
     indepth_required_source_ids: List[str] = field(default_factory=list)
@@ -1099,7 +1101,7 @@ def _latest_indepth_draft_claims(state: _State) -> List[str]:
                 break
             if later.get("role") != "indepth_validator":
                 continue
-            if later.get("status") == "unavailable" or later.get("drop"):
+            if later.get("status") == "unavailable":
                 rejected.append(claims)
             break
     if rejected:
@@ -1130,12 +1132,11 @@ def _indepth_validation_summary(
     lead = {
         "checked": "In-Depth claims were checked against chart, citation, and temporal rules.",
         "edited": (
-            "In-Depth was updated after checks; claims that did not pass were removed "
-            "or corrected."
+            "In-Depth was updated after checks; a date was corrected from the chart's "
+            "dated records."
         ),
         "needs_review": (
-            "No complete In-Depth response passed the chart, citation, and temporal "
-            "checks."
+            "Some In-Depth points are marked for checking; they are shown, not removed."
         ),
         "unavailable": "The In-Depth checks could not be completed.",
         "no_claims": "No In-Depth claims were written; nothing beyond the answer was fully supported.",
@@ -1165,9 +1166,40 @@ def _indepth_validation_summary(
     return " ".join([lead, *reasons[:2]])
 
 
+def _indepth_mark_note(marked: int, total: int, review: Mapping[str, Any]) -> str:
+    """Clinician-facing In-Depth confidence note: how many points are marked, and the review's words."""
+    parts: list[str] = []
+    if marked:
+        parts.append(
+            f"{marked} of {total} point{'s' if total != 1 else ''} "
+            f"{'is' if marked == 1 else 'are'} marked for checking"
+        )
+    issues = " ".join(str(review.get("issues") or "").split())
+    if review.get("status") == "flagged" and issues:
+        parts.append("review note: " + issues.rstrip("."))
+    if review.get("status") == "unreviewed":
+        parts.append("In-Depth review was unavailable, so these points were not reviewed")
+    if not parts:
+        return ""
+    note = "; ".join(parts)
+    return note[0].upper() + note[1:] + ". Verify marked points against the chart."
+
+
+def _marked_claim(claim: str, labels: Sequence[str]) -> str:
+    if not labels:
+        return claim
+    return claim + " *(Check: " + "; ".join(labels) + ".)*"
+
+
 def _in_depth_payload(state: _State) -> Dict[str, Any]:
+    plain_answer = "\n".join("- " + claim for claim in state.claims)
     final_answer = (
-        "" if state.indepth_error else "\n".join("- " + claim for claim in state.claims)
+        ""
+        if state.indepth_error
+        else "\n".join(
+            "- " + _marked_claim(claim, state.indepth_marks.get(index, ()))
+            for index, claim in enumerate(state.claims, 1)
+        )
     )
     validation = dict(state.indepth_gate or {})
     if state.indepth_error and not validation.get("status"):
@@ -1185,9 +1217,8 @@ def _in_depth_payload(state: _State) -> Dict[str, Any]:
     if state.indepth_error_code:
         payload["errorCode"] = state.indepth_error_code
         payload["requiredSourceIds"] = list(state.indepth_required_source_ids)
-    if (
-        state.indepth_review_draft
-        and state.indepth_review_draft.strip() != final_answer.strip()
+    if state.indepth_review_draft and state.indepth_review_draft.strip() != (
+        "" if state.indepth_error else plain_answer.strip()
     ):
         payload["reviewDraft"] = state.indepth_review_draft
         payload["reviewReferences"] = list(state.indepth_review_references)
@@ -2012,20 +2043,6 @@ async def _execute_stages(
                                     request, state, prior_answer, claims
                                 )
 
-                            async def fit_retry(
-                                extra_msgs: List[Dict[str, Any]],
-                            ) -> List[Dict[str, Any]]:
-                                _view, messages, _chart = (
-                                    await _select_indepth_context(
-                                        request,
-                                        state,
-                                        prior_answer,
-                                        extra_msgs=extra_msgs,
-                                        stage="indepth_retry",
-                                    )
-                                )
-                                return messages
-
                             (
                                 state.claims,
                                 state.indepth_conf,
@@ -2053,20 +2070,12 @@ async def _execute_stages(
                                 ],
                                 validator_dry=sampling["review_dry"],
                                 max_tokens=request.max_tokens,
-                                max_loops=int(
-                                    request.profile.policies.get("review_loops", 1)
-                                ),
                                 steps=state.steps,
                                 canonicalize_citations=(
                                     product and temporal_mode == "enforce"
                                 ),
                                 review_context_fitter=(
                                     fit_review
-                                    if product and request.profile.exact_tokenizer
-                                    else None
-                                ),
-                                retry_context_fitter=(
-                                    fit_retry
                                     if product and request.profile.exact_tokenizer
                                     else None
                                 ),
@@ -2094,10 +2103,6 @@ async def _execute_stages(
                                 }
                             )
                         _capture_indepth_review_artifact(state)
-                        if state.indepth_conf.get("status") == "unavailable":
-                            state.indepth_error = (
-                                "In-Depth was withheld because review was unavailable."
-                            )
                     except InsufficientContextError as exc:
                         _capture_indepth_review_artifact(state)
                         state.indepth_error = str(exc)
@@ -2122,12 +2127,9 @@ async def _execute_stages(
 
                 if stage == "indepth_gate":
                     # A synthesis that wrote no claims answered as its prompt asks when nothing more is
-                    # fully supported; review that rejected claims leaves its own status on the conf.
-                    wrote_no_claims = (
-                        not state.claims
-                        and not state.indepth_error
-                        and not state.indepth_conf.get("status")
-                    )
+                    # supported. Every written claim is shown; the checks below mark it, never remove it.
+                    wrote_no_claims = not state.claims and not state.indepth_error
+                    review = dict(state.indepth_conf or {})
                     state.indepth_gate = temporal.gate_indepth_claims(
                         stages._latest_user_text(state.messages),
                         state.claims,
@@ -2137,26 +2139,27 @@ async def _execute_stages(
                     if wrote_no_claims:
                         state.indepth_gate["status"] = "no_claims"
                         state.indepth_conf = {}
-                    if state.indepth_conf.get("status") == "unavailable":
-                        state.indepth_gate["review_status"] = "unavailable"
-                    elif state.indepth_conf.get("status") == "edited":
-                        state.indepth_gate["review_status"] = "edited"
-                        state.indepth_gate["review_removed"] = int(
-                            state.indepth_conf.get("removed") or 0
+                    state.claims = list(state.indepth_gate["claims"])
+                    marks: Dict[int, List[Tuple[str, str]]] = {}
+
+                    def mark(claim_index: int, level: str, label: str) -> None:
+                        if (level, label) not in marks.setdefault(claim_index, []):
+                            marks[claim_index].append((level, label))
+
+                    for claim_index in state.indepth_gate.get("flagged") or []:
+                        mark(claim_index, "red", "the date check found a conflict")
+                    if review.get("status") == "flagged":
+                        state.indepth_gate["review_status"] = "flagged"
+                        state.indepth_gate["review_flagged"] = list(
+                            review.get("flagged") or []
                         )
                         state.indepth_gate["review_issues"] = str(
-                            state.indepth_conf.get("issues") or ""
+                            review.get("issues") or ""
                         )
-                        state.indepth_gate["review_attempts"] = int(
-                            state.indepth_conf.get("review_attempts") or 1
-                        )
-                        if state.indepth_gate.get("status") == "checked":
-                            state.indepth_gate["status"] = "edited"
-                    state.claims = list(state.indepth_gate["claims"])
-                    indepth_reviewed = (
-                        "review" in request.profile.models
-                        and request.profile.output_mode != "indepth"
-                    )
+                        for claim_index in review.get("flagged") or []:
+                            mark(claim_index, "yellow", "flagged on review")
+                    elif review.get("status") == "unreviewed":
+                        state.indepth_gate["review_status"] = "unavailable"
                     citation_checks: list[dict[str, Any]] = []
                     candidates: list[tuple[int, str, list[dict[str, Any]]]] = []
                     for claim_index, claim in enumerate(state.claims, 1):
@@ -2166,11 +2169,12 @@ async def _execute_stages(
                                 {
                                     "claim_index": claim_index,
                                     "claim": claim,
-                                    "status": "fail",
-                                    "reason": "In-Depth claim has no source citation.",
+                                    "status": "warn",
+                                    "reason": "In-Depth claim cites no record; it is general guidance.",
                                     "source_indices": [],
                                 }
                             )
+                            mark(claim_index, "yellow", "general guidance, not cited")
                             continue
                         claim_references = stages._resolve_references(
                             claim_citations,
@@ -2197,6 +2201,7 @@ async def _execute_stages(
                                     ],
                                 }
                             )
+                            mark(claim_index, "red", "it cites a record not in this chart")
                             continue
                         candidates.append((claim_index, claim, claim_references))
 
@@ -2214,7 +2219,6 @@ async def _execute_stages(
                             state.mappings,
                         )
 
-                    accepted_claims: list[str] = []
                     indepth_references: list[dict[str, Any]] = []
                     offset = 0
                     for claim_index, claim, references in candidates:
@@ -2222,6 +2226,7 @@ async def _execute_stages(
                             offset : offset + len(references)
                         ]
                         offset += len(references)
+                        indepth_references.extend(grounded_references)
                         unsupported = [
                             reference
                             for reference in grounded_references
@@ -2241,6 +2246,7 @@ async def _execute_stages(
                                     ],
                                 }
                             )
+                            mark(claim_index, "red", "its cited record does not support it")
                             continue
                         unchecked = [
                             reference
@@ -2248,14 +2254,11 @@ async def _execute_stages(
                             if reference.get("groundingStatus") == "unchecked"
                         ]
                         if unchecked:
-                            # A claim the In-Depth review passed is shown, its confidence saying the
-                            # citation check could not reach it; an unreviewed claim had no check at
-                            # all and stays withheld.
                             citation_checks.append(
                                 {
                                     "claim_index": claim_index,
                                     "claim": claim,
-                                    "status": "warn" if indepth_reviewed else "fail",
+                                    "status": "warn",
                                     "reason": "In-Depth citation support could not be checked within the grounding limits.",
                                     "source_indices": [
                                         reference.get("index")
@@ -2263,27 +2266,31 @@ async def _execute_stages(
                                     ],
                                 }
                             )
-                            if not indepth_reviewed:
-                                continue
-                        accepted_claims.append(claim)
-                        indepth_references.extend(grounded_references)
+                            mark(claim_index, "yellow", "its citation was not checked")
 
-                    state.claims = accepted_claims
-                    state.indepth_gate["claims"] = accepted_claims
+                    state.indepth_marks = {
+                        claim_index: [label for _level, label in labels]
+                        for claim_index, labels in sorted(marks.items())
+                    }
                     if citation_checks:
                         state.indepth_gate["citation_checks"] = citation_checks
-                    if any(check["status"] == "fail" for check in citation_checks):
-                        state.indepth_gate["status"] = (
-                            "edited" if accepted_claims else "needs_review"
+                    if marks:
+                        state.indepth_gate["status"] = "needs_review"
+                        state.indepth_gate["marked"] = sorted(marks)
+                    levels = {level for labels in marks.values() for level, _label in labels}
+                    if state.claims and not state.indepth_error:
+                        level = (
+                            "red"
+                            if "red" in levels
+                            else "yellow"
+                            if levels or review.get("status") == "unreviewed"
+                            else str(review.get("level") or "green")
                         )
-                    if (
-                        any(check["status"] == "warn" for check in citation_checks)
-                        and state.indepth_conf.get("level") == "green"
-                    ):
                         state.indepth_conf = {
-                            **state.indepth_conf,
-                            "level": "yellow",
-                            "note": "Some In-Depth citations could not be checked within the grounding limits.",
+                            "level": level,
+                            "note": _indepth_mark_note(
+                                len(marks), len(state.claims), review
+                            ),
                         }
                     for reference in indepth_references:
                         existing = next(
@@ -2298,13 +2305,6 @@ async def _execute_stages(
                             state.references.append(reference)
                             continue
                         _merge_reference_grounding(existing, reference)
-                    if (
-                        state.indepth_gate["status"] == "needs_review"
-                        and not state.indepth_error
-                    ):
-                        state.indepth_error = (
-                            "In-Depth was withheld because evidence checks rejected every claim."
-                        )
                     if state.indepth_error:
                         state.indepth_conf = {
                             **state.indepth_conf,
