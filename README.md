@@ -22,17 +22,17 @@ med-agent-hub
   -> optional team gather
   -> answer -> deterministic substance/temporal gate
   -> immediate reference resolution and answer_done
-  -> optional review -> re-gate -> final reference resolution
+  -> optional review (labels the answer) -> re-gate -> final reference resolution
   -> final Answer citation grounding
-  -> In-Depth -> deterministic temporal and citation grounding gates -> done
+  -> In-Depth -> review and deterministic temporal and citation grounding checks that mark claims -> done
 OpenAI-compatible model router at LLM_BASE_URL
 ```
 
 Streaming and blocking requests execute the same asynchronous engine in `server/engine.py`. Blocking requests drain the engine's events into the response envelope. Product profiles stream `answer_done`, optional `answer_validation`, `indepth_pending`, `indepth_done` or `indepth_error`, and `done`.
 
-Product terminal events carry the complete assistant envelope. In-Depth state is emitted only in the nested `inDepth` object so its `answer` cannot overwrite the direct clinical Answer. When review or deterministic gates remove model-generated claims, `inDepth.reviewDraft` renders the pre-check claim set for review and `inDepth.reviewReferences` resolves only that draft's citations. These review fields are explicitly not the shipped answer or final evidence set. Java and ESM clients reject the retired flattened In-Depth shape.
+Product terminal events carry the complete assistant envelope. In-Depth state is emitted only in the nested `inDepth` object so its `answer` cannot overwrite the direct clinical Answer. Checks mark In-Depth claims and never remove them: a marked claim is followed by a short note naming what to check, `inDepth.validation.marked` lists the marked claims, and `confidence.in_depth` counts them. When a deterministic date patch changes a claim, or the In-Depth fails after synthesis, `inDepth.reviewDraft` renders the pre-check claims and `inDepth.reviewReferences` resolves only that draft's citations. These review fields are explicitly not the shipped answer or final evidence set. Java and ESM clients reject the retired flattened In-Depth shape.
 
-When Answer checks change a model draft, `answerValidation.originalAnswer` preserves the earliest pre-check Answer and `answerValidation.originalReferences` resolves only that draft's citations. The final `references` field remains authoritative for the checked Answer and accepted In-Depth claims.
+When a deterministic Answer check changes a model draft, `answerValidation.originalAnswer` preserves the earliest pre-check Answer and `answerValidation.originalReferences` resolves only that draft's citations. The final `references` field remains authoritative for the checked Answer and accepted In-Depth claims.
 
 ## Profiles
 
@@ -128,9 +128,9 @@ thread.
 ## Validation and Evidence
 
 - Every product Answer receives deterministic substance, date, temporal, date-value, and trend checks before `answer_done`.
-- Reviewer edits are checked again before they can ship.
-- Every product In-Depth claim receives deterministic temporal, citation-resolution, and citation-grounding results before display.
-- A rejected or edited In-Depth draft remains available as a separately labeled review artifact; it never enters final answer scoring or final evidence.
+- The answer reviewer is another model pass, so it labels the answer and never replaces it. An error it reports leaves the answer as written, marked `needs_review` with a yellow note. The reviewer is told which earliest and latest statements the dated chart series confirm, and an error it reports on one of them is set aside.
+- The In-Depth draws on knowledge-base and guideline context as well as the chart. It is written once and reviewed once; the review flags claims and never asks for a new draft.
+- Every product In-Depth claim receives deterministic temporal, citation-resolution, and citation-grounding results before display. A claim a check questions is shown with a note naming the check: red when the date check or citation grounding contradicts it or it cites a record outside the chart, yellow when the review flagged it, its citation was not checked, or it is uncited general guidance.
 - Citation grounding checks every claim group in stable, context-bounded sequential batches; a failed batch cannot erase verdicts from successful batches.
 - References resolve against the complete current evidence ledger and carry source id, resource metadata, source text, usage locations, resolution state, and final grounding state.
 - Citation count is metadata, not a confidence score.

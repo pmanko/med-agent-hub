@@ -39,7 +39,7 @@ MULTI_COUNT_FACTS = {
 }
 
 
-def test_indepth_temporal_gate_checks_each_claim_and_removes_unsafe_output():
+def test_indepth_temporal_gate_checks_each_claim_and_flags_unsafe_output():
     result = gate_indepth_claims(
         "Summarize follow-up timing",
         [
@@ -50,13 +50,16 @@ def test_indepth_temporal_gate_checks_each_claim_and_removes_unsafe_output():
         mode="enforce",
     )
 
-    assert result["status"] == "edited"
-    assert result["claims"] == ["Follow-up should consider the clinical context."]
-    assert result["removed"] == [2]
+    assert result["status"] == "needs_review"
+    assert result["claims"] == [
+        "Follow-up should consider the clinical context.",
+        "The visit occurred on 2025-10-//13.",
+    ]
+    assert result["flagged"] == [2]
     assert [item["claim_index"] for item in result["checks"]] == [1, 2]
 
 
-def test_fully_rejected_indepth_cannot_report_complete():
+def test_a_claim_the_date_check_cannot_correct_is_kept_and_flagged():
     result = gate_indepth_claims(
         "When was follow-up?",
         ["The visit occurred on 2025-10-//13."],
@@ -65,8 +68,8 @@ def test_fully_rejected_indepth_cannot_report_complete():
     )
 
     assert result["status"] == "needs_review"
-    assert result["claims"] == []
-    assert result["removed"] == [1]
+    assert result["claims"] == ["The visit occurred on 2025-10-//13."]
+    assert result["flagged"] == [1]
 
 
 def test_non_temporal_claim_still_records_not_applicable_verdict():
@@ -100,8 +103,10 @@ def test_unsafe_patch_cannot_replace_claim_with_uncited_different_series():
     )
 
     assert result["status"] == "needs_review"
-    assert result["claims"] == []
-    assert result["removed"] == [1]
+    assert result["claims"] == [
+        "The CD4 count was 341 cells/uL on 2006-04-04; the overall trend of immune suppression should be monitored."
+    ]
+    assert result["flagged"] == [1]
     check = result["checks"][0]["gate"]
     assert check["patch_citations"] == [178]
     assert {index for item in check["checks"] for index in item["source_indices"]} == {178}
@@ -116,7 +121,7 @@ def test_safe_patch_must_stay_within_original_claim_citations():
     )
 
     assert result["status"] == "edited"
-    assert result["removed"] == []
+    assert result["flagged"] == []
     assert result["claims"][0].startswith("The chart shows one dated CD4 count measurement")
     assert "[178]" in result["claims"][0]
 
@@ -253,8 +258,8 @@ def test_dangling_citation_is_not_repaired_when_point_binding_is_ambiguous():
     )
 
     assert result["status"] == "needs_review"
-    assert result["claims"] == []
-    assert result["removed"] == [1]
+    assert result["claims"] == [claim]
+    assert result["flagged"] == [1]
     assert "citation_repair" not in result["checks"][0]
 
 
@@ -285,7 +290,7 @@ def test_uncited_claim_without_malformed_marker_is_not_auto_cited():
 
 
 @pytest.mark.parametrize("written_unit", ("lb", "kg/m2", "kg/m²", "kg per m2"))
-def test_dangling_citation_with_wrong_unit_is_rejected_not_repaired(written_unit):
+def test_dangling_citation_with_wrong_unit_is_flagged_not_repaired(written_unit):
     facts = {
         **FACTS,
         "numeric_series": [
@@ -302,15 +307,17 @@ def test_dangling_citation_with_wrong_unit_is_rejected_not_repaired(written_unit
         "date_output_contract": {"allowed_iso_dates": ["2006-06-06"]},
     }
 
+    claim = f"The patient's weight was 71 {written_unit} on 2006-06-06 ["
     result = gate_indepth_claims(
         "What was the patient's weight?",
-        [f"The patient's weight was 71 {written_unit} on 2006-06-06 ["],
+        [claim],
         facts,
         mode="enforce",
     )
 
     assert result["status"] == "needs_review"
-    assert result["claims"] == []
+    assert result["claims"] == [claim]
+    assert result["flagged"] == [1]
     assert "citation_repair" not in result["checks"][0]
 
 
@@ -322,7 +329,8 @@ def test_existing_citation_does_not_authorize_cleaning_a_second_uncited_claim():
     )
 
     assert result["status"] == "needs_review"
-    assert result["claims"] == []
+    assert result["claims"] == [claim]
+    assert result["flagged"] == [1]
     assert "citation_repair" not in result["checks"][0]
 
 
@@ -398,14 +406,14 @@ def test_grouped_numeric_citations_deduplicate_without_reordering():
         "[18, foo]",
     ),
 )
-def test_malformed_grouped_citations_fail_closed_in_enforce_mode(citation):
+def test_malformed_grouped_citations_are_flagged_in_enforce_mode(citation):
     claim = f"The recorded vital signs are supported by sources {citation}."
 
     result = gate_indepth_claims("What was recorded?", [claim], FACTS, mode="enforce")
 
     assert result["status"] == "needs_review"
-    assert result["claims"] == []
-    assert result["removed"] == [1]
+    assert result["claims"] == [claim]
+    assert result["flagged"] == [1]
     citation_checks = [
         check
         for check in result["checks"][0]["gate"]["checks"]

@@ -1,6 +1,7 @@
-"""Rewrite-mode answer validator: the validator LOCALIZES each chart contradiction and returns the
-corrected answer; the refine loop ADOPTS that fix (not a from-scratch regeneration) and keeps the BEST
-(fewest-errors) version seen, NEVER regressing below the original draft (the over-correction guard).
+"""Rewrite-mode answer validator: the validator LOCALIZES each chart contradiction. Its verdict labels
+the answer: a flagged answer is shown as written with a yellow note and needs_review metadata, and is
+never replaced by the reviewer's correction or regenerated. Statements the deterministic date checks
+confirmed are given to the reviewer as confirmed, and an error that targets one is set aside.
 
 Selected by the profile's review prompt. Mocks only the model boundary (`_chat`)
 and exercises the compiled stages end-to-end, branching on the response_format json_schema name so the
@@ -39,7 +40,7 @@ def _factory(calls, rewrite_verdicts):
     "chart_answer"     (Answer synth)    -> {answer: ans-vN} (N = synth call index);
     "in_depth"         (In-Depth synth)  -> {claims:[...]};
     "rewrite_verdict"  (rewrite validator) -> the Nth entry of `rewrite_verdicts`, verbatim;
-    "indepth_verdict"  -> {drop:[]} (no-op here);
+    "indepth_verdict"  -> {flag:[]} (no-op here);
     no response_format (orchestrator)    -> no tools (break to synthesis)."""
     state = {"answer_synth": 0, "indepth_synth": 0, "rw": 0}
 
@@ -79,7 +80,7 @@ def _factory(calls, rewrite_verdicts):
             state["rw"] += 1
             return {"content": v if isinstance(v, str) else json.dumps(v)}
         if name == "indepth_verdict":
-            return {"content": json.dumps({"drop": [], "issues": ""})}
+            return {"content": json.dumps({"flag": [], "issues": ""})}
         return {"content": "", "tool_calls": None}
 
     return fake_chat
@@ -173,7 +174,7 @@ def test_answer_review_clean_pass_returns_checked_metadata():
     assert [name for _model, name in calls].count("rewrite_verdict") == 1
 
 
-def test_answer_review_adopts_safe_corrected_prose_as_edited():
+def test_answer_review_labels_a_flagged_answer_and_never_adopts_its_correction():
     calls, env = _run_review(
         [
             {
@@ -184,17 +185,16 @@ def test_answer_review_adopts_safe_corrected_prose_as_edited():
             {"answer_ok": True, "errors": [], "corrected_answer": ""},
         ]
     )
-    assert env["answer"] == "The patient is taking lisinopril [1]."
-    assert env["answerValidation"]["status"] == "edited"
-    assert (
-        env["answerValidation"]["originalAnswer"]
-        == "The patient is taking aspirin [1]."
-    )
+    assert env["answer"] == "The patient is taking aspirin [1]."
+    assert env["answerValidation"]["status"] == "needs_review"
+    assert "originalAnswer" not in env["answerValidation"]
+    assert env["answerValidation"]["issues"][0]["wrong"] == "aspirin"
     assert env["confidence"]["answer"]["level"] == "yellow"
-    assert [name for _model, name in calls].count("rewrite_verdict") == 2
+    assert '"aspirin" against lisinopril [1]' in env["confidence"]["answer"]["note"]
+    assert [name for _model, name in calls].count("rewrite_verdict") == 1
 
 
-def test_answer_review_preserves_original_when_no_safe_patch():
+def test_answer_review_labels_a_flag_that_offers_no_correction():
     _calls, env = _run_review(
         [
             {
@@ -206,7 +206,7 @@ def test_answer_review_preserves_original_when_no_safe_patch():
     )
     assert env["answer"] == "The patient is taking aspirin [1]."
     assert env["answerValidation"]["status"] == "needs_review"
-    assert env["confidence"]["answer"]["level"] == "red"
+    assert env["confidence"]["answer"]["level"] == "yellow"
 
 
 def test_answer_review_ignores_an_error_whose_wrong_text_is_not_in_the_draft():
@@ -283,21 +283,91 @@ def test_answer_review_does_not_mark_malformed_reviewer_output_checked(
     assert env["confidence"]["answer"]["level"] == "yellow"
 
 
-def test_answer_review_does_not_adopt_correction_when_recheck_is_malformed():
-    _calls, env = _run_review(
-        [
-            {
-                "answer_ok": False,
-                "errors": [_err("aspirin", "lisinopril [1]", "lisinopril")],
-                "corrected_answer": "The patient is taking lisinopril [1].",
-            },
-            "{not-json",
-        ]
+def _weight_review_messages(answer):
+    question = (
+        "Give only the earliest and latest documented weight measurements in the available "
+        "past-year data, with exact date, value, and citation."
+    )
+    payload = {
+        "schema_version": "answer_to_review.v1",
+        "original_question": question,
+        "answer": answer,
+        "citations": [350, 19],
+        "blocks": [],
+    }
+    return [
+        {"role": "system", "content": "envelope system"},
+        {
+            "role": "user",
+            "content": "\n".join(
+                [
+                    "[19] (2026-01-26) Finding — Weight (kg): 71.0 kg",
+                    "[320] (2025-10-27) Finding — Weight (kg): 73.0 kg",
+                    "[350] (2025-10-13) Finding — Weight (kg): 74.0 kg",
+                ]
+            ),
+        },
+        {"role": "assistant", "content": answer},
+        {
+            "role": "user",
+            "content": "Review this answer:\n```json\n" + json.dumps(payload) + "\n```",
+        },
+    ]
+
+
+def test_answer_review_sets_aside_an_error_on_an_endpoint_the_date_checks_confirmed():
+    """The 21 Oct weight-endpoints turn: the answer named the right earliest weight, the reviewer
+    said 73 kg on a later date was earliest, and the turn ended red. Code confirms the endpoint, the
+    reviewer is told so, and its error on that statement no longer labels the answer."""
+    answer = (
+        "The earliest documented weight measurement in the past year was 74 kg on "
+        "2025-10-13 [350], and the latest is 71 kg on 2026-01-26 [19]."
+    )
+    review_inputs = []
+
+    async def fake_chat(client, model, messages, *, response_format=None, **kwargs):
+        review_inputs.append(messages[-1]["content"])
+        return {
+            "content": json.dumps(
+                {
+                    "answer_ok": False,
+                    "errors": [
+                        _err(
+                            "The earliest documented weight measurement in the past year was 74 kg",
+                            "Weight (kg): 73 kg on 2025-10-27 [320]",
+                            "The earliest documented weight measurement in the past year was 73 kg",
+                        )
+                    ],
+                    "corrected_answer": answer.replace("74 kg", "73 kg"),
+                }
+            )
+        }
+
+    team._chat = fake_chat
+    profile = make_profile(
+        topology="leg",
+        stages=("context", "review"),
+        models={"review": "REVIEWER"},
+        prompts={"review": "validation-rewrite"},
+        output="review",
+        policies={"temporal_gate": "enforce", "anchor": "2026-06-20"},
+    )
+    env = json.loads(
+        asyncio.run(
+            run_profile(
+                profile,
+                _weight_review_messages(answer),
+                response_format=_RF,
+                context={"temporal_gate": "enforce"},
+            )
+        )
     )
 
-    assert env["answer"] == "The patient is taking aspirin [1]."
-    assert env["answerValidation"]["status"] == "needs_review"
-    assert env["confidence"]["answer"]["level"] == "red"
+    assert "=== CONFIRMED BY DATE CHECKS ===" in review_inputs[0]
+    assert "74 kg on 2025-10-13" in review_inputs[0]
+    assert env["answer"] == answer
+    assert env["answerValidation"]["status"] == "checked"
+    assert env["confidence"]["answer"]["level"] == "green"
 
 
 def _dated_review_messages(answer):
@@ -330,15 +400,9 @@ def _dated_review_messages(answer):
     ]
 
 
-def test_answer_review_rewrite_reintroducing_temporal_error_is_caught():
-    """A malformed/stale date the LLM REVIEWER reintroduces via corrected_answer must be caught by the
-    deterministic temporal gate before shipping — the reviewer approving its own rewrite is not enough.
-
-    The draft answer is temporally CORRECT and passes the gate's first (pre-review) check cleanly.
-    The reviewer then "corrects" it to the exact wrong stale-date claim
-    test_scaffolding.py::test_temporal_gate_enforce_patches_answer_and_trace proves the gate flags and
-    patches on a fresh draft. Without re-gating after the rewrite, that bad claim would ship untouched
-    just because the reviewer's own recheck approved it."""
+def test_answer_review_correction_that_would_add_a_wrong_date_never_ships():
+    """The draft answer is temporally CORRECT. The reviewer "corrects" it to a wrong upcoming-date
+    claim. The reviewer only labels, so the correct draft ships and the wrong date never does."""
     calls = []
     team._chat = _factory(
         calls,
@@ -370,8 +434,6 @@ def test_answer_review_rewrite_reintroducing_temporal_error_is_caught():
         )
     )
     env = json.loads(out)
-    # The reviewer's false "upcoming appointment" claim must not ship — the gate's own patch replaces
-    # it with an accurate statement that the date is in the PAST, not silently pass through unchecked.
     assert "upcoming appointment is 2026-01-07" not in env["answer"], env["answer"]
     assert env["answer"].startswith(
         "No upcoming appointment is documented after 2026-06-20"
@@ -417,7 +479,7 @@ def _factory_answers(calls, answers, rewrite_verdicts):
             state["rw"] += 1
             return {"content": json.dumps(v)}
         if name == "indepth_verdict":
-            return {"content": json.dumps({"drop": [], "issues": ""})}
+            return {"content": json.dumps({"flag": [], "issues": ""})}
         return {"content": "", "tool_calls": None}
 
     return fake_chat
@@ -457,10 +519,9 @@ def test_clean_pass_is_green_and_untouched():
     assert "ans-v0" in env["answer"]
 
 
-def test_adopts_corrected_answer_without_regenerating():
-    """Flagged with a fix that clears on re-audit -> yellow, the VALIDATOR's corrected text ships, and
-    the writer is NOT asked to regenerate (chart_answer synth stays at 1 — the rewrite is adopted, not
-    re-generated). This is the core regenerate->rewrite behavioral change."""
+def test_flagged_answer_is_neither_rewritten_nor_regenerated():
+    """Flagged with a correction -> the draft ships as written, labelled yellow; the writer is not asked
+    again and the reviewer is not asked to recheck a rewrite."""
     calls, env = _run(
         [
             {
@@ -472,87 +533,7 @@ def test_adopts_corrected_answer_without_regenerating():
         ]
     )
     synth, rw = _counts(calls)
-    assert (
-        synth == 1
-    ), f"answer must NOT be regenerated, got {synth} synth calls: {calls}"
-    assert rw == 2, calls  # audit draft + re-audit the adopted fix
+    assert synth == 1, calls
+    assert rw == 1, calls
     assert env["confidence"]["answer"]["level"] == "yellow"
-    assert (
-        "71 kg" in env["answer"] and "ans-v0" not in env["answer"]
-    )  # the corrected text replaced the draft
-    assert "[15]" in env["answer"]  # citation carried from the corrected text
-
-
-def test_never_regress_reverts_to_original_when_rewrite_is_worse():
-    """THE OVER-CORRECTION GUARD: the rewrite re-audits with MORE errors than the original draft ->
-    REVERT to the original answer (never ship a worse rewrite). Level red, original text preserved.
-    """
-    calls, env = _run(
-        [
-            {
-                "answer_ok": False,
-                "errors": [_err("ans-v0", "weight 71 kg [15]", "71 kg")],
-                "corrected_answer": "The patient weighs 71 kg but the HbA1c is 12 and BP 200/130.",
-            },
-            # re-audit of the rewrite: it introduced NEW errors (2 > the original's 1)
-            {
-                "answer_ok": False,
-                "errors": [
-                    _err("HbA1c 12", "no HbA1c in chart", "remove"),
-                    _err("BP 200/130", "no BP in chart", "remove"),
-                ],
-                "corrected_answer": "even worse",
-            },
-        ],
-        validator_max_loops=1,
-    )
-    assert env["confidence"]["answer"]["level"] == "red"
-    assert (
-        "ans-v0" in env["answer"]
-    ), "must REVERT to the original draft, not keep the worse rewrite"
-    assert "200/130" not in env["answer"], "the worse rewrite must NOT ship"
-
-
-def test_adopts_improved_but_imperfect_rewrite_as_red():
-    """Rewrite re-audits with FEWER errors (1 < 2) but not clean -> adopt the improved rewrite, red.
-    Strictly-better is kept; the guard only blocks regressions, not partial improvements.
-    """
-    calls, env = _run(
-        [
-            {
-                "answer_ok": False,
-                "errors": [
-                    _err("ans", "x [1]", "a2"),
-                    _err("v0", "y [2]", "b2"),
-                ],
-                "corrected_answer": "improved answer [1] [2]",
-            },
-            {
-                "answer_ok": False,
-                "errors": [_err("improved", "y [2]", "b2")],
-                "corrected_answer": "improved answer [1] [2]",
-            },
-        ],
-        validator_max_loops=1,
-    )
-    assert env["confidence"]["answer"]["level"] == "red"
-    assert (
-        "improved answer" in env["answer"]
-    ), "a strictly-fewer-errors rewrite must be adopted"
-
-
-def test_flag_without_a_rewrite_keeps_original_red():
-    """Validator flags an error but offers NO corrected_answer -> keep the original draft, red caveat
-    (nothing usable to adopt; never blank the answer)."""
-    calls, env = _run(
-        [
-            {
-                "answer_ok": False,
-                "errors": [_err("ans-v0", "weight 71 kg [15]", "71 kg")],
-                "corrected_answer": "",
-            },
-        ],
-        validator_max_loops=1,
-    )
-    assert env["confidence"]["answer"]["level"] == "red"
-    assert "ans-v0" in env["answer"]
+    assert "ans-v0" in env["answer"] and "71 kg" not in env["answer"]
