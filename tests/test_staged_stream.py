@@ -918,6 +918,45 @@ def test_ground_references_grounds_each_enumerated_item_against_its_own_source(
     assert prompt.count("PAIR ") == 3
 
 
+def test_ground_references_checks_a_range_cited_at_both_ends_against_both_ends(monkeypatch):
+    # The 21 Oct ek-growth answer: "from 65.5 cm [253], [214] to 67.0 cm [20], [71]" was split at
+    # the second marker, so the two 65.5 cm records were asked alone to support an upward trend and
+    # the correct answer went red. Each range is one claim its endpoints support together.
+    fake_chat, calls = _fake_chat_returning_verdicts([["YES", "YES"]])
+    monkeypatch.setattr(team, "_chat", fake_chat)
+    statement = (
+        "The child's weight has remained relatively stable between 6.1 kg [218] and 6.4 kg [75], "
+        "while their height shows a slight upward trend from 65.5 cm [253], [214] to 67.0 cm "
+        "[20], [71]."
+    )
+    texts = {
+        218: ("2026-01-08", "Weight (kg): 6.1 kg"),
+        75: ("2026-01-26", "Weight (kg): 6.4 kg"),
+        253: ("2026-01-04", "Height (cm): 65.5 cm"),
+        214: ("2026-01-08", "Height (cm): 65.5 cm"),
+        20: ("2026-02-02", "Height (cm): 67 cm"),
+        71: ("2026-01-26", "Height (cm): 67 cm"),
+    }
+    refs = [
+        {"index": index, "usage": [{"location": "answer", "text": statement}]}
+        for index in texts
+    ]
+    mappings = [
+        {"index": index, "date": date, "text": text} for index, (date, text) in texts.items()
+    ]
+
+    grounded = asyncio.run(team._ground_references(None, "M", statement, refs, mappings))
+
+    assert [item["groundingStatus"] for item in grounded] == ["verified"] * 6
+    groups = {item["index"]: item["groundingGroup"] for item in grounded}
+    assert groups[218] == groups[75] == [75, 218]
+    assert groups[253] == groups[20] == [20, 71, 214, 253]
+    claims = {item["index"]: item["groundingChecks"][0]["claim"] for item in grounded}
+    assert "between 6.1 kg" in claims[218] and "and 6.4 kg" in claims[218]
+    assert "from 65.5 cm" in claims[253] and "to 67.0 cm" in claims[253]
+    assert calls[0]["messages"][0]["content"].count("PAIR ") == 2
+
+
 def check_source_indices(grounded_ref):
     return grounded_ref["groundingChecks"][0]["source_indices"]
 

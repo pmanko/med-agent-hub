@@ -461,6 +461,13 @@ def _claim_fragments_for_index(answer: str, index: int) -> List[str]:
     return fragments
 
 
+_RANGE_OPENER_RE = re.compile(
+    r"\b(?:from|between|increas\w*|decreas\w*|rose|rising|fell|falling|dropp\w*|trend\w*|chang\w*)\b",
+    re.I,
+)
+_RANGE_JOINER_RE = re.compile(r"\s*,?\s*(?:to|and|through|versus|vs\.?)\b", re.I)
+
+
 def _citation_clusters(text: str) -> List[Dict[str, Any]]:
     """Partition ``text`` into citation clusters for per-item grounding.
 
@@ -487,6 +494,23 @@ def _citation_clusters(text: str) -> List[Dict[str, Any]]:
             spans[-1]["indices"].append(idx)
             spans[-1]["last_end"] = marker.end()
         prev_end = marker.end()
+    # A range or change cited at both ends ("from 65.5 cm [1] to 67 cm [2]", "between 6.1 kg [3]
+    # and 6.4 kg [4]") is one claim its endpoints support together; split, neither end's source
+    # can support the trend or range on its own.
+    merged: List[Dict[str, Any]] = []
+    for span in spans:
+        if merged:
+            previous = merged[-1]
+            opener = text[previous["text_start"] : previous["last_end"]]
+            lead = text[previous["last_end"] :]
+            if _RANGE_OPENER_RE.search(_INLINE_CITATION_RE.sub("", opener)) and _RANGE_JOINER_RE.match(
+                lead
+            ):
+                previous["indices"].extend(span["indices"])
+                previous["last_end"] = span["last_end"]
+                continue
+        merged.append(dict(span, indices=list(span["indices"])))
+    spans = merged
     clusters: List[Dict[str, Any]] = []
     for position, span in enumerate(spans):
         span_end = spans[position + 1]["text_start"] if position + 1 < len(spans) else len(text)
