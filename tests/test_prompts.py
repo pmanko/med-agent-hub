@@ -149,22 +149,15 @@ def test_synthesis_prompts_instruct_on_temporal_facts_sidecar():
         assert "Do not infer a trend from one point" in text
 
 
-def test_indepth_prompt_matches_evidence_gate_contract():
+def test_indepth_prompt_asks_for_guideline_context_with_honest_citations():
     text = prompt_loader.load_prompt("synthesis-indepth")
 
-    assert "directly relevant to the question and direct answer" in text
-    assert "the cited source set must support the entire displayed claim" in text
-    assert "Do not use a patient chart citation as support for outside medical knowledge" in text
-    assert "If no supporting KnowledgeReference record is present" in text
-    assert "asks only for a factual point lookup" in text
-    assert "first confirm and use the record already cited by the DIRECT ANSWER" in text
-    assert "explicitly asks for a trend, comparison, interpretation, or guidance" in text
-    assert "the point-lookup limit does not apply" in text
-    assert "Do not introduce a trend, comparison, different measurement" in text
-    assert "A claim may cover one evidence record or one concept series" in text
-    assert "do not bundle weight, blood pressure, pulse" in text
-    assert "put exactly that one [N] citation at the end" in text
-    assert "cite every chart endpoint or supporting KnowledgeReference it needs" in text
+    assert "connects knowledge-base and guideline context to THIS patient" in text
+    assert "Cites a KnowledgeReference record with [N] when one supports the claim" in text
+    assert "attributes it in prose" in text
+    assert "labelled as general guidance" in text
+    assert "Do not cite a patient chart record as if it stated a guideline" in text
+    assert "Do not restate the direct answer" in text
 
 
 @pytest.mark.parametrize(
@@ -174,12 +167,13 @@ def test_indepth_prompt_matches_evidence_gate_contract():
         "validation-rewrite-indepth",
     ),
 )
-def test_indepth_review_prompts_enforce_the_same_source_support_contract(name):
+def test_indepth_review_prompts_flag_claims_for_the_clinician_to_check(name):
     text = prompt_loader.load_prompt(name)
 
-    assert "the cited source set must support the entire displayed claim" in text
-    assert "outside medical knowledge requires a cited KnowledgeReference" in text
-    assert "Do not KEEP a claim merely because the guidance sounds standard" in text
+    assert '{"flag": [' in text
+    assert "flagged claims are still shown" in text
+    assert "a cited [N] record does not state the clause it is attached to" in text
+    assert "Do NOT flag a claim only because it states well-established general guidance" in text
 
 
 def test_combined_validator_uses_the_same_indepth_source_support_contract():
@@ -187,17 +181,6 @@ def test_combined_validator_uses_the_same_indepth_source_support_contract():
 
     assert "the cited source set must support the entire displayed claim" in text
     assert "outside medical knowledge requires a supporting source" in text
-
-
-def test_indepth_resynthesis_feedback_uses_the_same_source_contract():
-    feedback = team._indepth_feedback(
-        {"drop": [1], "issues": "The cited chart record does not state the guidance."},
-        ["Unsupported guidance [1]."],
-    )
-
-    assert "supported by its cited numbered source set" in feedback
-    assert "KnowledgeReference" in feedback
-    assert "patient chart citation" in feedback
 
 
 def test_product_answer_prompt_distinguishes_patient_records_from_knowledge_sources():
