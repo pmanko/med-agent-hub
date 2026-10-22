@@ -3401,3 +3401,99 @@ def test_profile_stream_executes_gather_from_the_configured_stage_plan(monkeypat
     assert (
         "gemma-e4b-q8" in calls
     ), "the orchestrator was never called even though the compiled profile declares gather"
+
+
+def test_indepth_with_no_claims_written_is_empty_not_withheld(monkeypatch):
+    # The In-Depth prompt asks for an empty list when nothing more is fully supported, so a model that
+    # writes no claims has answered as instructed: nothing to show, nothing rejected.
+    _stub_common(monkeypatch)
+
+    async def fake_answer(*_args, **_kwargs):
+        return "Useful answer [1].", [1], []
+
+    async def no_claims(*_args, **_kwargs):
+        return [], {"level": "green", "note": ""}
+
+    async def unchanged(_client, **kwargs):
+        return (
+            kwargs["answer_text"],
+            kwargs["citations"],
+            kwargs["blocks"],
+            {"level": "green", "note": ""},
+        )
+
+    monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
+    monkeypatch.setattr(team, "_gen_indepth", no_claims)
+    monkeypatch.setattr(team, "_ensure_substantive_answer", unchanged)
+
+    events = _collect(_product_profile(review_model="V"))
+    names = [name for name, _ in events]
+    final = dict(events)["done"]
+
+    assert "indepth_error" not in names
+    assert final["inDepth"]["status"] == "complete"
+    assert final["inDepth"]["answer"] == ""
+    assert final["inDepth"]["error"] == ""
+    assert final["inDepth"]["validation"]["status"] == "no_claims"
+    assert "in_depth" not in final["confidence"]
+
+
+def test_indepth_whose_review_dropped_every_claim_is_still_withheld(monkeypatch):
+    _stub_common(monkeypatch)
+
+    async def fake_answer(*_args, **_kwargs):
+        return "Useful answer [1].", [1], []
+
+    async def all_dropped(*_args, **_kwargs):
+        return [], {"level": "red", "status": "edited", "removed": 2, "issues": "wrong date"}
+
+    async def unchanged(_client, **kwargs):
+        return (
+            kwargs["answer_text"],
+            kwargs["citations"],
+            kwargs["blocks"],
+            {"level": "green", "note": ""},
+        )
+
+    monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
+    monkeypatch.setattr(team, "_gen_indepth", all_dropped)
+    monkeypatch.setattr(team, "_ensure_substantive_answer", unchanged)
+
+    final = dict(_collect(_product_profile(review_model="V")))["done"]
+
+    assert final["inDepth"]["status"] == "needs_review"
+    assert final["confidence"]["in_depth"]["level"] == "red"
+
+
+def test_indepth_claim_whose_citation_could_not_be_checked_is_shown_with_a_caution(monkeypatch):
+    _stub_common(monkeypatch)
+
+    async def fake_answer(*_args, **_kwargs):
+        return "Useful answer [1].", [1], []
+
+    async def one_claim(*_args, **_kwargs):
+        return ["Supporting context [1]."], {"level": "green", "note": ""}
+
+    async def unchecked_ground(_client, _model, _answer, references, _mappings):
+        return [dict(ref, grounded=None, groundingStatus="unchecked") for ref in references]
+
+    async def unchanged(_client, **kwargs):
+        return (
+            kwargs["answer_text"],
+            kwargs["citations"],
+            kwargs["blocks"],
+            {"level": "green", "note": ""},
+        )
+
+    monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
+    monkeypatch.setattr(team, "_gen_indepth", one_claim)
+    monkeypatch.setattr(team, "_ensure_substantive_answer", unchanged)
+    monkeypatch.setattr(team, "_ground_references", unchecked_ground)
+
+    final = dict(_collect(_product_profile(review_model="V")))["done"]
+
+    assert final["inDepth"]["status"] == "complete"
+    assert "Supporting context [1]." in final["inDepth"]["answer"]
+    assert final["confidence"]["in_depth"]["level"] == "yellow"
+    checks = final["inDepth"]["validation"]["citation_checks"]
+    assert [check["status"] for check in checks] == ["warn"]
