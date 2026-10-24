@@ -957,6 +957,19 @@ def test_ground_references_checks_a_range_cited_at_both_ends_against_both_ends(m
     assert calls[0]["messages"][0]["content"].count("PAIR ") == 2
 
 
+@pytest.mark.parametrize(
+    "statement",
+    (
+        "Weight increased to 70 kg [1], and pulse was 80 bpm [2].",
+        "Weight changed little [1] and the pulse rose [2].",
+    ),
+)
+def test_citation_clusters_keep_an_item_after_a_change_verb_apart_when_no_second_endpoint_follows(statement):
+    # A change verb before the first marker and "and" after it do not make a range: the second item
+    # is its own measurement, so each citation is grounded against its own item.
+    assert [cluster["indices"] for cluster in team._citation_clusters(statement)] == [[1], [2]]
+
+
 def check_source_indices(grounded_ref):
     return grounded_ref["groundingChecks"][0]["source_indices"]
 

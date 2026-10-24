@@ -465,7 +465,12 @@ _RANGE_OPENER_RE = re.compile(
     r"\b(?:from|between|increas\w*|decreas\w*|rose|rising|fell|falling|dropp\w*|trend\w*|chang\w*)\b",
     re.I,
 )
-_RANGE_JOINER_RE = re.compile(r"\s*,?\s*(?:to|and|through|versus|vs\.?)\b", re.I)
+# The joiner must lead straight to the second endpoint's number ("to 67 cm", "and 6.4 kg"); an "and"
+# that starts another item ("and pulse was 80 bpm") is not a range.
+_RANGE_JOINER_RE = re.compile(
+    r"\s*,?\s*(?:to|and|through|versus|vs\.?)\s+(?:about\s+|approximately\s+|~\s*)?[-+\u2212]?\d",
+    re.I,
+)
 
 
 def _citation_clusters(text: str) -> List[Dict[str, Any]]:
