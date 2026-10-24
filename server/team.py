@@ -2047,13 +2047,18 @@ def _comparable(text: str) -> str:
 
 
 def _overruled_by(error: Mapping[str, Any], verified: Sequence[Mapping[str, Any]]) -> bool:
-    """Whether a reviewer error targets a statement the deterministic date checks confirmed."""
+    """Whether a reviewer error targets only a statement the deterministic date checks confirmed.
+
+    The error's wrong text must lie within the confirmed fact, or be that fact with nothing but
+    punctuation around it: an error that also quotes another assertion is not overruled."""
     wrong = _comparable(error.get("wrong") or "")
     if not wrong:
         return False
     for check in verified:
         claim = _comparable(check.get("claim") or "")
-        if claim and (wrong in claim or claim in wrong):
+        if not claim:
+            continue
+        if wrong in claim or (claim in wrong and not re.search(r"\w", wrong.replace(claim, " "))):
             return True
     return False
 

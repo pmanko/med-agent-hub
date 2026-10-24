@@ -370,6 +370,53 @@ def test_answer_review_sets_aside_an_error_on_an_endpoint_the_date_checks_confir
     assert env["confidence"]["answer"]["level"] == "green"
 
 
+@pytest.mark.parametrize(
+    "wrong",
+    [
+        "this medication is safe",
+        "The latest weight was 71 kg on 2026-01-26 [19], and this medication is safe",
+    ],
+    ids=["other-assertion", "whole-clause"],
+)
+def test_answer_review_keeps_an_error_on_an_assertion_beside_a_confirmed_endpoint(wrong):
+    """The date checks confirm only the endpoint's date and value. A reviewer error on another
+    assertion in the same clause, alone or together with the endpoint, still labels the answer."""
+    answer = "The latest weight was 71 kg on 2026-01-26 [19], and this medication is safe."
+
+    async def fake_chat(client, model, messages, *, response_format=None, **kwargs):
+        return {
+            "content": json.dumps(
+                {
+                    "answer_ok": False,
+                    "errors": [_err(wrong, "No record supports a safety claim", "Remove the safety claim")],
+                    "corrected_answer": "The latest weight was 71 kg on 2026-01-26 [19].",
+                }
+            )
+        }
+
+    team._chat = fake_chat
+    profile = make_profile(
+        topology="leg",
+        stages=("context", "review"),
+        models={"review": "REVIEWER"},
+        prompts={"review": "validation-rewrite"},
+        output="review",
+        policies={"temporal_gate": "enforce", "anchor": "2026-06-20"},
+    )
+    env = json.loads(
+        asyncio.run(
+            run_profile(
+                profile,
+                _weight_review_messages(answer),
+                response_format=_RF,
+                context={"temporal_gate": "enforce"},
+            )
+        )
+    )
+
+    assert env["answerValidation"]["status"] == "needs_review", env["answerValidation"]
+
+
 def _dated_review_messages(answer):
     """Like _review_messages, but the chart context carries a dated appointment record so the
     deterministic temporal gate has something to check the (possibly reviewer-rewritten) answer

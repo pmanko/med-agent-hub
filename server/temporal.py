@@ -1922,9 +1922,8 @@ def verified_series_endpoints(
                 endpoint = dates_in_window[0] if mark.group("first") else dates_in_window[-1]
                 if stated_date != endpoint:
                     continue
-                stated_values = {
-                    value for _match, value in _claim_local_series_values(value_text, series, selected)
-                }
+                stated = _claim_local_series_values(value_text, series, selected)
+                stated_values = {value for _match, value in stated}
                 matched = [
                     point
                     for point in points
@@ -1935,12 +1934,18 @@ def verified_series_endpoints(
                 if not matched:
                     continue
                 which = "earliest" if mark.group("first") else "latest"
+                # The check confirms the endpoint's date and value only, so its claim ends at whichever
+                # of the two comes last: another assertion later in the clause is not confirmed.
+                value = float(matched[0]["value"])
+                fact_end = max(
+                    [dates[0].end()] + [match.end() for match, stated_value in stated if stated_value == value]
+                )
                 _add_check(
                     checks,
                     "series_endpoint",
                     "pass",
                     "info",
-                    clause.strip(" ,;"),
+                    clean[:fact_end].strip(" ,;"),
                     f"The {which} dated {series.get('concept')} point"
                     + (f" since {window_start}" if window_start else "")
                     + f" is {matched[0]['value']} on {endpoint}.",
