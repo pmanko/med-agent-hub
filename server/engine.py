@@ -1953,7 +1953,11 @@ async def _execute_stages(
                             _stream_payload(
                                 state,
                                 request,
-                                in_depth={"status": "pending", "answer": ""},
+                                in_depth=(
+                                    {"status": "pending", "answer": ""}
+                                    if "indepth" in request.profile.stages
+                                    else {"status": "complete", "answer": ""}
+                                ),
                             ),
                         )
                         if await _disconnected(request):

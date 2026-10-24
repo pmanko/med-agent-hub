@@ -31,7 +31,8 @@ def test_in_depth_without_its_gate_is_rejected():
         compile_profile(replace(fast, stages=fast.stages + ("indepth",)))
 
 
-def test_a_profile_without_in_depth_streams_no_pending_in_depth(monkeypatch):
+@pytest.mark.parametrize("reviewed", [False, True], ids=["unreviewed", "reviewed"])
+def test_a_profile_without_in_depth_streams_no_pending_in_depth(monkeypatch, reviewed):
     _stub_common(monkeypatch)
 
     async def fake_answer(*_a, **_k):
@@ -44,8 +45,10 @@ def test_a_profile_without_in_depth_streams_no_pending_in_depth(monkeypatch):
     monkeypatch.setattr(team, "_ensure_substantive_answer", fake_substantive)
     profile = make_profile(
         topology="single",
-        stages=["context", "answer", "gate", "resolve_refs", "final_resolve_refs", "ground_verdicts"],
-        models={"answer": "M", "grounding": "M"},
+        stages=["context", "answer", "gate", "resolve_refs"]
+        + (["review", "gate"] if reviewed else [])
+        + ["final_resolve_refs", "ground_verdicts"],
+        models={"answer": "M", "grounding": "M", **({"review": "M"} if reviewed else {})},
         prompts={"answer": "synthesis-answer"},
         output="product",
         supplemental_sources=("knowledge-base",),
