@@ -30,7 +30,7 @@ from .patient_ledger_cache import PatientLedgerCache, default_patient_ledger_cac
 from .querystore_client import ContextSliceFetch, InconsistentSnapshotError, QueryStoreClient
 from .ranked_candidates import resolve_ranked_hits_with_retry
 
-_CHART_MARKER = "Patient records (most recent first):"
+CHART_MARKER = "Patient records (most recent first):"
 _CHART_LINE = re.compile(r"^\[(\d+)]\s*(.*)$")
 _DATE_PREFIX = re.compile(r"^\((\d{4}-\d{2}-\d{2})\)\s*")
 _QUERY_TOKEN = re.compile(r"[A-Za-z0-9]+(?:[-_.:/][A-Za-z0-9]+)*")
@@ -1059,9 +1059,9 @@ def _inline_chart(messages: Sequence[Mapping[str, Any]]) -> str:
         if message.get("role") != "user" or not isinstance(content, str):
             continue
         user_contents.append(content)
-        marker = content.find(_CHART_MARKER)
+        marker = content.find(CHART_MARKER)
         if marker >= 0:
-            return content[marker + len(_CHART_MARKER) :].lstrip("\r\n")
+            return content[marker + len(CHART_MARKER) :].lstrip("\r\n")
         if any(_CHART_LINE.match(line.strip()) for line in content.splitlines()):
             return content
     if len(user_contents) >= 2:
@@ -1073,7 +1073,7 @@ def is_chart_message(message: Mapping[str, Any]) -> bool:
     content = message.get("content")
     if message.get("role") != "user" or not isinstance(content, str):
         return False
-    return _CHART_MARKER in content or any(
+    return CHART_MARKER in content or any(
         _CHART_LINE.match(line.strip()) for line in content.splitlines()
     )
 

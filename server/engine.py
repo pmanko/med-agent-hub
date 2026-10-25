@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import dataclasses
 import hashlib
 import json
 import os
@@ -341,20 +342,13 @@ def _ledger_after_drug_injection(
         if existing is None:
             existing = existing_by_uuid.get(uuid)
         if existing is not None:
+            # Keep every other field, QueryStore's slice tier and rank included: a dropped
+            # one silently sends the selector back to its local fallback ranking.
             records.append(
-                EvidenceRecord(
-                    stable_id=existing.stable_id,
-                    source=existing.source,
-                    source_priority=existing.source_priority,
-                    resource_type=existing.resource_type,
-                    resource_uuid=existing.resource_uuid,
+                dataclasses.replace(
+                    existing,
                     date=mapping.get("date"),
-                    clinical_date=existing.clinical_date,
-                    date_kind=existing.date_kind,
                     text=str(mapping.get("text") or existing.text),
-                    mandatory=existing.mandatory,
-                    metadata=existing.metadata,
-                    raw=existing.raw,
                 )
             )
             continue
@@ -433,7 +427,7 @@ def requester_line(context: Optional[Mapping[str, Any]]) -> str:
 
 
 def _replace_chart_message(
-    messages: List[Dict[str, Any]], chart: str, requester: str = ""
+    messages: List[Dict[str, Any]], chart: str, requester: str = "", gathered: str = ""
 ) -> List[Dict[str, Any]]:
     out = [
         message
@@ -450,12 +444,32 @@ def _replace_chart_message(
             at,
             {
                 "role": "user",
-                "content": (requester + "\n\n" if requester else "")
-                + "Patient records (most recent first):\n"
-                + chart,
+                "content": stages.records_message(chart, gathered)["content"]
+                + ("\n\n" + requester if requester else ""),
             },
         )
     return out
+
+
+async def _reuse_answer_chart(
+    state: _State, measure: Callable[[str], Awaitable[int]], stage: str
+) -> bool:
+    """Whether a later stage can keep the answer's records, so the router reuses their prefix."""
+    if not state.chart or state.context_budget is None:
+        return False
+    tokens = await measure(state.chart)
+    if tokens > state.context_budget.input_limit:
+        return False
+    state.steps.append(
+        {
+            "role": "context_selection",
+            "stage": stage,
+            "mode": "answer_records",
+            "input_tokens": tokens,
+            "input_limit": state.context_budget.input_limit,
+        }
+    )
+    return True
 
 
 async def _count_answer_input(
@@ -473,10 +487,10 @@ async def _count_answer_input(
             source="llama-router",
         )
     base_messages = [dict(message) for message in (messages or state.messages)]
-    actual_messages = _replace_chart_message(base_messages, chart, requester_line(request.context))
-    user = _prompt(request.profile, "answer", "synthesis-answer")
-    if state.gathered:
-        user += "\n\n" + state.gathered
+    actual_messages = _replace_chart_message(base_messages, chart, requester_line(request.context), state.gathered)
+    user = stages.with_gathered(
+        _prompt(request.profile, "answer", "synthesis-answer"), state.gathered, actual_messages
+    )
     actual_messages.append({"role": "user", "content": user})
     count_chat = getattr(counter, "count_chat", None)
     if callable(count_chat):
@@ -515,7 +529,7 @@ async def _select_answer_context(
         input_measure=lambda chart: _count_answer_input(request, state, chart),
     )
     state.chart = state.view.render()
-    state.messages = _replace_chart_message(state.messages, state.chart, requester_line(request.context))
+    state.messages = _replace_chart_message(state.messages, state.chart, requester_line(request.context), state.gathered)
 
 
 async def _count_indepth_input(
@@ -532,7 +546,7 @@ async def _count_indepth_input(
             "The profile requires an exact token counter.",
             source="llama-router",
         )
-    messages = _replace_chart_message(state.messages, chart, requester_line(request.context))
+    messages = _replace_chart_message(state.messages, chart, requester_line(request.context), state.gathered)
     messages = stages._indepth_messages(
         messages,
         _prompt(request.profile, "indepth", "synthesis-indepth"),
@@ -567,6 +581,14 @@ async def _select_indepth_context(
             "The profile requires exact context selection.",
             source="llama-router",
         )
+    def measure(chart: str) -> Awaitable[int]:
+        return _count_indepth_input(request, state, chart, prior_answer, extra_msgs)
+
+    if state.view is not None and await _reuse_answer_chart(state, measure, stage):
+        messages = _replace_chart_message(
+            state.messages, state.chart, requester_line(request.context), state.gathered
+        )
+        return state.view, messages, state.chart
     selector = request.context_selector or select_context
     view = await selector(
         state.ledger,
@@ -574,12 +596,10 @@ async def _select_indepth_context(
         model=request.profile.models["indepth"],
         budget=state.context_budget,
         counter=state.token_counter,
-        input_measure=lambda chart: _count_indepth_input(
-            request, state, chart, prior_answer, extra_msgs
-        ),
+        input_measure=measure,
     )
     chart = view.render()
-    messages = _replace_chart_message(state.messages, chart, requester_line(request.context))
+    messages = _replace_chart_message(state.messages, chart, requester_line(request.context), state.gathered)
     state.steps.append(
         {
             "role": "context_selection",
@@ -647,6 +667,8 @@ async def _select_answer_review_context(
         )
         return await counter.count(reviewer_model, rendered)
 
+    if await _reuse_answer_chart(state, measure, stage):
+        return state.chart
     selector = request.context_selector or select_context
     view = await selector(
         state.ledger,
@@ -717,6 +739,8 @@ async def _select_indepth_review_context(
         )
         return await counter.count(reviewer_model, rendered)
 
+    if await _reuse_answer_chart(state, measure, "indepth_review"):
+        return state.chart
     selector = request.context_selector or select_context
     view = await selector(
         state.ledger,
@@ -891,7 +915,7 @@ async def _prepare_context(request: ExecutionRequest, state: _State) -> None:
         or state.view.mode == "selected"
         or state.ledger.source_names != ("inline",)
     ):
-        state.messages = _replace_chart_message(state.messages, state.chart, requester_line(request.context))
+        state.messages = _replace_chart_message(state.messages, state.chart, requester_line(request.context), state.gathered)
     requester = requester_line(request.context)
     if requester:
         state.steps.append({"role": "requester", "line": requester})
@@ -1348,7 +1372,11 @@ async def _execute_stages(
                             if "expert" in request.profile.models
                             else ""
                         ),
-                        messages=state.messages,
+                        # The orchestrator reads the records alone, as before gathered
+                        # evidence joined the shared context message.
+                        messages=_replace_chart_message(
+                            state.messages, state.chart, requester_line(request.context)
+                        ),
                         chart=state.chart,
                         max_tokens=request.max_tokens,
                         orch_temp=sampling["orchestrator_temperature"],
