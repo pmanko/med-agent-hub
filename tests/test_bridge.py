@@ -737,14 +737,17 @@ def test_v1_models_advertises_complete_backend_inventory_for_generic_clients():
 def test_v1_models_advertises_staged_capability_not_just_id_prefix():
     # Gate 10: clients must route by this field, never by pattern-matching the id string.
     with patch.object(
-        openai_compat, "_served_backend_model_metadata", return_value={"gemma-e4b": {}}
+        openai_compat,
+        "_served_backend_model_metadata",
+        return_value={"gemma-e4b": {}, "gemma-4-12b": {}},
     ):
         client = TestClient(app)
         r = client.get("/v1/models")
     by_id = {m["id"]: m for m in r.json()["data"]}
     assert by_id["single-12b-checked"]["staged"] is True
     assert by_id["eval-e4b-answer-only"]["staged"] is False
-    assert by_id["single-e4b-checked"]["default"] is True
+    assert by_id["single-12b-checked"]["default"] is True
+    assert by_id["single-e4b-checked"]["default"] is False
     assert by_id["single-e2b-checked"]["available"] is False
     assert by_id["single-e2b-checked"]["required_models"] == [
         "gemma-e2b",
