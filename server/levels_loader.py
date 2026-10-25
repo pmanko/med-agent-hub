@@ -536,23 +536,27 @@ def compile_profile(profile: Profile) -> Profile:
     ):
         raise ValueError(f"profile {profile.id!r} indepth_gate must follow indepth")
     if profile.output_mode == "product":
+        # In-Depth is optional for a product profile (a fast checked answer), but never
+        # without its gate; every answer check stays mandatory.
         required = {
             "answer",
             "gate",
             "resolve_refs",
             "final_resolve_refs",
             "ground_verdicts",
-            "indepth",
-            "indepth_gate",
         }
+        if "indepth" in stages:
+            required.add("indepth_gate")
         missing = sorted(required - set(stages))
         if missing:
             raise ValueError(f"product profile {profile.id!r} lacks stages {missing}")
-        if not (
-            stages.index("final_resolve_refs")
-            < stages.index("ground_verdicts")
-            < stages.index("indepth")
-            < stages.index("indepth_gate")
+        if stages.index("final_resolve_refs") >= stages.index("ground_verdicts") or (
+            "indepth" in stages
+            and not (
+                stages.index("ground_verdicts")
+                < stages.index("indepth")
+                < stages.index("indepth_gate")
+            )
         ):
             raise ValueError(
                 f"product profile {profile.id!r} must ground before gated In-Depth"
