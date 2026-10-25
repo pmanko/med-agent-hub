@@ -9,7 +9,7 @@ import unicodedata
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import httpx
 
@@ -461,6 +461,18 @@ def _claim_fragments_for_index(answer: str, index: int) -> List[str]:
     return fragments
 
 
+_RANGE_OPENER_RE = re.compile(
+    r"\b(?:from|between|increas\w*|decreas\w*|rose|rising|fell|falling|dropp\w*|trend\w*|chang\w*)\b",
+    re.I,
+)
+# The joiner must lead straight to the second endpoint's number ("to 67 cm", "and 6.4 kg"); an "and"
+# that starts another item ("and pulse was 80 bpm") is not a range.
+_RANGE_JOINER_RE = re.compile(
+    r"\s*,?\s*(?:to|and|through|versus|vs\.?)\s+(?:about\s+|approximately\s+|~\s*)?[-+\u2212]?\d",
+    re.I,
+)
+
+
 def _citation_clusters(text: str) -> List[Dict[str, Any]]:
     """Partition ``text`` into citation clusters for per-item grounding.
 
@@ -487,6 +499,23 @@ def _citation_clusters(text: str) -> List[Dict[str, Any]]:
             spans[-1]["indices"].append(idx)
             spans[-1]["last_end"] = marker.end()
         prev_end = marker.end()
+    # A range or change cited at both ends ("from 65.5 cm [1] to 67 cm [2]", "between 6.1 kg [3]
+    # and 6.4 kg [4]") is one claim its endpoints support together; split, neither end's source
+    # can support the trend or range on its own.
+    merged: List[Dict[str, Any]] = []
+    for span in spans:
+        if merged:
+            previous = merged[-1]
+            opener = text[previous["text_start"] : previous["last_end"]]
+            lead = text[previous["last_end"] :]
+            if _RANGE_OPENER_RE.search(_INLINE_CITATION_RE.sub("", opener)) and _RANGE_JOINER_RE.match(
+                lead
+            ):
+                previous["indices"].extend(span["indices"])
+                previous["last_end"] = span["last_end"]
+                continue
+        merged.append(dict(span, indices=list(span["indices"])))
+    spans = merged
     clusters: List[Dict[str, Any]] = []
     for position, span in enumerate(spans):
         span_end = spans[position + 1]["text_start"] if position + 1 < len(spans) else len(text)
@@ -1272,10 +1301,10 @@ _INDEPTH_VERDICT_RF = {
         "schema": {
             "type": "object",
             "properties": {
-                "drop": {"type": "array", "items": {"type": "integer"}},
+                "flag": {"type": "array", "items": {"type": "integer"}},
                 "issues": {"type": "string"},
             },
-            "required": ["drop"],
+            "required": ["flag"],
         },
     },
 }
@@ -1761,6 +1790,7 @@ async def _validate_answer_rewrite(
     repeat_penalty: Optional[float],
     dry: Optional[float],
     validation_prompt: str = _REWRITE_VALIDATOR_PROMPT,
+    verified: Sequence[Dict[str, Any]] = (),
 ) -> Dict[str, Any]:
     """Rewrite-mode audit: localize each chart contradiction and return a correction.
 
@@ -1772,6 +1802,7 @@ async def _validate_answer_rewrite(
         gathered=gathered,
         answer_text=answer_text,
         validation_prompt=validation_prompt,
+        verified=verified,
     )
     msg = await _chat(
         client,
@@ -1893,6 +1924,7 @@ def _answer_validation_messages(
     gathered: str,
     answer_text: str,
     validation_prompt: str = _REWRITE_VALIDATOR_PROMPT,
+    verified: Sequence[Dict[str, Any]] = (),
 ) -> List[Dict[str, Any]]:
     instruction = load_prompt(validation_prompt + "-answer")
     audit_user = (
@@ -1902,6 +1934,13 @@ def _answer_validation_messages(
         + "\n\n=== DRAFT ANSWER ===\n"
         + answer_text
     )
+    if verified:
+        audit_user += (
+            "\n\n=== CONFIRMED BY DATE CHECKS ===\n"
+            "Code checked these statements against the chart's dated records. They are correct; "
+            "do not report them as errors.\n"
+            + "\n".join(f"- {check['claim']} ({check['reason']})" for check in verified)
+        )
     return [records_message(chart, gathered), {"role": "user", "content": audit_user}]
 
 
@@ -1921,9 +1960,9 @@ async def _validate_indepth_verdict(
 ) -> Dict[str, Any]:
     """Audit the In-Depth claims claim-by-claim.
 
-    Returns ``{drop: [1-based claim numbers], issues: str}``, with drops clamped
-    to the claim list. A malformed result marks review unavailable so unreviewed
-    claims cannot ship as checked.
+    Returns ``{flag: [1-based claim numbers], issues: str}``, with flags clamped
+    to the claim list. A malformed result marks review unavailable, so the claims
+    are labelled unreviewed rather than checked.
     """
     messages = _indepth_validation_messages(
         chart=chart,
@@ -1952,7 +1991,7 @@ async def _validate_indepth_verdict(
             raw[:240],
         )
         return {
-            "drop": list(range(1, len(claims) + 1)),
+            "flag": [],
             "issues": "In-Depth review returned malformed output.",
             "unavailable": True,
         }
@@ -1963,23 +2002,25 @@ async def _validate_indepth_verdict(
             raw[:240],
         )
         return {
-            "drop": list(range(1, len(claims) + 1)),
+            "flag": [],
             "issues": "In-Depth review returned an invalid result.",
             "unavailable": True,
         }
-    drop = [
-        d
-        for d in (verdict.get("drop") or [])
-        if isinstance(d, int) and 1 <= d <= len(claims)
-    ]
+    flag = sorted(
+        {
+            d
+            for d in (verdict.get("flag") or [])
+            if isinstance(d, int) and 1 <= d <= len(claims)
+        }
+    )
     logger.info(
-        "indepth-validator[%s] drop=%s/%d claims issues=%r",
+        "indepth-validator[%s] flag=%s/%d claims issues=%r",
         validator_model,
-        drop,
+        flag,
         len(claims),
         (verdict.get("issues") or "")[:120],
     )
-    return {"drop": drop, "issues": verdict.get("issues", "")}
+    return {"flag": flag, "issues": verdict.get("issues", "")}
 
 
 def _indepth_validation_messages(
@@ -1998,33 +2039,50 @@ def _indepth_validation_messages(
         + _LEDGER_NOTE
         + "\n\n=== DIRECT ANSWER (context) ===\n"
         + answer_text
-        + "\n\n=== IN-DEPTH CLAIMS (numbered; return the numbers to DROP) ===\n"
+        + "\n\n=== IN-DEPTH CLAIMS (numbered; return the numbers to FLAG) ===\n"
         + numbered
     )
     return [records_message(chart, gathered), {"role": "user", "content": audit_user}]
 
 
-def _answer_note(level: str, first_issue: str, last_issue: str) -> str:
-    """Clinician-facing confidence note for the Answer, composed deterministically from the
-    validator verdicts captured during the re-synth cycle (no extra LLM call)."""
-    if level == "yellow":
-        base = "An initial draft was flagged on clinical review and corrected on a second pass"
-        return (
-            base
-            + ((" (first issue: " + first_issue + ")") if first_issue else "")
-            + "."
-        )
-    if level == "red":
-        return (
-            "Clinical review still flagged this after a revision: "
-            + (
-                last_issue
-                or first_issue
-                or "the answer could not be confirmed against the chart."
-            )
-            + " Verify against the chart before acting."
-        )
-    return ""
+def _comparable(text: str) -> str:
+    text = re.sub(r"\[\d+(?:\s*,\s*\d+)*\]", " ", str(text or "")).lower()
+    text = re.sub(r"^\s*(?:the|a|an)\s+", "", " ".join(text.split()))
+    return text.strip(" .,;:")
+
+
+def _overruled_by(error: Mapping[str, Any], verified: Sequence[Mapping[str, Any]]) -> bool:
+    """Whether a reviewer error targets only a statement the deterministic date checks confirmed.
+
+    The error's wrong text must lie within the confirmed fact, or be that fact with nothing but
+    punctuation around it: an error that also quotes another assertion is not overruled."""
+    wrong = _comparable(error.get("wrong") or "")
+    if not wrong:
+        return False
+    for check in verified:
+        claim = _comparable(check.get("claim") or "")
+        if not claim:
+            continue
+        if wrong in claim or (claim in wrong and not re.search(r"\w", wrong.replace(claim, " "))):
+            return True
+    return False
+
+
+def _review_flag_note(errors: Sequence[Mapping[str, Any]]) -> str:
+    """Clinician-facing note for an answer the reviewer flagged and the Hub left as written."""
+    first = errors[0] if errors else {}
+    wrong = str(first.get("wrong") or "").strip()
+    chart = str(first.get("chart") or "").strip()
+    detail = ""
+    if wrong and chart:
+        detail = f": it questioned \"{wrong}\" against {chart}"
+    elif wrong or chart:
+        detail = f": {wrong or chart}"
+    more = f" ({len(errors) - 1} more)" if len(errors) > 1 else ""
+    return (
+        "A second model review flagged a possible error" + detail + more
+        + ". The answer is shown as written; verify against the chart."
+    )
 
 
 async def _review_existing_answer(
@@ -2051,9 +2109,10 @@ async def _review_existing_answer(
 ]:
     """Review an already-visible Answer and return an updated chartsearchai envelope.
 
-    This is the async staged validation leg. It is deliberately conservative: deterministic gates can
-    patch high-confidence temporal/date failures; the LLM reviewer can rewrite prose when it offers a
-    clean correction; otherwise the original answer remains visible with needs_review metadata.
+    This is the async staged validation leg. Deterministic gates can patch high-confidence
+    temporal/date failures from the chart's dated records. The LLM reviewer only labels: an error it
+    reports leaves the answer as written, marked needs_review with a yellow note, and an error that
+    targets a statement the date checks confirmed is set aside.
     """
     payload = payload_override or _review_payload_from_messages(messages)
     original_answer = str(
@@ -2170,6 +2229,7 @@ async def _review_existing_answer(
             if review_chart_selector is not None
             else chart
         )
+        verified = temporal.verified_series_endpoints(question, answer_text, temporal_facts)
         try:
             verdict = await _validate_answer_rewrite(
                 client,
@@ -2182,6 +2242,7 @@ async def _review_existing_answer(
                 repeat_penalty=validator_repeat_penalty,
                 dry=validator_dry,
                 validation_prompt=reviewer_prompt or _REWRITE_VALIDATOR_PROMPT,
+                verified=verified,
             )
         except Exception as e:
             logger.warning("answer-review validator call failed: %s", e)
@@ -2231,162 +2292,28 @@ async def _review_existing_answer(
             )
 
         errs = (verdict or {}).get("errors") or []
-        steps.append(
-            {
-                "role": "answer_review",
-                "mode": "rewrite",
-                "model": reviewer_model,
-                "answer_ok": (verdict or {}).get("answer_ok", True),
-                "n_errors": len(errs),
-                "errors": errs,
-            }
-        )
+        overruled = [err for err in errs if _overruled_by(err, verified)]
+        errs = [err for err in errs if err not in overruled]
+        if overruled and not errs:
+            verdict = {**verdict, "answer_ok": True, "errors": []}
+        review_step = {
+            "role": "answer_review",
+            "mode": "rewrite",
+            "model": reviewer_model,
+            "answer_ok": (verdict or {}).get("answer_ok", True),
+            "n_errors": len(errs),
+            "errors": errs,
+        }
+        if overruled:
+            review_step["overruled_by_date_checks"] = overruled
+        steps.append(review_step)
         if verdict and not verdict.get("answer_ok", True) and errs:
+            # The reviewer is another pass of a model like the one that wrote the answer, so its
+            # verdict labels the answer; it never replaces or hides it.
             issues.extend(errs)
-            corrected = (verdict.get("corrected_answer") or "").strip()
-            if blocks:
-                status = "needs_review"
-                summary = "The answer check found an issue in prose or table content that needs review."
-                answer_conf = {
-                    "level": "red",
-                    "note": _answer_note("red", _rw_issue(verdict), ""),
-                }
-            elif (
-                corrected
-                and corrected != answer_text
-                and _is_substantive_answer(corrected)
-            ):
-                recheck_chart = (
-                    await review_chart_selector(corrected, [], "answer_review_retry")
-                    if review_chart_selector is not None
-                    else chart
-                )
-                try:
-                    recheck = await _validate_answer_rewrite(
-                        client,
-                        reviewer_model,
-                        chart=recheck_chart,
-                        gathered=gathered,
-                        answer_text=corrected,
-                        max_tokens=max_tokens,
-                        temperature=validator_temperature,
-                        repeat_penalty=validator_repeat_penalty,
-                        dry=validator_dry,
-                        validation_prompt=reviewer_prompt
-                        or _REWRITE_VALIDATOR_PROMPT,
-                    )
-                except Exception as e:
-                    logger.warning("answer-review correction recheck failed: %s", e)
-                    recheck = {
-                        "answer_ok": False,
-                        "errors": [],
-                        "unavailable": True,
-                        "reason": str(e),
-                    }
-                steps.append(
-                    {
-                        "role": "answer_review",
-                        "mode": "rewrite",
-                        "model": reviewer_model,
-                        "attempt": 1,
-                        "answer_ok": recheck.get("answer_ok", True),
-                        "n_errors": len(recheck.get("errors") or []),
-                        "errors": recheck.get("errors") or [],
-                        "status": (
-                            "unavailable" if recheck.get("unavailable") else "checked"
-                        ),
-                    }
-                )
-                if recheck.get("unavailable"):
-                    reason = str(
-                        recheck.get("reason")
-                        or "The corrected answer could not be rechecked."
-                    )
-                    issues.append(
-                        {"id": "answer_review_unavailable", "reason": reason}
-                    )
-                    status = "needs_review"
-                    summary = (
-                        "The answer check found an issue, but the proposed correction "
-                        "could not be safely rechecked."
-                    )
-                    answer_conf = {
-                        "level": "red",
-                        "note": (
-                            "A proposed correction could not be rechecked. Verify "
-                            "against the chart."
-                        ),
-                    }
-                elif recheck.get("answer_ok", True) or not recheck.get("errors"):
-                    answer_text = corrected
-                    citations = _extract_citations(corrected) or citations
-                    status = "edited"
-                    summary = "The answer was updated after chart check."
-                    answer_conf = {
-                        "level": "yellow",
-                        "note": _answer_note("yellow", _rw_issue(verdict), ""),
-                    }
-                    # The reviewer's corrected_answer must pass the same deterministic temporal/date
-                    # enforcement the original draft got, or a reviewer-introduced date error would
-                    # ship unchecked. Re-run the gate on the rewrite; discard its own before/after
-                    # tracking (`_`) since `original_answer` here means the pre-review answer, not
-                    # whatever the gate patched from.
-                    (
-                        answer_text,
-                        citations,
-                        blocks,
-                        answer_conf,
-                        temporal_gate_result,
-                        _,
-                    ) = _regate_after_rewrite(
-                        question=question,
-                        answer_text=answer_text,
-                        citations=citations,
-                        blocks=blocks,
-                        temporal_facts=temporal_facts,
-                        temporal_gate_mode=temporal_gate_mode,
-                        steps=steps,
-                        answer_conf=answer_conf,
-                        prior_original_answer=None,
-                    )
-                    if (
-                        temporal_gate_result.get("status") == "fail"
-                        and temporal_gate_result.get("applied") != "patch"
-                    ):
-                        status = "needs_review"
-                        summary = (
-                            "The answer check found a temporal/date issue introduced during "
-                            "review that needs review."
-                        )
-                elif len(recheck.get("errors") or []) < len(errs):
-                    answer_text = corrected
-                    citations = _extract_citations(corrected) or citations
-                    status = "needs_review"
-                    summary = "The answer was improved after chart check but still needs review."
-                    answer_conf = {
-                        "level": "red",
-                        "note": _answer_note(
-                            "red", _rw_issue(verdict), _rw_issue(recheck)
-                        ),
-                    }
-                else:
-                    status = "needs_review"
-                    summary = "The answer check found an issue that could not be safely repaired."
-                    answer_conf = {
-                        "level": "red",
-                        "note": _answer_note(
-                            "red", _rw_issue(verdict), _rw_issue(recheck)
-                        ),
-                    }
-            else:
-                status = "needs_review"
-                summary = (
-                    "The answer check found an issue that could not be safely repaired."
-                )
-                answer_conf = {
-                    "level": "red",
-                    "note": _answer_note("red", _rw_issue(verdict), ""),
-                }
+            status = "needs_review"
+            summary = "Review flagged a possible error; the answer is shown as written."
+            answer_conf = {"level": "yellow", "note": _review_flag_note(errs)}
 
     original_for_wire = (
         original_answer
@@ -2420,37 +2347,6 @@ async def _review_existing_answer(
     )
 
 
-def _indepth_note(level: str, n_dropped: int, issues: str) -> str:
-    """Clinician-facing confidence note for the In-Depth, from the validator verdict."""
-    if level == "yellow":
-        return "Supporting context was flagged on review and regenerated."
-    if level == "red":
-        base = "Some supporting context could not be reliably grounded"
-        if n_dropped:
-            base += " (" + str(n_dropped) + " point(s) removed)"
-        return base + ((": " + issues) if issues else "") + "."
-    return ""
-
-
-def _indepth_feedback(verdict: Dict[str, Any], claims: List[str]) -> str:
-    """In-Depth re-synthesis guidance from the validator verdict (the flagged claims + the note)."""
-    issues = (verdict.get("issues") or "").strip()
-    drop = verdict.get("drop") or []
-    flagged = "; ".join(claims[i - 1] for i in drop if 1 <= i <= len(claims))
-    parts = ["Some In-Depth points were flagged on clinical review."]
-    if flagged:
-        parts.append("Flagged points: " + flagged)
-    if issues:
-        parts.append("Reviewer note: " + issues)
-    parts.append(
-        "Rewrite the In-Depth as a fresh list of claims: drop or correct the flagged points, "
-        "make every factual clause fully supported by its cited numbered source set, and never "
-        "use a patient chart citation as support for outside medical knowledge. If no supporting "
-        "KnowledgeReference is present, use only directly supported patient-chart context."
-    )
-    return "\n".join(parts)
-
-
 async def _gen_indepth(
     client: httpx.AsyncClient,
     synth_model: str,
@@ -2469,63 +2365,18 @@ async def _gen_indepth(
     validator_repeat_penalty: Optional[float],
     validator_dry: Optional[float],
     max_tokens: Optional[int],
-    max_loops: int,
     steps: List[Dict[str, Any]],
     canonicalize_citations: bool = False,
     review_context_fitter: Optional[Callable[[List[str]], Awaitable[str]]] = None,
-    retry_context_fitter: Optional[
-        Callable[[List[Dict[str, Any]]], Awaitable[List[Dict[str, Any]]]]
-    ] = None,
 ) -> Tuple[List[str], Dict[str, Any]]:
-    """Synthesize and audit In-Depth claims without replacing reviewer-approved work.
+    """Synthesize the In-Depth claims once and label them with one review.
 
-    A partial rejection returns the original survivors. A total rejection permits one fresh attempt,
-    which is audited before any surviving claims can ship. Every model call is recorded in `steps`.
+    The reviewer is another pass of a model like the writer, so it never removes a claim or asks
+    for a new draft. Every claim is returned; the conf lists the 1-based claims the reviewer
+    flagged (``flagged``) for the In-Depth gate to mark, or says the review was unavailable.
+    Every model call is recorded in `steps`.
     """
     green = {"level": "green", "note": ""}
-
-    async def _audit(cl: List[str], attempt: int) -> Dict[str, Any]:
-        try:
-            audit_chart = (
-                await review_context_fitter(cl)
-                if review_context_fitter is not None
-                else chart
-            )
-            verdict = await _validate_indepth_verdict(
-                client,
-                validator_model,
-                chart=audit_chart,
-                gathered=gathered,
-                answer_text=answer_text,
-                claims=cl,
-                max_tokens=max_tokens,
-                temperature=validator_temperature,
-                repeat_penalty=validator_repeat_penalty,
-                dry=validator_dry,
-                validation_prompt=validator_prompt or "validation",
-            )
-        except InsufficientContextError:
-            raise
-        except Exception as e:
-            logger.warning("indepth-validator call failed: %s", e)
-            verdict = {
-                "drop": list(range(1, len(cl) + 1)),
-                "issues": "In-Depth review unavailable.",
-                "unavailable": True,
-            }
-        steps.append(
-            {
-                "role": "indepth_validator",
-                "model": validator_model,
-                "attempt": attempt,
-                "status": "unavailable" if verdict.get("unavailable") else "checked",
-                "drop": verdict.get("drop") or [],
-                "issues": verdict.get("issues", ""),
-                "claims_in": len(cl),
-            }
-        )
-        return verdict
-
     claims = await _synthesize_indepth(
         client,
         synth_model,
@@ -2549,120 +2400,58 @@ async def _gen_indepth(
     if not (validator_model and claims):
         return claims, green
 
-    v = await _audit(claims, 0)
-    if v.get("unavailable"):
-        return [], {
-            "level": "red",
-            "status": "unavailable",
-            "note": "In-Depth review was unavailable; no unreviewed claims were shipped.",
-        }
-    if not (v.get("drop") or []):
-        return claims, green
-
-    initial_drop = set(v.get("drop") or [])
-    initial_issues = str(v.get("issues") or "")
-    initial_survivors = [
-        claim for index, claim in enumerate(claims, start=1) if index not in initial_drop
-    ]
-    if initial_survivors:
-        logger.info(
-            "indepth-validator: partial drop -> preserve %d unflagged claim(s)",
-            len(initial_survivors),
+    try:
+        audit_chart = (
+            await review_context_fitter(claims)
+            if review_context_fitter is not None
+            else chart
         )
-        return initial_survivors, {
-            "level": "red",
-            "status": "edited",
-            "removed": len(initial_drop),
-            "issues": initial_issues,
-            "review_attempts": 1,
-            "note": _indepth_note(
-                "red", len(initial_drop), initial_issues
-            ),
-        }
-
-    # A total rejection gets one bounded fresh attempt. Partial rejection returns the unflagged
-    # claims above so a retry cannot destroy good work or introduce new errors.
-    retry_reviewed = False
-    for _ in range(1 if max_loops > 0 else 0):
-        logger.info("indepth-validator: claims flagged -> re-synthesizing")
-        retry_extra = [
-            {"role": "assistant", "content": json.dumps({"claims": claims})},
-            {"role": "user", "content": _indepth_feedback(v, claims)},
-        ]
-        retry_messages = (
-            await retry_context_fitter(retry_extra)
-            if retry_context_fitter is not None
-            else base_messages
-        )
-        revised = await _synthesize_indepth(
+        verdict = await _validate_indepth_verdict(
             client,
-            synth_model,
-            retry_messages,
-            indepth_instruction,
-            gathered,
-            answer_text,
-            temperature=synth_temperature,
+            validator_model,
+            chart=audit_chart,
+            gathered=gathered,
+            answer_text=answer_text,
+            claims=claims,
             max_tokens=max_tokens,
-            repeat_penalty=synth_repeat_penalty,
-            dry=synth_dry,
-            extra_msgs=retry_extra,
+            temperature=validator_temperature,
+            repeat_penalty=validator_repeat_penalty,
+            dry=validator_dry,
+            validation_prompt=validator_prompt or "validation",
         )
-        original_revised = list(revised)
-        if canonicalize_citations:
-            revised = [
-                temporal.canonicalize_indepth_citations(claim)[0]
-                for claim in revised
-            ]
-        revised_step = {
-            "role": "indepth_resynth",
-            "model": synth_model,
-            "claims": list(revised),
+    except InsufficientContextError:
+        raise
+    except Exception as e:
+        logger.warning("indepth-validator call failed: %s", e)
+        verdict = {"flag": [], "issues": "In-Depth review unavailable.", "unavailable": True}
+    steps.append(
+        {
+            "role": "indepth_validator",
+            "model": validator_model,
+            "status": "unavailable" if verdict.get("unavailable") else "checked",
+            "flag": verdict.get("flag") or [],
+            "issues": verdict.get("issues", ""),
+            "claims_in": len(claims),
         }
-        if revised != original_revised:
-            revised_step["original_claims"] = original_revised
-            revised_step["citation_canonicalized"] = True
-        steps.append(revised_step)
-        if not revised:
-            break
-        claims = revised
-        v = await _audit(claims, 1)
-        retry_reviewed = True
-        if v.get("unavailable"):
-            return [], {
-                "level": "red",
-                "status": "unavailable",
-                "note": "In-Depth review was unavailable; no unreviewed claims were shipped.",
-            }
-        if not (v.get("drop") or []):
-            return claims, {
-                "level": "yellow",
-                "status": "edited",
-                "removed": len(initial_drop),
-                "issues": initial_issues,
-                "review_attempts": 2,
-                "note": _indepth_note("yellow", 0, ""),
-            }
-
-    # still flagged after re-synth -> block/strip the remaining flagged claims (red).
-    drop = v.get("drop") or []
-    retry_drop = set(drop) if retry_reviewed else set()
-    retry_issues = str(v.get("issues") or "") if retry_reviewed else ""
-    lifecycle_issues = list(
-        dict.fromkeys(issue for issue in (initial_issues, retry_issues) if issue)
     )
-    kept = [c for i, c in enumerate(claims, start=1) if i not in set(drop)]
-    logger.info("indepth-validator: still flagged after re-synth -> strip %s", drop)
-    return kept, {
-        "level": "red",
-        "status": "edited",
-        "removed": len(initial_drop) + len(retry_drop),
-        "issues": "; ".join(lifecycle_issues),
-        "review_attempts": 2 if retry_reviewed else 1,
-        "note": _indepth_note(
-            "red",
-            len(initial_drop) + len(retry_drop),
-            "; ".join(lifecycle_issues),
-        ),
+    if verdict.get("unavailable"):
+        return claims, {
+            "level": "yellow",
+            "status": "unreviewed",
+            "note": "In-Depth review was unavailable; these points were not reviewed.",
+        }
+    flagged = list(verdict.get("flag") or [])
+    if not flagged:
+        return claims, green
+    issues = " ".join(str(verdict.get("issues") or "").split())
+    return claims, {
+        "level": "yellow",
+        "status": "flagged",
+        "flagged": flagged,
+        "issues": issues,
+        "note": f"Review flagged {len(flagged)} of {len(claims)} points"
+        + (f": {issues.rstrip('.')}" if issues else "")
+        + ". Verify them against the chart.",
     }
 
 
@@ -2675,16 +2464,6 @@ def _extract_citations(text: str) -> List[int]:
         if index not in citations:
             citations.append(index)
     return citations
-
-
-def _rw_issue(verdict: Optional[Dict[str, Any]]) -> str:
-    """A clinician-facing issue string from a rewrite verdict's first localized error (the chart-correct
-    fact), for the confidence caveat."""
-    errs = (verdict or {}).get("errors") or []
-    if not errs:
-        return ""
-    e = errs[0]
-    return (e.get("chart") or e.get("fix") or "").strip()
 
 
 async def _ensure_substantive_answer(
@@ -2739,9 +2518,7 @@ async def _ensure_substantive_answer(
                 answer_text, citations, blocks = attempt_text, attempt_cit, attempt_blk
                 answer_conf = {
                     "level": "yellow",
-                    "note": _answer_note(
-                        "yellow", "the first draft was not a usable answer", ""
-                    ),
+                    "note": "The first draft was not a usable answer and was written again.",
                 }
                 break
         else:

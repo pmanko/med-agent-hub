@@ -255,12 +255,14 @@ def test_staged_stream_with_validator_emits_full_phase_sequence(monkeypatch):
     assert fast_ref["resolutionStatus"] == "resolved"
     assert fast_ref["groundingStatus"] == "checking"
     assert fast_ref["usage"] == [{"location": "answer", "text": "Ans [1]."}]
-    # answer_validation: correction and final grounding land atomically for the post-review answer.
-    assert ev["answer_validation"]["answerValidation"]["status"] == "edited"
-    assert ev["answer_validation"]["answerValidation"]["originalAnswer"] == "Ans [1]."
+    # answer_validation: the review's flag and final grounding land together; the reviewer's
+    # correction is not adopted, so the visible answer and its references are unchanged.
+    assert ev["answer_validation"]["answerValidation"]["status"] == "needs_review"
+    assert "originalAnswer" not in ev["answer_validation"]["answerValidation"]
+    assert ev["answer_validation"]["confidence"]["answer"]["level"] == "yellow"
     checked_ref = ev["answer_validation"]["references"][0]
-    assert checked_ref["index"] == 2
-    assert checked_ref["resourceUuid"] == "u2"
+    assert checked_ref["index"] == 1
+    assert checked_ref["resourceUuid"] == "u1"
     assert checked_ref["resolutionStatus"] == "resolved"
     assert checked_ref["groundingStatus"] == "verified"
     # done: in-depth complete
@@ -271,17 +273,18 @@ def test_staged_stream_with_validator_emits_full_phase_sequence(monkeypatch):
     assert "status" not in ev["indepth_done"]
     assert ev["done"]["inDepth"]["error"] == ""
     assert ev["done"]["model"] == "lvl"
+    assert ev["done"]["answer"] == "Ans [1]."
     final_ref = ev["done"]["references"][0]
-    assert final_ref["index"] == 2
+    assert final_ref["index"] == 1
     assert final_ref["groundingStatus"] == "verified"
     assert final_ref["grounded"] is True
+    assert rewrite_calls == 1
     assert [(stage, answer) for stage, answer, _blocks in selected_reviews] == [
         ("answer_review", "Ans [1]."),
-        ("answer_review_retry", "Ans fixed [2]."),
     ]
 
 
-def test_post_review_punctuation_rewrite_preserves_usable_answer_and_needs_review(
+def test_review_flag_with_an_unusable_rewrite_keeps_the_answer_needs_review(
     monkeypatch,
 ):
     _stub_common(monkeypatch)
@@ -313,7 +316,7 @@ def test_post_review_punctuation_rewrite_preserves_usable_answer_and_needs_revie
 
     assert events["done"]["answer"] == "Useful answer [1]."
     assert events["done"]["answerValidation"]["status"] == "needs_review"
-    assert events["done"]["confidence"]["answer"]["level"] == "red"
+    assert events["done"]["confidence"]["answer"]["level"] == "yellow"
 
 
 def test_deterministic_answer_patch_keeps_earliest_draft_and_its_references(
@@ -395,7 +398,7 @@ def test_preliminary_problem_stays_checking_until_configured_review_finishes(
     assert events["answer_validation"]["answerValidation"]["status"] == "needs_review"
 
 
-def test_indepth_unresolved_citation_is_not_displayed(monkeypatch):
+def test_indepth_claim_citing_a_record_outside_the_chart_is_shown_marked_red(monkeypatch):
     _stub_common(monkeypatch)
 
     async def fake_answer(*_args, **_kwargs):
@@ -421,8 +424,16 @@ def test_indepth_unresolved_citation_is_not_displayed(monkeypatch):
 
     events = dict(_collect(_product_profile(review_model="V")))
 
-    assert "Supported context [1]." in events["done"]["inDepth"]["answer"]
-    assert "[99]" not in events["done"]["inDepth"]["answer"]
+    in_depth = events["done"]["inDepth"]
+    assert in_depth["status"] == "complete"
+    assert in_depth["answer"].splitlines() == [
+        "- Supported context [1].",
+        "- Invented context [99]. *(Check: it cites a record not in this chart.)*",
+    ]
+    assert in_depth["validation"]["status"] == "needs_review"
+    assert in_depth["validation"]["marked"] == [2]
+    assert events["done"]["confidence"]["in_depth"]["level"] == "red"
+    assert "1 of 2 points is marked" in events["done"]["confidence"]["in_depth"]["note"]
     reference = next(ref for ref in events["done"]["references"] if ref["index"] == 1)
     assert any(usage["location"] == "indepth" for usage in reference["usage"])
 
@@ -685,12 +696,12 @@ def test_stage_drain_returns_final_post_review_envelope(monkeypatch):
         )
 
     env = json.loads(asyncio.run(_run()))
-    assert env["answer"] == "Ans fixed [2]."
-    assert env["citations"] == [2]
-    assert {reference["index"] for reference in env["references"]} == {1, 2}
-    assert env["answerValidation"]["status"] == "edited"
+    assert env["answer"] == "Ans [1]."
+    assert env["citations"] == [1]
+    assert {reference["index"] for reference in env["references"]} == {1}
+    assert env["answerValidation"]["status"] == "needs_review"
     assert env["inDepth"]["status"] == "complete"
-    assert env["references"][0]["index"] == 2
+    assert env["references"][0]["index"] == 1
     assert env["references"][0]["groundingStatus"] == "verified"
 
 
@@ -905,6 +916,58 @@ def test_ground_references_grounds_each_enumerated_item_against_its_own_source(
     assert len(calls) == 1
     prompt = calls[0]["messages"][0]["content"]
     assert prompt.count("PAIR ") == 3
+
+
+def test_ground_references_checks_a_range_cited_at_both_ends_against_both_ends(monkeypatch):
+    # The 21 Oct ek-growth answer: "from 65.5 cm [253], [214] to 67.0 cm [20], [71]" was split at
+    # the second marker, so the two 65.5 cm records were asked alone to support an upward trend and
+    # the correct answer went red. Each range is one claim its endpoints support together.
+    fake_chat, calls = _fake_chat_returning_verdicts([["YES", "YES"]])
+    monkeypatch.setattr(team, "_chat", fake_chat)
+    statement = (
+        "The child's weight has remained relatively stable between 6.1 kg [218] and 6.4 kg [75], "
+        "while their height shows a slight upward trend from 65.5 cm [253], [214] to 67.0 cm "
+        "[20], [71]."
+    )
+    texts = {
+        218: ("2026-01-08", "Weight (kg): 6.1 kg"),
+        75: ("2026-01-26", "Weight (kg): 6.4 kg"),
+        253: ("2026-01-04", "Height (cm): 65.5 cm"),
+        214: ("2026-01-08", "Height (cm): 65.5 cm"),
+        20: ("2026-02-02", "Height (cm): 67 cm"),
+        71: ("2026-01-26", "Height (cm): 67 cm"),
+    }
+    refs = [
+        {"index": index, "usage": [{"location": "answer", "text": statement}]}
+        for index in texts
+    ]
+    mappings = [
+        {"index": index, "date": date, "text": text} for index, (date, text) in texts.items()
+    ]
+
+    grounded = asyncio.run(team._ground_references(None, "M", statement, refs, mappings))
+
+    assert [item["groundingStatus"] for item in grounded] == ["verified"] * 6
+    groups = {item["index"]: item["groundingGroup"] for item in grounded}
+    assert groups[218] == groups[75] == [75, 218]
+    assert groups[253] == groups[20] == [20, 71, 214, 253]
+    claims = {item["index"]: item["groundingChecks"][0]["claim"] for item in grounded}
+    assert "between 6.1 kg" in claims[218] and "and 6.4 kg" in claims[218]
+    assert "from 65.5 cm" in claims[253] and "to 67.0 cm" in claims[253]
+    assert calls[0]["messages"][0]["content"].count("PAIR ") == 2
+
+
+@pytest.mark.parametrize(
+    "statement",
+    (
+        "Weight increased to 70 kg [1], and pulse was 80 bpm [2].",
+        "Weight changed little [1] and the pulse rose [2].",
+    ),
+)
+def test_citation_clusters_keep_an_item_after_a_change_verb_apart_when_no_second_endpoint_follows(statement):
+    # A change verb before the first marker and "and" after it do not make a range: the second item
+    # is its own measurement, so each citation is grounded against its own item.
+    assert [cluster["indices"] for cluster in team._citation_clusters(statement)] == [[1], [2]]
 
 
 def check_source_indices(grounded_ref):
@@ -1611,36 +1674,20 @@ def test_product_long_indepth_keeps_all_verified_claims(monkeypatch):
     assert len(final["references"]) == total
 
 
-def test_gen_indepth_refits_review_and_retry_subcalls(monkeypatch):
+def test_gen_indepth_refits_the_review_and_never_resynthesizes(monkeypatch):
     synth_calls = []
     review_charts = []
-    fitted_retry_messages = []
 
-    async def synth(
-        _client,
-        _model,
-        base_messages,
-        *_args,
-        extra_msgs=None,
-        **_kwargs,
-    ):
+    async def synth(_client, _model, base_messages, *_args, extra_msgs=None, **_kwargs):
         synth_calls.append((base_messages, extra_msgs))
-        return ["Initial claim [1]."] if extra_msgs is None else ["Revised claim [1]."]
+        return ["Initial claim [1]."]
 
     async def review(_client, _model, *, chart, claims, **_kwargs):
         review_charts.append(chart)
-        return (
-            {"drop": [1], "issues": "retry"}
-            if claims[0].startswith("Initial")
-            else {"drop": [], "issues": ""}
-        )
+        return {"flag": [1], "issues": "Claim 1 cites the wrong record."}
 
     async def fit_review(claims):
         return "review chart for " + claims[0]
-
-    async def fit_retry(extra_msgs):
-        fitted_retry_messages.extend(extra_msgs)
-        return [{"role": "user", "content": "retry chart"}]
 
     monkeypatch.setattr(team, "_synthesize_indepth", synth)
     monkeypatch.setattr(team, "_validate_indepth_verdict", review)
@@ -1663,21 +1710,16 @@ def test_gen_indepth_refits_review_and_retry_subcalls(monkeypatch):
             validator_repeat_penalty=None,
             validator_dry=None,
             max_tokens=64,
-            max_loops=1,
             steps=[],
             review_context_fitter=fit_review,
-            retry_context_fitter=fit_retry,
         )
     )
 
-    assert claims == ["Revised claim [1]."]
-    assert confidence["status"] == "edited"
-    assert review_charts == [
-        "review chart for Initial claim [1].",
-        "review chart for Revised claim [1].",
-    ]
-    assert synth_calls[1][0] == [{"role": "user", "content": "retry chart"}]
-    assert synth_calls[1][1] == fitted_retry_messages
+    assert claims == ["Initial claim [1]."]
+    assert confidence["status"] == "flagged"
+    assert confidence["flagged"] == [1]
+    assert review_charts == ["review chart for Initial claim [1]."]
+    assert synth_calls == [([{"role": "user", "content": "answer chart"}], None)]
 
 
 def test_product_indepth_required_source_overflow_has_structured_terminal_metadata(
@@ -2074,7 +2116,7 @@ def test_withheld_malformed_table_remains_needs_review_after_llm_review(monkeypa
     )
 
 
-def test_reviewed_prose_correction_clears_withheld_table_blocker(monkeypatch):
+def test_review_correction_does_not_replace_an_answer_whose_table_was_withheld(monkeypatch):
     _stub_common(monkeypatch)
 
     malformed_block = {
@@ -2128,14 +2170,10 @@ def test_reviewed_prose_correction_clears_withheld_table_blocker(monkeypatch):
 
     final = dict(_collect(_product_profile(review_model="V")))["done"]
 
-    assert final["answer"] == "The documented weight record is available [1]."
+    assert final["answer"] == "The documented weight is shown below [1]."
     assert final["blocks"] == []
-    assert final["answerValidation"]["status"] == "edited"
-    assert final["answerValidation"]["originalBlocks"] == [malformed_block]
-    assert not any(
-        issue.get("id") == "table_contract"
-        for issue in final["answerValidation"]["issues"]
-    )
+    assert final["answerValidation"]["status"] == "needs_review"
+    assert review_calls == 1
 
 
 def test_product_single_unscoped_citation_is_scoped_and_grounded(monkeypatch):
@@ -2323,7 +2361,7 @@ def test_indepth_failure_preserves_latest_validated_answer_state(monkeypatch):
     validated = events["answer_validation"]
     final = events["done"]
 
-    assert validated["answer"] == "Reviewed answer [2]."
+    assert validated["answer"] == "Visible fast answer [1]."
     assert final["answer"] == validated["answer"]
     assert final["blocks"] == validated["blocks"]
     assert final["references"] == validated["references"]
@@ -2331,7 +2369,7 @@ def test_indepth_failure_preserves_latest_validated_answer_state(monkeypatch):
     assert final["confidence"]["answer"]["level"] == "red"
 
 
-def test_review_can_recover_from_initial_unresolved_citation(monkeypatch):
+def test_review_correction_does_not_replace_an_answer_with_an_unresolved_citation(monkeypatch):
     _stub_common(monkeypatch)
 
     async def fake_answer(*_args, **_kwargs):
@@ -2357,10 +2395,9 @@ def test_review_can_recover_from_initial_unresolved_citation(monkeypatch):
 
     assert events["answer_done"]["confidence"]["answer"]["level"] == "red"
     final = events["done"]
-    assert final["answer"] == "Correct source [1]."
-    assert final["answerValidation"]["status"] == "edited"
-    assert final["confidence"]["answer"]["level"] != "red"
-    assert final["references"][0]["index"] == 1
+    assert final["answer"] == "Wrong source [99]."
+    assert final["answerValidation"]["status"] == "needs_review"
+    assert review_calls == 1
 
 
 def test_final_mixed_grounding_cannot_leave_answer_checked(monkeypatch):
@@ -2447,27 +2484,28 @@ def test_answer_and_indepth_grounding_checks_merge_for_shared_reference(monkeypa
     )
 
 
-def test_unavailable_indepth_reviewer_is_withheld_in_product_envelope(monkeypatch):
+def test_unavailable_indepth_reviewer_ships_the_claims_labelled_unreviewed(monkeypatch):
     _stub_common(monkeypatch)
 
     async def fake_answer(*_args, **_kwargs):
         return "Supported answer [1].", [1], []
 
     async def unavailable(*_args, **_kwargs):
-        return [], {
-            "level": "red",
-            "status": "unavailable",
-            "note": "In-Depth review was unavailable; no unreviewed claims were shipped.",
+        return ["Context the review did not reach [1]."], {
+            "level": "yellow",
+            "status": "unreviewed",
+            "note": "In-Depth review was unavailable; these points were not reviewed.",
         }
 
     monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
     monkeypatch.setattr(team, "_gen_indepth", unavailable)
 
     final = dict(_collect(_product_profile(review_model="review")))["done"]
-    assert final["inDepth"]["status"] == "needs_review"
-    assert final["inDepth"]["answer"] == ""
-    assert "review was unavailable" in final["inDepth"]["error"]
+    assert final["inDepth"]["status"] == "complete"
+    assert final["inDepth"]["answer"] == "- Context the review did not reach [1]."
     assert final["inDepth"]["validation"]["review_status"] == "unavailable"
+    assert final["confidence"]["in_depth"]["level"] == "yellow"
+    assert "not reviewed" in final["confidence"]["in_depth"]["note"]
 
 
 def test_failed_indepth_retry_preserves_the_first_model_draft(monkeypatch):
@@ -2495,208 +2533,44 @@ def test_failed_indepth_retry_preserves_the_first_model_draft(monkeypatch):
     assert final["inDepth"]["reviewReferences"][0]["index"] == 1
 
 
-def test_partial_indepth_review_is_reported_as_edited(monkeypatch):
+def test_flagged_indepth_claim_is_shown_marked_beside_the_one_that_passed(monkeypatch):
     _stub_common(monkeypatch)
 
     async def fake_answer(*_args, **_kwargs):
         return "Supported answer [1].", [1], []
 
-    async def edited(*_args, **_kwargs):
-        _kwargs["steps"].append(
-            {
-                "role": "indepth_synth",
-                "claims": [
-                    "The supported claim remains [1].",
-                    "The unsupported draft claim [2].",
-                ],
-            }
-        )
-        return ["The supported claim remains [1]."], {
-            "level": "red",
-            "status": "edited",
-            "removed": 1,
-            "issues": "The second claim was unsupported.",
-            "review_attempts": 1,
-            "note": "One unsupported claim was removed.",
+    async def flagged(*_args, **_kwargs):
+        return ["The supported claim remains [1].", "The questioned claim [2]."], {
+            "level": "yellow",
+            "status": "flagged",
+            "flagged": [2],
+            "issues": "Claim 2 overstates record 2.",
+            "note": "Review flagged 1 of 2 points.",
         }
 
     monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
-    monkeypatch.setattr(team, "_gen_indepth", edited)
+    monkeypatch.setattr(team, "_gen_indepth", flagged)
 
     final = dict(_collect(_product_profile(review_model="review")))["done"]
     assert final["inDepth"]["status"] == "complete"
-    assert final["inDepth"]["answer"] == "- The supported claim remains [1]."
-    assert final["inDepth"]["reviewDraft"] == (
-        "- The supported claim remains [1].\n"
-        "- The unsupported draft claim [2]."
-    )
-    assert [reference["index"] for reference in final["inDepth"]["reviewReferences"]] == [1, 2]
-    assert [reference["index"] for reference in final["references"]] == [1]
-    assert all(
-        reference["usage"][0]["location"] == "indepth_review_draft"
-        for reference in final["inDepth"]["reviewReferences"]
-    )
-    assert {
-        reference["usage"][0]["text"]
-        for reference in final["inDepth"]["reviewReferences"]
-    } == {
+    assert final["inDepth"]["answer"].splitlines() == [
         "- The supported claim remains [1].",
-        "- The unsupported draft claim [2].",
-    }
+        "- The questioned claim [2]. *(Check: flagged on review.)*",
+    ]
+    assert "reviewDraft" not in final["inDepth"]
+    assert [reference["index"] for reference in final["references"]] == [1, 2]
     validation = final["inDepth"]["validation"]
-    assert validation["status"] == "edited"
-    assert validation["review_status"] == "edited"
-    assert validation["review_removed"] == 1
-    assert validation["review_issues"] == "The second claim was unsupported."
-    assert validation["review_attempts"] == 1
-
-
-def test_successful_indepth_retry_keeps_first_rejected_draft(monkeypatch):
-    _stub_common(monkeypatch)
-
-    async def fake_answer(*_args, **_kwargs):
-        return "Supported answer [1].", [1], []
-
-    async def retry_success(*_args, **kwargs):
-        kwargs["steps"].extend(
-            [
-                {
-                    "role": "indepth_synth",
-                    "claims": ["First rejected claim [2]."],
-                },
-                {
-                    "role": "indepth_validator",
-                    "status": "checked",
-                    "drop": [1],
-                },
-                {
-                    "role": "indepth_resynth",
-                    "claims": ["Accepted retry claim [1]."],
-                },
-                {
-                    "role": "indepth_validator",
-                    "status": "checked",
-                    "drop": [],
-                },
-            ]
-        )
-        return ["Accepted retry claim [1]."], {
-            "level": "yellow",
-            "status": "edited",
-            "removed": 1,
-            "issues": "The first draft was unsupported.",
-            "review_attempts": 2,
-            "note": "The draft was replaced.",
-        }
-
-    monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
-    monkeypatch.setattr(team, "_gen_indepth", retry_success)
-
-    final = dict(_collect(_product_profile(review_model="review")))["done"]
-
-    assert final["inDepth"]["answer"] == "- Accepted retry claim [1]."
-    assert final["inDepth"]["reviewDraft"] == "- First rejected claim [2]."
-    assert [
-        reference["index"]
-        for reference in final["inDepth"]["reviewReferences"]
-    ] == [2]
-    assert final["confidence"]["in_depth"]["level"] == "yellow"
-
-
-def test_failed_second_indepth_attempt_exposes_the_latest_rejected_draft(monkeypatch):
-    _stub_common(monkeypatch)
-
-    async def fake_answer(*_args, **_kwargs):
-        return "Supported answer [1].", [1], []
-
-    async def both_rejected(*_args, **kwargs):
-        kwargs["steps"].extend(
-            [
-                {
-                    "role": "indepth_synth",
-                    "claims": ["First rejected claim [1]."],
-                },
-                {
-                    "role": "indepth_validator",
-                    "status": "checked",
-                    "drop": [1],
-                },
-                {
-                    "role": "indepth_resynth",
-                    "claims": ["Latest rejected claim [2]."],
-                },
-                {
-                    "role": "indepth_validator",
-                    "status": "checked",
-                    "drop": [1],
-                },
-            ]
-        )
-        return [], {
-            "level": "red",
-            "status": "edited",
-            "removed": 1,
-            "issues": "Both attempts were unsupported.",
-            "review_attempts": 2,
-        }
-
-    monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
-    monkeypatch.setattr(team, "_gen_indepth", both_rejected)
-
-    final = dict(_collect(_product_profile(review_model="review")))["done"]
-
-    assert final["inDepth"]["reviewDraft"] == "- Latest rejected claim [2]."
-
-
-@pytest.mark.parametrize(
-    ("confidence", "expected_removed", "expected_issues"),
-    (
-        (
-            {
-                "level": "yellow",
-                "status": "edited",
-                "removed": 2,
-                "issues": "The initial draft was unsupported.",
-                "review_attempts": 2,
-                "note": "The draft was replaced.",
-            },
-            2,
-            "The initial draft was unsupported.",
-        ),
-        (
-            {
-                "level": "red",
-                "status": "edited",
-                "removed": 3,
-                "issues": "The initial draft was unsupported.; One retry claim was unsupported.",
-                "review_attempts": 2,
-                "note": "Unsupported claims were removed.",
-            },
-            3,
-            "The initial draft was unsupported.; One retry claim was unsupported.",
-        ),
-    ),
-)
-def test_retry_review_metadata_survives_product_envelope(
-    monkeypatch, confidence, expected_removed, expected_issues
-):
-    _stub_common(monkeypatch)
-
-    async def fake_answer(*_args, **_kwargs):
-        return "Supported answer [1].", [1], []
-
-    async def edited(*_args, **_kwargs):
-        return ["The replacement claim is supported [1]."], confidence
-
-    monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
-    monkeypatch.setattr(team, "_gen_indepth", edited)
-
-    final = dict(_collect(_product_profile(review_model="review")))["done"]
-    validation = final["inDepth"]["validation"]
-    assert validation["status"] == "edited"
-    assert validation["review_removed"] == expected_removed
-    assert validation["review_issues"] == expected_issues
-    assert validation["review_attempts"] == 2
+    assert validation["status"] == "needs_review"
+    assert validation["review_status"] == "flagged"
+    assert validation["review_flagged"] == [2]
+    assert validation["review_issues"] == "Claim 2 overstates record 2."
+    assert validation["marked"] == [2]
+    confidence = final["confidence"]["in_depth"]
+    assert confidence["level"] == "yellow"
+    assert confidence["note"] == (
+        "1 of 2 points is marked for checking; review note: Claim 2 overstates record 2. "
+        "Verify marked points against the chart."
+    )
 
 
 def test_non_substantive_review_preserves_answer_temporal_gate(monkeypatch):
@@ -2716,7 +2590,7 @@ def test_non_substantive_review_preserves_answer_temporal_gate(monkeypatch):
     }
 
 
-def test_indepth_citation_cannot_inherit_answer_verified_verdict(monkeypatch):
+def test_indepth_citation_keeps_its_own_unsupported_verdict_beside_the_answer(monkeypatch):
     _stub_common(monkeypatch)
     calls = []
 
@@ -2744,34 +2618,30 @@ def test_indepth_citation_cannot_inherit_answer_verified_verdict(monkeypatch):
     monkeypatch.setattr(team, "_ground_references", ground_by_usage)
 
     events = dict(_collect(_product_profile()))
-    indepth_done = events["indepth_error"]
+    indepth_done = events["indepth_done"]
     final = events["done"]
     assert indepth_done["inDepth"] == final["inDepth"]
     assert indepth_done["answer"] == final["answer"]
     assert "status" not in indepth_done
 
     assert len(calls) == 2
-    assert indepth_done["inDepth"]["status"] == "needs_review"
-    assert indepth_done["references"][0]["groundingStatus"] == "verified"
-    assert final["inDepth"]["status"] == "needs_review"
-    assert final["inDepth"]["answer"] == ""
-    assert final["inDepth"]["reviewDraft"] == "- Unsupported In-Depth claim [1]."
-    assert final["inDepth"]["reviewReferences"][0]["index"] == 1
-    assert final["inDepth"]["reviewReferences"][0]["groundingStatus"] == "unchecked"
-    assert final["inDepth"]["reviewReferences"][0]["usage"][0]["location"] == (
-        "indepth_review_draft"
+    assert final["inDepth"]["status"] == "complete"
+    assert final["inDepth"]["answer"] == (
+        "- Unsupported In-Depth claim [1]. *(Check: its cited record does not support it.)*"
     )
+    assert "reviewDraft" not in final["inDepth"]
     assert final["confidence"]["in_depth"]["level"] == "red"
-    assert "withheld" in final["confidence"]["in_depth"]["note"]
     assert final["inDepth"]["validation"]["citation_checks"][0]["status"] == "fail"
     assert "not supported by its cited source" in final["inDepth"]["validation"][
         "summary"
     ]
-    assert "evidence checks rejected every claim" in final["inDepth"]["error"]
-    assert final["references"][0]["groundingStatus"] == "verified"
-    assert all(
-        usage.get("location") != "indepth" for usage in final["references"][0]["usage"]
-    )
+    assert final["inDepth"]["error"] == ""
+    # The record supports the answer's use and not the In-Depth's, and says both.
+    assert final["references"][0]["groundingStatus"] == "mixed"
+    assert {usage.get("location") for usage in final["references"][0]["usage"]} == {
+        "answer",
+        "indepth",
+    }
 
 
 def test_knowledge_reference_survives_source_set_grounding_with_provenance(monkeypatch):
@@ -2923,7 +2793,7 @@ def test_product_review_and_final_event_preserve_grounded_knowledge_reference(mo
     }
 
 
-def test_unchecked_indepth_citation_is_omitted_and_cannot_report_complete(monkeypatch):
+def test_unreviewed_indepth_claim_whose_citation_was_not_checked_is_shown_marked(monkeypatch):
     _stub_common(monkeypatch)
 
     async def fake_answer(*_args, **_kwargs):
@@ -2951,14 +2821,18 @@ def test_unchecked_indepth_citation_is_omitted_and_cannot_report_complete(monkey
 
     final = dict(_collect(_product_profile()))["done"]
 
-    assert final["inDepth"]["status"] == "needs_review"
-    assert final["inDepth"]["answer"] == ""
+    assert final["inDepth"]["status"] == "complete"
+    assert final["inDepth"]["answer"] == (
+        "- In-Depth claim whose support was not checked [1]. "
+        "*(Check: its citation was not checked.)*"
+    )
+    assert final["confidence"]["in_depth"]["level"] == "yellow"
     check = final["inDepth"]["validation"]["citation_checks"][0]
-    assert check["status"] == "fail"
+    assert check["status"] == "warn"
     assert "could not be checked" in check["reason"]
 
 
-def test_uncited_indepth_claim_is_withheld_and_cannot_report_complete(monkeypatch):
+def test_uncited_indepth_claim_is_shown_labelled_as_general_guidance(monkeypatch):
     _stub_common(monkeypatch)
 
     async def fake_answer(*_args, **_kwargs):
@@ -2972,14 +2846,15 @@ def test_uncited_indepth_claim_is_withheld_and_cannot_report_complete(monkeypatc
 
     final = dict(_collect(_product_profile()))["done"]
 
-    assert final["inDepth"]["status"] == "needs_review"
-    assert final["inDepth"]["answer"] == ""
-    assert final["inDepth"]["reviewDraft"] == "- Uncited clinical interpretation."
-    assert final["inDepth"]["reviewReferences"] == []
+    assert final["inDepth"]["status"] == "complete"
+    assert final["inDepth"]["answer"] == (
+        "- Uncited clinical interpretation. *(Check: general guidance, not cited.)*"
+    )
+    assert final["confidence"]["in_depth"]["level"] == "yellow"
     check = final["inDepth"]["validation"]["citation_checks"][0]
-    assert check["status"] == "fail"
-    assert "no source citation" in check["reason"]
-    assert "no source citation" in final["inDepth"]["validation"]["summary"]
+    assert check["status"] == "warn"
+    assert "cites no record" in check["reason"]
+    assert "cites no record" in final["inDepth"]["validation"]["summary"]
 
 
 def test_named_sse_emits_heartbeats_while_a_leg_stalls():
@@ -3401,3 +3276,72 @@ def test_profile_stream_executes_gather_from_the_configured_stage_plan(monkeypat
     assert (
         "gemma-e4b-q8" in calls
     ), "the orchestrator was never called even though the compiled profile declares gather"
+
+
+def test_indepth_with_no_claims_written_is_empty_not_withheld(monkeypatch):
+    # The In-Depth prompt asks for an empty list when nothing more is fully supported, so a model that
+    # writes no claims has answered as instructed: nothing to show, nothing rejected.
+    _stub_common(monkeypatch)
+
+    async def fake_answer(*_args, **_kwargs):
+        return "Useful answer [1].", [1], []
+
+    async def no_claims(*_args, **_kwargs):
+        return [], {"level": "green", "note": ""}
+
+    async def unchanged(_client, **kwargs):
+        return (
+            kwargs["answer_text"],
+            kwargs["citations"],
+            kwargs["blocks"],
+            {"level": "green", "note": ""},
+        )
+
+    monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
+    monkeypatch.setattr(team, "_gen_indepth", no_claims)
+    monkeypatch.setattr(team, "_ensure_substantive_answer", unchanged)
+
+    events = _collect(_product_profile(review_model="V"))
+    names = [name for name, _ in events]
+    final = dict(events)["done"]
+
+    assert "indepth_error" not in names
+    assert final["inDepth"]["status"] == "complete"
+    assert final["inDepth"]["answer"] == ""
+    assert final["inDepth"]["error"] == ""
+    assert final["inDepth"]["validation"]["status"] == "no_claims"
+    assert "in_depth" not in final["confidence"]
+
+
+def test_indepth_claim_whose_citation_could_not_be_checked_is_shown_with_a_caution(monkeypatch):
+    _stub_common(monkeypatch)
+
+    async def fake_answer(*_args, **_kwargs):
+        return "Useful answer [1].", [1], []
+
+    async def one_claim(*_args, **_kwargs):
+        return ["Supporting context [1]."], {"level": "green", "note": ""}
+
+    async def unchecked_ground(_client, _model, _answer, references, _mappings):
+        return [dict(ref, grounded=None, groundingStatus="unchecked") for ref in references]
+
+    async def unchanged(_client, **kwargs):
+        return (
+            kwargs["answer_text"],
+            kwargs["citations"],
+            kwargs["blocks"],
+            {"level": "green", "note": ""},
+        )
+
+    monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
+    monkeypatch.setattr(team, "_gen_indepth", one_claim)
+    monkeypatch.setattr(team, "_ensure_substantive_answer", unchanged)
+    monkeypatch.setattr(team, "_ground_references", unchecked_ground)
+
+    final = dict(_collect(_product_profile(review_model="V")))["done"]
+
+    assert final["inDepth"]["status"] == "complete"
+    assert "Supporting context [1]." in final["inDepth"]["answer"]
+    assert final["confidence"]["in_depth"]["level"] == "yellow"
+    checks = final["inDepth"]["validation"]["citation_checks"]
+    assert [check["status"] for check in checks] == ["warn"]

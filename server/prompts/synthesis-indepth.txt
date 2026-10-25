@@ -1,34 +1,29 @@
 Write ONLY a JSON object with exactly one key: "claims" - an array of strings. Output nothing before or after the JSON object. No prose, no markdown, no code fences.
 
-GOAL: write the IN-DEPTH elaboration for the answer below - concise supporting context that is directly relevant to the question and direct answer and useful to a clinician. Every displayed claim must be grounded in the numbered evidence supplied to you.
+GOAL: write the IN-DEPTH elaboration for the answer below - the clinical context a clinician wants alongside the direct answer. The In-Depth connects knowledge-base and guideline context to THIS patient. It is not a restatement of the chart or of the answer.
 
 You will be given, appended after this instruction:
 - the DIRECT ANSWER (already written - do not repeat it), and
-- the patient chart plus any GATHERED KB / EVIDENCE.
+- the patient chart plus any GATHERED KB / EVIDENCE, including numbered KnowledgeReference records when the knowledge base has relevant entries.
 
-Write 1-3 claims. Prioritise, in order:
-1. Additional patient-chart facts that directly clarify the answer.
-2. A trend or comparison only when the cited records collectively state every value and date used.
-3. Guideline or general-medical context only when a supporting numbered KnowledgeReference record is present in the supplied evidence.
-
-Keep the retrieval task narrow:
-- When the question asks only for a factual point lookup such as a last visit, latest result, current medication, or single event, first confirm and use the record already cited by the DIRECT ANSWER. Add at most one chart-context claim containing only extra details stated by that same record.
-- When the question explicitly asks for a trend, comparison, interpretation, or guidance, the point-lookup limit does not apply. Provide only the requested context, keep each claim atomic, and cite every chart endpoint or supporting KnowledgeReference it needs.
-- Do not introduce a trend, comparison, different measurement, or unrelated chart topic unless the question asks for it or it is necessary to explain the direct answer.
-- A claim may cover one evidence record or one concept series, never several unrelated measurements. For example, do not bundle weight, blood pressure, pulse, oxygen saturation, and temperature into one claim.
-- When one record supports the claim, put exactly that one [N] citation at the end. A comparison may cite only the endpoint records that state its values and dates.
+Write 2-4 claims. Prioritise, in order:
+1. What the relevant guideline or KnowledgeReference says and what it means for this patient (for example, whether a regimen, a result, or a monitoring interval fits current guidance).
+2. The clinical significance of the chart findings the answer reports: risk, what to monitor, what usually follows.
+3. Additional chart facts only when they change how the answer should be read.
 
 Each string in "claims":
-- States ONE checkable idea.
-- Includes [N] citations to the smallest source set that supports it.
-- Uses multiple citations when a comparison or trend depends on multiple records.
-- Is limited to what those cited sources actually say: the cited source set must support the entire displayed claim.
+- States ONE idea, checkable on its own. Do not bundle unrelated measurements into one claim.
+- Cites a KnowledgeReference record with [N] when one supports the claim.
+- Cites a patient chart record with [N] when the claim depends on that record's value, date, drug, or result.
+- When stating well-established general medical guidance that no supplied record states, attributes it in prose ("per WHO HIV guidelines", "standard practice") with no bracket. Such a claim is shown to the clinician labelled as general guidance.
 
 Evidence rules:
-- Do not use a patient chart citation as support for outside medical knowledge, a guideline, a threshold, a risk interpretation, or a recommendation that the cited chart record does not state.
-- If no supporting KnowledgeReference record is present, do not add outside clinical interpretation. Use only additional chart context that the cited patient records directly support.
-- A source that supports one clause does not support a second uncited clause. Split the ideas or omit the unsupported clause.
-- [N] is reserved for real numbered evidence records only. Never emit a literal "[N]" placeholder or invent an index.
-- If a useful idea cannot be fully supported by numbered evidence, omit it.
+- [N] is reserved for real numbered evidence records. Never emit a literal "[N]" placeholder, never invent an index, and never wrap a guideline title or year in brackets.
+- Do not cite a patient chart record as if it stated a guideline, threshold, or recommendation it does not state.
+- Every patient value, date, drug, and result you mention must match the cited chart record.
+- Do not invent a record, dose, guideline title, threshold, or source name.
 
-Do not restate the direct answer, list unrelated chart facts, or add generic advice. Return {"claims": []} when no additional relevant, fully supported context exists.
+Do not restate the direct answer, re-list chart tables, or add a generic "consult a doctor" disclaimer. Return {"claims": []} only when there is genuinely no useful context, for example when the asked fact is not documented and nothing general applies.
+
+Example output:
+{"claims": ["Per WHO HIV guidelines, stavudine (d4T) is no longer recommended because of frequent, often irreversible toxicity, so this patient's d4T-based regimen [4] would now usually be switched.", "The main concerns with continued d4T are peripheral neuropathy and lipoatrophy, which warrant monitoring."]}

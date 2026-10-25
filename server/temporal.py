@@ -1858,6 +1858,103 @@ def _repair_dangling_indepth_citation(
     )
 
 
+_ENDPOINT_RE = re.compile(
+    r"\b(?P<first>earliest|first|oldest|initial)\b|\b(?P<last>latest|most recent|newest|last|final)\b",
+    re.I,
+)
+_WINDOW_MONTHS_RE = re.compile(
+    r"\b(?:past|last|previous)[\s-]+(?:(?P<year>year)|(?P<n>\d+)[\s-]+months?)\b", re.I
+)
+
+
+def _endpoint_window_start(question: str, facts: Dict[str, Any]) -> Optional[str]:
+    """The first date a "past year" or "last N months" question admits, from the reference date."""
+    match = _WINDOW_MONTHS_RE.search(question or "")
+    reference = _parse_iso_date(facts.get("reference_date"))
+    if not match or not reference:
+        return None
+    months = 12 if match.group("year") else int(match.group("n"))
+    return _shift_months(reference, -months).isoformat()
+
+
+def verified_series_endpoints(
+    question: str, answer: str, temporal_facts: Optional[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """Earliest and latest statements in an answer that the dated chart series confirm.
+
+    A clause that names the earliest (or latest) measurement passes when its one date is the
+    first (or last) dated point of a series the answer discusses, within the question's window,
+    and the clause states that point's value. Only confirmations are returned, as passing checks;
+    a clause that does not match is left to the other checks.
+    """
+    if not temporal_facts or not answer:
+        return []
+    selected = _selected_series(question, answer, temporal_facts)
+    if not selected:
+        return []
+    window_start = _endpoint_window_start(question, temporal_facts)
+    reference = str(temporal_facts.get("reference_date") or "")
+    checks: List[Dict[str, Any]] = []
+    for sentence in _SENTENCE_RE.split(answer):
+        marks = list(_ENDPOINT_RE.finditer(sentence))
+        for position, mark in enumerate(marks):
+            end = marks[position + 1].start() if position + 1 < len(marks) else len(sentence)
+            clause = sentence[mark.start() : end]
+            clean = re.sub(r"\[\d+\]", "", clause)
+            dates = list(_ISO_TOKEN_RE.finditer(clean))
+            if len(dates) != 1:
+                continue
+            stated_date = dates[0].group()
+            value_text = (
+                clean[: dates[0].start()] + " " * len(stated_date) + clean[dates[0].end() :]
+            )
+            for series in selected:
+                points = [
+                    point
+                    for point in series.get("points") or []
+                    if point.get("date")
+                    and (not window_start or str(point["date"]) >= window_start)
+                    and (not reference or str(point["date"]) <= reference)
+                ]
+                if not points:
+                    continue
+                dates_in_window = sorted(str(point["date"]) for point in points)
+                endpoint = dates_in_window[0] if mark.group("first") else dates_in_window[-1]
+                if stated_date != endpoint:
+                    continue
+                stated = _claim_local_series_values(value_text, series, selected)
+                stated_values = {value for _match, value in stated}
+                matched = [
+                    point
+                    for point in points
+                    if str(point["date"]) == endpoint
+                    and isinstance(point.get("value"), (int, float))
+                    and float(point["value"]) in stated_values
+                ]
+                if not matched:
+                    continue
+                which = "earliest" if mark.group("first") else "latest"
+                # The check confirms the endpoint's date and value only, so its claim ends at whichever
+                # of the two comes last: another assertion later in the clause is not confirmed.
+                value = float(matched[0]["value"])
+                fact_end = max(
+                    [dates[0].end()] + [match.end() for match, stated_value in stated if stated_value == value]
+                )
+                _add_check(
+                    checks,
+                    "series_endpoint",
+                    "pass",
+                    "info",
+                    clean[:fact_end].strip(" ,;"),
+                    f"The {which} dated {series.get('concept')} point"
+                    + (f" since {window_start}" if window_start else "")
+                    + f" is {matched[0]['value']} on {endpoint}.",
+                    [point["index"] for point in matched if isinstance(point.get("index"), int)],
+                )
+                break
+    return checks
+
+
 def gate_indepth_claims(
     question: str,
     claims: List[str],
@@ -1865,12 +1962,17 @@ def gate_indepth_claims(
     *,
     mode: str = "enforce",
 ) -> Dict[str, Any]:
-    """Apply the deterministic temporal gate to every displayed In-Depth claim."""
+    """Apply the deterministic temporal gate to every displayed In-Depth claim.
+
+    In enforce mode a failing claim is replaced by the gate's chart-derived patch when the patch
+    cites only records the claim already cited. Otherwise the claim is kept and its 1-based index
+    listed in ``flagged``, so the reader sees it marked rather than removed.
+    """
     normalized_mode = (mode or "enforce").strip().lower()
     if normalized_mode not in {"off", "warn", "enforce"}:
         normalized_mode = "enforce"
     kept: List[str] = []
-    removed: List[int] = []
+    flagged: List[int] = []
     checks: List[Dict[str, Any]] = []
     edited = False
     if not claims:
@@ -1879,7 +1981,7 @@ def gate_indepth_claims(
             "mode": normalized_mode,
             "status": "needs_review",
             "claims": [],
-            "removed": [],
+            "flagged": [],
             "checks": [],
         }
     for index, claim in enumerate(claims or [], 1):
@@ -1936,7 +2038,7 @@ def gate_indepth_claims(
                 "source_indices": canonicalized_indices,
             }
         checks.append(check)
-        if gate.get("status") != "fail" or normalized_mode != "enforce":
+        if gate.get("status") != "fail":
             kept.append(claim)
             continue
         patch = str(gate.get("patch_answer") or "").strip()
@@ -1944,18 +2046,23 @@ def gate_indepth_claims(
             value for value in gate.get("patch_citations") or [] if isinstance(value, int)
         }
         original_citations = set(citations)
-        if patch and patch_citations and patch_citations <= original_citations:
+        if (
+            normalized_mode == "enforce"
+            and patch
+            and patch_citations
+            and patch_citations <= original_citations
+        ):
             kept.append(patch)
+            edited = True
         else:
-            removed.append(index)
-        edited = True
+            # A claim the date check cannot correct from the chart stays visible, marked.
+            kept.append(claim)
+            flagged.append(index)
 
-    if edited and not kept:
+    if flagged:
         status = "needs_review"
     elif edited:
         status = "edited"
-    elif any(item["gate"].get("status") == "fail" for item in checks):
-        status = "needs_review"
     else:
         status = "checked"
     return {
@@ -1963,6 +2070,6 @@ def gate_indepth_claims(
         "mode": normalized_mode,
         "status": status,
         "claims": kept,
-        "removed": removed,
+        "flagged": flagged,
         "checks": checks,
     }

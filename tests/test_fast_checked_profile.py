@@ -60,3 +60,15 @@ def test_a_profile_without_in_depth_streams_no_pending_in_depth(monkeypatch, rev
     assert not [name for name in names if name.startswith("indepth")]
     in_depth = [data["inDepth"] for _, data in events if isinstance(data.get("inDepth"), dict)]
     assert in_depth and all(item["status"] == "complete" and not item["answer"] for item in in_depth)
+
+
+def test_the_answer_profile_is_a_product_profile_without_review_or_in_depth():
+    checked = get_profile("single-12b-checked")
+    answer = get_profile("single-12b-answer")
+
+    assert answer.visibility == "product" and answer.output_mode == "product"
+    assert list(answer.stages) == [
+        "context", "answer", "gate", "resolve_refs", "final_resolve_refs", "ground_verdicts"
+    ]
+    assert answer.models == {role: checked.models[role] for role in ("answer", "grounding")}
+    assert not answer.default

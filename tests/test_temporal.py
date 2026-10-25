@@ -1492,3 +1492,42 @@ def test_gate_does_not_select_hospitalizations_from_generic_past_year_words():
     assert "single_point_trend" not in failed_ids
     assert "date_value_binding" not in failed_ids
     assert all("hospitalizations" not in c["reason"] for c in gate["checks"])
+
+
+# ---- verified_series_endpoints ----------------------------------------------
+
+_WEIGHT_YEAR_CHART = """Patient records (most recent first):
+[19] (2026-01-26) Finding — Weight (kg): 71.0 kg
+[320] (2025-10-27) Finding — Weight (kg): 73.0 kg
+[350] (2025-10-13) Finding — Weight (kg): 74.0 kg
+[400] (2024-03-01) Finding — Weight (kg): 60.0 kg
+"""
+_ENDPOINT_QUESTION = (
+    "Give only the earliest and latest documented weight measurements in the available "
+    "past-year data, with exact date, value, and citation."
+)
+
+
+def test_verified_series_endpoints_confirms_the_window_endpoints_an_answer_states():
+    facts = temporal.build_temporal_facts(_WEIGHT_YEAR_CHART, "2026-06-20")
+    answer = (
+        "The earliest documented weight measurement in the past year was 74 kg on "
+        "2025-10-13 [350], and the latest is 71 kg on 2026-01-26 [19]."
+    )
+    checks = temporal.verified_series_endpoints(_ENDPOINT_QUESTION, answer, facts)
+    assert [(c["status"], c["source_indices"]) for c in checks] == [
+        ("pass", [350]),
+        ("pass", [19]),
+    ]
+    assert "74 kg on 2025-10-13" in checks[0]["claim"]
+
+
+def test_verified_series_endpoints_confirms_nothing_the_series_contradicts():
+    facts = temporal.build_temporal_facts(_WEIGHT_YEAR_CHART, "2026-06-20")
+    wrong_value = "The earliest weight in the past year was 73 kg on 2025-10-13 [350]."
+    wrong_date = "The earliest weight in the past year was 73 kg on 2025-10-27 [320]."
+    outside_window = "The earliest weight was 74 kg on 2025-10-13 [350]."
+    assert temporal.verified_series_endpoints(_ENDPOINT_QUESTION, wrong_value, facts) == []
+    assert temporal.verified_series_endpoints(_ENDPOINT_QUESTION, wrong_date, facts) == []
+    # Without a window in the question, the 2024 weight is the earliest point.
+    assert temporal.verified_series_endpoints("What was the earliest weight?", outside_window, facts) == []
