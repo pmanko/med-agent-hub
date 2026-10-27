@@ -95,22 +95,27 @@ def test_empty_indepth_cannot_report_checked_or_complete():
 
 
 def test_unsafe_patch_cannot_replace_claim_with_uncited_different_series():
-    result = gate_indepth_claims(
-        [
-            "The CD4 count was 341 cells/uL on 2006-04-04; the overall trend of immune suppression should be monitored."
-        ],
-        MULTI_COUNT_FACTS,
-        mode="enforce",
-    )
+    claim = "The CD4 count was 300 cells/uL on 2006-04-04."
+    result = gate_indepth_claims([claim], MULTI_COUNT_FACTS, mode="enforce")
 
     assert result["status"] == "needs_review"
-    assert result["claims"] == [
-        "The CD4 count was 341 cells/uL on 2006-04-04; the overall trend of immune suppression should be monitored."
-    ]
+    assert result["claims"] == [claim]
     assert result["flagged"] == [1]
     check = result["checks"][0]["gate"]
     assert check["patch_citations"] == [178]
-    assert {index for item in check["checks"] for index in item["source_indices"]} == {178}
+
+
+def test_risk_and_outcome_words_are_not_read_as_the_patients_trend():
+    claims = [
+        "The low CD4 count reflects a severely compromised immune status, increasing the risk of infection.",
+        "Antiretroviral therapy should start regardless of the CD4 count to improve outcomes.",
+        "A single CD4 count of 341 cells/uL [178] is insufficient to establish a trend.",
+    ]
+
+    result = gate_indepth_claims(claims, MULTI_COUNT_FACTS, mode="enforce")
+
+    assert result["flagged"] == []
+    assert _flags(result) == []
 
 
 def test_safe_patch_must_stay_within_original_claim_citations():
@@ -454,9 +459,14 @@ def test_a_claim_asserting_a_trend_over_one_point_still_fails():
     assert "single_point_trend:fail" in _flags(result)
 
 
-def test_claims_the_question_used_to_fail_are_judged_on_their_own_words():
-    """Every In-Depth claim the gate questioned in the 26 October 2026 run, replayed claim-only."""
-    goldens = json.loads((FIXTURES / "indepth-gate-goldens.json").read_text())
+@pytest.mark.parametrize(
+    "goldens_file", ["indepth-gate-goldens.json", "indepth-gate-goldens-2026-10-27.json"]
+)
+def test_claims_the_gate_questioned_in_past_runs_get_the_reviewed_verdict(goldens_file):
+    """Every In-Depth claim the gate questioned in the 26 and 27 October 2026 runs, replayed
+    claim-only: wrong or invented dates still fail; claims about risks, single values and the
+    correct last visit do not."""
+    goldens = json.loads((FIXTURES / goldens_file).read_text())
     facts = {}
     for case in goldens["cases"]:
         chart = case["chart"]

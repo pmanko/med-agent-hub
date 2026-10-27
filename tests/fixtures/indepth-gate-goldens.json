@@ -20,9 +20,7 @@
       "flagged_with_question": [
         "last_visit:fail"
       ],
-      "expected": [
-        "last_visit:fail"
-      ]
+      "expected": []
     },
     {
       "scenario": "am-weight-trend",
@@ -63,9 +61,7 @@
       "flagged_with_question": [
         "single_point_trend:fail"
       ],
-      "expected": [
-        "single_point_trend:fail"
-      ]
+      "expected": []
     },
     {
       "scenario": "convo-diagnosis-evidence",
@@ -75,9 +71,7 @@
       "flagged_with_question": [
         "single_point_trend:fail"
       ],
-      "expected": [
-        "single_point_trend:fail"
-      ]
+      "expected": []
     },
     {
       "scenario": "convo-diagnosis-evidence",
@@ -87,9 +81,7 @@
       "flagged_with_question": [
         "single_point_trend:fail"
       ],
-      "expected": [
-        "single_point_trend:fail"
-      ]
+      "expected": []
     },
     {
       "scenario": "convo-diagnosis-evidence",

@@ -294,6 +294,20 @@ profiles:
     context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true, supplemental_sources: [knowledge-base]}
     knobs: {answer: {temperature: 0}}
 
+  # The default with the DRY repetition penalty off for the writer and the reviewer; DRY
+  # garbles dates copied from the chart (2026-01_26). Measured against single-12b-checked.
+  single-12b-checked-nodry:
+    label: Checked answer (12B, repetition penalty off)
+    topology: single
+    stages: *product
+    models: {answer: gemma-4-12b, review: gemma-4-12b, grounding: gemma-4-12b, indepth: gemma-4-12b}
+    prompts: {answer: synthesis-answer, review: validation-label, indepth: synthesis-indepth}
+    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true, review: {action: label, grounding: separate}}
+    visibility: product
+    selection_priority: 54
+    context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true, supplemental_sources: [knowledge-base]}
+    knobs: {answer: {temperature: 0, dry: 0}, review: {dry: 0}}
+
   team-med-checked:
     label: Checked medical team
     topology: team

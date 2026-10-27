@@ -398,7 +398,7 @@ def test_preliminary_problem_stays_checking_until_configured_review_finishes(
     assert events["answer_validation"]["answerValidation"]["status"] == "needs_review"
 
 
-def test_indepth_claim_citing_a_record_outside_the_chart_is_shown_marked_red(monkeypatch):
+def test_indepth_claim_citing_a_record_outside_the_chart_is_shown_marked(monkeypatch):
     _stub_common(monkeypatch)
 
     async def fake_answer(*_args, **_kwargs):
@@ -432,7 +432,8 @@ def test_indepth_claim_citing_a_record_outside_the_chart_is_shown_marked_red(mon
     ]
     assert in_depth["validation"]["status"] == "needs_review"
     assert in_depth["validation"]["marked"] == [2]
-    assert events["done"]["confidence"]["in_depth"]["level"] == "red"
+    # One marked point of two is a point to check, not a low-confidence In-Depth.
+    assert events["done"]["confidence"]["in_depth"]["level"] == "yellow"
     assert "1 of 2 points is marked" in events["done"]["confidence"]["in_depth"]["note"]
     reference = next(ref for ref in events["done"]["references"] if ref["index"] == 1)
     assert any(usage["location"] == "indepth" for usage in reference["usage"])
@@ -712,6 +713,13 @@ def _fake_chat_returning_verdicts(verdicts_by_call):
     async def fake_chat(_client, model, messages, **kwargs):
         calls.append({"model": model, "messages": messages, **kwargs})
         verdicts = verdicts_by_call[len(calls) - 1]
+        schema = ((kwargs.get("response_format") or {}).get("json_schema") or {}).get("name")
+        if schema == "attribution_verdicts":
+            return {
+                "content": json.dumps(
+                    {"pairs": [{"facts": [], "verdict": verdict} for verdict in verdicts]}
+                )
+            }
         return {"content": json.dumps({"verdicts": verdicts})}
 
     return fake_chat, calls
