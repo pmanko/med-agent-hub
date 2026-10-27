@@ -1,0 +1,141 @@
+{
+  "reference_date": "2026-06-20",
+  "source": "validation run dffe15e9 (26 October 2026), checked 12B profile",
+  "cases": [
+    {
+      "scenario": "date-aloice-orders-table",
+      "chart": "aloice-mukangu",
+      "question": "Show this patient's medication orders in the past 6 months as a table with medication name and exact order dates.",
+      "claim": "The patient's hemoglobin level has significantly decreased from 9.1 g/dL on 2025-10-26 to 3.9 g/dL on 2025-12-14 [104][198], which is a critical finding requiring urgent clinical attention and potential transfusion or investigation of underlying causes like anemia of chronic disease or drug toxicity.",
+      "flagged_with_question": [
+        "window_scope:warn"
+      ],
+      "expected": []
+    },
+    {
+      "scenario": "single-upcoming-appointments",
+      "chart": "zabella-halambe",
+      "question": "Does this patient have any upcoming appointments?",
+      "claim": "Based on the patient's most recent encounter on 2026-01-26, a return visit was scheduled for 2026-02-23 [22], which has already passed relative to today's date of 2026-06-20.",
+      "flagged_with_question": [
+        "last_visit:fail"
+      ],
+      "expected": [
+        "last_visit:fail"
+      ]
+    },
+    {
+      "scenario": "am-weight-trend",
+      "chart": "aloice-mukangu",
+      "question": "How has this patient's weight changed over the past year?",
+      "claim": "The patient's weight loss of approximately 20% in less than three months is clinically significant and may indicate a worsening underlying condition, such as advanced HIV disease or complications from the active tuberculosis treatment program [1].",
+      "flagged_with_question": [
+        "window_scope:warn"
+      ],
+      "expected": []
+    },
+    {
+      "scenario": "am-weight-trend",
+      "chart": "aloice-mukangu",
+      "question": "How has this patient's weight changed over the past year?",
+      "claim": "Rapid weight loss in patients with HIV/TB requires close monitoring for malnutrition and potential side effects of antiretroviral therapy (ART) or TB medications.",
+      "flagged_with_question": [
+        "window_scope:warn"
+      ],
+      "expected": []
+    },
+    {
+      "scenario": "am-weight-trend",
+      "chart": "aloice-mukangu",
+      "question": "How has this patient's weight changed over the past year?",
+      "claim": "The patient's low CD4 count of 72 cells/uL recorded on 2025-10-22 [311] places them at high risk for opportunistic infections, which can contribute to significant weight loss and clinical deterioration.",
+      "flagged_with_question": [
+        "single_point_trend:fail",
+        "window_scope:warn"
+      ],
+      "expected": []
+    },
+    {
+      "scenario": "am-cd4-history",
+      "chart": "aloice-mukangu",
+      "question": "Share the history of CD4 counts since this patient came to clinic.",
+      "claim": "The low CD4 count reflects a severely compromised immune status, increasing the risk for serious infections such as those requiring cryptococcal or tuberculosis treatment plans.",
+      "flagged_with_question": [
+        "single_point_trend:fail"
+      ],
+      "expected": [
+        "single_point_trend:fail"
+      ]
+    },
+    {
+      "scenario": "convo-diagnosis-evidence",
+      "chart": "zabella-halambe",
+      "question": "What is her most recent CD4 count?",
+      "claim": "Per WHO guidelines, antiretroviral therapy (ART) should be started regardless of the CD4 count or clinical stage to manage the infection and improve outcomes [367].",
+      "flagged_with_question": [
+        "single_point_trend:fail"
+      ],
+      "expected": [
+        "single_point_trend:fail"
+      ]
+    },
+    {
+      "scenario": "convo-diagnosis-evidence",
+      "chart": "zabella-halambe",
+      "question": "Has her CD4 count changed over time?",
+      "claim": "A single CD4 count of 341 cells/uL [182] is insufficient to establish a clinical trend, as monitoring requires multiple measurements over time to assess the efficacy of antiretroviral therapy.",
+      "flagged_with_question": [
+        "single_point_trend:fail"
+      ],
+      "expected": [
+        "single_point_trend:fail"
+      ]
+    },
+    {
+      "scenario": "convo-diagnosis-evidence",
+      "chart": "zabella-halambe",
+      "question": "Has her CD4 count changed over time?",
+      "claim": "Per WHO guidelines [366], while this patient's current count is above the threshold for advanced HIV disease (below 200 cells/mm\u00b3), it remains an indicator of immune status that necessitates ongoing surveillance.",
+      "flagged_with_question": [
+        "single_point_trend:fail"
+      ],
+      "expected": []
+    },
+    {
+      "scenario": "convo-diagnosis-evidence",
+      "chart": "zabella-halambe",
+      "question": "Has her CD4 count changed over time?",
+      "claim": "The clinical significance of a CD4 count in the 300-500 range typically suggests moderate immunosuppression, requiring continued adherence to her primary regimen [1] and monitoring for opportunistic infections.",
+      "flagged_with_question": [
+        "single_point_trend:fail"
+      ],
+      "expected": []
+    },
+    {
+      "scenario": "convo-vitals-monitoring",
+      "chart": "zabella-halambe",
+      "question": "What is her most recent weight, and has it changed?",
+      "claim": "A weight loss of 3 kg (from 74 kg on 2025-10-23 to 71 kg on 2026-06-20) in a patient with HIV may be clinically significant and requires assessment for underlying causes such as opportunistic infections or medication side effects.",
+      "flagged_with_question": [
+        "date_format:fail",
+        "date_value_binding:fail"
+      ],
+      "expected": [
+        "date_format:fail",
+        "date_value_binding:fail"
+      ]
+    },
+    {
+      "scenario": "convo-vitals-monitoring",
+      "chart": "zabella-halambe",
+      "question": "Does the chart record her oxygen saturation?",
+      "claim": "The patient's pulse oximetry reading of 93% on 2026-01_26 [14] is within a range that typically indicates adequate oxygenation, though it represents a downward trend from the peak of 98% recorded in December 2025.",
+      "flagged_with_question": [
+        "date_format:fail"
+      ],
+      "expected": [
+        "date_format:fail"
+      ]
+    }
+  ]
+}

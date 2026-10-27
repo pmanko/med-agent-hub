@@ -1956,13 +1956,16 @@ def verified_series_endpoints(
 
 
 def gate_indepth_claims(
-    question: str,
     claims: List[str],
     temporal_facts: Optional[Dict[str, Any]],
     *,
     mode: str = "enforce",
 ) -> Dict[str, Any]:
     """Apply the deterministic temporal gate to every displayed In-Depth claim.
+
+    Each claim is judged on its own words, with no question attached: the trend, window,
+    last-visit and upcoming checks and the choice of measurement series see the claim alone.
+    A question that asks for a trend therefore cannot fail a claim that states one value.
 
     In enforce mode a failing claim is replaced by the gate's chart-derived patch when the patch
     cites only records the claim already cited. Otherwise the claim is kept and its 1-based index
@@ -2001,7 +2004,7 @@ def gate_indepth_claims(
             edited = True
         citations = [int(value) for value in re.findall(r"\[(\d+)]", claim or "")]
         gate = run_temporal_gate(
-            question, claim or "", citations, temporal_facts, normalized_mode
+            "", claim or "", citations, temporal_facts, normalized_mode
         )
         if normalized_mode != "off" and _has_malformed_citation_syntax(claim or ""):
             gate = dict(gate)
