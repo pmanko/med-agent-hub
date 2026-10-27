@@ -259,10 +259,10 @@ profiles:
     knobs: {answer: {temperature: 0}, review: {temperature: 0.7}}
 
   single-31b-xcheck:
-    label: Checked answer (31B writer, Qwen3.8 27B checker)
+    label: Checked answer (31B writer, Qwen3.5 9B checker)
     topology: single
     stages: *product
-    models: {answer: gemma-31b, review: qwen3.8-27b, grounding: qwen3.8-27b, indepth: gemma-31b}
+    models: {answer: gemma-31b, review: qwen3.5-9b, grounding: qwen3.5-9b, indepth: gemma-31b}
     prompts: {answer: synthesis-answer, review: validation-label, indepth: synthesis-indepth}
     policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true, review: {action: label, grounding: separate}}
     visibility: product

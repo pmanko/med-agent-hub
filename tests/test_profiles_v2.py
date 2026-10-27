@@ -511,7 +511,7 @@ def test_compiled_profile_configuration_is_immutable():
         ),
         (
             "single-31b-xcheck",
-            {"answer": "gemma-31b", "review": "qwen3.8-27b", "grounding": "qwen3.8-27b", "indepth": "gemma-31b"},
+            {"answer": "gemma-31b", "review": "qwen3.5-9b", "grounding": "qwen3.5-9b", "indepth": "gemma-31b"},
             "separate",
             0.7,
         ),
