@@ -978,7 +978,7 @@ def test_indepth_synthesis_review_and_retry_match_the_exact_backend_guard():
                 fixed = 5 if "retry-feedback" in content else 3
             elif schema == "indepth_verdict":
                 fixed = 4
-            elif schema == "rewrite_verdict":
+            elif schema == "label_verdict":
                 fixed = 4
             else:
                 fixed = 1
@@ -1094,7 +1094,7 @@ def test_indepth_synthesis_review_and_retry_match_the_exact_backend_guard():
                 repeat_penalty=None,
                 dry=None,
                 validation_prompt=str(
-                    profile.prompts.get("review") or "validation-rewrite"
+                    profile.prompts.get("review") or "validation-label"
                 ),
             )
         )

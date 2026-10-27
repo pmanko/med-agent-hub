@@ -95,7 +95,7 @@ def _stub_common(monkeypatch):
     monkeypatch.setattr(team, "_merge_temporal_gate_conf", lambda conf, _gate: conf)
     monkeypatch.setattr(team, "_write_trace", lambda *_a, **_k: None)
     monkeypatch.setattr(team, "_ground_references", fake_ground)
-    monkeypatch.setattr(team, "_validate_answer_rewrite", clean_answer_review)
+    monkeypatch.setattr(team, "_validate_answer_label", clean_answer_review)
 
 
 def _product_profile(
@@ -123,7 +123,7 @@ def _product_profile(
     if review_model:
         stages.extend(["review", "gate"])
         models["review"] = review_model
-        prompts["review"] = "validation-rewrite"
+        prompts["review"] = "validation-label"
     stages.extend(["final_resolve_refs", "ground_verdicts", "indepth", "indepth_gate"])
     models["grounding"] = answer_model
     models["indepth"] = answer_model
@@ -180,7 +180,7 @@ def test_e2b_product_profile_routes_each_stage_to_its_declared_model(monkeypatch
         return (["Claim [1]."], {"level": "green", "note": ""})
 
     monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
-    monkeypatch.setattr(team, "_validate_answer_rewrite", fake_review)
+    monkeypatch.setattr(team, "_validate_answer_label", fake_review)
     monkeypatch.setattr(team, "_ground_references", fake_ground)
     monkeypatch.setattr(team, "_gen_indepth", fake_indepth)
 
@@ -232,7 +232,7 @@ def test_staged_stream_with_validator_emits_full_phase_sequence(monkeypatch):
 
     monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
     monkeypatch.setattr(team, "_ensure_substantive_answer", fake_validate)
-    monkeypatch.setattr(team, "_validate_answer_rewrite", fake_rewrite)
+    monkeypatch.setattr(team, "_validate_answer_label", fake_rewrite)
     monkeypatch.setattr(engine, "_select_answer_review_context", fake_select_review)
 
     events = _collect(_product_profile(review_model="V"))
@@ -310,7 +310,7 @@ def test_review_flag_with_an_unusable_rewrite_keeps_the_answer_needs_review(
 
     monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
     monkeypatch.setattr(team, "_ensure_substantive_answer", fake_validate)
-    monkeypatch.setattr(team, "_validate_answer_rewrite", punctuation_rewrite)
+    monkeypatch.setattr(team, "_validate_answer_label", punctuation_rewrite)
 
     events = dict(_collect(_product_profile(review_model="V")))
 
@@ -388,7 +388,7 @@ def test_preliminary_problem_stays_checking_until_configured_review_finishes(
 
     monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
     monkeypatch.setattr(team, "_ensure_substantive_answer", fake_validate)
-    monkeypatch.setattr(team, "_validate_answer_rewrite", clean_review)
+    monkeypatch.setattr(team, "_validate_answer_label", clean_review)
 
     events = dict(_collect(_product_profile(review_model="V")))
 
@@ -488,7 +488,7 @@ def test_stage_timing_covers_reviewed_profile_and_repeated_gate(monkeypatch):
     monkeypatch.setattr(team, "_ensure_substantive_answer", fake_validate)
     monkeypatch.setattr(
         team,
-        "_validate_answer_rewrite",
+        "_validate_answer_label",
         lambda *_args, **_kwargs: asyncio.sleep(
             0, result={"answer_ok": True, "errors": []}
         ),
@@ -534,7 +534,7 @@ def test_stage_timing_is_closed_before_public_phase_yield(monkeypatch):
     monkeypatch.setattr(team, "_ensure_substantive_answer", fake_validate)
     monkeypatch.setattr(
         team,
-        "_validate_answer_rewrite",
+        "_validate_answer_label",
         lambda *_args, **_kwargs: asyncio.sleep(
             0, result={"answer_ok": True, "errors": []}
         ),
@@ -678,7 +678,7 @@ def test_stage_drain_returns_final_post_review_envelope(monkeypatch):
 
     monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
     monkeypatch.setattr(team, "_ensure_substantive_answer", fake_validate)
-    monkeypatch.setattr(team, "_validate_answer_rewrite", fake_rewrite)
+    monkeypatch.setattr(team, "_validate_answer_label", fake_rewrite)
 
     async def fake_indepth(*_args, **_kwargs):
         return ["In-Depth-only support [1]."], {"level": "green", "note": ""}
@@ -1701,7 +1701,7 @@ def test_gen_indepth_refits_the_review_and_never_resynthesizes(monkeypatch):
             "gathered",
             "answer",
             validator_model="reviewer",
-            validator_prompt="validation-rewrite",
+            validator_prompt="validation-label",
             chart="answer chart",
             synth_temperature=0,
             synth_repeat_penalty=None,
@@ -1775,7 +1775,7 @@ def test_product_review_context_overflow_reaches_structured_terminal_metadata(
     monkeypatch.setattr(team, "_gen_indepth", real_gen_indepth)
     monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
     monkeypatch.setattr(team, "_ensure_substantive_answer", keep_answer)
-    monkeypatch.setattr(team, "_validate_answer_rewrite", clean_review)
+    monkeypatch.setattr(team, "_validate_answer_label", clean_review)
     monkeypatch.setattr(team, "_synthesize_indepth", fake_indepth)
     monkeypatch.setattr(engine, "_select_indepth_review_context", review_overflow)
 
@@ -1892,7 +1892,7 @@ def test_needs_review_answer_still_runs_indepth(monkeypatch):
 
     monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
     monkeypatch.setattr(team, "_ensure_substantive_answer", fake_validate)
-    monkeypatch.setattr(team, "_validate_answer_rewrite", unusable_rewrite)
+    monkeypatch.setattr(team, "_validate_answer_label", unusable_rewrite)
 
     collected = _collect(_product_profile(review_model="V"))
     assert [name for name, _payload in collected] == [
@@ -2080,7 +2080,7 @@ def test_withheld_malformed_table_remains_needs_review_after_llm_review(monkeypa
 
     monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
     monkeypatch.setattr(team, "_ensure_substantive_answer", keep_answer)
-    monkeypatch.setattr(team, "_validate_answer_rewrite", clean_review)
+    monkeypatch.setattr(team, "_validate_answer_label", clean_review)
 
     final = dict(_collect(_product_profile(review_model="V")))["done"]
 
@@ -2166,7 +2166,7 @@ def test_review_correction_does_not_replace_an_answer_whose_table_was_withheld(m
 
     monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
     monkeypatch.setattr(team, "_ensure_substantive_answer", keep_answer)
-    monkeypatch.setattr(team, "_validate_answer_rewrite", correct_prose)
+    monkeypatch.setattr(team, "_validate_answer_label", correct_prose)
 
     final = dict(_collect(_product_profile(review_model="V")))["done"]
 
@@ -2317,7 +2317,7 @@ def test_post_review_failure_restores_exact_emitted_answer_state(monkeypatch):
         raise RuntimeError("grounding unavailable")
 
     monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
-    monkeypatch.setattr(team, "_validate_answer_rewrite", rewrite_answer)
+    monkeypatch.setattr(team, "_validate_answer_label", rewrite_answer)
     monkeypatch.setattr(team, "_ground_references", failed_grounding)
 
     events = dict(_collect(_product_profile(review_model="V")))
@@ -2354,7 +2354,7 @@ def test_indepth_failure_preserves_latest_validated_answer_state(monkeypatch):
         raise RuntimeError("in-depth gate unavailable")
 
     monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
-    monkeypatch.setattr(team, "_validate_answer_rewrite", rewrite_answer)
+    monkeypatch.setattr(team, "_validate_answer_label", rewrite_answer)
     monkeypatch.setattr(engine.temporal, "gate_indepth_claims", failed_indepth_gate)
 
     events = dict(_collect(_product_profile(review_model="V")))
@@ -2389,7 +2389,7 @@ def test_review_correction_does_not_replace_an_answer_with_an_unresolved_citatio
         return {"answer_ok": True, "errors": []}
 
     monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
-    monkeypatch.setattr(team, "_validate_answer_rewrite", rewrite_answer)
+    monkeypatch.setattr(team, "_validate_answer_label", rewrite_answer)
 
     events = dict(_collect(_product_profile(review_model="V")))
 
@@ -2742,7 +2742,7 @@ def test_product_review_and_final_event_preserve_grounded_knowledge_reference(mo
         return [], []
 
     monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
-    monkeypatch.setattr(team, "_validate_answer_rewrite", fake_review)
+    monkeypatch.setattr(team, "_validate_answer_label", fake_review)
     monkeypatch.setattr(team, "_gen_indepth", fake_indepth)
     monkeypatch.setattr(team, "_entailment_verdicts", supported)
     monkeypatch.setattr(team, "_gather_evidence", fake_gather)

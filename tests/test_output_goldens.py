@@ -73,7 +73,7 @@ async def _fake_chat(
     if response_format is None:
         return {"content": "ok", "tool_calls": None}
     schema = (response_format.get("json_schema") or {}).get("name")
-    if schema == "rewrite_verdict":
+    if schema == "label_verdict":
         return {"content": REVIEW_VERDICT}
     return {"content": IN_DEPTH if schema == "in_depth" else ANSWER}
 
@@ -134,7 +134,7 @@ LEGACY_TWO_CALL_PROFILE = team_profile(
         ),
         (
             "raw-answer-review.json",
-            "answer-review:gemma-4-12b@validation-rewrite~enforce~temp0",
+            "answer-review:gemma-4-12b@validation-label~enforce~temp0",
             REVIEW_MESSAGES,
         ),
         (

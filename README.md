@@ -51,6 +51,15 @@ exact tokenizer-backed context counting, and apply the hub-owned `chart_answer`
 JSON schema. A product request cannot replace that contract; low-level legs
 retain their existing caller-controlled `response_format` behavior.
 
+A profile that reviews or grounds its Answer declares a `review` policy:
+`action: label` (the reviewer's verdict labels the Answer and never replaces it;
+`apply` and `redo` are reserved and refused) and `grounding`, how cited records
+are checked against their sentences. `separate` makes one bounded entailment
+call with the `grounding` model; `folded` asks the reviewer to judge each cited
+record in the same call and writes the citation statuses from its reply; `off`
+checks no citation support and leaves citations `unchecked` without a label.
+The engine implements these choices and never branches on a profile id.
+
 Low-level experiment legs use these ids:
 
 - `answer:<model>@<prompt>~<gate>~temp<n>`

@@ -131,6 +131,12 @@ def _answer_response_format(request: ExecutionRequest) -> Optional[Dict[str, Any
     return request.response_format
 
 
+def _grounding_policy(profile: Profile) -> str:
+    """How the profile checks that cited records support their sentences (``review.grounding``)."""
+    review = profile.policies.get("review") or {}
+    return str(review.get("grounding") or "separate")
+
+
 @dataclass
 class _State:
     messages: List[Dict[str, Any]]
@@ -167,6 +173,7 @@ class _State:
     review_draft_citations: List[int] = field(default_factory=list)
     review_draft_blocks: List[Any] = field(default_factory=list)
     review_edited: bool = False
+    review_citation_verdicts: Optional[Dict[int, bool]] = None
     references: List[Dict[str, Any]] = field(default_factory=list)
     claims: List[str] = field(default_factory=list)
     indepth_review_draft: str = ""
@@ -394,7 +401,7 @@ def _fixed_context_text(
         parts.append(f"{message.get('role', 'user')}: {content}")
     for role, fallback in (
         ("answer", "synthesis-answer"),
-        ("review", "validation-rewrite"),
+        ("review", "validation-label"),
         ("indepth", "synthesis-indepth"),
         ("orchestrator", "orchestrator"),
         ("expert", "medical_expert"),
@@ -403,6 +410,8 @@ def _fixed_context_text(
             if role == "review":
                 stem = str(request.profile.prompts.get(role) or fallback)
                 parts.append(load_prompt(stem + "-answer"))
+                if _grounding_policy(request.profile) == "folded":
+                    parts.append(load_prompt(stages._CITATION_SUPPORT_PROMPT))
                 parts.append(load_prompt(stem + "-indepth"))
             else:
                 parts.append(_prompt(request.profile, role, fallback))
@@ -640,6 +649,7 @@ async def _select_answer_review_context(
             source="llama-router",
         )
     reviewer_model = request.profile.models["review"]
+    folded = _grounding_policy(request.profile) == "folded"
     review_text = answer_text
     block_text, _block_refs = stages._block_temporal_text_and_refs(blocks)
     if block_text:
@@ -651,8 +661,9 @@ async def _select_answer_review_context(
             gathered=state.gathered,
             answer_text=review_text,
             validation_prompt=str(
-                request.profile.prompts.get("review") or "validation-rewrite"
+                request.profile.prompts.get("review") or "validation-label"
             ),
+            citation_support=folded,
         )
         count_chat = getattr(counter, "count_chat", None)
         if callable(count_chat):
@@ -660,7 +671,11 @@ async def _select_answer_review_context(
                 reviewer_model,
                 {
                     "messages": messages,
-                    "response_format": stages._REWRITE_VERDICT_RF,
+                    "response_format": (
+                        stages._LABEL_WITH_CITATIONS_VERDICT_RF
+                        if folded
+                        else stages._LABEL_VERDICT_RF
+                    ),
                 },
             )
         rendered = "\n".join(
@@ -723,7 +738,7 @@ async def _select_indepth_review_context(
             answer_text=prior_answer,
             claims=claims,
             validation_prompt=str(
-                request.profile.prompts.get("review") or "validation-rewrite"
+                request.profile.prompts.get("review") or "validation-label"
             ),
         )
         count_chat = getattr(counter, "count_chat", None)
@@ -1295,6 +1310,7 @@ async def _execute_stages(
     )
     sampling = _sampling(request)
     answer_response_format = _answer_response_format(request)
+    grounding = _grounding_policy(request.profile)
     temporal_enabled, temporal_mode = resolve_temporal_policy(
         request.profile, request.context
     )
@@ -1645,7 +1661,11 @@ async def _execute_stages(
                         state.mappings,
                         answer=state.answer_text,
                         blocks=state.blocks,
-                        grounding_status="checking" if state.mappings else None,
+                        grounding_status=(
+                            ("unchecked" if grounding == "off" else "checking")
+                            if state.mappings
+                            else None
+                        ),
                     )
                     has_review = "review" in request.profile.stages
                     has_final_grounding = "ground_verdicts" in request.profile.stages
@@ -1713,6 +1733,8 @@ async def _execute_stages(
                     continue
 
                 if stage == "review":
+                    if grounding == "folded":
+                        state.review_citation_verdicts = {}
                     reviews_current_answer = "answer" in request.profile.stages
                     payload_override = None
                     if reviews_current_answer:
@@ -1764,7 +1786,7 @@ async def _execute_stages(
                         reviewer_model=request.profile.models["review"],
                         reviewer_prompt=str(
                             request.profile.prompts.get("review")
-                            or "validation-rewrite"
+                            or "validation-label"
                         ),
                         validator_temperature=sampling["review_temperature"],
                         validator_repeat_penalty=sampling["review_repeat_penalty"],
@@ -1773,6 +1795,7 @@ async def _execute_stages(
                         steps=state.steps,
                         payload_override=payload_override,
                         review_chart_selector=review_chart_selector,
+                        citation_verdicts=state.review_citation_verdicts,
                     )
                     if reviewed_gate is not None:
                         state.answer_gate = reviewed_gate
@@ -1804,7 +1827,11 @@ async def _execute_stages(
                         state.mappings,
                         answer=state.answer_text,
                         blocks=state.blocks,
-                        grounding_status="checking" if state.mappings else None,
+                        grounding_status=(
+                            ("unchecked" if grounding == "off" else "checking")
+                            if state.mappings
+                            else None
+                        ),
                     )
                     if "review" in request.profile.stages:
                         prior_validation = state.answer_validation or {}
@@ -1869,30 +1896,44 @@ async def _execute_stages(
                     continue
 
                 if stage == "ground_verdicts":
-                    if state.mappings:
+                    if grounding == "off":
+                        # The profile checks no citation support: citations stay unchecked and no
+                        # label claims a check that was never meant to run.
+                        state.steps.append({"role": "grounding", "policy": "off"})
+                    elif state.mappings:
                         deterministic_checks = [
                             check
                             for check in (state.answer_gate or {}).get("checks", [])
                             if check.get("status") == "pass"
                             and check.get("source_indices")
                         ]
+                        folded = grounding == "folded"
+                        grounding_options: Dict[str, Any] = {}
                         if deterministic_checks:
-                            state.references = await stages._ground_references(
-                                client,
-                                request.profile.models["grounding"],
-                                state.answer_text,
-                                state.references,
-                                state.mappings,
-                                deterministic_checks=deterministic_checks,
+                            grounding_options["deterministic_checks"] = deterministic_checks
+                        if folded:
+                            grounding_options["index_verdicts"] = (
+                                state.review_citation_verdicts or {}
                             )
-                        else:
-                            state.references = await stages._ground_references(
-                                client,
-                                request.profile.models["grounding"],
-                                state.answer_text,
-                                state.references,
-                                state.mappings,
-                            )
+                        state.references = await stages._ground_references(
+                            client,
+                            None if folded else request.profile.models["grounding"],
+                            state.answer_text,
+                            state.references,
+                            state.mappings,
+                            **grounding_options,
+                        )
+                        state.steps.append(
+                            {
+                                "role": "grounding",
+                                "policy": grounding,
+                                "model": (
+                                    request.profile.models["review"]
+                                    if folded
+                                    else request.profile.models["grounding"]
+                                ),
+                            }
+                        )
                     unsupported = [
                         reference
                         for reference in state.references
@@ -1902,7 +1943,8 @@ async def _execute_stages(
                     unchecked = [
                         reference
                         for reference in state.references
-                        if reference.get("resolutionStatus") == "resolved"
+                        if grounding != "off"
+                        and reference.get("resolutionStatus") == "resolved"
                         and reference.get("groundingStatus") == "unchecked"
                     ]
                     if unsupported:
@@ -2062,7 +2104,7 @@ async def _execute_stages(
                                 validator_model=request.profile.models["review"],
                                 validator_prompt=str(
                                     request.profile.prompts.get("review")
-                                    or "validation-rewrite"
+                                    or "validation-label"
                                 ),
                                 chart=indepth_chart,
                                 synth_temperature=sampling["answer_temperature"],
