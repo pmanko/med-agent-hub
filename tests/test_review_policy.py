@@ -278,3 +278,120 @@ def test_label_reviewer_is_not_asked_for_a_fix_or_a_corrected_answer(monkeypatch
     assert set(properties) == {"answer_ok", "errors"}
     assert set(properties["errors"]["items"]["properties"]) == {"wrong", "chart"}
     assert "CITATION SUPPORT" not in seen["prompt"]
+
+
+_FULL_STAGES = _FAST_STAGES + ["indepth", "indepth_gate"]
+
+
+def _full_profile(grounding: str):
+    models = {"answer": "W", "review": "R", "indepth": "W"}
+    if grounding == "separate":
+        models["grounding"] = "G"
+    return make_profile(
+        topology="single",
+        stages=_FULL_STAGES,
+        models=models,
+        prompts={
+            "answer": "synthesis-answer",
+            "review": "validation-label",
+            "indepth": "synthesis-indepth",
+        },
+        output="product",
+        policies={"review": {"action": "label", "grounding": grounding}},
+    )
+
+
+def _stub_indepth(monkeypatch, claims, indepth_verdict):
+    calls = _stub(
+        monkeypatch,
+        "Weight was 71 kg [1].",
+        {"answer_ok": True, "errors": [], "citations": {1: True}},
+    )
+
+    async def fake_claims(*_args, **_kwargs):
+        return list(claims)
+
+    async def fake_indepth_review(_client, model, **kwargs):
+        calls.append(("indepth_review", model, kwargs.get("citation_support", False)))
+        return dict(indepth_verdict)
+
+    async def entailment(_client, model, pairs, **kwargs):
+        calls.append(("entailment", model, kwargs.get("attribution_only", False)))
+        return [True for _pair in pairs]
+
+    monkeypatch.setattr(team, "_synthesize_indepth", fake_claims)
+    monkeypatch.setattr(team, "_validate_indepth_verdict", fake_indepth_review)
+    monkeypatch.setattr(team, "_bounded_entailment_verdicts", entailment)
+    return calls
+
+
+def _indepth_statuses(final):
+    return {
+        ref["index"]: ref["groundingStatus"]
+        for ref in final["references"]
+        if any(usage.get("location") == "indepth" for usage in ref.get("usage") or [])
+    }
+
+
+def test_separate_grounding_checks_in_depth_citations_for_what_they_attribute(monkeypatch):
+    calls = _stub_indepth(
+        monkeypatch,
+        ["CD4 was 341 cells/uL [2], which calls for monitoring for infections."],
+        {"flag": [], "issues": ""},
+    )
+
+    _names, final = _final(_full_profile("separate"))
+
+    assert ("entailment", "G", False) in calls
+    assert ("entailment", "G", True) in calls
+    assert _indepth_statuses(final) == {2: "verified"}
+    assert final["inDepth"]["validation"]["status"] == "checked"
+
+
+def test_folded_grounding_takes_in_depth_citation_verdicts_from_the_review(monkeypatch):
+    calls = _stub_indepth(
+        monkeypatch,
+        ["Weight was 71 kg [1], which is stable.", "CD4 was 500 cells/uL [2]."],
+        {"flag": [], "issues": "", "unsupported": [2]},
+    )
+
+    _names, final = _final(_full_profile("folded"))
+
+    assert [call for call in calls if call[0] == "entailment"] == []
+    assert ("indepth_review", "R", True) in calls
+    assert _indepth_statuses(final) == {1: "verified", 2: "unsupported"}
+    validation = final["inDepth"]["validation"]
+    assert validation["marked"] == [2]
+    assert "does not support" in final["inDepth"]["answer"].splitlines()[1]
+
+
+def test_off_grounding_leaves_in_depth_citations_unchecked_and_unmarked(monkeypatch):
+    calls = _stub_indepth(
+        monkeypatch,
+        ["CD4 was 341 cells/uL [2], which calls for monitoring for infections."],
+        {"flag": [], "issues": ""},
+    )
+
+    _names, final = _final(_full_profile("off"))
+
+    assert [call for call in calls if call[0] == "entailment"] == []
+    assert _indepth_statuses(final) == {2: "unchecked"}
+    assert final["inDepth"]["validation"]["status"] == "checked"
+    assert "Check:" not in final["inDepth"]["answer"]
+
+
+def test_attribution_check_asks_only_what_the_claim_attributes_to_its_record(monkeypatch):
+    prompts = []
+
+    async def fake_chat(_client, _model, messages, **_kwargs):
+        prompts.append(messages[-1]["content"])
+        return {"content": json.dumps({"verdicts": ["YES"]})}
+
+    monkeypatch.setattr(team, "_chat", fake_chat)
+    pair = [("[20] Temperature 39.7 C", "Temperature 39.7 C indicates a febrile state.")]
+
+    asyncio.run(team._entailment_verdicts(None, "G", pair, attribution_only=True))
+    asyncio.run(team._entailment_verdicts(None, "G", pair))
+
+    assert prompts[0].startswith(team._ATTRIBUTION_SYSTEM_PROMPT)
+    assert prompts[1].startswith(team._ENTAILMENT_SYSTEM_PROMPT)

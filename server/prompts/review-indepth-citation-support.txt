@@ -1,0 +1,5 @@
+=== CITATION SUPPORT ===
+Also judge every [N] citation in the claims. List in "unsupported" the NUMBERS of the claims with a cited record that does not state the patient fact (value, date, drug, result, status) or guideline content the claim attributes to it. Judge only what the claim says the record shows; interpretation, advice and general knowledge in the claim are not citation problems. Report an unsupported citation in "unsupported", not in "flag".
+
+Add to the JSON object:
+  "unsupported": [<claim numbers>]

@@ -295,7 +295,7 @@ def test_profile_stream_done_event_carries_safety_warnings():
     async def fake_gen_indepth(*_a, **_k):
         return ([], {"level": "green", "note": ""})
 
-    async def fake_ground(_client, _model, _answer, references, _mappings):
+    async def fake_ground(_client, _model, _answer, references, _mappings, **_kwargs):
         return references
 
     def fake_gate(**k):

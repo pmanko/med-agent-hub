@@ -509,7 +509,7 @@ def compile_profile(profile: Profile) -> Profile:
         ("answer", "answer"),
         ("review", "review"),
         ("ground_verdicts" if grounding == "separate" else "", "grounding"),
-        ("indepth_gate", "grounding"),
+        ("indepth_gate" if grounding == "separate" else "", "grounding"),
         ("indepth", "indepth"),
     ):
         if stage in profile.stages and role not in profile.models:

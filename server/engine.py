@@ -184,6 +184,8 @@ class _State:
     indepth_gate: Optional[Dict[str, Any]] = None
     # 1-based In-Depth claim index -> what each check marked on it; shown beside the claim.
     indepth_marks: Dict[int, List[str]] = field(default_factory=dict)
+    # Neutral tags: what a claim is, not a call to check it (uncited general guidance).
+    indepth_tags: Dict[int, str] = field(default_factory=dict)
     indepth_error: str = ""
     indepth_error_code: Optional[str] = None
     indepth_required_source_ids: List[str] = field(default_factory=list)
@@ -410,9 +412,12 @@ def _fixed_context_text(
             if role == "review":
                 stem = str(request.profile.prompts.get(role) or fallback)
                 parts.append(load_prompt(stem + "-answer"))
-                if _grounding_policy(request.profile) == "folded":
+                folded = _grounding_policy(request.profile) == "folded"
+                if folded:
                     parts.append(load_prompt(stages._CITATION_SUPPORT_PROMPT))
                 parts.append(load_prompt(stem + "-indepth"))
+                if folded:
+                    parts.append(load_prompt(stages._INDEPTH_CITATION_SUPPORT_PROMPT))
             else:
                 parts.append(_prompt(request.profile, role, fallback))
     if temporal_block:
@@ -730,6 +735,7 @@ async def _select_indepth_review_context(
             source="llama-router",
         )
     reviewer_model = request.profile.models["review"]
+    folded = _grounding_policy(request.profile) == "folded"
 
     async def measure(chart: str) -> int:
         messages = stages._indepth_validation_messages(
@@ -740,6 +746,7 @@ async def _select_indepth_review_context(
             validation_prompt=str(
                 request.profile.prompts.get("review") or "validation-label"
             ),
+            citation_support=folded,
         )
         count_chat = getattr(counter, "count_chat", None)
         if callable(count_chat):
@@ -747,7 +754,11 @@ async def _select_indepth_review_context(
                 reviewer_model,
                 {
                     "messages": messages,
-                    "response_format": stages._INDEPTH_VERDICT_RF,
+                    "response_format": (
+                        stages._INDEPTH_WITH_CITATIONS_VERDICT_RF
+                        if folded
+                        else stages._INDEPTH_VERDICT_RF
+                    ),
                 },
             )
         rendered = "\n".join(
@@ -1200,10 +1211,12 @@ def _indepth_mark_note(marked: int, total: int, review: Mapping[str, Any]) -> st
     return note[0].upper() + note[1:] + ". Verify marked points against the chart."
 
 
-def _marked_claim(claim: str, labels: Sequence[str]) -> str:
-    if not labels:
-        return claim
-    return claim + " *(Check: " + "; ".join(labels) + ".)*"
+def _marked_claim(claim: str, labels: Sequence[str], tag: str = "") -> str:
+    if labels:
+        return claim + " *(Check: " + "; ".join(labels) + ".)*"
+    if tag:
+        return claim + " *(" + tag[0].upper() + tag[1:] + ".)*"
+    return claim
 
 
 def _in_depth_payload(state: _State) -> Dict[str, Any]:
@@ -1212,7 +1225,12 @@ def _in_depth_payload(state: _State) -> Dict[str, Any]:
         ""
         if state.indepth_error
         else "\n".join(
-            "- " + _marked_claim(claim, state.indepth_marks.get(index, ()))
+            "- "
+            + _marked_claim(
+                claim,
+                state.indepth_marks.get(index, ()),
+                state.indepth_tags.get(index, ""),
+            )
             for index, claim in enumerate(state.claims, 1)
         )
     )
@@ -2125,6 +2143,11 @@ async def _execute_stages(
                                     if product and request.profile.exact_tokenizer
                                     else None
                                 ),
+                                **(
+                                    {"citation_support": True}
+                                    if grounding == "folded"
+                                    else {}
+                                ),
                             )
                         else:
                             state.claims = await stages._synthesize_indepth(
@@ -2210,16 +2233,17 @@ async def _execute_stages(
                     for claim_index, claim in enumerate(state.claims, 1):
                         claim_citations = stages._extract_citations(claim)
                         if not claim_citations:
+                            # General guidance cites no record. It is tagged, not marked for review.
+                            state.indepth_tags[claim_index] = "general guidance, not from the chart"
                             citation_checks.append(
                                 {
                                     "claim_index": claim_index,
                                     "claim": claim,
-                                    "status": "warn",
+                                    "status": "info",
                                     "reason": "In-Depth claim cites no record; it is general guidance.",
                                     "source_indices": [],
                                 }
                             )
-                            mark(claim_index, "yellow", "general guidance, not cited")
                             continue
                         claim_references = stages._resolve_references(
                             claim_citations,
@@ -2255,13 +2279,39 @@ async def _execute_stages(
                         for _claim_index, _claim, references in candidates
                         for reference in references
                     ]
-                    if flattened and state.mappings:
+                    if grounding == "folded" and flattened and state.mappings:
+                        # The In-Depth review judged each claim's citations in its own call.
+                        unsupported_claims = review.get("citation_unsupported")
+                        grounded: list[dict[str, Any]] = []
+                        for claim_index, claim, references in candidates:
+                            verdicts = (
+                                {
+                                    reference.get("index"): claim_index
+                                    not in unsupported_claims
+                                    for reference in references
+                                }
+                                if unsupported_claims is not None
+                                else {}
+                            )
+                            grounded.extend(
+                                await stages._ground_references(
+                                    client,
+                                    None,
+                                    claim,
+                                    references,
+                                    state.mappings,
+                                    index_verdicts=verdicts,
+                                )
+                            )
+                        flattened = grounded
+                    elif grounding == "separate" and flattened and state.mappings:
                         flattened = await stages._ground_references(
                             client,
                             request.profile.models["grounding"],
                             "\n".join(claim for _index, claim, _refs in candidates),
                             flattened,
                             state.mappings,
+                            attribution_only=True,
                         )
 
                     indepth_references: list[dict[str, Any]] = []
@@ -2296,7 +2346,8 @@ async def _execute_stages(
                         unchecked = [
                             reference
                             for reference in grounded_references
-                            if reference.get("groundingStatus") == "unchecked"
+                            if grounding != "off"
+                            and reference.get("groundingStatus") == "unchecked"
                         ]
                         if unchecked:
                             citation_checks.append(
