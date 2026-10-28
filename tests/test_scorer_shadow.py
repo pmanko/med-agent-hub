@@ -67,5 +67,7 @@ def test_shadow_scorer_is_recorded_on_the_check_and_never_sets_the_label(monkeyp
 
     check = grounded[0]["groundingChecks"][0]
     assert check["support"] == "supported" and grounded[0]["support"] == "supported"
-    assert check["scorer"] == {"supported": 0.05, "contradicted": 0.9, "support": "contradicted"}
-    assert client.calls[0][1]["pairs"][0]["statement"].startswith("The weight was 41 kg")
+    # The scorer judges the listed fact, not the whole sentence, and its verdict stays beside.
+    assert client.calls[0][1]["pairs"] == [{"source": "[1] 2026-01-07 Weight (kg): 41 kg", "statement": "41 kg"}]
+    assert check["scorer"]["support"] == "contradicted"
+    assert check["scorer"]["facts"] == [{"fact": "41 kg", "supported": 0.05, "contradicted": 0.9, "support": "contradicted"}]

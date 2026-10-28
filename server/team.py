@@ -785,6 +785,50 @@ async def _bounded_entailment_verdicts(
     return out
 
 
+async def _shadow_score_facts(
+    client: httpx.AsyncClient,
+    pairs: List[Tuple[str, str]],
+    positions: List[int],
+    verdict_by_position: Mapping[int, Mapping[str, Any]],
+) -> Dict[int, Dict[str, Any]]:
+    """The scorer's verdict per check, scored fact by fact.
+
+    The 28 October replay showed a scorer cannot judge a whole In-Depth point (the clinical
+    reading joined to the fact drags every point to "not entailed"); it can judge a bare
+    fact against its record. So each fact the prompted check listed is scored against the
+    source, and the check's scorer verdict is contradicted when any fact is, supported when
+    every fact is, not addressed otherwise; a check whose list is empty is scored whole.
+    """
+    fact_pairs: List[Tuple[str, str]] = []
+    owners: List[Tuple[int, int]] = []
+    for position, (source, statement) in zip(positions, pairs):
+        facts = [
+            str(f.get("fact") or "").strip()
+            for f in (verdict_by_position.get(position) or {}).get("facts") or []
+            if str(f.get("fact") or "").strip()
+        ] or [statement]
+        for fact_index, fact in enumerate(facts):
+            fact_pairs.append((source, fact))
+            owners.append((position, fact_index))
+    scored = await _scorer_verdicts(client, fact_pairs)
+    out: Dict[int, Dict[str, Any]] = {}
+    for (position, _fact_index), (_, fact), score in zip(owners, fact_pairs, scored):
+        entry = out.setdefault(position, {"support": UNCHECKED, "facts": []})
+        entry["facts"].append({"fact": fact, **score})
+    for entry in out.values():
+        labels = [f["support"] for f in entry["facts"]]
+        entry["support"] = (
+            UNCHECKED
+            if UNCHECKED in labels
+            else CONTRADICTED
+            if CONTRADICTED in labels
+            else SUPPORTED
+            if all(label == SUPPORTED for label in labels)
+            else NOT_ADDRESSED
+        )
+    return out
+
+
 # The older status field each client reads, derived from ``support``: a fact the record does
 # not hold is neither verified nor unsupported, so it reads as unchecked there.
 _GROUNDING_STATUS_FOR_SUPPORT = {
@@ -1002,8 +1046,8 @@ async def _ground_references(
     }
     scorer_by_position: Dict[int, Dict[str, Any]] = {}
     if shadow_scorer and pairs:
-        scorer_by_position = dict(
-            zip(checkable_positions, await _scorer_verdicts(client, pairs))
+        scorer_by_position = await _shadow_score_facts(
+            client, pairs, checkable_positions, verdict_by_position
         )
 
     grounded_refs: List[Dict[str, Any]] = []
