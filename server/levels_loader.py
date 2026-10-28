@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 import rfc8785
 import yaml
 
+from .decision_model import validate_decision_model_id
 from .prompt_loader import load_prompt
 
 _PATH = Path(__file__).parent / "levels.yaml"
@@ -30,9 +31,17 @@ _ANSWER_CONTRACTS = {"caller", "chart_answer"}
 # or sending the writer back to redo the answer stay reserved until a judged run earns them.
 _REVIEW_ACTIONS = {"label"}
 _RESERVED_REVIEW_ACTIONS = {"apply", "redo"}
-# How cited records are checked against their sentences: a separate entailment call, a verdict
-# folded into the review, or not at all.
-_GROUNDING_POLICIES = {"separate", "folded", "off"}
+# How cited records are checked against their sentences: a separate entailment call, a calibrated
+# decision model (Laya/Jev), a verdict folded into the review, or not at all.
+_GROUNDING_POLICIES = {"separate", "decision", "folded", "off"}
+_REVIEW_POLICY_KEYS = {
+    "action",
+    "grounding",
+    "low_threshold",
+    "high_threshold",
+    "temperature_scale",
+    "verify_review_errors",
+}
 _ALLOWED_STAGES = {
     "context",
     "gather",
@@ -436,7 +445,7 @@ def _review_policy(profile: Profile) -> Optional[str]:
         raise ValueError(
             f"profile {profile.id!r} must declare policies.review with action and grounding"
         )
-    unknown = sorted(set(review) - {"action", "grounding"})
+    unknown = sorted(set(review) - _REVIEW_POLICY_KEYS)
     if unknown:
         raise ValueError(f"profile {profile.id!r} review policy has unknown keys {unknown}")
     action = str(review.get("action") or "")
@@ -459,6 +468,15 @@ def _review_policy(profile: Profile) -> Optional[str]:
         raise ValueError(
             f"profile {profile.id!r} grounding folded requires the review stage"
         )
+    low = review.get("low_threshold")
+    high = review.get("high_threshold")
+    if low is not None or high is not None:
+        low_val = float(low if low is not None else 0.35)
+        high_val = float(high if high is not None else 0.75)
+        if not (0.0 < low_val < high_val < 1.0):
+            raise ValueError(
+                f"profile {profile.id!r} requires 0 < low_threshold < high_threshold < 1"
+            )
     return grounding
 
 
@@ -505,17 +523,20 @@ def compile_profile(profile: Profile) -> Profile:
             f"profile {profile.id!r} gather requires an orchestrator model"
         )
     grounding = _review_policy(profile)
+    needs_grounding_role = grounding in {"separate", "decision"}
     for stage, role in (
         ("answer", "answer"),
         ("review", "review"),
-        ("ground_verdicts" if grounding == "separate" else "", "grounding"),
-        ("indepth_gate" if grounding == "separate" else "", "grounding"),
+        ("ground_verdicts" if needs_grounding_role else "", "grounding"),
+        ("indepth_gate" if needs_grounding_role else "", "grounding"),
         ("indepth", "indepth"),
     ):
         if stage in profile.stages and role not in profile.models:
             raise ValueError(
                 f"profile {profile.id!r} stage {stage} requires model role {role}"
             )
+    if grounding == "decision":
+        validate_decision_model_id(str(profile.models.get("grounding") or ""))
     if profile.output_mode not in _OUTPUT_MODES:
         raise ValueError(
             f"profile {profile.id!r} has invalid output mode {profile.output_mode!r}"

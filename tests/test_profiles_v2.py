@@ -36,6 +36,7 @@ def test_configured_catalog_contains_only_current_product_eval_and_debug_profile
         "single-12b-checked-folded",
         "single-12b-checked-noground",
         "single-12b-checked-nodry",
+        "single-12b-checked-laya",
         "single-a4b-checked",
         "team-med-checked",
         "debug-team-high-checked",

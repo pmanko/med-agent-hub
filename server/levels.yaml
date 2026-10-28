@@ -308,6 +308,20 @@ profiles:
     context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true, supplemental_sources: [knowledge-base]}
     knobs: {answer: {temperature: 0, dry: 0}, review: {dry: 0}}
 
+  # Decision-layer verification arm (DECISION-LAYER-2026-10): replaces generative grounding
+  # and verifies Answer reviewer error pairs with calibrated Laya three-band probabilities.
+  single-12b-checked-laya:
+    label: Checked answer (12B writer, Laya decision verifier)
+    topology: single
+    stages: *product
+    models: {answer: gemma-4-12b, review: gemma-4-12b, grounding: laya, indepth: gemma-4-12b}
+    prompts: {answer: synthesis-answer, review: validation-label, indepth: synthesis-indepth}
+    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true, review: {action: label, grounding: decision, low_threshold: 0.35, high_threshold: 0.75, temperature_scale: 1.0, verify_review_errors: true}}
+    visibility: product
+    selection_priority: 55
+    context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true, supplemental_sources: [knowledge-base]}
+    knobs: {answer: {temperature: 0}}
+
   team-med-checked:
     label: Checked medical team
     topology: team

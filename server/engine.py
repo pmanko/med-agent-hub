@@ -138,6 +138,17 @@ def _grounding_policy(profile: Profile) -> str:
     return str(review.get("grounding") or "separate")
 
 
+def _decision_review_options(profile: Profile) -> Dict[str, Any]:
+    """Extract calibrated decision-model thresholds and temperature scaling from ``policies.review``."""
+    review = profile.policies.get("review") or {}
+    return {
+        "low_threshold": float(review.get("low_threshold", 0.35)),
+        "high_threshold": float(review.get("high_threshold", 0.75)),
+        "temperature_scale": float(review.get("temperature_scale", 1.0)),
+        "verify_review_errors": bool(review.get("verify_review_errors", True)),
+    }
+
+
 @dataclass
 class _State:
     messages: List[Dict[str, Any]]
@@ -330,6 +341,8 @@ def _merge_reference_grounding(
         grounded, aggregate = None, "mixed"
     elif "unsupported" in statuses:
         grounded, aggregate = False, "unsupported"
+    elif "uncertain" in statuses:
+        grounded, aggregate = None, "uncertain"
     else:
         grounded, aggregate = True, "verified"
     existing["grounded"] = grounded
@@ -1840,6 +1853,27 @@ async def _execute_stages(
                         payload_override=payload_override,
                         review_chart_selector=review_chart_selector,
                         citation_verdicts=state.review_citation_verdicts,
+                        **(
+                            {
+                                "decision_verifier_model": request.profile.models[
+                                    "grounding"
+                                ],
+                                "low_threshold": _decision_review_options(
+                                    request.profile
+                                )["low_threshold"],
+                                "high_threshold": _decision_review_options(
+                                    request.profile
+                                )["high_threshold"],
+                                "temperature_scale": _decision_review_options(
+                                    request.profile
+                                )["temperature_scale"],
+                            }
+                            if grounding == "decision"
+                            and _decision_review_options(request.profile)[
+                                "verify_review_errors"
+                            ]
+                            else {}
+                        ),
                     )
                     if reviewed_gate is not None:
                         state.answer_gate = reviewed_gate
@@ -1959,6 +1993,14 @@ async def _execute_stages(
                             grounding_options["index_verdicts"] = (
                                 state.review_citation_verdicts or {}
                             )
+                        elif grounding == "decision":
+                            dec_opts = _decision_review_options(request.profile)
+                            grounding_options["decision_grounding"] = True
+                            grounding_options["low_threshold"] = dec_opts["low_threshold"]
+                            grounding_options["high_threshold"] = dec_opts["high_threshold"]
+                            grounding_options["temperature_scale"] = dec_opts[
+                                "temperature_scale"
+                            ]
                         state.references = await stages._ground_references(
                             client,
                             None if folded else request.profile.models["grounding"],
@@ -1984,6 +2026,11 @@ async def _execute_stages(
                         if reference.get("groundingStatus")
                         in {"unsupported", "mixed"}
                     ]
+                    uncertain = [
+                        reference
+                        for reference in state.references
+                        if reference.get("groundingStatus") == "uncertain"
+                    ]
                     unchecked = [
                         reference
                         for reference in state.references
@@ -2002,6 +2049,29 @@ async def _execute_stages(
                             summary="One or more cited sources do not support the associated claim.",
                             issues=list(prior.get("issues") or [])
                             + stages._grounding_failure_issues(unsupported),
+                            original_answer=prior.get("originalAnswer"),
+                        )
+                    elif uncertain:
+                        prior = state.answer_validation or {}
+                        if state.answer_conf.get("level") == "green":
+                            state.answer_conf = {
+                                "level": "yellow",
+                                "note": "One or more cited sources had uncertain support and are marked for review.",
+                            }
+                        state.answer_validation = stages._answer_validation_wire(
+                            "needs_review",
+                            summary="One or more cited sources had uncertain support and are marked for review.",
+                            issues=list(prior.get("issues") or [])
+                            + [
+                                {
+                                    "id": "citation_grounding_uncertain",
+                                    "status": "warn",
+                                    "severity": "warn",
+                                    "reason": "Citation support probability fell in the uncertain band.",
+                                    "source_indices": [reference.get("index")],
+                                }
+                                for reference in uncertain
+                            ],
                             original_answer=prior.get("originalAnswer"),
                         )
                     elif unchecked:
@@ -2338,14 +2408,27 @@ async def _execute_stages(
                                 )
                             )
                         flattened = grounded
-                    elif grounding == "separate" and flattened and state.mappings:
+                    elif grounding in {"separate", "decision"} and flattened and state.mappings:
+                        indepth_ground_opts: Dict[str, Any] = {"attribution_only": True}
+                        if grounding == "decision":
+                            dec_opts = _decision_review_options(request.profile)
+                            indepth_ground_opts["decision_grounding"] = True
+                            indepth_ground_opts["low_threshold"] = dec_opts[
+                                "low_threshold"
+                            ]
+                            indepth_ground_opts["high_threshold"] = dec_opts[
+                                "high_threshold"
+                            ]
+                            indepth_ground_opts["temperature_scale"] = dec_opts[
+                                "temperature_scale"
+                            ]
                         flattened = await stages._ground_references(
                             client,
                             request.profile.models["grounding"],
                             "\n".join(claim for _index, claim, _refs in candidates),
                             flattened,
                             state.mappings,
-                            attribution_only=True,
+                            **indepth_ground_opts,
                         )
 
                     indepth_references: list[dict[str, Any]] = []
@@ -2397,6 +2480,26 @@ async def _execute_stages(
                                 if not_found
                                 else "its cited record does not support it",
                             )
+                            continue
+                        uncertain = [
+                            reference
+                            for reference in grounded_references
+                            if reference.get("groundingStatus") == "uncertain"
+                        ]
+                        if uncertain:
+                            citation_checks.append(
+                                {
+                                    "claim_index": claim_index,
+                                    "claim": claim,
+                                    "status": "warn",
+                                    "reason": "In-Depth citation support probability fell in the uncertain band.",
+                                    "source_indices": [
+                                        reference.get("index")
+                                        for reference in uncertain
+                                    ],
+                                }
+                            )
+                            mark(claim_index, "yellow", "its citation support was uncertain")
                             continue
                         unchecked = [
                             reference

@@ -13,7 +13,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Sequ
 
 import httpx
 
-from . import drug_safety, temporal
+from . import decision_model, drug_safety, temporal
 from .config import EXPERT_DRY_MULTIPLIER, llm_config, resolve_hub_build_revision
 from .context_sources import (
     CHART_MARKER,
@@ -722,6 +722,82 @@ async def _bounded_entailment_verdicts(
     return verdicts
 
 
+async def _bounded_decision_verdicts(
+    client: httpx.AsyncClient,
+    model: str,
+    pairs: List[Tuple[str, str]],
+    *,
+    attribution_only: bool = False,
+    low_threshold: float = decision_model.DEFAULT_LOW_THRESHOLD,
+    high_threshold: float = decision_model.DEFAULT_HIGH_THRESHOLD,
+    temperature_scale: float = decision_model.DEFAULT_TEMPERATURE_SCALE,
+    reasons: Optional[List[Optional[str]]] = None,
+    probabilities: Optional[List[Optional[float]]] = None,
+    bands: Optional[List[Optional[str]]] = None,
+) -> List[Optional[bool]]:
+    """Score pairs with a calibrated decision model, splitting on context overflow."""
+
+    async def check(
+        items: List[Tuple[str, str]],
+    ) -> Tuple[
+        List[Optional[bool]],
+        List[Optional[str]],
+        List[Optional[float]],
+        List[Optional[str]],
+    ]:
+        found_reasons: List[Optional[str]] = []
+        found_probs: List[Optional[float]] = []
+        found_bands: List[Optional[str]] = []
+        try:
+            verdicts = await decision_model.decide_grounding_pairs(
+                client,
+                model,
+                items,
+                chat_fn=_chat,
+                message_text_fn=_message_text,
+                attribution_only=attribution_only,
+                low_threshold=low_threshold,
+                high_threshold=high_threshold,
+                temperature_scale=temperature_scale,
+                reasons=found_reasons,
+                probabilities=found_probs,
+                bands=found_bands,
+            )
+            return (
+                verdicts,
+                (found_reasons + [None] * len(items))[: len(items)],
+                (found_probs + [None] * len(items))[: len(items)],
+                (found_bands + [None] * len(items))[: len(items)],
+            )
+        except InsufficientContextError:
+            if len(items) == 1:
+                logger.warning(
+                    "decision grounding[%s] single pair exceeds context -> unchecked",
+                    model,
+                )
+                return [None], [None], [None], [None]
+            midpoint = len(items) // 2
+            left_v, left_r, left_p, left_b = await check(items[:midpoint])
+            right_v, right_r, right_p, right_b = await check(items[midpoint:])
+            return (
+                left_v + right_v,
+                left_r + right_r,
+                left_p + right_p,
+                left_b + right_b,
+            )
+
+    if not pairs:
+        return []
+    verdicts, pair_reasons, pair_probs, pair_bands = await check(pairs)
+    if reasons is not None:
+        reasons.extend(pair_reasons)
+    if probabilities is not None:
+        probabilities.extend(pair_probs)
+    if bands is not None:
+        bands.extend(pair_bands)
+    return verdicts
+
+
 async def _ground_references(
     client: httpx.AsyncClient,
     model: str,
@@ -732,6 +808,10 @@ async def _ground_references(
     deterministic_checks: Optional[List[Dict[str, Any]]] = None,
     index_verdicts: Optional[Mapping[int, bool]] = None,
     attribution_only: bool = False,
+    decision_grounding: bool = False,
+    low_threshold: float = decision_model.DEFAULT_LOW_THRESHOLD,
+    high_threshold: float = decision_model.DEFAULT_HIGH_THRESHOLD,
+    temperature_scale: float = decision_model.DEFAULT_TEMPERATURE_SCALE,
 ) -> List[Dict[str, Any]]:
     """Ground final claims against their cited source sets in one bounded entailment call.
 
@@ -891,6 +971,8 @@ async def _ground_references(
         for i in checkable_positions
     ]
     pair_reasons: List[Optional[str]] = []
+    pair_probs: List[Optional[float]] = []
+    pair_bands: List[Optional[str]] = []
     if index_verdicts is not None:
         verdicts = []
         for position in checkable_positions:
@@ -905,6 +987,23 @@ async def _ground_references(
                 if judged and all(value is True for value in judged)
                 else None
             )
+    elif decision_grounding:
+        verdicts = (
+            await _bounded_decision_verdicts(
+                client,
+                model,
+                pairs,
+                attribution_only=attribution_only,
+                low_threshold=low_threshold,
+                high_threshold=high_threshold,
+                temperature_scale=temperature_scale,
+                reasons=pair_reasons,
+                probabilities=pair_probs,
+                bands=pair_bands,
+            )
+            if pairs
+            else []
+        )
     else:
         verdicts = (
             await _bounded_entailment_verdicts(
@@ -921,6 +1020,8 @@ async def _ground_references(
             else []
         )
     reason_by_position = dict(zip(checkable_positions, pair_reasons))
+    prob_by_position = dict(zip(checkable_positions, pair_probs))
+    band_by_position = dict(zip(checkable_positions, pair_bands))
     verdict_by_position = {
         **{position: True for position in deterministic_positions},
         **dict(zip(checkable_positions, verdicts)),
@@ -936,27 +1037,36 @@ async def _ground_references(
         for group_position in groups_by_reference[i]:
             group = groups[group_position]
             group_verdict = verdict_by_position.get(group_position)
+            group_band = band_by_position.get(group_position)
             grounding_check = {
-                    "status": (
-                        "verified"
-                        if group_verdict is True
-                        else "unsupported"
-                        if group_verdict is False
-                        else "unchecked"
-                    ),
-                    "claim": group["claim"],
-                    "location": group["location"],
-                    "path": group["path"],
-                    "source_indices": sorted(
-                        {
-                            references[position].get("index")
-                            for position in group["references"]
-                            if isinstance(references[position].get("index"), int)
-                        }
-                    ),
-                }
+                "status": (
+                    "verified"
+                    if group_verdict is True
+                    else "unsupported"
+                    if group_verdict is False
+                    else "uncertain"
+                    if group_band == "uncertain"
+                    else "unchecked"
+                ),
+                "claim": group["claim"],
+                "location": group["location"],
+                "path": group["path"],
+                "source_indices": sorted(
+                    {
+                        references[position].get("index")
+                        for position in group["references"]
+                        if isinstance(references[position].get("index"), int)
+                    }
+                ),
+            }
             if group_position in deterministic_positions:
                 grounding_check["method"] = deterministic_methods[group_position]
+            elif decision_grounding and group_position in prob_by_position:
+                grounding_check["method"] = "decision_model"
+                if prob_by_position[group_position] is not None:
+                    grounding_check["probability"] = prob_by_position[group_position]
+                if group_band is not None:
+                    grounding_check["band"] = group_band
             if group_verdict is False and reason_by_position.get(group_position):
                 grounding_check["not_found"] = reason_by_position[group_position]
             grounding_checks.append(grounding_check)
@@ -970,6 +1080,9 @@ async def _ground_references(
         elif check_statuses == {"verified"}:
             verdict = True
             aggregate_status = "verified"
+        elif check_statuses <= {"verified", "uncertain"} and "uncertain" in check_statuses:
+            verdict = None
+            aggregate_status = "uncertain"
         else:
             verdict = None
             aggregate_status = "mixed"
@@ -2311,6 +2424,10 @@ async def _review_existing_answer(
         Callable[[str, List[Any], str], Awaitable[str]]
     ] = None,
     citation_verdicts: Optional[Dict[int, bool]] = None,
+    decision_verifier_model: Optional[str] = None,
+    low_threshold: float = decision_model.DEFAULT_LOW_THRESHOLD,
+    high_threshold: float = decision_model.DEFAULT_HIGH_THRESHOLD,
+    temperature_scale: float = decision_model.DEFAULT_TEMPERATURE_SCALE,
 ) -> Tuple[
     str, Dict[str, Any], str, Dict[str, Any], Optional[Dict[str, Any]], Optional[str]
 ]:
@@ -2506,7 +2623,23 @@ async def _review_existing_answer(
         errs = (verdict or {}).get("errors") or []
         overruled = [err for err in errs if _overruled_by(err, verified)]
         errs = [err for err in errs if err not in overruled]
-        if overruled and not errs:
+        overruled_by_decision: List[Dict[str, Any]] = []
+        if decision_verifier_model and errs:
+            (
+                errs,
+                overruled_by_decision,
+                _decision_records,
+            ) = await decision_model.verify_review_error_pairs(
+                client,
+                decision_verifier_model,
+                errs,
+                chat_fn=_chat,
+                message_text_fn=_message_text,
+                low_threshold=low_threshold,
+                high_threshold=high_threshold,
+                temperature_scale=temperature_scale,
+            )
+        if (overruled or overruled_by_decision) and not errs:
             verdict = {**verdict, "answer_ok": True, "errors": []}
         review_step = {
             "role": "answer_review",
@@ -2518,6 +2651,9 @@ async def _review_existing_answer(
         }
         if overruled:
             review_step["overruled_by_date_checks"] = overruled
+        if overruled_by_decision:
+            review_step["overruled_by_decision_model"] = overruled_by_decision
+            review_step["decision_verifier_model"] = decision_verifier_model
         if citation_verdicts is not None:
             review_step["citation_support"] = {
                 str(index): supported for index, supported in citation_verdicts.items()
