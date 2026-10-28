@@ -125,9 +125,8 @@
       "flagged_with_question": [
         "date_format:fail"
       ],
-      "expected": [
-        "date_format:fail"
-      ]
+      "expected": [],
+      "note": "the underscore date is repaired to 2026-01-26 before the check"
     }
   ]
 }

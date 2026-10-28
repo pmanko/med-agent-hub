@@ -524,30 +524,22 @@ def _citation_clusters(text: str) -> List[Dict[str, Any]]:
     return clusters
 
 
-_ENTAILMENT_SYSTEM_PROMPT = (
-    "You are a strict clinical fact-checker. For each PAIR, decide whether the SOURCE record "
-    "supports the STATEMENT. Answer NO if: the statement is about a different person or describes "
-    "family/social history rather than the patient's own record; the statement is negated, denied, "
-    "ruled out, or described as only suspected/possible when the source does not confirm it; the "
-    "source does not state the specific fact claimed; or you are not fully certain from the source "
-    "text alone. Never use outside medical knowledge — judge only what the SOURCE text says. Return "
-    'exactly one verdict per pair, in the same order, as JSON: {"verdicts": ["YES"|"NO", ...]}.'
-)
-
-# In-Depth claims join a chart fact to interpretation and advice. Their citations are checked for
-# the facts the claim attributes to each record; the reasoning is the reviewer's to judge. Asking
-# for the facts first keeps a checker from rejecting a sentence for its interpretation: told only
-# to ignore interpretation, the Qwen checkers answered NO to every pair.
+# Every citation check lists the patient facts a statement gives and looks each up in the
+# cited records. Asking for the facts first keeps a checker from rejecting a sentence for its
+# interpretation (told only to ignore interpretation, the Qwen checkers answered NO to every
+# pair), and "differs" separates a contradiction from a fact the record simply does not hold.
 _ATTRIBUTION_SYSTEM_PROMPT = (
     "You check what clinical statements attribute to patient records. For each PAIR, first copy "
     "the patient facts the STATEMENT gives that could come from a record: values with units, dates, "
     "drug names, results, diagnoses, statuses, stages. Leave out interpretation, advice, risks and "
-    "general medical knowledge. Then mark each fact found (the SOURCE states it, allowing different "
-    "wording or date format) or not found. The verdict is YES when every fact is found, NO when any "
-    "fact is not found or differs. When the statement gives no patient fact, the verdict is YES only "
-    "if the SOURCE states the guidance or knowledge the statement gives, otherwise NO. Use only "
+    "general medical knowledge. Then mark each fact: found (the SOURCE states it, allowing "
+    "different wording or date format), differs (the SOURCE states another value, date or status "
+    "for the same thing; copy what it states into source_value) or not_found (the SOURCE says "
+    "nothing about it). When the statement gives no patient fact, give one fact for the guidance "
+    "or knowledge it states and mark it found only if the SOURCE states that guidance. Use only "
     "the SOURCE text. Return one entry per pair, in the same order, as JSON: "
-    '{"pairs": [{"facts": [{"fact": "...", "found": true|false}], "verdict": "YES"|"NO"}, ...]}.'
+    '{"pairs": [{"facts": [{"fact": "...", "status": "found"|"differs"|"not_found", '
+    '"source_value": "..."}]}, ...]}.'
 )
 
 _ATTRIBUTION_RF = {
@@ -568,14 +560,17 @@ _ATTRIBUTION_RF = {
                                     "type": "object",
                                     "properties": {
                                         "fact": {"type": "string"},
-                                        "found": {"type": "boolean"},
+                                        "status": {
+                                            "type": "string",
+                                            "enum": ["found", "differs", "not_found"],
+                                        },
+                                        "source_value": {"type": "string"},
                                     },
-                                    "required": ["fact", "found"],
+                                    "required": ["fact", "status"],
                                 },
                             },
-                            "verdict": {"type": "string", "enum": ["YES", "NO"]},
                         },
-                        "required": ["facts", "verdict"],
+                        "required": ["facts"],
                     },
                 },
             },
@@ -584,142 +579,174 @@ _ATTRIBUTION_RF = {
     },
 }
 
-_ENTAILMENT_RF = {
-    "type": "json_schema",
-    "json_schema": {
-        "name": "entailment_verdicts",
-        "schema": {
-            "type": "object",
-            "properties": {
-                "verdicts": {
-                    "type": "array",
-                    "items": {"type": "string", "enum": ["YES", "NO"]},
-                },
-            },
-            "required": ["verdicts"],
-        },
-    },
-}
+SUPPORTED, CONTRADICTED, NOT_ADDRESSED, UNCHECKED = (
+    "supported",
+    "contradicted",
+    "not_addressed",
+    "unchecked",
+)
+
+
+def _as_verdict(value: Any) -> Dict[str, Any]:
+    """A citation verdict as ``_support_from_facts`` shapes it; a bare boolean (an older
+    checker or a stub) reads as supported, contradicted or, for None, unchecked."""
+    if isinstance(value, dict) and value.get("support"):
+        return {"facts": [], "not_found": None, "chart_value": None, **value}
+    support = SUPPORTED if value is True else CONTRADICTED if value is False else UNCHECKED
+    return {"support": support, "facts": [], "not_found": None, "chart_value": None}
+
+
+def _support_of(reference: Mapping[str, Any]) -> str:
+    """A reference's support verdict, derived from ``groundingStatus`` when it carries none."""
+    support = reference.get("support")
+    if support in {SUPPORTED, CONTRADICTED, NOT_ADDRESSED, UNCHECKED}:
+        return str(support)
+    return {"verified": SUPPORTED, "unsupported": CONTRADICTED, "mixed": CONTRADICTED}.get(
+        str(reference.get("groundingStatus") or ""), UNCHECKED
+    )
+
+
+def _check_support(check: Mapping[str, Any]) -> str:
+    """A grounding check's support verdict, derived from its status when it carries none."""
+    support = check.get("support")
+    if support in {SUPPORTED, CONTRADICTED, NOT_ADDRESSED, UNCHECKED}:
+        return str(support)
+    return {"verified": SUPPORTED, "unsupported": CONTRADICTED}.get(
+        str(check.get("status") or ""), UNCHECKED
+    )
+
+
+def _support_from_facts(facts: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Derive one citation verdict from the checker's fact list.
+
+    A fact the record states differently contradicts the statement; a fact the record does not
+    hold leaves the statement not addressed; every fact found is supported. The checker's own
+    one-word verdict is never used: in run 5ac27952 it said "not supported" after finding every
+    fact in 18 of 28 cases.
+    """
+    clean = [
+        {
+            "fact": str(fact.get("fact") or "").strip(),
+            "status": str(fact.get("status") or "").strip(),
+            **(
+                {"source_value": str(fact.get("source_value") or "").strip()}
+                if str(fact.get("source_value") or "").strip()
+                else {}
+            ),
+        }
+        for fact in facts
+        if isinstance(fact, dict) and str(fact.get("fact") or "").strip()
+    ]
+    statuses = {fact["status"] for fact in clean}
+    if "differs" in statuses:
+        support = CONTRADICTED
+    elif "not_found" in statuses:
+        support = NOT_ADDRESSED
+    elif clean and statuses <= {"found"}:
+        support = SUPPORTED
+    else:
+        support = UNCHECKED
+    return {
+        "support": support,
+        "facts": clean,
+        "not_found": "; ".join(f["fact"] for f in clean if f["status"] == "not_found") or None,
+        "chart_value": "; ".join(
+            f"{f['fact']}: the record states {f['source_value']}" if f.get("source_value") else f["fact"]
+            for f in clean
+            if f["status"] == "differs"
+        )
+        or None,
+    }
 
 
 async def _entailment_verdicts(
     client: httpx.AsyncClient,
     model: str,
     pairs: List[Tuple[str, str]],
-    *,
-    attribution_only: bool = False,
-    reasons: Optional[List[Optional[str]]] = None,
-) -> List[Optional[bool]]:
-    """Batched LLM entailment check for citation grounding — mirrors the validator call shape
-    (fresh one-shot message list, dedicated json_schema response_format, one call for the whole
-    batch since the hub's single-slot router makes per-pair fan-out no faster). ``pairs`` are
-    ``(source_text, statement)``. FAIL-OPEN to ``None`` (unchecked) for every pair on any call or
-    parse failure, or if the model returns fewer verdicts than pairs — a flaky grounding check must
-    never fabricate a verdict. With ``attribution_only``, ``reasons`` (when given) is filled with
-    one entry per pair: the facts the checker did not find in the source, or None."""
+) -> List[Dict[str, Any]]:
+    """Batched citation check: one call for the whole batch (the single-slot router makes per-pair
+    fan-out no faster), a fresh one-shot message list, a json_schema response_format. ``pairs``
+    are ``(source_text, statement)``. Returns one verdict per pair as ``_support_from_facts``
+    builds it. FAIL-OPEN to ``unchecked`` for every pair on any call or parse failure, or if
+    the model returns fewer entries than pairs: a flaky check must never fabricate a verdict.
+    Runs with the repetition penalty off; DRY garbles the dates a checker copies."""
     if not pairs:
         return []
     body = "\n\n".join(
         f"PAIR {i + 1}:\nSOURCE: {source or '(none)'}\nSTATEMENT: {statement or '(none)'}"
         for i, (source, statement) in enumerate(pairs)
     )
-    instruction = (
-        _ATTRIBUTION_SYSTEM_PROMPT if attribution_only else _ENTAILMENT_SYSTEM_PROMPT
-    )
-    user = instruction + "\n\n" + body
+    user = _ATTRIBUTION_SYSTEM_PROMPT + "\n\n" + body
+    unchecked = {"support": UNCHECKED, "facts": [], "not_found": None, "chart_value": None}
     try:
         msg = await _chat(
             client,
             model,
             [{"role": "user", "content": user}],
-            response_format=_ATTRIBUTION_RF if attribution_only else _ENTAILMENT_RF,
+            response_format=_ATTRIBUTION_RF,
+            dry_multiplier=0.0,
         )
         obj = json.loads(_message_text(msg))
-        if attribution_only:
-            entries = obj.get("pairs") if isinstance(obj, dict) else None
-            if not isinstance(entries, list):
-                raise ValueError("attribution response missing a 'pairs' array")
-            verdicts = [
-                entry.get("verdict") if isinstance(entry, dict) else None
-                for entry in entries
-            ]
-            if reasons is not None:
-                for entry in entries[: len(pairs)]:
-                    facts = entry.get("facts") if isinstance(entry, dict) else None
-                    missing = [
-                        str(fact.get("fact")).strip()
-                        for fact in (facts if isinstance(facts, list) else [])
-                        if isinstance(fact, dict)
-                        and fact.get("found") is False
-                        and str(fact.get("fact") or "").strip()
-                    ]
-                    reasons.append("; ".join(missing) or None)
-                reasons.extend([None] * (len(pairs) - len(reasons)))
-        else:
-            verdicts = obj.get("verdicts") if isinstance(obj, dict) else None
-        if not isinstance(verdicts, list):
-            raise ValueError("entailment response missing a 'verdicts' array")
+        entries = obj.get("pairs") if isinstance(obj, dict) else None
+        if not isinstance(entries, list):
+            raise ValueError("attribution response missing a 'pairs' array")
     except InsufficientContextError:
         raise
     except Exception:
         logger.warning(
-            "entailment grounding[%s] call failed/unparseable -> all %d pair(s) unchecked",
+            "citation check[%s] call failed/unparseable -> all %d pair(s) unchecked",
             model,
             len(pairs),
         )
-        if reasons is not None:
-            reasons[:] = [None] * len(pairs)
-        return [None] * len(pairs)
-    out: List[Optional[bool]] = []
+        return [dict(unchecked) for _ in pairs]
+    out: List[Dict[str, Any]] = []
     for i in range(len(pairs)):
-        v = verdicts[i] if i < len(verdicts) else None
-        if isinstance(v, str) and v.strip().upper() == "YES":
-            out.append(True)
-        elif isinstance(v, str) and v.strip().upper() == "NO":
-            out.append(False)
-        else:
-            out.append(None)
+        entry = entries[i] if i < len(entries) else None
+        facts = entry.get("facts") if isinstance(entry, dict) else None
+        out.append(
+            _support_from_facts(facts) if isinstance(facts, list) else dict(unchecked)
+        )
     return out
+
+
+_CITATION_BATCH = 4
 
 
 async def _bounded_entailment_verdicts(
     client: httpx.AsyncClient,
     model: str,
     pairs: List[Tuple[str, str]],
-    *,
-    attribution_only: bool = False,
-    reasons: Optional[List[Optional[str]]] = None,
-) -> List[Optional[bool]]:
-    """Check all pairs together, splitting only when exact token measurement overflows.
+) -> List[Dict[str, Any]]:
+    """Check pairs in batches of ``_CITATION_BATCH`` (small models lose track of long batches),
+    splitting a batch further only when exact token measurement overflows."""
 
-    ``reasons``, when given, receives one entry per pair (see ``_entailment_verdicts``)."""
-    options = {"attribution_only": True} if attribution_only else {}
-
-    async def check(items: List[Tuple[str, str]]) -> Tuple[List[Optional[bool]], List[Optional[str]]]:
-        found: List[Optional[str]] = []
+    async def check(items: List[Tuple[str, str]]) -> List[Dict[str, Any]]:
         try:
-            verdicts = await _entailment_verdicts(
-                client, model, items, **options, **({"reasons": found} if attribution_only else {})
-            )
-            return verdicts, (found + [None] * len(items))[: len(items)]
+            return await _entailment_verdicts(client, model, items)
         except InsufficientContextError:
             if len(items) == 1:
                 logger.warning(
-                    "entailment grounding[%s] single pair exceeds context -> unchecked",
+                    "citation check[%s] single pair exceeds context -> unchecked",
                     model,
                 )
-                return [None], [None]
+                return [{"support": UNCHECKED, "facts": [], "not_found": None, "chart_value": None}]
             midpoint = len(items) // 2
-            left, left_reasons = await check(items[:midpoint])
-            right, right_reasons = await check(items[midpoint:])
-            return left + right, left_reasons + right_reasons
+            return await check(items[:midpoint]) + await check(items[midpoint:])
 
-    if not pairs:
-        return []
-    verdicts, pair_reasons = await check(pairs)
-    if reasons is not None:
-        reasons.extend(pair_reasons)
-    return verdicts
+    out: List[Dict[str, Any]] = []
+    for start in range(0, len(pairs), _CITATION_BATCH):
+        out.extend(await check(pairs[start : start + _CITATION_BATCH]))
+    return out
+
+
+# The older status field each client reads, derived from ``support``: a fact the record does
+# not hold is neither verified nor unsupported, so it reads as unchecked there.
+_GROUNDING_STATUS_FOR_SUPPORT = {
+    SUPPORTED: "verified",
+    CONTRADICTED: "unsupported",
+    NOT_ADDRESSED: "unchecked",
+    UNCHECKED: "unchecked",
+}
 
 
 async def _ground_references(
@@ -731,7 +758,6 @@ async def _ground_references(
     *,
     deterministic_checks: Optional[List[Dict[str, Any]]] = None,
     index_verdicts: Optional[Mapping[int, bool]] = None,
-    attribution_only: bool = False,
 ) -> List[Dict[str, Any]]:
     """Ground final claims against their cited source sets in one bounded entailment call.
 
@@ -741,8 +767,11 @@ async def _ground_references(
 
     With ``index_verdicts`` (grounding folded into the review), no entailment call is made: a claim
     is supported when the reviewer supported every record it cites, unsupported when it rejected
-    any, and unchecked when it judged none or only some of them. ``attribution_only`` checks only
-    what each claim attributes to its records (In-Depth claims), not its interpretation.
+    any, and unchecked when it judged none or only some of them.
+
+    Every reference gets ``support`` (supported, contradicted, not_addressed, unchecked) beside
+    the older ``groundingStatus``; only a contradiction is a failure, a fact the record does not
+    hold is neutral.
     """
     mapping_by_index = {
         mapping.get("index"): mapping
@@ -825,6 +854,7 @@ async def _ground_references(
                         group["source_facts"].append(fact)
                 source_item = f"[{idx}] {source}"
                 group["sources"].append(source_item)
+                group.setdefault("facts_by_reference", {})[ref_position] = source_facts
             if (
                 ref_position in group["references"]
                 and group_position not in groups_by_reference[ref_position]
@@ -837,15 +867,20 @@ async def _ground_references(
         text = re.sub(r"(?<![\w.])(-?\d+)\.0+(?=\D|$)", r"\1", text)
         return " ".join(text.split())
 
+    # A table cell that copies a record's date or value exactly is checked without a model,
+    # whether it cites one record or several that share the fact (two weights on one date).
     deterministic_methods = {
         position: "deterministic_exact"
         for position, group in enumerate(groups)
         if group["location"] == "block"
-        and len(group["references"]) == 1
+        and group["references"]
         and normalize_fact(group["claim"])
-        and any(
-            normalize_fact(group["claim"]) == normalize_fact(fact)
-            for fact in group["source_facts"]
+        and all(
+            any(
+                normalize_fact(group["claim"]) == normalize_fact(fact)
+                for fact in (group.get("facts_by_reference") or {}).get(position, [])
+            )
+            for position in group["references"]
         )
     }
     for position, group in enumerate(groups):
@@ -890,8 +925,9 @@ async def _ground_references(
         ("\n".join(groups[i]["sources"]), groups[i]["claim"])
         for i in checkable_positions
     ]
-    pair_reasons: List[Optional[str]] = []
+    blank = {"facts": [], "not_found": None, "chart_value": None}
     if index_verdicts is not None:
+        # The reviewer judged each record with a yes or no, so a no reads as a contradiction.
         verdicts = []
         for position in checkable_positions:
             judged = [
@@ -899,30 +935,21 @@ async def _ground_references(
                 for reference_position in groups[position]["references"]
             ]
             verdicts.append(
-                False
+                {**blank, "support": CONTRADICTED}
                 if any(value is False for value in judged)
-                else True
+                else {**blank, "support": SUPPORTED}
                 if judged and all(value is True for value in judged)
-                else None
+                else {**blank, "support": UNCHECKED}
             )
     else:
-        verdicts = (
-            await _bounded_entailment_verdicts(
-                client,
-                model,
-                pairs,
-                **(
-                    {"attribution_only": True, "reasons": pair_reasons}
-                    if attribution_only
-                    else {}
-                ),
+        verdicts = [
+            _as_verdict(value)
+            for value in (
+                await _bounded_entailment_verdicts(client, model, pairs) if pairs else []
             )
-            if pairs
-            else []
-        )
-    reason_by_position = dict(zip(checkable_positions, pair_reasons))
+        ]
     verdict_by_position = {
-        **{position: True for position in deterministic_positions},
+        **{position: {**blank, "support": SUPPORTED} for position in deterministic_positions},
         **dict(zip(checkable_positions, verdicts)),
     }
 
@@ -935,15 +962,11 @@ async def _ground_references(
         grounding_checks = []
         for group_position in groups_by_reference[i]:
             group = groups[group_position]
-            group_verdict = verdict_by_position.get(group_position)
+            group_verdict = verdict_by_position.get(group_position) or {**blank, "support": UNCHECKED}
+            support = group_verdict["support"]
             grounding_check = {
-                    "status": (
-                        "verified"
-                        if group_verdict is True
-                        else "unsupported"
-                        if group_verdict is False
-                        else "unchecked"
-                    ),
+                    "status": _GROUNDING_STATUS_FOR_SUPPORT[support],
+                    "support": support,
                     "claim": group["claim"],
                     "location": group["location"],
                     "path": group["path"],
@@ -957,24 +980,25 @@ async def _ground_references(
                 }
             if group_position in deterministic_positions:
                 grounding_check["method"] = deterministic_methods[group_position]
-            if group_verdict is False and reason_by_position.get(group_position):
-                grounding_check["not_found"] = reason_by_position[group_position]
+            if group_verdict.get("facts"):
+                grounding_check["facts"] = group_verdict["facts"]
+            if group_verdict.get("not_found"):
+                grounding_check["not_found"] = group_verdict["not_found"]
+            if group_verdict.get("chart_value"):
+                grounding_check["chart_value"] = group_verdict["chart_value"]
             grounding_checks.append(grounding_check)
-        check_statuses = {check["status"] for check in grounding_checks}
-        if not grounding_checks or "unchecked" in check_statuses:
-            verdict = None
-            aggregate_status = "unchecked"
-        elif check_statuses == {"unsupported"}:
-            verdict = False
-            aggregate_status = "unsupported"
-        elif check_statuses == {"verified"}:
-            verdict = True
-            aggregate_status = "verified"
+        supports = {check["support"] for check in grounding_checks}
+        if not grounding_checks or UNCHECKED in supports:
+            aggregate_support = UNCHECKED
+        elif CONTRADICTED in supports:
+            aggregate_support = CONTRADICTED
+        elif NOT_ADDRESSED in supports:
+            aggregate_support = NOT_ADDRESSED
         else:
-            verdict = None
-            aggregate_status = "mixed"
-        out["grounded"] = verdict
-        out["groundingStatus"] = aggregate_status
+            aggregate_support = SUPPORTED
+        out["grounded"] = {SUPPORTED: True, CONTRADICTED: False}.get(aggregate_support)
+        out["support"] = aggregate_support
+        out["groundingStatus"] = _GROUNDING_STATUS_FOR_SUPPORT[aggregate_support]
         out["groundingChecks"] = grounding_checks
         source_set = sorted(
             {
@@ -996,28 +1020,28 @@ async def _ground_references(
 def _grounding_failure_issues(
     references: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
-    """Collapse repeated per-reference failures into claim/source-set issues."""
+    """One issue per claim and source set: ``fail`` for a contradiction (the record states
+    something else, quoted), ``info`` for a fact the record does not hold."""
     issues: List[Dict[str, Any]] = []
     seen: set[Tuple[str, str, str, Tuple[int, ...]]] = set()
     for reference in references or []:
-        if reference.get("groundingStatus") not in {"unsupported", "mixed"}:
+        if _support_of(reference) not in {CONTRADICTED, NOT_ADDRESSED}:
             continue
-        failing_checks = [
-            check
+        checks = [
+            {**check, "support": _check_support(check)}
             for check in (reference.get("groundingChecks") or [])
-            if isinstance(check, dict) and check.get("status") == "unsupported"
+            if isinstance(check, dict)
+            and _check_support(check) in {CONTRADICTED, NOT_ADDRESSED}
+        ] or [
+            {
+                "support": _support_of(reference),
+                "claim": "",
+                "location": "answer",
+                "path": "",
+                "source_indices": reference.get("groundingGroup") or [reference.get("index")],
+            }
         ]
-        if not failing_checks:
-            failing_checks = [
-                {
-                    "claim": "",
-                    "location": "answer",
-                    "path": "",
-                    "source_indices": reference.get("groundingGroup")
-                    or [reference.get("index")],
-                }
-            ]
-        for check in failing_checks:
+        for check in checks:
             source_indices = tuple(
                 sorted(
                     {
@@ -1036,22 +1060,40 @@ def _grounding_failure_issues(
             if key in seen:
                 continue
             seen.add(key)
-            issues.append(
-                {
+            cited = ", ".join(f"[{index}]" for index in source_indices) or "the cited record"
+            if check.get("support") == CONTRADICTED:
+                issue = {
                     "id": "citation_grounding",
                     "status": "fail",
                     "severity": "block",
-                    "reason": (
-                        "The cited source set did not fully support the associated claim."
-                        if len(source_indices) > 1
-                        else f"Citation [{source_indices[0]}] was not fully supported by its source record."
-                        if source_indices
-                        else "The cited evidence did not fully support the associated claim."
-                    ),
-                    "source_indices": list(source_indices),
+                    "reason": f"{cited} states something different: {check.get('chart_value') or 'see the record'}.",
                 }
-            )
+            else:
+                issue = {
+                    "id": "citation_not_addressed",
+                    "status": "info",
+                    "severity": "info",
+                    "reason": f"{cited} does not hold: {check.get('not_found') or 'part of this claim'}.",
+                }
+            issue["source_indices"] = list(source_indices)
+            if check.get("claim"):
+                issue["claim"] = check["claim"]
+            issues.append(issue)
     return issues
+
+
+def _contradiction_note(references: List[Dict[str, Any]]) -> str:
+    """The clinician-facing note for contradicted citations: what the records state."""
+    parts = []
+    for reference in references:
+        for check in reference.get("groundingChecks") or []:
+            if _check_support(check) == CONTRADICTED and check.get("chart_value"):
+                parts.append(f"[{reference.get('index')}]: {check['chart_value']}")
+    return (
+        "A cited record states something different from the answer. " + "; ".join(parts)
+        if parts
+        else "A cited record states something different from the answer."
+    )
 
 
 def _latest_user_text(messages: List[Dict[str, Any]]) -> str:
@@ -1761,6 +1803,9 @@ def _apply_temporal_gate(
     steps: List[Dict[str, Any]],
 ) -> Tuple[str, List[int], List[Any], Dict[str, Any], Optional[str]]:
     """Run the deterministic temporal gate and optionally replace the answer in enforce mode."""
+    repaired_text, date_repairs = temporal.repair_garbled_dates(answer_text, temporal_facts)
+    if date_repairs and (temporal_gate_mode or "enforce").strip().lower() == "enforce":
+        answer_text = repaired_text
     block_text, block_refs = _block_temporal_text_and_refs(blocks)
     gate_answer_text = answer_text + (("\n" + block_text) if block_text else "")
     gate_citations = sorted(set(citations or []) | set(block_refs))
@@ -1769,6 +1814,9 @@ def _apply_temporal_gate(
     )
     original_answer = None
     gate["applied"] = "none"
+    if date_repairs and gate.get("mode") == "enforce":
+        gate["date_repairs"] = date_repairs
+        gate["applied"] = "repair"
     if gate.get("mode") == "enforce" and gate.get("status") == "fail":
         original_answer = answer_text
         patch = (gate.get("patch_answer") or "").strip()
@@ -2274,6 +2322,30 @@ def _overruled_by(error: Mapping[str, Any], verified: Sequence[Mapping[str, Any]
     return False
 
 
+def _normalized_text(value: Any) -> str:
+    return " ".join(unicodedata.normalize("NFKC", str(value or "")).casefold().split())
+
+
+def _quoted_in_chart(error: Mapping[str, Any], chart: str) -> bool:
+    """Whether the reviewer's ``chart`` quote points at the chart it reviewed.
+
+    A flag that quotes a record (by its ``[N]`` index or its text) is a finding; one that
+    quotes nothing the chart holds is the reviewer's doubt and is shown as such, never as a mark.
+    """
+    raw = str(error.get("chart") or "")
+    chart_text = _normalized_text(chart)
+    if not chart_text:
+        return False
+    if any(f"[{index}]" in chart for index in _INLINE_CITATION_RE.findall(raw)):
+        return True
+    quote = _normalized_text(_INLINE_CITATION_RE.sub("", raw))
+    if len(quote) >= 4 and quote in chart_text:
+        return True
+    runs = [run.strip() for run in re.split(r"[;,.()]", quote)]
+    longest = max(runs, key=len) if runs else ""
+    return len(longest) >= 12 and longest in chart_text
+
+
 def _review_flag_note(errors: Sequence[Mapping[str, Any]]) -> str:
     """Clinician-facing note for an answer the reviewer flagged and the Hub left as written."""
     first = errors[0] if errors else {}
@@ -2522,14 +2594,32 @@ async def _review_existing_answer(
             review_step["citation_support"] = {
                 str(index): supported for index, supported in citation_verdicts.items()
             }
+        quoted = [err for err in errs if _quoted_in_chart(err, review_chart)]
+        unquoted = [err for err in errs if err not in quoted]
+        if unquoted:
+            review_step["unverified"] = unquoted
+        review_step["review_status"] = "flagged" if quoted else "clean"
         steps.append(review_step)
-        if verdict and not verdict.get("answer_ok", True) and errs:
+        if verdict and not verdict.get("answer_ok", True) and quoted:
             # The reviewer is another pass of a model like the one that wrote the answer, so its
             # verdict labels the answer; it never replaces or hides it.
-            issues.extend(errs)
+            issues.extend(quoted)
             status = "needs_review"
             summary = "Review flagged a possible error; the answer is shown as written."
-            answer_conf = {"level": "yellow", "note": _review_flag_note(errs)}
+            answer_conf = {"level": "yellow", "note": _review_flag_note(quoted)}
+        elif unquoted:
+            # The reviewer doubted a statement but quoted nothing the chart holds.
+            issues.extend(
+                {
+                    "id": "review_doubt",
+                    "status": "info",
+                    "severity": "info",
+                    "wrong": str(err.get("wrong") or ""),
+                    "chart": str(err.get("chart") or ""),
+                    "reason": "The reviewer questioned this but quoted no chart record for it.",
+                }
+                for err in unquoted
+            )
 
     original_for_wire = (
         original_answer

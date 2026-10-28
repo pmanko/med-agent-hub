@@ -316,7 +316,7 @@ def _stub_indepth(monkeypatch, claims, indepth_verdict):
         return dict(indepth_verdict)
 
     async def entailment(_client, model, pairs, **kwargs):
-        calls.append(("entailment", model, kwargs.get("attribution_only", False)))
+        calls.append(("entailment", model, "facts-first"))
         return [True for _pair in pairs]
 
     monkeypatch.setattr(team, "_synthesize_indepth", fake_claims)
@@ -342,8 +342,7 @@ def test_separate_grounding_checks_in_depth_citations_for_what_they_attribute(mo
 
     _names, final = _final(_full_profile("separate"))
 
-    assert ("entailment", "G", False) in calls
-    assert ("entailment", "G", True) in calls
+    assert calls.count(("entailment", "G", "facts-first")) == 2
     assert _indepth_statuses(final) == {2: "verified"}
     assert final["inDepth"]["validation"]["status"] == "checked"
 
@@ -362,7 +361,7 @@ def test_folded_grounding_takes_in_depth_citation_verdicts_from_the_review(monke
     assert _indepth_statuses(final) == {1: "verified", 2: "unsupported"}
     validation = final["inDepth"]["validation"]
     assert validation["marked"] == [2]
-    assert "does not support" in final["inDepth"]["answer"].splitlines()[1]
+    assert "states something different" in final["inDepth"]["answer"].splitlines()[1]
 
 
 def test_off_grounding_leaves_in_depth_citations_unchecked_and_unmarked(monkeypatch):
@@ -380,18 +379,20 @@ def test_off_grounding_leaves_in_depth_citations_unchecked_and_unmarked(monkeypa
     assert "Check:" not in final["inDepth"]["answer"]
 
 
-def test_attribution_check_asks_only_what_the_claim_attributes_to_its_record(monkeypatch):
+def test_every_citation_check_lists_the_facts_first(monkeypatch):
     prompts = []
 
     async def fake_chat(_client, _model, messages, **_kwargs):
         prompts.append(messages[-1]["content"])
-        return {"content": json.dumps({"verdicts": ["YES"]})}
+        return {"content": json.dumps({"pairs": [{"facts": [{"fact": "39.7 C", "status": "found"}]}]})}
 
     monkeypatch.setattr(team, "_chat", fake_chat)
     pair = [("[20] Temperature 39.7 C", "Temperature 39.7 C indicates a febrile state.")]
 
-    asyncio.run(team._entailment_verdicts(None, "G", pair, attribution_only=True))
-    asyncio.run(team._entailment_verdicts(None, "G", pair))
+    verdicts = asyncio.run(team._entailment_verdicts(None, "G", pair))
 
     assert prompts[0].startswith(team._ATTRIBUTION_SYSTEM_PROMPT)
-    assert prompts[1].startswith(team._ENTAILMENT_SYSTEM_PROMPT)
+    assert "PAIR 1:" in prompts[0]
+    assert verdicts[0]["support"] == "supported"
+
+

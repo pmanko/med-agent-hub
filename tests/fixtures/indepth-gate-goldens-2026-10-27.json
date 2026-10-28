@@ -111,9 +111,8 @@
       "flagged_in_run": [
         "date_format:fail"
       ],
-      "expected": [
-        "date_format:fail"
-      ]
+      "expected": [],
+      "note": "the underscore date is repaired to 2026-01-26 before the check"
     },
     {
       "scenario": "convo-safety-escalation",

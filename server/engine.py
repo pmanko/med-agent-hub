@@ -132,6 +132,62 @@ def _answer_response_format(request: ExecutionRequest) -> Optional[Dict[str, Any
     return request.response_format
 
 
+def _confidence_policy(profile: Profile) -> str:
+    """What the confidence sections carry (``review.confidence``): ``levels`` (a green, yellow
+    or red grade) or ``findings`` (no grade; the list of what the checks found)."""
+    review = profile.policies.get("review") or {}
+    return str(review.get("confidence") or "levels")
+
+
+_ISSUE_CHECKS = (
+    ("citation_grounding", "citation"),
+    ("citation_not_addressed", "citation"),
+    ("citation_grounding_unavailable", "citation"),
+    ("review_doubt", "review"),
+    ("citation_", "record"),
+)
+
+
+def _answer_findings(state: "_State") -> List[Dict[str, Any]]:
+    """What the checks found on the Answer, one entry per issue the validation carries."""
+    findings: List[Dict[str, Any]] = []
+    for issue in (state.answer_validation or {}).get("issues") or []:
+        if not isinstance(issue, dict):
+            continue
+        issue_id = str(issue.get("id") or "")
+        if issue.get("wrong") is not None and not issue_id:
+            check = "review"
+        else:
+            check = next(
+                (name for prefix, name in _ISSUE_CHECKS if issue_id.startswith(prefix)), "date"
+            )
+        says = str(issue.get("reason") or "").strip()
+        if check == "review":
+            wrong, chart = str(issue.get("wrong") or ""), str(issue.get("chart") or "")
+            says = (f"questioned \"{wrong}\" against {chart}" if chart else wrong) or says
+        findings.append(
+            {
+                "check": check,
+                "where": "answer",
+                "status": str(issue.get("status") or "fail"),
+                "says": says,
+            }
+        )
+    return findings
+
+
+def _confidence_section(
+    profile: Profile, section: Mapping[str, Any], findings: List[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """The shipped confidence section: the grade under ``levels``, no grade under ``findings``."""
+    out: Dict[str, Any] = dict(section or {})
+    if _confidence_policy(profile) == "findings" and out:
+        out["level"] = None
+    if out or findings:
+        out["findings"] = findings
+    return out
+
+
 def _grounding_policy(profile: Profile) -> str:
     """How the profile checks that cited records support their sentences (``review.grounding``)."""
     review = profile.policies.get("review") or {}
@@ -185,6 +241,7 @@ class _State:
     indepth_gate: Optional[Dict[str, Any]] = None
     # 1-based In-Depth claim index -> what each check marked on it; shown beside the claim.
     indepth_marks: Dict[int, List[str]] = field(default_factory=dict)
+    indepth_findings: List[Dict[str, Any]] = field(default_factory=list)
     # Neutral tags: what a claim is, not a call to check it (uncited general guidance).
     indepth_tags: Dict[int, str] = field(default_factory=dict)
     indepth_error: str = ""
@@ -324,16 +381,20 @@ def _merge_reference_grounding(
             existing.get("groundingStatus"),
             incoming.get("groundingStatus"),
         }
-    if statuses & {"unchecked", "checking", None}:
-        grounded, aggregate = None, "unchecked"
-    elif "mixed" in statuses or {"verified", "unsupported"} <= statuses:
-        grounded, aggregate = None, "mixed"
-    elif "unsupported" in statuses:
-        grounded, aggregate = False, "unsupported"
+    supports = {check.get("support") for check in checks if check.get("support")}
+    if not supports:
+        supports = {stages._support_of(existing), stages._support_of(incoming)}
+    if statuses & {"unchecked", "checking", None} or stages.UNCHECKED in supports:
+        support = stages.UNCHECKED
+    elif stages.CONTRADICTED in supports or "unsupported" in statuses:
+        support = stages.CONTRADICTED
+    elif stages.NOT_ADDRESSED in supports:
+        support = stages.NOT_ADDRESSED
     else:
-        grounded, aggregate = True, "verified"
-    existing["grounded"] = grounded
-    existing["groundingStatus"] = aggregate
+        support = stages.SUPPORTED
+    existing["support"] = support
+    existing["grounded"] = {stages.SUPPORTED: True, stages.CONTRADICTED: False}.get(support)
+    existing["groundingStatus"] = stages._GROUNDING_STATUS_FOR_SUPPORT[support]
 
 
 def _ledger_after_drug_injection(
@@ -978,7 +1039,8 @@ def _sampling(request: ExecutionRequest) -> Dict[str, Any]:
         "answer_dry": stages._knob(knobs, "answer", "dry", SYNTH_DRY_MULTIPLIER),
         "review_temperature": stages._knob(knobs, "review", "temperature", 0.0),
         "review_repeat_penalty": stages._knob(knobs, "review", "repeat_penalty", None),
-        "review_dry": stages._knob(knobs, "review", "dry", None),
+        # Checks copy dates and values from the chart; the repetition penalty garbles them.
+        "review_dry": stages._knob(knobs, "review", "dry", 0.0),
     }
 
 
@@ -1065,13 +1127,17 @@ def _stream_payload(
     if request.model_label or request.profile.id:
         payload["model"] = request.model_label or request.profile.id
     if state.answer_conf:
-        payload["confidence"] = {"answer": state.answer_conf}
+        payload["confidence"] = {
+            "answer": _confidence_section(request.profile, state.answer_conf, _answer_findings(state))
+        }
         if (
             in_depth is not None
             and in_depth.get("status") != "pending"
             and state.indepth_conf
         ):
-            payload["confidence"]["in_depth"] = state.indepth_conf
+            payload["confidence"]["in_depth"] = _confidence_section(
+                request.profile, state.indepth_conf, list(state.indepth_findings)
+            )
     if state.answer_validation is not None:
         validation = dict(state.answer_validation)
         initial = state.initial_answer_text
@@ -1978,30 +2044,45 @@ async def _execute_stages(
                                 ),
                             }
                         )
-                    unsupported = [
+                    contradicted = [
                         reference
                         for reference in state.references
-                        if reference.get("groundingStatus")
-                        in {"unsupported", "mixed"}
+                        if stages._support_of(reference) == stages.CONTRADICTED
+                    ]
+                    not_addressed = [
+                        reference
+                        for reference in state.references
+                        if stages._support_of(reference) == stages.NOT_ADDRESSED
                     ]
                     unchecked = [
                         reference
                         for reference in state.references
                         if grounding != "off"
                         and reference.get("resolutionStatus") == "resolved"
-                        and reference.get("groundingStatus") == "unchecked"
+                        and stages._support_of(reference) == stages.UNCHECKED
                     ]
-                    if unsupported:
+                    if not_addressed:
+                        # A record that does not hold a stated fact is incomplete citing, a
+                        # note for the reader, never a mark against the answer.
+                        prior = state.answer_validation or {}
+                        state.answer_validation = stages._answer_validation_wire(
+                            str(prior.get("status") or "checked"),
+                            summary=str(prior.get("summary") or ""),
+                            issues=list(prior.get("issues") or [])
+                            + stages._grounding_failure_issues(not_addressed),
+                            original_answer=prior.get("originalAnswer"),
+                        )
+                    if contradicted:
                         prior = state.answer_validation or {}
                         state.answer_conf = {
                             "level": "red",
-                            "note": "One or more cited source sets did not support the associated claim.",
+                            "note": stages._contradiction_note(contradicted),
                         }
                         state.answer_validation = stages._answer_validation_wire(
                             "needs_review",
-                            summary="One or more cited sources do not support the associated claim.",
+                            summary="A cited record states something different from the answer.",
                             issues=list(prior.get("issues") or [])
-                            + stages._grounding_failure_issues(unsupported),
+                            + stages._grounding_failure_issues(contradicted),
                             original_answer=prior.get("originalAnswer"),
                         )
                     elif unchecked:
@@ -2235,10 +2316,14 @@ async def _execute_stages(
                         state.indepth_conf = {}
                     state.claims = list(state.indepth_gate["claims"])
                     marks: Dict[int, List[Tuple[str, str]]] = {}
+                    state.indepth_findings = []
 
-                    def mark(claim_index: int, level: str, label: str) -> None:
+                    def mark(claim_index: int, level: str, label: str, check: str) -> None:
                         if (level, label) not in marks.setdefault(claim_index, []):
                             marks[claim_index].append((level, label))
+                            state.indepth_findings.append(
+                                {"check": check, "where": claim_index, "says": label}
+                            )
 
                     gate_entries = {
                         entry.get("claim_index"): entry
@@ -2249,6 +2334,7 @@ async def _execute_stages(
                             claim_index,
                             "red",
                             _date_check_label(gate_entries.get(claim_index) or {}),
+                            "date",
                         )
                     if review.get("status") == "flagged":
                         state.indepth_gate["review_status"] = "flagged"
@@ -2259,9 +2345,11 @@ async def _execute_stages(
                             review.get("issues") or ""
                         )
                         for claim_index in review.get("flagged") or []:
-                            mark(claim_index, "yellow", "flagged on review")
+                            mark(claim_index, "yellow", "flagged on review", "review")
                     elif review.get("status") == "unreviewed":
                         state.indepth_gate["review_status"] = "unavailable"
+                    else:
+                        state.indepth_gate["review_status"] = "clean"
                     citation_checks: list[dict[str, Any]] = []
                     candidates: list[tuple[int, str, list[dict[str, Any]]]] = []
                     for claim_index, claim in enumerate(state.claims, 1):
@@ -2304,7 +2392,7 @@ async def _execute_stages(
                                     ],
                                 }
                             )
-                            mark(claim_index, "red", "it cites a record not in this chart")
+                            mark(claim_index, "red", "it cites a record not in this chart", "record")
                             continue
                         candidates.append((claim_index, claim, claim_references))
 
@@ -2345,7 +2433,6 @@ async def _execute_stages(
                             "\n".join(claim for _index, claim, _refs in candidates),
                             flattened,
                             state.mappings,
-                            attribution_only=True,
                         )
 
                     indepth_references: list[dict[str, Any]] = []
@@ -2356,23 +2443,23 @@ async def _execute_stages(
                         ]
                         offset += len(references)
                         indepth_references.extend(grounded_references)
-                        unsupported = [
+                        contradicted = [
                             reference
                             for reference in grounded_references
-                            if reference.get("groundingStatus")
-                            in {"unsupported", "mixed"}
+                            if stages._support_of(reference) == stages.CONTRADICTED
                         ]
-                        if unsupported:
-                            not_found = "; ".join(
+                        if contradicted:
+                            chart_value = "; ".join(
                                 dict.fromkeys(
-                                    check["not_found"]
-                                    for reference in unsupported
+                                    check["chart_value"]
+                                    for reference in contradicted
                                     for check in reference.get("groundingChecks") or []
-                                    if check.get("not_found")
+                                    if check.get("chart_value")
+                                    and stages._check_support(check) == stages.CONTRADICTED
                                 )
                             )
                             cited = ", ".join(
-                                f"[{reference.get('index')}]" for reference in unsupported
+                                f"[{reference.get('index')}]" for reference in contradicted
                             )
                             citation_checks.append(
                                 {
@@ -2380,29 +2467,63 @@ async def _execute_stages(
                                     "claim": claim,
                                     "status": "fail",
                                     "reason": (
-                                        f"Its cited record {cited} does not state: {not_found}."
-                                        if not_found
-                                        else "In-Depth claim is not supported by its cited source."
+                                        f"{cited} states something different: {chart_value}."
+                                        if chart_value
+                                        else f"{cited} states something different from this claim."
                                     ),
                                     "source_indices": [
-                                        reference.get("index")
-                                        for reference in unsupported
+                                        reference.get("index") for reference in contradicted
                                     ],
                                 }
                             )
                             mark(
                                 claim_index,
                                 "red",
-                                f"{cited} does not state {not_found}"
-                                if not_found
-                                else "its cited record does not support it",
+                                f"{cited} states {chart_value}"
+                                if chart_value
+                                else f"{cited} states something different",
+                                "citation",
+                            )
+                            continue
+                        not_addressed = [
+                            reference
+                            for reference in grounded_references
+                            if stages._support_of(reference) == stages.NOT_ADDRESSED
+                        ]
+                        if not_addressed:
+                            # The record holds part of the claim, not all of it: a note, not a mark.
+                            not_found = "; ".join(
+                                dict.fromkeys(
+                                    check["not_found"]
+                                    for reference in not_addressed
+                                    for check in reference.get("groundingChecks") or []
+                                    if check.get("not_found")
+                                )
+                            )
+                            cited = ", ".join(
+                                f"[{reference.get('index')}]" for reference in not_addressed
+                            )
+                            citation_checks.append(
+                                {
+                                    "claim_index": claim_index,
+                                    "claim": claim,
+                                    "status": "not_addressed",
+                                    "reason": (
+                                        f"{cited} does not hold: {not_found}."
+                                        if not_found
+                                        else f"{cited} does not hold part of this claim."
+                                    ),
+                                    "source_indices": [
+                                        reference.get("index") for reference in not_addressed
+                                    ],
+                                }
                             )
                             continue
                         unchecked = [
                             reference
                             for reference in grounded_references
                             if grounding != "off"
-                            and reference.get("groundingStatus") == "unchecked"
+                            and stages._support_of(reference) == stages.UNCHECKED
                         ]
                         if unchecked:
                             citation_checks.append(
@@ -2417,7 +2538,20 @@ async def _execute_stages(
                                     ],
                                 }
                             )
-                            mark(claim_index, "yellow", "its citation was not checked")
+                            mark(claim_index, "yellow", "its citation was not checked", "citation")
+                            continue
+                        if grounding != "off" and grounded_references:
+                            citation_checks.append(
+                                {
+                                    "claim_index": claim_index,
+                                    "claim": claim,
+                                    "status": "pass",
+                                    "reason": "Its cited records state what the claim attributes to them.",
+                                    "source_indices": [
+                                        reference.get("index") for reference in grounded_references
+                                    ],
+                                }
+                            )
 
                     state.indepth_marks = {
                         claim_index: [label for _level, label in labels]
