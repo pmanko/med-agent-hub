@@ -2009,6 +2009,40 @@ async def _execute_stages(
                                 or (state.review_draft if state.review_edited else None)
                             ),
                         )
+                    elif "ground_verdicts" not in request.profile.stages:
+                        # No review and no citation check: the deterministic checks alone set
+                        # the status (a gate patch is an edit, a failed gate or an unresolved
+                        # record needs review).
+                        prior = state.answer_validation or {}
+                        unresolved_final = any(
+                            reference.get("resolutionStatus") == "unresolved"
+                            for reference in state.references
+                        )
+                        if unresolved_final:
+                            _mark_answer_low_confidence(
+                                state,
+                                "One or more citations do not resolve to the current evidence ledger.",
+                            )
+                        if state.citation_issues:
+                            _mark_answer_low_confidence(
+                                state,
+                                "The answer has a blocking citation-format or citation-scope issue.",
+                            )
+                        status = (
+                            "needs_review"
+                            if unresolved_final
+                            or state.citation_issues
+                            or state.answer_conf.get("level") == "red"
+                            else "edited"
+                            if _initial_answer_changed(state)
+                            else "checked"
+                        )
+                        state.answer_validation = stages._answer_validation_wire(
+                            status,
+                            summary=prior.get("summary") or state.answer_conf.get("note", ""),
+                            issues=list(prior.get("issues") or []) + list(state.citation_issues),
+                            original_answer=prior.get("originalAnswer"),
+                        )
                     record_stage_timing()
                     continue
 
@@ -2419,7 +2453,7 @@ async def _execute_stages(
                             mark(claim_index, "yellow", "flagged on review", "review")
                     elif review.get("status") == "unreviewed":
                         state.indepth_gate["review_status"] = "unavailable"
-                    else:
+                    elif "review" in request.profile.models:
                         state.indepth_gate["review_status"] = "clean"
                     citation_checks: list[dict[str, Any]] = []
                     candidates: list[tuple[int, str, list[dict[str, Any]]]] = []
