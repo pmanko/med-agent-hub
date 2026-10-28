@@ -10,6 +10,8 @@ stage_sets:
   product: &product [context, answer, gate, resolve_refs, review, gate, final_resolve_refs, ground_verdicts, indepth, indepth_gate]
   product_fast: &product_fast [context, answer, gate, resolve_refs, review, gate, final_resolve_refs, ground_verdicts]
   product_answer: &product_answer [context, answer, gate, resolve_refs, final_resolve_refs, ground_verdicts]
+  product_bare: &product_bare [context, answer, gate, resolve_refs, final_resolve_refs, indepth, indepth_gate]
+  product_agree: &product_agree [context, answer, gate, resolve_refs, final_resolve_refs, agree, indepth, indepth_gate]
   team_product: &team_product [context, gather, answer, gate, resolve_refs, review, gate, final_resolve_refs, ground_verdicts, indepth, indepth_gate]
 
 profiles:
@@ -211,7 +213,7 @@ profiles:
     stages: *product
     models: {answer: gemma-4-12b, review: gemma-4-12b, grounding: gemma-4-12b, indepth: gemma-4-12b}
     prompts: {answer: synthesis-answer, review: validation-label, indepth: synthesis-indepth}
-    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true, review: {action: label, grounding: separate, confidence: findings}}
+    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true, review: {action: label, grounding: separate}, confidence: findings}
     visibility: product
     default: true
     selection_priority: 30
@@ -238,7 +240,7 @@ profiles:
     stages: *product_answer
     models: {answer: gemma-4-12b, grounding: gemma-4-12b}
     prompts: {answer: synthesis-answer}
-    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true, review: {action: label, grounding: separate, confidence: findings}}
+    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true, review: {action: label, grounding: separate}, confidence: findings}
     visibility: product
     selection_priority: 40
     context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true, supplemental_sources: [knowledge-base]}
@@ -246,67 +248,63 @@ profiles:
 
   # Checked-answer research arms: the default profile's stages, context and policies with one
   # choice changed each. Offered in the app after the default; the harness runs them as arms.
-  single-12b-xcheck:
-    label: Checked answer (12B writer, Qwen3.6 35B-A3B checker)
-    topology: single
-    stages: *product
-    models: {answer: gemma-4-12b, review: qwen3.6-35b, grounding: qwen3.6-35b, indepth: gemma-4-12b}
-    prompts: {answer: synthesis-answer, review: validation-label, indepth: synthesis-indepth}
-    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true, review: {action: label, grounding: separate, confidence: findings}}
-    visibility: product
-    selection_priority: 50
-    context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true, supplemental_sources: [knowledge-base]}
-    knobs: {answer: {temperature: 0}, review: {temperature: 0.7}}
 
   single-31b-xcheck:
-    label: Checked answer (31B writer, Qwen3.5 9B checker)
+    label: Checked answer (31B writer, Qwen3.5 9B verifier)
     topology: single
     stages: *product
     models: {answer: gemma-31b, review: qwen3.5-9b, grounding: qwen3.5-9b, indepth: gemma-31b}
-    prompts: {answer: synthesis-answer, review: validation-label, indepth: synthesis-indepth}
-    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true, review: {action: label, grounding: separate, confidence: findings}}
+    prompts: {answer: synthesis-answer, review: validation-verify, indepth: synthesis-indepth}
+    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true, review: {action: label, grounding: separate}, confidence: findings}
     visibility: product
     selection_priority: 51
     context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true, supplemental_sources: [knowledge-base]}
     knobs: {answer: {temperature: 0}, review: {temperature: 0.7}}
 
-  single-12b-checked-folded:
-    label: Checked answer (12B, citation support judged in the review)
+  # Run D (confidence-labels.md, pruning of 28 October): three checked arms that each answer one
+  # question. bare: the deterministic checks alone. verify: a cross-family reviewer that asks
+  # and answers verification questions. agree: a second writer from another family answers on
+  # its own and each sentence of the shown answer is checked against its answer.
+  single-12b-bare:
+    label: Answer with the chart checks only (12B)
     topology: single
-    stages: *product
-    models: {answer: gemma-4-12b, review: gemma-4-12b, grounding: gemma-4-12b, indepth: gemma-4-12b}
-    prompts: {answer: synthesis-answer, review: validation-label, indepth: synthesis-indepth}
-    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true, review: {action: label, grounding: folded, confidence: findings}}
-    visibility: product
-    selection_priority: 52
-    context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true, supplemental_sources: [knowledge-base]}
-    knobs: {answer: {temperature: 0}}
-
-  single-12b-checked-noground:
-    label: Checked answer (12B, no citation support check)
-    topology: single
-    stages: *product
-    models: {answer: gemma-4-12b, review: gemma-4-12b, grounding: gemma-4-12b, indepth: gemma-4-12b}
-    prompts: {answer: synthesis-answer, review: validation-label, indepth: synthesis-indepth}
-    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true, review: {action: label, grounding: "off", confidence: findings}}
-    visibility: product
-    selection_priority: 53
-    context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true, supplemental_sources: [knowledge-base]}
-    knobs: {answer: {temperature: 0}}
-
-  # The default with the DRY repetition penalty off for the writer and the reviewer; DRY
-  # garbles dates copied from the chart (2026-01_26). Measured against single-12b-checked.
-  single-12b-checked-nodry:
-    label: Checked answer (12B, repetition penalty off)
-    topology: single
-    stages: *product
-    models: {answer: gemma-4-12b, review: gemma-4-12b, grounding: gemma-4-12b, indepth: gemma-4-12b}
-    prompts: {answer: synthesis-answer, review: validation-label, indepth: synthesis-indepth}
-    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true, review: {action: label, grounding: separate, confidence: findings}}
+    stages: *product_bare
+    models: {answer: gemma-4-12b, indepth: gemma-4-12b}
+    prompts: {answer: synthesis-answer, indepth: synthesis-indepth}
+    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true, confidence: findings}
     visibility: product
     selection_priority: 54
     context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true, supplemental_sources: [knowledge-base]}
-    knobs: {answer: {temperature: 0, dry: 0}, review: {dry: 0}}
+    knobs: {answer: {temperature: 0}}
+
+  single-12b-verify:
+    label: Checked answer (12B writer, Qwen3.6 35B-A3B verifier)
+    topology: single
+    stages: *product
+    models: {answer: gemma-4-12b, review: qwen3.6-35b, grounding: qwen3.6-35b, indepth: gemma-4-12b}
+    prompts: {answer: synthesis-answer, review: validation-verify, indepth: synthesis-indepth}
+    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true, review: {action: label, grounding: separate}, confidence: findings}
+    visibility: product
+    selection_priority: 55
+    context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true, supplemental_sources: [knowledge-base]}
+    knobs: {answer: {temperature: 0}, review: {temperature: 0.7}}
+
+  single-12b-agree:
+    label: Answer agreed by a second writer (12B and Qwen3.6 35B-A3B)
+    topology: single
+    stages: *product_agree
+    models: {answer: gemma-4-12b, second: qwen3.6-35b, indepth: gemma-4-12b}
+    prompts: {answer: synthesis-answer, indepth: synthesis-indepth}
+    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true, confidence: findings}
+    visibility: product
+    selection_priority: 56
+    context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true, supplemental_sources: [knowledge-base]}
+    knobs: {answer: {temperature: 0}}
+
+
+
+  # The default with the DRY repetition penalty off for the writer and the reviewer; DRY
+  # garbles dates copied from the chart (2026-01_26). Measured against single-12b-checked.
 
   team-med-checked:
     label: Checked medical team

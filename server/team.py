@@ -1017,6 +1017,79 @@ async def _ground_references(
     return grounded_refs
 
 
+_ANSWER_SENTENCE_RE = re.compile(r"(?<=[.!?])\s+|\n+")
+
+
+def _answer_claims(answer_text: str, blocks: Optional[List[Any]] = None) -> List[str]:
+    """The sentences of an answer, citations removed, plus each table cell's text."""
+    claims = [
+        _INLINE_CITATION_RE.sub("", part).strip()
+        for part in _ANSWER_SENTENCE_RE.split(answer_text or "")
+    ]
+    block_text, _refs = _block_temporal_text_and_refs(list(blocks or []))
+    claims.extend(
+        _INLINE_CITATION_RE.sub("", line).strip() for line in (block_text or "").splitlines()
+    )
+    return [claim for claim in claims if len(claim) >= 8]
+
+
+def _agreement_record(
+    model: str, second_text: str, claims: List[str], verdicts: List[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """What the second writer agreed with, claim by claim: ``agreed`` (every fact stated),
+    ``differs`` (a fact stated differently, with the other reading), ``unverified`` (not stated)."""
+    status_for = {SUPPORTED: "agreed", CONTRADICTED: "differs", NOT_ADDRESSED: "unverified"}
+    rows = []
+    for claim, verdict in zip(claims, verdicts):
+        verdict = _as_verdict(verdict)
+        row = {"claim": claim, "status": status_for.get(verdict["support"], "unchecked")}
+        if verdict.get("chart_value"):
+            row["other"] = verdict["chart_value"]
+        if verdict.get("not_found"):
+            row["not_stated"] = verdict["not_found"]
+        rows.append(row)
+    for claim in claims[len(verdicts):]:
+        rows.append({"claim": claim, "status": "unchecked"})
+    statuses = {row["status"] for row in rows}
+    status = (
+        "differs"
+        if "differs" in statuses
+        else "unchecked"
+        if "unchecked" in statuses or not rows
+        else "agreed"
+        if statuses <= {"agreed"}
+        else "partly"
+    )
+    return {"model": model, "answer": second_text, "status": status, "claims": rows}
+
+
+def _agreement_issues(agreement: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    """``fail`` for a claim the second writer states differently, ``info`` for one it does not state."""
+    issues = []
+    for row in agreement.get("claims") or []:
+        if row.get("status") == "differs":
+            issues.append(
+                {
+                    "id": "agreement",
+                    "status": "fail",
+                    "severity": "block",
+                    "claim": row["claim"],
+                    "reason": f"The second writer states something different: {row.get('other') or 'see its answer'}.",
+                }
+            )
+        elif row.get("status") == "unverified":
+            issues.append(
+                {
+                    "id": "agreement_unverified",
+                    "status": "info",
+                    "severity": "info",
+                    "claim": row["claim"],
+                    "reason": f"The second writer did not state: {row.get('not_stated') or 'this'}.",
+                }
+            )
+    return issues
+
+
 def _grounding_failure_issues(
     references: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
@@ -1453,6 +1526,16 @@ _LABEL_VERDICT_RF = {
                         "type": "object",
                         "properties": {
                             "wrong": {"type": "string"},
+                            "chart": {"type": "string"},
+                        },
+                    },
+                },
+                "checked": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "question": {"type": "string"},
                             "chart": {"type": "string"},
                         },
                     },

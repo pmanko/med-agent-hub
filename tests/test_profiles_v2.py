@@ -31,11 +31,10 @@ def test_configured_catalog_contains_only_current_product_eval_and_debug_profile
         "single-12b-checked",
         "single-12b-fast",
         "single-12b-answer",
-        "single-12b-xcheck",
         "single-31b-xcheck",
-        "single-12b-checked-folded",
-        "single-12b-checked-noground",
-        "single-12b-checked-nodry",
+        "single-12b-bare",
+        "single-12b-verify",
+        "single-12b-agree",
         "single-a4b-checked",
         "team-med-checked",
         "debug-team-high-checked",
@@ -505,7 +504,7 @@ def test_compiled_profile_configuration_is_immutable():
     ("profile_id", "models", "grounding", "review_temperature"),
     [
         (
-            "single-12b-xcheck",
+            "single-12b-verify",
             {"answer": "gemma-4-12b", "review": "qwen3.6-35b", "grounding": "qwen3.6-35b", "indepth": "gemma-4-12b"},
             "separate",
             0.7,
@@ -516,8 +515,6 @@ def test_compiled_profile_configuration_is_immutable():
             "separate",
             0.7,
         ),
-        ("single-12b-checked-folded", None, "folded", None),
-        ("single-12b-checked-noground", None, "off", None),
     ],
 )
 def test_checked_answer_arms_change_only_their_declared_choice(
@@ -530,7 +527,11 @@ def test_checked_answer_arms_change_only_their_declared_choice(
     assert not arm.default
     assert arm.selection_priority > default.selection_priority
     assert arm.stages == default.stages
-    assert arm.prompts == default.prompts
+    # The verifier arms ask verification questions; every other prompt is the default's.
+    assert {role: prompt for role, prompt in arm.prompts.items() if role != "review"} == {
+        role: prompt for role, prompt in default.prompts.items() if role != "review"
+    }
+    assert arm.prompts["review"] in {"validation-label", "validation-verify"}
     assert arm.supplemental_sources == default.supplemental_sources
     assert (arm.context_window, arm.reserved_output_tokens, arm.exact_tokenizer) == (
         default.context_window,
