@@ -10,9 +10,7 @@
         "date_value_binding:fail",
         "window_scope:warn"
       ],
-      "expected": [
-        "window_scope:warn"
-      ]
+      "expected": []
     },
     {
       "scenario": "date-aloice-last-visit-exact",

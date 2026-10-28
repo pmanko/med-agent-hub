@@ -1795,7 +1795,7 @@ async def _execute_stages(
                     gate_issues = [
                         check
                         for check in (state.answer_gate or {}).get("checks", [])
-                        if check.get("status") in {"warn", "fail"}
+                        if check.get("status") in {"info", "warn", "fail"}
                     ]
                     gate_issues.extend(state.citation_issues)
                     unresolved = [
@@ -1997,7 +1997,7 @@ async def _execute_stages(
                             + [
                                 check
                                 for check in (state.answer_gate or {}).get("checks", [])
-                                if check.get("status") in {"warn", "fail"}
+                                if check.get("status") in {"info", "warn", "fail"}
                             ]
                             + [
                                 {
