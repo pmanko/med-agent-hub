@@ -190,6 +190,34 @@ def test_folded_grounding_leaves_a_citation_the_review_did_not_judge_unchecked(m
     assert final["answerValidation"]["status"] == "unavailable"
 
 
+def test_folded_grounding_falls_back_to_the_separate_check_when_the_review_judged_nothing(
+    monkeypatch,
+):
+    """A folded review that lists no cited record (the 9B often returns an empty map) must not
+    leave every citation unchecked: the engine runs the separate check with the review model."""
+    _stub(
+        monkeypatch,
+        "Weight was 71 kg [1]. CD4 was 341 cells/uL [2].",
+        {"answer_ok": True, "errors": [], "citations": {}},
+    )
+    entailment_calls = []
+
+    async def fake_entailment(_client, model, pairs):
+        entailment_calls.append((model, len(pairs)))
+        return [{"support": "supported", "facts": [], "not_found": None, "chart_value": None}] * len(
+            pairs
+        )
+
+    monkeypatch.setattr(team, "_bounded_entailment_verdicts", fake_entailment)
+
+    _names, final = _final(_profile("folded"))
+
+    assert entailment_calls == [("R", 2)]
+    statuses = {ref["index"]: ref["groundingStatus"] for ref in final["references"]}
+    assert statuses == {1: "verified", 2: "verified"}
+    assert final["answerValidation"]["status"] == "checked"
+
+
 def test_off_grounding_marks_citations_unchecked_without_a_label(monkeypatch):
     calls = _stub(
         monkeypatch,
