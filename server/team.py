@@ -534,6 +534,19 @@ _ENTAILMENT_SYSTEM_PROMPT = (
     'exactly one verdict per pair, in the same order, as JSON: {"verdicts": ["YES"|"NO", ...]}.'
 )
 
+# In-Depth claims join a chart fact to interpretation and advice. Their citations are checked for
+# the fact the claim attributes to each record; the reasoning is the reviewer's to judge.
+_ATTRIBUTION_SYSTEM_PROMPT = (
+    "You are a strict clinical fact-checker. For each PAIR, decide whether the SOURCE record "
+    "states what the STATEMENT attributes to it: the patient value, date, drug, result or status, "
+    "or the guideline content. Ignore interpretation, advice, risk and general medical knowledge "
+    "in the statement; they are judged elsewhere. Answer NO if the statement attributes to the "
+    "source a value, date, drug, result, status or content the source does not state, or one "
+    "that differs from it, or if you are not fully certain from the source text alone. Never use "
+    "outside medical knowledge. Return exactly one verdict per pair, in the same order, as JSON: "
+    '{"verdicts": ["YES"|"NO", ...]}.'
+)
+
 _ENTAILMENT_RF = {
     "type": "json_schema",
     "json_schema": {
@@ -556,6 +569,8 @@ async def _entailment_verdicts(
     client: httpx.AsyncClient,
     model: str,
     pairs: List[Tuple[str, str]],
+    *,
+    attribution_only: bool = False,
 ) -> List[Optional[bool]]:
     """Batched LLM entailment check for citation grounding — mirrors the validator call shape
     (fresh one-shot message list, dedicated json_schema response_format, one call for the whole
@@ -569,7 +584,10 @@ async def _entailment_verdicts(
         f"PAIR {i + 1}:\nSOURCE: {source or '(none)'}\nSTATEMENT: {statement or '(none)'}"
         for i, (source, statement) in enumerate(pairs)
     )
-    user = _ENTAILMENT_SYSTEM_PROMPT + "\n\n" + body
+    instruction = (
+        _ATTRIBUTION_SYSTEM_PROMPT if attribution_only else _ENTAILMENT_SYSTEM_PROMPT
+    )
+    user = instruction + "\n\n" + body
     try:
         msg = await _chat(
             client,
@@ -606,12 +624,15 @@ async def _bounded_entailment_verdicts(
     client: httpx.AsyncClient,
     model: str,
     pairs: List[Tuple[str, str]],
+    *,
+    attribution_only: bool = False,
 ) -> List[Optional[bool]]:
     """Check all pairs together, splitting only when exact token measurement overflows."""
+    options = {"attribution_only": True} if attribution_only else {}
 
     async def check(items: List[Tuple[str, str]]) -> List[Optional[bool]]:
         try:
-            return await _entailment_verdicts(client, model, items)
+            return await _entailment_verdicts(client, model, items, **options)
         except InsufficientContextError:
             if len(items) == 1:
                 logger.warning(
@@ -633,12 +654,19 @@ async def _ground_references(
     mappings: List[Dict[str, Any]],
     *,
     deterministic_checks: Optional[List[Dict[str, Any]]] = None,
+    index_verdicts: Optional[Mapping[int, bool]] = None,
+    attribution_only: bool = False,
 ) -> List[Dict[str, Any]]:
     """Ground final claims against their cited source sets in one bounded entailment call.
 
     A sentence may rely on multiple citations collectively (for example, two dated weights support
     a change claim). Grouping identical usage text prevents each source from being incorrectly asked
     to support the entire multi-source sentence by itself.
+
+    With ``index_verdicts`` (grounding folded into the review), no entailment call is made: a claim
+    is supported when the reviewer supported every record it cites, unsupported when it rejected
+    any, and unchecked when it judged none or only some of them. ``attribution_only`` checks only
+    what each claim attributes to its records (In-Depth claims), not its interpretation.
     """
     mapping_by_index = {
         mapping.get("index"): mapping
@@ -786,7 +814,31 @@ async def _ground_references(
         ("\n".join(groups[i]["sources"]), groups[i]["claim"])
         for i in checkable_positions
     ]
-    verdicts = await _bounded_entailment_verdicts(client, model, pairs) if pairs else []
+    if index_verdicts is not None:
+        verdicts = []
+        for position in checkable_positions:
+            judged = [
+                index_verdicts.get(references[reference_position].get("index"))
+                for reference_position in groups[position]["references"]
+            ]
+            verdicts.append(
+                False
+                if any(value is False for value in judged)
+                else True
+                if judged and all(value is True for value in judged)
+                else None
+            )
+    else:
+        verdicts = (
+            await _bounded_entailment_verdicts(
+                client,
+                model,
+                pairs,
+                **({"attribution_only": True} if attribution_only else {}),
+            )
+            if pairs
+            else []
+        )
     verdict_by_position = {
         **{position: True for position in deterministic_positions},
         **dict(zip(checkable_positions, verdicts)),
@@ -1258,15 +1310,13 @@ _INDEPTH_RF = {
 }
 
 
-# Rewrite-validator verdict (the "suggest the fix" mode): the validator LOCALIZES each chart
-# contradiction (wrong phrase + grounding record + replacement) AND returns the surgically-corrected
-# answer, so the refine loop ADOPTS the validator's fix instead of asking the writer to regenerate. The
-# research basis: actionable, localized feedback beats a binary verdict, and a surgical edit avoids the
-# over-correction that a from-scratch regenerate inflicts on the already-correct parts of a strong answer.
-_REWRITE_VERDICT_RF = {
+# Label-mode reviewer verdict: the reviewer localizes each chart contradiction (the wrong phrase
+# and the record that contradicts it). The verdict labels the answer; it never replaces it, so the
+# reviewer is not asked for a fix or a corrected answer.
+_LABEL_VERDICT_RF = {
     "type": "json_schema",
     "json_schema": {
-        "name": "rewrite_verdict",
+        "name": "label_verdict",
         "schema": {
             "type": "object",
             "properties": {
@@ -1278,20 +1328,43 @@ _REWRITE_VERDICT_RF = {
                         "properties": {
                             "wrong": {"type": "string"},
                             "chart": {"type": "string"},
-                            "fix": {"type": "string"},
                         },
                     },
                 },
-                "corrected_answer": {"type": "string"},
             },
             "required": ["answer_ok"],
         },
     },
 }
 
-# A validator_prompt with this stem selects the rewrite path (loads <stem>-answer.txt + the rewrite
-# schema + the adopt-the-fix loop); the default "validation" keeps the regenerate path unchanged.
-_REWRITE_VALIDATOR_PROMPT = "validation-rewrite"
+_CITATION_SUPPORT_PROMPT = "review-citation-support"
+_LABEL_WITH_CITATIONS_VERDICT_RF = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "label_verdict",
+        "schema": {
+            "type": "object",
+            "properties": {
+                **_LABEL_VERDICT_RF["json_schema"]["schema"]["properties"],
+                "citations": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "index": {"type": "integer"},
+                            "supported": {"type": "boolean"},
+                        },
+                        "required": ["index", "supported"],
+                    },
+                },
+            },
+            "required": ["answer_ok", "citations"],
+        },
+    },
+}
+
+# The reviewer prompt stem: <stem>-answer.txt labels the Answer, <stem>-indepth.txt the In-Depth.
+_LABEL_VALIDATOR_PROMPT = "validation-label"
 
 
 _INDEPTH_VERDICT_RF = {
@@ -1305,6 +1378,22 @@ _INDEPTH_VERDICT_RF = {
                 "issues": {"type": "string"},
             },
             "required": ["flag"],
+        },
+    },
+}
+
+_INDEPTH_CITATION_SUPPORT_PROMPT = "review-indepth-citation-support"
+_INDEPTH_WITH_CITATIONS_VERDICT_RF = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "indepth_verdict",
+        "schema": {
+            "type": "object",
+            "properties": {
+                **_INDEPTH_VERDICT_RF["json_schema"]["schema"]["properties"],
+                "unsupported": {"type": "array", "items": {"type": "integer"}},
+            },
+            "required": ["flag", "unsupported"],
         },
     },
 }
@@ -1778,7 +1867,7 @@ def _indepth_messages(
     )
 
 
-async def _validate_answer_rewrite(
+async def _validate_answer_label(
     client: httpx.AsyncClient,
     validator_model: str,
     *,
@@ -1789,10 +1878,15 @@ async def _validate_answer_rewrite(
     temperature: float,
     repeat_penalty: Optional[float],
     dry: Optional[float],
-    validation_prompt: str = _REWRITE_VALIDATOR_PROMPT,
+    validation_prompt: str = _LABEL_VALIDATOR_PROMPT,
     verified: Sequence[Dict[str, Any]] = (),
+    citation_support: bool = False,
 ) -> Dict[str, Any]:
-    """Rewrite-mode audit: localize each chart contradiction and return a correction.
+    """Label-mode audit: localize each chart contradiction the answer contains.
+
+    With ``citation_support`` (grounding folded into the review) the reviewer also says, per
+    cited record, whether it supports its sentence; ``citations`` maps each judged index the
+    answer cites to that verdict.
 
     A malformed reviewer response is an unavailable check, never evidence that the
     answer passed review.
@@ -1803,12 +1897,15 @@ async def _validate_answer_rewrite(
         answer_text=answer_text,
         validation_prompt=validation_prompt,
         verified=verified,
+        citation_support=citation_support,
     )
     msg = await _chat(
         client,
         validator_model,
         messages,
-        response_format=_REWRITE_VERDICT_RF,
+        response_format=(
+            _LABEL_WITH_CITATIONS_VERDICT_RF if citation_support else _LABEL_VERDICT_RF
+        ),
         temperature=temperature,
         max_tokens=max_tokens,
         repeat_penalty=repeat_penalty,
@@ -1819,27 +1916,25 @@ async def _validate_answer_rewrite(
         verdict = json.loads(raw)
     except (json.JSONDecodeError, TypeError):
         logger.warning(
-            "rewrite-validator[%s] verdict UNPARSEABLE -> unavailable; raw=%r",
+            "answer-reviewer[%s] verdict UNPARSEABLE -> unavailable; raw=%r",
             validator_model,
             raw[:240],
         )
         return {
             "answer_ok": False,
             "errors": [],
-            "corrected_answer": "",
             "unavailable": True,
             "reason": "The answer reviewer returned malformed output.",
         }
     if not isinstance(verdict, dict):
         logger.warning(
-            "rewrite-validator[%s] verdict not an object -> unavailable; raw=%r",
+            "answer-reviewer[%s] verdict not an object -> unavailable; raw=%r",
             validator_model,
             raw[:240],
         )
         return {
             "answer_ok": False,
             "errors": [],
-            "corrected_answer": "",
             "unavailable": True,
             "reason": "The answer reviewer returned an invalid result.",
         }
@@ -1860,26 +1955,29 @@ async def _validate_answer_rewrite(
     discarded_errors = len(raw_errors) - len(errors)
     if discarded_errors:
         logger.warning(
-            "rewrite-validator[%s] discarded %d unlocalized error(s)",
+            "answer-reviewer[%s] discarded %d unlocalized error(s)",
             validator_model,
             discarded_errors,
         )
     answer_ok = not errors
     logger.info(
-        "rewrite-validator[%s] answer_ok=%s n_errors=%d",
+        "answer-reviewer[%s] answer_ok=%s n_errors=%d",
         validator_model,
         answer_ok,
         len(errors),
     )
-    return {
-        "answer_ok": answer_ok,
-        "errors": errors,
-        "corrected_answer": (
-            (verdict.get("corrected_answer") or "").strip()
-            if errors and not discarded_errors
-            else ""
-        ),
-    }
+    result: Dict[str, Any] = {"answer_ok": answer_ok, "errors": errors}
+    if citation_support:
+        cited = set(_extract_citations(answer_text))
+        result["citations"] = {
+            item["index"]: item["supported"]
+            for item in verdict.get("citations") or []
+            if isinstance(item, dict)
+            and isinstance(item.get("index"), int)
+            and isinstance(item.get("supported"), bool)
+            and item["index"] in cited
+        }
+    return result
 
 
 _LEDGER_NOTE = (
@@ -1923,10 +2021,13 @@ def _answer_validation_messages(
     chart: str,
     gathered: str,
     answer_text: str,
-    validation_prompt: str = _REWRITE_VALIDATOR_PROMPT,
+    validation_prompt: str = _LABEL_VALIDATOR_PROMPT,
     verified: Sequence[Dict[str, Any]] = (),
+    citation_support: bool = False,
 ) -> List[Dict[str, Any]]:
     instruction = load_prompt(validation_prompt + "-answer")
+    if citation_support:
+        instruction += "\n\n" + load_prompt(_CITATION_SUPPORT_PROMPT)
     audit_user = (
         instruction
         + "\n\n"
@@ -1957,8 +2058,12 @@ async def _validate_indepth_verdict(
     repeat_penalty: Optional[float],
     dry: Optional[float],
     validation_prompt: str = "validation",
+    citation_support: bool = False,
 ) -> Dict[str, Any]:
     """Audit the In-Depth claims claim-by-claim.
+
+    With ``citation_support`` (grounding folded into the review) the verdict also lists, under
+    ``unsupported``, the claims whose cited records do not state what the claim attributes to them.
 
     Returns ``{flag: [1-based claim numbers], issues: str}``, with flags clamped
     to the claim list. A malformed result marks review unavailable, so the claims
@@ -1970,12 +2075,17 @@ async def _validate_indepth_verdict(
         answer_text=answer_text,
         claims=claims,
         validation_prompt=validation_prompt,
+        citation_support=citation_support,
     )
     msg = await _chat(
         client,
         validator_model,
         messages,
-        response_format=_INDEPTH_VERDICT_RF,
+        response_format=(
+            _INDEPTH_WITH_CITATIONS_VERDICT_RF
+            if citation_support
+            else _INDEPTH_VERDICT_RF
+        ),
         temperature=temperature,
         max_tokens=max_tokens,
         repeat_penalty=repeat_penalty,
@@ -2020,7 +2130,16 @@ async def _validate_indepth_verdict(
         len(claims),
         (verdict.get("issues") or "")[:120],
     )
-    return {"flag": flag, "issues": verdict.get("issues", "")}
+    result: Dict[str, Any] = {"flag": flag, "issues": verdict.get("issues", "")}
+    if citation_support:
+        result["unsupported"] = sorted(
+            {
+                d
+                for d in (verdict.get("unsupported") or [])
+                if isinstance(d, int) and 1 <= d <= len(claims)
+            }
+        )
+    return result
 
 
 def _indepth_validation_messages(
@@ -2030,8 +2149,11 @@ def _indepth_validation_messages(
     answer_text: str,
     claims: List[str],
     validation_prompt: str = "validation",
+    citation_support: bool = False,
 ) -> List[Dict[str, Any]]:
     instruction = load_prompt(validation_prompt + "-indepth")
+    if citation_support:
+        instruction += "\n\n" + load_prompt(_INDEPTH_CITATION_SUPPORT_PROMPT)
     numbered = "\n".join(f"{i}. {c}" for i, c in enumerate(claims, start=1))
     audit_user = (
         instruction
@@ -2104,6 +2226,7 @@ async def _review_existing_answer(
     review_chart_selector: Optional[
         Callable[[str, List[Any], str], Awaitable[str]]
     ] = None,
+    citation_verdicts: Optional[Dict[int, bool]] = None,
 ) -> Tuple[
     str, Dict[str, Any], str, Dict[str, Any], Optional[Dict[str, Any]], Optional[str]
 ]:
@@ -2113,6 +2236,9 @@ async def _review_existing_answer(
     temporal/date failures from the chart's dated records. The LLM reviewer only labels: an error it
     reports leaves the answer as written, marked needs_review with a yellow note, and an error that
     targets a statement the date checks confirmed is set aside.
+
+    When ``citation_verdicts`` is given (grounding folded into the review), the reviewer also
+    judges each cited record and the dict is filled with its per-index verdicts.
     """
     payload = payload_override or _review_payload_from_messages(messages)
     original_answer = str(
@@ -2231,7 +2357,7 @@ async def _review_existing_answer(
         )
         verified = temporal.verified_series_endpoints(question, answer_text, temporal_facts)
         try:
-            verdict = await _validate_answer_rewrite(
+            verdict = await _validate_answer_label(
                 client,
                 reviewer_model,
                 chart=review_chart,
@@ -2241,15 +2367,15 @@ async def _review_existing_answer(
                 temperature=validator_temperature,
                 repeat_penalty=validator_repeat_penalty,
                 dry=validator_dry,
-                validation_prompt=reviewer_prompt or _REWRITE_VALIDATOR_PROMPT,
+                validation_prompt=reviewer_prompt or _LABEL_VALIDATOR_PROMPT,
                 verified=verified,
+                citation_support=citation_verdicts is not None,
             )
         except Exception as e:
             logger.warning("answer-review validator call failed: %s", e)
             verdict = {
                 "answer_ok": False,
                 "errors": [],
-                "corrected_answer": "",
                 "unavailable": True,
                 "reason": str(e),
             }
@@ -2291,6 +2417,8 @@ async def _review_existing_answer(
                 original_answer if original_answer != answer_text else None,
             )
 
+        if citation_verdicts is not None:
+            citation_verdicts.update(verdict.get("citations") or {})
         errs = (verdict or {}).get("errors") or []
         overruled = [err for err in errs if _overruled_by(err, verified)]
         errs = [err for err in errs if err not in overruled]
@@ -2298,7 +2426,7 @@ async def _review_existing_answer(
             verdict = {**verdict, "answer_ok": True, "errors": []}
         review_step = {
             "role": "answer_review",
-            "mode": "rewrite",
+            "mode": "label",
             "model": reviewer_model,
             "answer_ok": (verdict or {}).get("answer_ok", True),
             "n_errors": len(errs),
@@ -2306,6 +2434,10 @@ async def _review_existing_answer(
         }
         if overruled:
             review_step["overruled_by_date_checks"] = overruled
+        if citation_verdicts is not None:
+            review_step["citation_support"] = {
+                str(index): supported for index, supported in citation_verdicts.items()
+            }
         steps.append(review_step)
         if verdict and not verdict.get("answer_ok", True) and errs:
             # The reviewer is another pass of a model like the one that wrote the answer, so its
@@ -2368,6 +2500,7 @@ async def _gen_indepth(
     steps: List[Dict[str, Any]],
     canonicalize_citations: bool = False,
     review_context_fitter: Optional[Callable[[List[str]], Awaitable[str]]] = None,
+    citation_support: bool = False,
 ) -> Tuple[List[str], Dict[str, Any]]:
     """Synthesize the In-Depth claims once and label them with one review.
 
@@ -2418,6 +2551,7 @@ async def _gen_indepth(
             repeat_penalty=validator_repeat_penalty,
             dry=validator_dry,
             validation_prompt=validator_prompt or "validation",
+            **({"citation_support": True} if citation_support else {}),
         )
     except InsufficientContextError:
         raise
@@ -2441,8 +2575,14 @@ async def _gen_indepth(
             "note": "In-Depth review was unavailable; these points were not reviewed.",
         }
     flagged = list(verdict.get("flag") or [])
+    # Folded grounding: the review's citation verdicts travel with its labels to the In-Depth gate.
+    support = (
+        {"citation_unsupported": list(verdict.get("unsupported") or [])}
+        if citation_support
+        else {}
+    )
     if not flagged:
-        return claims, green
+        return claims, {**green, **support}
     issues = " ".join(str(verdict.get("issues") or "").split())
     return claims, {
         "level": "yellow",
@@ -2452,6 +2592,7 @@ async def _gen_indepth(
         "note": f"Review flagged {len(flagged)} of {len(claims)} points"
         + (f": {issues.rstrip('.')}" if issues else "")
         + ". Verify them against the chart.",
+        **support,
     }
 
 

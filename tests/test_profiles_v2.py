@@ -295,8 +295,8 @@ def test_discovery_metadata_is_authoritative_and_dynamic_legs_are_not_advertised
         "system_prompt_sha256": {"synthesis-answer": answer_digest},
     }
     assert set(prompt_digests["review"]["system_prompt_sha256"]) == {
-        "validation-rewrite-answer",
-        "validation-rewrite-indepth",
+        "validation-label-answer",
+        "validation-label-indepth",
     }
 
 

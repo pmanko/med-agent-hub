@@ -5,7 +5,7 @@ confirmed are given to the reviewer as confirmed, and an error that targets one 
 
 Selected by the profile's review prompt. Mocks only the model boundary (`_chat`)
 and exercises the compiled stages end-to-end, branching on the response_format json_schema name so the
-Answer synth, the rewrite_verdict validator, and the In-Depth calls are served independently.
+Answer synth, the label_verdict validator, and the In-Depth calls are served independently.
 
 Run: pytest tests/test_validator_rewrite.py
 """
@@ -35,11 +35,11 @@ def _restore_chat_after_test():
         team._chat = original_chat
 
 
-def _factory(calls, rewrite_verdicts):
+def _factory(calls, label_verdicts):
     """Mock _chat. Branches on the response_format json_schema name:
     "chart_answer"     (Answer synth)    -> {answer: ans-vN} (N = synth call index);
     "in_depth"         (In-Depth synth)  -> {claims:[...]};
-    "rewrite_verdict"  (rewrite validator) -> the Nth entry of `rewrite_verdicts`, verbatim;
+    "label_verdict"  (rewrite validator) -> the Nth entry of `label_verdicts`, verbatim;
     "indepth_verdict"  -> {flag:[]} (no-op here);
     no response_format (orchestrator)    -> no tools (break to synthesis)."""
     state = {"answer_synth": 0, "indepth_synth": 0, "rw": 0}
@@ -71,10 +71,10 @@ def _factory(calls, rewrite_verdicts):
             n = state["indepth_synth"]
             state["indepth_synth"] += 1
             return {"content": json.dumps({"claims": [f"claim-A-v{n}"]})}
-        if name == "rewrite_verdict":
+        if name == "label_verdict":
             v = (
-                rewrite_verdicts[min(state["rw"], len(rewrite_verdicts) - 1)]
-                if rewrite_verdicts
+                label_verdicts[min(state["rw"], len(label_verdicts) - 1)]
+                if label_verdicts
                 else {"answer_ok": True}
             )
             state["rw"] += 1
@@ -89,22 +89,22 @@ def _factory(calls, rewrite_verdicts):
 def _counts(calls):
     return (
         sum(1 for _m, n in calls if n == "chart_answer"),
-        sum(1 for _m, n in calls if n == "rewrite_verdict"),
+        sum(1 for _m, n in calls if n == "label_verdict"),
     )
 
 
-def _run(rewrite_verdicts, **kw):
+def _run(label_verdicts, **kw):
     calls = []
     original_chat = team._chat
     try:
-        team._chat = _factory(calls, rewrite_verdicts)
+        team._chat = _factory(calls, label_verdicts)
         profile = team_profile(
             orchestrator="ORCH",
             answer="SYNTH",
             review="VALIDATOR",
             indepth="SYNTH",
             output="combined",
-            review_prompt="validation-rewrite",
+            review_prompt="validation-label",
             policies={"review_loops": int(kw.get("validator_max_loops", 1))},
         )
         out = asyncio.run(run_profile(profile, _MESSAGES, response_format=_RF))
@@ -137,17 +137,17 @@ def _review_messages(answer="The patient is taking aspirin [1].", blocks=None):
 
 
 def _run_review(
-    rewrite_verdicts, *, answer="The patient is taking aspirin [1].", blocks=None
+    label_verdicts, *, answer="The patient is taking aspirin [1].", blocks=None
 ):
     calls = []
     original_chat = team._chat
     try:
-        team._chat = _factory(calls, rewrite_verdicts)
+        team._chat = _factory(calls, label_verdicts)
         profile = make_profile(
             topology="leg",
             stages=("context", "review"),
             models={"review": "REVIEWER"},
-            prompts={"review": "validation-rewrite"},
+            prompts={"review": "validation-label"},
             output="review",
         )
         out = asyncio.run(
@@ -171,7 +171,7 @@ def test_answer_review_clean_pass_returns_checked_metadata():
     assert env["answerValidation"]["status"] == "checked"
     assert env["answerValidation"]["label"] == "Checked"
     assert env["confidence"]["answer"]["level"] == "green"
-    assert [name for _model, name in calls].count("rewrite_verdict") == 1
+    assert [name for _model, name in calls].count("label_verdict") == 1
 
 
 def test_answer_review_labels_a_flagged_answer_and_never_adopts_its_correction():
@@ -191,7 +191,7 @@ def test_answer_review_labels_a_flagged_answer_and_never_adopts_its_correction()
     assert env["answerValidation"]["issues"][0]["wrong"] == "aspirin"
     assert env["confidence"]["answer"]["level"] == "yellow"
     assert '"aspirin" against lisinopril [1]' in env["confidence"]["answer"]["note"]
-    assert [name for _model, name in calls].count("rewrite_verdict") == 1
+    assert [name for _model, name in calls].count("label_verdict") == 1
 
 
 def test_answer_review_labels_a_flag_that_offers_no_correction():
@@ -230,7 +230,7 @@ def test_answer_review_ignores_an_error_whose_wrong_text_is_not_in_the_draft():
     assert env["answer"] == "The patient is taking aspirin [1]."
     assert env["answerValidation"]["status"] == "checked"
     assert env["answerValidation"]["issues"] == []
-    assert [name for _model, name in calls].count("rewrite_verdict") == 1
+    assert [name for _model, name in calls].count("label_verdict") == 1
 
 
 def test_answer_review_does_not_apply_a_mixed_localized_and_unlocalized_rewrite():
@@ -348,7 +348,7 @@ def test_answer_review_sets_aside_an_error_on_an_endpoint_the_date_checks_confir
         topology="leg",
         stages=("context", "review"),
         models={"review": "REVIEWER"},
-        prompts={"review": "validation-rewrite"},
+        prompts={"review": "validation-label"},
         output="review",
         policies={"temporal_gate": "enforce", "anchor": "2026-06-20"},
     )
@@ -399,7 +399,7 @@ def test_answer_review_keeps_an_error_on_an_assertion_beside_a_confirmed_endpoin
         topology="leg",
         stages=("context", "review"),
         models={"review": "REVIEWER"},
-        prompts={"review": "validation-rewrite"},
+        prompts={"review": "validation-label"},
         output="review",
         policies={"temporal_gate": "enforce", "anchor": "2026-06-20"},
     )
@@ -466,7 +466,7 @@ def test_answer_review_correction_that_would_add_a_wrong_date_never_ships():
         topology="leg",
         stages=("context", "review"),
         models={"review": "REVIEWER"},
-        prompts={"review": "validation-rewrite"},
+        prompts={"review": "validation-label"},
         output="review",
         policies={"temporal_gate": "enforce", "anchor": "2026-06-20"},
     )
@@ -487,7 +487,7 @@ def test_answer_review_correction_that_would_add_a_wrong_date_never_ships():
     ), env["answer"]
 
 
-def _factory_answers(calls, answers, rewrite_verdicts):
+def _factory_answers(calls, answers, label_verdicts):
     """Like _factory but the writer returns answers[N] (so a test can force a non-substantive draft)."""
     state = {"answer_synth": 0, "indepth_synth": 0, "rw": 0}
 
@@ -517,10 +517,10 @@ def _factory_answers(calls, answers, rewrite_verdicts):
             n = state["indepth_synth"]
             state["indepth_synth"] += 1
             return {"content": json.dumps({"claims": [f"claim-A-v{n}"]})}
-        if name == "rewrite_verdict":
+        if name == "label_verdict":
             v = (
-                rewrite_verdicts[min(state["rw"], len(rewrite_verdicts) - 1)]
-                if rewrite_verdicts
+                label_verdicts[min(state["rw"], len(label_verdicts) - 1)]
+                if label_verdicts
                 else {"answer_ok": True}
             )
             state["rw"] += 1
@@ -547,7 +547,7 @@ def test_nonsubstantive_answer_ships_red_not_green():
         review="VALIDATOR",
         indepth="SYNTH",
         output="combined",
-        review_prompt="validation-rewrite",
+        review_prompt="validation-label",
     )
     env = json.loads(asyncio.run(run_profile(profile, _MESSAGES, response_format=_RF)))
     assert env["confidence"]["answer"]["level"] == "red", env["confidence"]

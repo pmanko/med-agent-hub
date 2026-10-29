@@ -51,6 +51,16 @@ exact tokenizer-backed context counting, and apply the hub-owned `chart_answer`
 JSON schema. A product request cannot replace that contract; low-level legs
 retain their existing caller-controlled `response_format` behavior.
 
+A profile that reviews or grounds its Answer declares a `review` policy:
+`action: label` (the reviewer's verdict labels the Answer and never replaces it;
+`apply` and `redo` are reserved and refused) and `grounding`, how cited records
+are checked against their sentences. `separate` makes one bounded entailment
+call with the `grounding` model; `folded` asks the reviewer to judge each cited
+record in the same call and writes the citation statuses from its reply; `off`
+checks no citation support and leaves citations `unchecked` without a label.
+The choice covers the Answer and the In-Depth claims alike.
+The engine implements these choices and never branches on a profile id.
+
 Low-level experiment legs use these ids:
 
 - `answer:<model>@<prompt>~<gate>~temp<n>`
@@ -130,7 +140,7 @@ thread.
 - Every product Answer receives deterministic substance, date, temporal, date-value, and trend checks before `answer_done`.
 - The answer reviewer is another model pass, so it labels the answer and never replaces it. An error it reports leaves the answer as written, marked `needs_review` with a yellow note. The reviewer is told which earliest and latest statements the dated chart series confirm, and an error it reports on one of them is set aside.
 - The In-Depth draws on knowledge-base and guideline context as well as the chart. It is written once and reviewed once; the review flags claims and never asks for a new draft.
-- Every product In-Depth claim receives deterministic temporal, citation-resolution, and citation-grounding results before display. The temporal check reads each claim on its own words, never the question's, so a question asking for a trend cannot fail a claim that states one value. A claim a check questions is shown with a note naming the check: red when the date check or citation grounding contradicts it or it cites a record outside the chart, yellow when the review flagged it, its citation was not checked, or it is uncited general guidance.
+- Every product In-Depth claim receives deterministic temporal, citation-resolution, and citation-grounding results before display. The temporal check reads each claim on its own words, never the question's, so a question asking for a trend cannot fail a claim that states one value. Citation grounding checks only what a claim attributes to each cited record (the value, date, drug, result, status or guideline content), not the interpretation or advice around it, which the review judges. A claim a check questions is shown with a note naming the check: red when the date check or citation grounding contradicts it or it cites a record outside the chart, yellow when the review flagged it or its citation was not checked. An uncited claim is tagged as general guidance, not marked for checking.
 - Citation grounding checks every claim group in stable, context-bounded sequential batches; a failed batch cannot erase verdicts from successful batches.
 - References resolve against the complete current evidence ledger and carry source id, resource metadata, source text, usage locations, resolution state, and final grounding state.
 - Citation count is metadata, not a confidence score.
