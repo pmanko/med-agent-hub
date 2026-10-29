@@ -335,3 +335,29 @@ def test_an_answer_that_misses_the_windows_records_is_marked_not_edited():
     assert text.startswith(answer)
     window = next(f for f in findings if f["id"] == "rule_window")
     assert window["status"] == "fail" and "latest 2026-05-01 [7]" in window["reason"]
+
+
+def test_an_old_item_inside_a_sentence_about_the_window_is_named_not_claimed_as_left_out():
+    """Judged run R10: "records before 2025-12-20 are left out" while an item citing only older
+    orders stayed in the sentence. The rule names such an item instead."""
+    chart = _VACCINE_CHART + "[9] (2025-11-01) Drug order: Dapsone. Action: NEW. Urgency: ROUTINE\n"
+    facts = build_temporal_facts(chart, "2026-06-20")
+    text, _c, _b, findings = answer_rules.apply_answer_rules(
+        "What medications were ordered in the past 6 months?",
+        "Orders in the past 6 months: isoniazid [4] and dapsone [9].",
+        [4, 9], [], facts,
+    )
+    window = [f for f in findings if f["id"] == "rule_window"]
+    assert [f["status"] for f in window] == ["fail"]
+    assert "[9] (2025-11-01)" in window[0]["reason"] and "left out" not in text
+
+
+def test_an_old_item_the_answer_frames_as_older_is_not_named():
+    chart = _VACCINE_CHART + "[9] (2025-11-01) Drug order: Dapsone. Action: NEW. Urgency: ROUTINE\n"
+    facts = build_temporal_facts(chart, "2026-06-20")
+    _t, _c, _b, findings = answer_rules.apply_answer_rules(
+        "What medications were ordered in the past 6 months?",
+        "Isoniazid was ordered [4]; dapsone was a previous order [9].",
+        [4, 9], [], facts,
+    )
+    assert not [f for f in findings if f["id"] == "rule_window" and f["status"] == "fail"]

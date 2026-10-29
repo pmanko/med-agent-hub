@@ -38,6 +38,8 @@ _SPAN_RE = re.compile(
 )
 
 _DRUG_STOP_TOKENS = {"and", "with", "tablet", "tablets", "oral", "plus", "fixed", "dose", "vaccine", "vaccination"}
+# An item the answer itself frames as older ("previous orders", "remain active since").
+_PRIOR_RE = re.compile(r"\b(?:previous(?:ly)?|prior|earlier|before|older|remains?|since)\b", re.I)
 # An answer that already says nothing falls inside the asked window, or places a record before it.
 _WINDOW_STATED_RE = re.compile(
     r"\bno (?:records?|data|measurements?|entries|orders?|visits?|encounters?|changes?)\b.{0,80}"
@@ -316,6 +318,7 @@ def _window_edits(
         return text, blocks, []
     start, words = window
     dropped: List[int] = []
+    listed_old: List[int] = []
     findings: List[Dict[str, Any]] = []
     cited_anywhere = [i for i in _cites(text) + _row_refs(blocks) if i in records]
     if cited_anywhere and _all_before(cited_anywhere, records, start):
@@ -391,9 +394,13 @@ def _window_edits(
                 continue
             # Within a sentence with in-window records, a citation group keeps only its in-window
             # records; a group with none left keeps its item text and loses its citations.
-            for _gs, _ge, _item, group in reversed(_clusters(sentence)):
+            for _gs, _ge, item, group in reversed(_clusters(sentence)):
                 indices = [i for i, _s, _e in group]
                 late = [i for i in indices if not _all_before([i], records, start)]
+                if not late and any(i in records for i in indices) and not _PRIOR_RE.search(item):
+                    # An item citing only older records inside a sentence about the window: the
+                    # rule cannot cut the item's words, so it names it instead of claiming it.
+                    listed_old.extend(i for i in indices if i in records)
                 if late and len(late) < len(indices):
                     dropped.extend(i for i in indices if i not in late)
                     sentence = (
@@ -407,6 +414,18 @@ def _window_edits(
             pieces.append(joined)
     new_text = "\n".join(pieces).strip("\n")
 
+    if listed_old:
+        findings.append(
+            _finding(
+                "window",
+                "fail",
+                text,
+                "the answer presents records dated before "
+                f"{start.isoformat()} as within the {words}: "
+                + ", ".join(f"[{i}] ({records[i]['date']})" for i in sorted(set(listed_old))),
+                listed_old,
+            )
+        )
     if dropped:
         n = len(set(dropped))
         note = (
