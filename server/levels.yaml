@@ -215,7 +215,6 @@ profiles:
     prompts: {answer: synthesis-answer, review: validation-label, indepth: synthesis-indepth}
     policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true, review: {action: label, grounding: separate}, confidence: findings}
     visibility: product
-    default: true
     selection_priority: 30
     context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true, supplemental_sources: [knowledge-base]}
     knobs: {answer: {temperature: 0}}
@@ -273,7 +272,8 @@ profiles:
     prompts: {answer: synthesis-answer, indepth: synthesis-indepth}
     policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true, confidence: findings}
     visibility: product
-    selection_priority: 54
+    default: true
+    selection_priority: 10
     context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true, supplemental_sources: [knowledge-base]}
     knobs: {answer: {temperature: 0}}
 

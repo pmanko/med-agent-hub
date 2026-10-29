@@ -46,9 +46,11 @@ def test_configured_catalog_contains_only_current_product_eval_and_debug_profile
 
 
 def test_default_product_profile_is_human_readable_single_12b():
-    profile = get_profile("single-12b-checked")
+    """Owner, 28 October 2026: the default is the bare profile, deterministic checks only, from
+    the judged runs D3 and D4 (no model check moved a score; bare is the fastest Hub arm)."""
+    profile = get_profile("single-12b-bare")
 
-    assert profile.label == "Checked answer (12B)"
+    assert profile.label == "Answer with the chart checks only (12B)"
     assert profile.workflow == "clinical_answer"
     assert profile.default is True
     assert profile.topology == "single"
@@ -60,10 +62,7 @@ def test_default_product_profile_is_human_readable_single_12b():
         "answer",
         "gate",
         "resolve_refs",
-        "review",
-        "gate",
         "final_resolve_refs",
-        "ground_verdicts",
         "indepth",
         "indepth_gate",
     )
@@ -354,7 +353,7 @@ def test_only_one_configured_profile_is_default():
     defaults = [
         profile_id for profile_id in profile_ids() if get_profile(profile_id).default
     ]
-    assert defaults == ["single-12b-checked"]
+    assert defaults == ["single-12b-bare"]
 
 
 def test_all_configured_profiles_and_prompts_validate_at_startup():
