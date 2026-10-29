@@ -213,7 +213,7 @@ profiles:
     stages: *product
     models: {answer: gemma-4-12b, review: gemma-4-12b, grounding: gemma-4-12b, indepth: gemma-4-12b}
     prompts: {answer: synthesis-answer, review: validation-label, indepth: synthesis-indepth}
-    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true, review: {action: label, grounding: separate}, confidence: findings}
+    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true, review: {action: label, grounding: separate, shadow: scorer}, confidence: findings}
     visibility: product
     default: true
     selection_priority: 30
@@ -255,7 +255,7 @@ profiles:
     stages: *product
     models: {answer: gemma-31b, review: qwen3.5-9b, grounding: qwen3.5-9b, indepth: gemma-31b}
     prompts: {answer: synthesis-answer, review: validation-verify, indepth: synthesis-indepth}
-    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true, review: {action: label, grounding: separate}, confidence: findings}
+    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true, review: {action: label, grounding: separate, shadow: scorer}, confidence: findings}
     visibility: product
     selection_priority: 51
     context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true, supplemental_sources: [knowledge-base]}
@@ -286,7 +286,7 @@ profiles:
     stages: *product
     models: {answer: gemma-4-12b, review: qwen3.5-9b, grounding: gemma-4-12b, indepth: gemma-4-12b}
     prompts: {answer: synthesis-answer, review: validation-verify, indepth: synthesis-indepth}
-    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true, review: {action: label, grounding: folded}, confidence: findings}
+    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true, review: {action: label, grounding: folded, shadow: scorer}, confidence: findings}
     visibility: product
     selection_priority: 55
     context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true, supplemental_sources: [knowledge-base]}
