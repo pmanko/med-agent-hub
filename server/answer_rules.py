@@ -6,6 +6,10 @@ sentence whose cited records fall outside the asked window, corrects a drug cita
 sentence built from a series) and reports an ``info`` finding, or marks a contradiction it can
 prove with a ``fail`` finding that names the chart's value. No rule rewrites a clinical statement.
 
+Every rule is general or reads its parameters from the chart: no drug, disease or measurement
+list is built in. The series rules take the chart's own measuring rhythm and the words that pick
+out one measurement among the chart's series; the drug rule takes the chart's drug orders.
+
 Findings have the gate-check shape (``id``, ``status``, ``severity``, ``claim``, ``reason``,
 ``source_indices``) and ids ``rule_<name>``. Claim-level marks (``claim_marks``) serve the Answer's
 sentences and each In-Depth point; the edits (``apply_answer_rules``) serve the Answer only.
@@ -32,36 +36,13 @@ _SPAN_RE = re.compile(
     r"eleven|twelve|eighteen|few|several)\s+)?(?P<unit>day|week|month|year)s?\b",
     re.I,
 )
-STALE_DAYS = 90
 
-# WHO antiretroviral generic names (ATC J05AE, J05AF, J05AG, J05AJ, J05AR, J05AX, and boosters).
-_ANTIRETROVIRALS = frozenset(
-    """abacavir didanosine emtricitabine lamivudine stavudine tenofovir zidovudine zalcitabine
-    efavirenz nevirapine etravirine rilpivirine doravirine delavirdine atazanavir darunavir
-    lopinavir ritonavir saquinavir fosamprenavir amprenavir indinavir nelfinavir tipranavir
-    dolutegravir raltegravir elvitegravir bictegravir cabotegravir maraviroc enfuvirtide ibalizumab
-    fostemsavir lenacapavir cobicistat islatravir""".split()
-)
-_ARV_CLASS_RE = re.compile(
-    r"\b(?:anti-?retrovirals?|ARVs?|ART|HAART|cART)\b", re.I
-)
-_OTHER_CLASS_RE = re.compile(
-    r"tubercul|\bTB\b|prophyla|\bPCP\b|pneumocystis|antibiotic|antifungal|antimicrobial|"
-    r"antibacterial|anti-?TB",
-    re.I,
-)
 _DRUG_STOP_TOKENS = {"and", "with", "tablet", "tablets", "oral", "plus", "fixed", "dose"}
 _DEMOGRAPHIC_WORDS_RE = re.compile(
     r"\b(?:name|named|female|male|sex|gender|born|birth|age|aged|years? old|address|lives|"
     r"identifier|identification|ID)\b",
     re.I,
 )
-_ADVANCED_DENIAL_RE = re.compile(
-    r"\b(?:not|no longer|does not|doesn't|do not|isn't|is not|without|nor)\b[^.;]{0,60}?"
-    r"\badvanced (?:HIV )?disease\b",
-    re.I,
-)
-_WHO_STAGE_RE = re.compile(r"WHO (?:HIV )?stage[^:]*:\s*(?:WHO )?stage\s*(\d|IV|I{1,3})\b", re.I)
 _DIAGNOSIS_DENIAL_RE = re.compile(
     r"\b(?:does not|doesn't|do not|did not|not)\s+(?:explicitly\s+|clearly\s+)?(?:state|list|"
     r"document|record|mention|specify|include|name|identify)\w*\s+(?:a|any|the|an)?\s*"
@@ -233,29 +214,6 @@ def _drug_citation_marks(claim: str, records: Dict[int, Dict[str, Any]]) -> List
     return out
 
 
-def _drug_class_marks(claim: str, records: Dict[int, Dict[str, Any]]) -> List[Dict[str, Any]]:
-    if not _ARV_CLASS_RE.search(claim) or _OTHER_CLASS_RE.search(claim):
-        return []
-    words = _words(claim)
-    wrong = {}
-    for index, record in records.items():
-        name = _drug_name(record)
-        tokens = _drug_tokens(name or "")
-        if tokens and tokens <= words and not tokens & _ANTIRETROVIRALS:
-            wrong.setdefault(name, index)
-    if not wrong:
-        return []
-    return [
-        _finding(
-            "drug_class",
-            "fail",
-            claim,
-            f"{', '.join(sorted(wrong))} {'is' if len(wrong) == 1 else 'are'} not antiretroviral",
-            wrong.values(),
-        )
-    ]
-
-
 def _demographics_marks(claim: str, records: Dict[int, Dict[str, Any]]) -> List[Dict[str, Any]]:
     out = []
     for _start, _end, item, group in _clusters(claim):
@@ -272,52 +230,6 @@ def _demographics_marks(claim: str, records: Dict[int, Dict[str, Any]]) -> List[
                     )
                 )
     return out
-
-
-def _latest(records: Dict[int, Dict[str, Any]], predicate) -> Optional[Dict[str, Any]]:
-    hits = [r for r in records.values() if predicate(r)]
-    return max(hits, key=lambda r: (str(r.get("date") or ""), -r["index"])) if hits else None
-
-
-def _advanced_hiv_marks(claim: str, records: Dict[int, Dict[str, Any]], facts: Dict[str, Any]) -> List[Dict[str, Any]]:
-    if not _ADVANCED_DENIAL_RE.search(claim):
-        return []
-    stage_record = _latest(records, lambda r: bool(_WHO_STAGE_RE.search(str(r.get("body") or ""))))
-    if stage_record:
-        raw = _WHO_STAGE_RE.search(stage_record["body"]).group(1).upper()
-        stage = {"I": 1, "II": 2, "III": 3, "IV": 4}.get(raw) or int(raw)
-        if stage >= 3:
-            return [
-                _finding(
-                    "advanced_hiv",
-                    "fail",
-                    claim,
-                    f"[{stage_record['index']}] records WHO stage {stage} on {stage_record['date']}, "
-                    "which is advanced HIV disease (WHO)",
-                    [stage_record["index"]],
-                )
-            ]
-    cd4 = next(
-        (s for s in facts.get("numeric_series") or [] if str(s.get("concept")).lower() == "cd4 count"),
-        None,
-    )
-    latest = (cd4 or {}).get("most_recent") or {}
-    try:
-        low = float(latest.get("value")) < 200
-    except (TypeError, ValueError):
-        low = False
-    if low:
-        return [
-            _finding(
-                "advanced_hiv",
-                "fail",
-                claim,
-                f"[{latest.get('index')}] records CD4 {temporal._format_value(latest.get('value'))} "
-                f"on {latest.get('date')}, below 200, which is advanced HIV disease (WHO)",
-                [latest.get("index")],
-            )
-        ]
-    return []
 
 
 def _diagnosis_marks(claim: str, records: Dict[int, Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -346,7 +258,8 @@ def _diagnosis_marks(claim: str, records: Dict[int, Dict[str, Any]]) -> List[Dic
 
 
 def claim_marks(claim: str, facts: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Contradictions one claim makes with the chart (R2, R5, R6, R7, R8, R9)."""
+    """Contradictions one claim makes with the chart: relative time, drug citation, demographics
+    citation and diagnosis presence."""
     records = _records(facts)
     if not claim or not records:
         return []
@@ -354,9 +267,7 @@ def claim_marks(claim: str, facts: Optional[Dict[str, Any]]) -> List[Dict[str, A
     return (
         _relative_time_marks(claim, records, reference)
         + _drug_citation_marks(claim, records)
-        + _drug_class_marks(claim, records)
         + _demographics_marks(claim, records)
-        + _advanced_hiv_marks(claim, records, facts or {})
         + _diagnosis_marks(claim, records)
     )
 
@@ -492,25 +403,42 @@ def _drug_citation_edits(text: str, records: Dict[int, Dict[str, Any]], answer_c
     return text, findings
 
 
-_GENERIC_SERIES_TOKENS = {"blood", "cells", "cell", "count", "rate", "level", "levels", "total", "serum", "kg", "cm", "adult", "percent"}
-
-
-def _names_series(text: str, series: Dict[str, Any]) -> bool:
-    """Whether ``text`` names the measurement by a distinctive word ("white", "oxygen", "weight",
-    "growing"), never by a shared one ("blood" in "blood type" names no blood measurement)."""
+def _names_series(text: str, series: Dict[str, Any], shared: set) -> bool:
+    """Whether ``text`` names the measurement by a word that picks it out in this chart: "white",
+    "oxygen", "weight", "growing". A word several measurements share ("blood" in white blood cells,
+    blood pressure and blood oxygen) names none of them."""
     _phrase, aliases = temporal._series_terms(series)
-    distinctive = aliases - _GENERIC_SERIES_TOKENS
-    return bool(distinctive & set(re.split(r"[^a-z0-9%]+", (text or "").lower())))
+    return bool((aliases - shared) & set(re.split(r"[^a-z0-9%]+", (text or "").lower())))
+
+
+def _shared_series_words(facts: Dict[str, Any]) -> set:
+    counts: Dict[str, int] = {}
+    for series in facts.get("numeric_series") or []:
+        for token in temporal._series_terms(series)[1]:
+            counts[token] = counts.get(token, 0) + 1
+    return {token for token, n in counts.items() if n >= 3}
 
 
 def _series_in_answer(question: str, answer: str, facts: Dict[str, Any]) -> List[Dict[str, Any]]:
     """The series the question asks about that the answer also mentions; none when the question
     is not about a measurement (an orders list that mentions a CD4 panel gets no series rule)."""
+    shared = _shared_series_words(facts)
     return [
         series
         for series in temporal._selected_series(question, "", facts)
-        if _names_series(question, series) and _names_series(answer, series)
+        if _names_series(question, series, shared) and _names_series(answer, series, shared)
     ]
+
+
+def _overdue(series: Dict[str, Any], reference: _dt.date) -> bool:
+    """Whether the gap from the series' last reading to the reference date is longer than any
+    interval between its own readings: the chart's measuring rhythm, not a fixed cutoff, says
+    when a value is old. A series with one reading has no rhythm and is never called overdue."""
+    dates = sorted(d for d in (_date(p.get("date")) for p in series.get("points") or []) if d)
+    if len(dates) < 2:
+        return False
+    longest = max((b - a).days for a, b in zip(dates, dates[1:]))
+    return (reference - dates[-1]).days > max(longest, 1)
 
 
 def _points_in_window(series: Dict[str, Any], start: Optional[_dt.date]) -> List[Dict[str, Any]]:
@@ -573,7 +501,7 @@ def _series_edits(question: str, text: str, facts: Dict[str, Any]) -> Tuple[str,
                 )
         last = series.get("most_recent") or {}
         last_date = _date(last.get("date"))
-        if last_date and (reference - last_date).days > STALE_DAYS and not _GAP_STATED_RE.search(text):
+        if last_date and not _GAP_STATED_RE.search(text) and _overdue(series, reference):
             stale_by_date.setdefault(last["date"], []).append(series)
     for date, group in sorted(stale_by_date.items()):
         last_date = _date(date)

@@ -137,27 +137,6 @@ def test_drug_citation_leaves_correct_citations_and_text_without_a_drug_name(zab
     assert findings == []
 
 
-# R6 drug class --------------------------------------------------------------------------------------
-
-
-def test_drug_class_marks_a_tb_combination_called_antiretroviral(aloice):
-    marks = answer_rules.claim_marks(
-        "The patient's antiretroviral regimen includes efavirenz [4], lamivudine / zidovudine [3] "
-        "and rifampicin isoniazid pyrazinamide and ethambutol [5].",
-        aloice,
-    )
-    assert _ids(marks) == ["rule_drug_class"]
-    assert "Rifampicin isoniazid pyrazinamide and ethambutol is not antiretroviral" in marks[0]["reason"]
-
-
-def test_drug_class_leaves_a_sentence_that_names_the_other_class(aloice):
-    assert not answer_rules.claim_marks(
-        "She takes efavirenz [4] as antiretroviral therapy and rifampicin isoniazid pyrazinamide "
-        "and ethambutol [5] for tuberculosis.",
-        aloice,
-    )
-
-
 # R7 demographics citation ---------------------------------------------------------------------------
 
 
@@ -165,25 +144,6 @@ def test_demographics_record_cited_for_a_clinical_fact_is_marked(zabella):
     marks = answer_rules.claim_marks("The patient is living with HIV [365].", zabella)
     assert _ids(marks) == ["rule_demographics_citation"]
     assert not answer_rules.claim_marks("The patient is a female born in 1998 [365].", zabella)
-
-
-# R8 advanced HIV disease ----------------------------------------------------------------------------
-
-
-def test_denying_advanced_hiv_disease_with_who_stage_3_is_marked(zabella):
-    marks = answer_rules.claim_marks(
-        "With a CD4 count of 341 cells/uL [182], the patient does not meet the criteria for advanced HIV disease.",
-        zabella,
-    )
-    assert _ids(marks) == ["rule_advanced_hiv"]
-    assert "[20] records WHO stage 3 on 2026-01-26" in marks[0]["reason"]
-
-
-def test_a_cd4_count_above_200_alone_is_not_a_denial(zabella):
-    assert not answer_rules.claim_marks(
-        "The most recent CD4 count of 341 cells/uL [182] is above the threshold for advanced HIV disease.",
-        zabella,
-    )
 
 
 # R9 diagnosis presence ------------------------------------------------------------------------------
@@ -261,28 +221,70 @@ def test_the_answer_gate_applies_the_rule_edits_and_reports_them(zabella):
 
 def test_the_answer_gate_in_warn_mode_reports_marks_without_editing(zabella):
     answer, _c, _b, gate, original = team._apply_temporal_gate(
-        question="Does she have advanced HIV disease?",
-        answer_text="She does not have advanced HIV disease; her CD4 count is 341 cells/uL [182].",
-        citations=[182],
+        question="What is she being treated for?",
+        answer_text="The record does not explicitly state a primary diagnosis; she takes nevirapine [1].",
+        citations=[1],
         blocks=[],
         temporal_facts=zabella,
         temporal_gate_mode="warn",
         steps=[],
     )
-    assert original is None and answer.startswith("She does not have advanced HIV disease")
-    assert "rule_advanced_hiv" in [c["id"] for c in gate["checks"]]
+    assert original is None and answer.startswith("The record does not explicitly state")
+    assert "rule_diagnosis_presence" in [c["id"] for c in gate["checks"]]
 
 
-def test_an_in_depth_point_a_rule_contradicts_is_flagged(aloice):
+def test_an_in_depth_point_a_rule_contradicts_is_flagged(zabella):
     result = gate_indepth_claims(
-        [
-            "The patient was started on new antiretroviral therapy including efavirenz [4] and "
-            "rifampicin isoniazid pyrazinamide and ethambutol [5].",
-            "Efavirenz [4] is an antiretroviral.",
-        ],
-        aloice,
+        ["HIV status is documented in the chart [365].", "Stavudine was ordered [3]."],
+        zabella,
         mode="enforce",
     )
     assert result["flagged"] == [1]
     failing = [c["id"] for c in result["checks"][0]["gate"]["checks"] if c["status"] == "fail"]
-    assert failing == ["rule_drug_class"]
+    assert failing == ["rule_demographics_citation"]
+
+
+def test_the_chart_measuring_rhythm_decides_when_a_value_is_old():
+    def series(*dates):
+        return {"points": [{"date": d, "value": 1} for d in dates]}
+
+    reference = answer_rules._date("2026-06-20")
+    # monthly readings, then five months of silence
+    assert answer_rules._overdue(series("2026-01-04", "2026-01-19", "2026-02-02"), reference)
+    # yearly readings, five months since the last
+    assert not answer_rules._overdue(series("2024-01-10", "2025-01-12", "2026-01-15"), reference)
+    # one reading has no rhythm
+    assert not answer_rules._overdue(series("2025-01-01"), reference)
+
+
+_DIABETES_CHART = """Patient records (most recent first):
+[1] (2026-03-02) Drug order: Metformin. Action: REVISE. Urgency: ROUTINE
+[2] (2026-03-02) Drug order: Amlodipine. Action: NEW. Urgency: ROUTINE
+[3] (2026-03-02) Systolic blood pressure: 150 mmHg
+[4] (2026-03-02) HbA1c: 8.1 %
+[5] (2026-01-05) Systolic blood pressure: 138 mmHg
+[6] (2026-01-05) HbA1c: 7.4 %
+[7] (2025-11-03) Systolic blood pressure: 145 mmHg
+[8] (2025-11-03) Drug order: Metformin. Action: NEW. Urgency: ROUTINE
+[9] (2025-09-01) Program: Diabetes care program. Status: Active. Current state: Enrolled
+[10] (2025-09-01) Patient: Test Person. Male. Born 1960-02-01. Address: Town. Identifiers: X1
+"""
+
+
+def test_the_rules_read_another_disease_from_its_chart():
+    """Behavior on a chart unlike the ones the rules were written from (diabetes and
+    hypertension, no HIV): every rule takes its drugs, conditions and measurements from it."""
+    facts = build_temporal_facts(_DIABETES_CHART, "2026-09-01")
+    text, _c, _b, findings = answer_rules.apply_answer_rules(
+        "How has her systolic blood pressure changed over the past 6 months?",
+        "Amlodipine [1] was started, and systolic blood pressure rose from 138 mmHg [5] to 150 mmHg [3]. "
+        "It was 145 mmHg in November [7].",
+        [1, 5, 3, 7], [], facts,
+    )
+    assert "Amlodipine [2]" in text, "the citation moves to the amlodipine order"
+    assert "145 mmHg in November" not in text, "a sentence citing only records before the window goes"
+    assert "The latest systolic blood pressure in the chart is from 2026-03-02 [3]" in text
+    assert {"rule_drug_citation", "rule_window", "rule_stale"} <= set(_ids(findings, "info"))
+    marks = answer_rules.claim_marks("The record does not state a diagnosis for her metformin [1].", facts)
+    assert _ids(marks) == ["rule_diagnosis_presence"] and "Diabetes care program" in marks[0]["reason"]
+    assert _ids(answer_rules.claim_marks("She has diabetes [10].", facts)) == ["rule_demographics_citation"]
