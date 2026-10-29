@@ -1523,6 +1523,24 @@ def test_a_shorter_documented_window_is_a_note_not_a_mark():
     assert gate["status"] == "pass"
 
 
+def test_value_binding_skips_unit_digits_and_change_amounts():
+    """Run D4: the date check bound the 3 of "cells/mm3" and of "a weight loss of 3 kg" to a
+    chart date as if each were a recorded value, and marked two correct In-Depth points."""
+    facts = temporal.build_temporal_facts(_CHART, "2006-06-01")
+    for question, claim in (
+        (
+            "What was the last CD4 count?",
+            "The CD4 count of 72 cells/uL on 2006-03-02 [218] is below the 200 cells/mm3 threshold.",
+        ),
+        (
+            "How has the weight changed?",
+            "A weight loss of 11 kg (from 52 kg on 2006-03-03 [202] to 41 kg on 2006-05-18 [15]) is significant.",
+        ),
+    ):
+        gate = temporal.run_temporal_gate(question, claim, [], facts, "enforce")
+        assert not [c for c in gate["checks"] if c["id"] == "date_value_binding"], claim
+
+
 def test_gate_fails_exposed_internal_date_id():
     facts = temporal.build_temporal_facts(_CHART, "2006-06-01")
     gate = temporal.run_temporal_gate(

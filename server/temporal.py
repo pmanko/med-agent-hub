@@ -44,6 +44,11 @@ _DATE_ID_TOKEN_RE = re.compile(r"\bD\d{4}_\d{2}_\d{2}\b")
 _LEADING_NUM_RE = re.compile(r"^([+-]?\d+(?:\.\d+)?)\s*(.*)$")
 _NUMBER_TOKEN_RE = re.compile(r"(?<![\[\d.-])([+-]?\d+(?:\.\d+)?)(?![\]\d.-])")
 _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+|\n+")
+_DELTA_PREFIX_RE = re.compile(
+    r"\b(?:(?:loss|gain|drop|decrease|increase|change|difference|reduction|fall|rise|decline)"
+    r"\s+of|by)\s+(?:about\s+|approximately\s+|~\s*)?$",
+    re.I,
+)
 _UPCOMING_RE = re.compile(
     r"\b(upcoming|future|next|scheduled|appointment|follow-?up|return visit)\b", re.I
 )
@@ -1310,6 +1315,12 @@ def _series_value_candidates(
     values: List[tuple[re.Match, float]] = []
     all_numbers: List[tuple[re.Match, float]] = []
     for match in _NUMBER_TOKEN_RE.finditer(text):
+        # A digit inside a unit ("cells/mm3") or a change amount ("a loss of 3 kg", "rose by
+        # 5") is not a recorded value of the series.
+        if match.start() and text[match.start() - 1].isalpha():
+            continue
+        if _DELTA_PREFIX_RE.search(text[max(0, match.start() - 24) : match.start()]):
+            continue
         try:
             all_numbers.append((match, float(match.group())))
         except ValueError:
