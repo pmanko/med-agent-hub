@@ -1,0 +1,363 @@
+"""Deterministic answer rules (umbrella spec ANSWER-RULES-2026-10), run on the fixture charts with
+the answers and In-Depth points runs D3 and D4 (28 October 2026) produced and the judges faulted,
+and on near misses each rule must leave alone."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+import server.team as team
+from server import answer_rules
+from server.temporal import build_temporal_facts, gate_indepth_claims
+
+CHARTS = Path(__file__).resolve().parent / "fixtures" / "charts"
+REFERENCE = "2026-06-20"
+
+
+@pytest.fixture(scope="module")
+def aloice():
+    return build_temporal_facts((CHARTS / "aloice-mukangu.snapshot.txt").read_text(), REFERENCE)
+
+
+@pytest.fixture(scope="module")
+def zabella():
+    return build_temporal_facts((CHARTS / "zabella-halambe.snapshot.txt").read_text(), REFERENCE)
+
+
+def _ids(findings, status=None):
+    return [f["id"] for f in findings if status is None or f["status"] == status]
+
+
+# R1 window ------------------------------------------------------------------------------------------
+
+
+def test_window_drops_old_table_rows_and_says_how_many(aloice):
+    def row(name, date, index):
+        return {"cells": {"medication_name": {"text": name, "refs": [index]}, "order_date": {"text": date, "refs": [index]}}}
+
+    blocks = [{"kind": "table", "rows": [
+        row("Efavirenz", "2026-01-07", 4),
+        row("Efavirenz", "2025-12-31", 34),
+        row("Efavirenz", "2025-12-16", 71),
+        row("Efavirenz", "2025-11-10", 112),
+    ]}]
+    text, citations, new_blocks, findings = answer_rules.apply_answer_rules(
+        "Show this patient's medication orders in the past 6 months as a table.",
+        "The patient's medication orders in the past 6 months are listed in the table below.",
+        [], blocks, aloice,
+    )
+    assert [r["cells"]["order_date"]["text"] for r in new_blocks[0]["rows"]] == ["2026-01-07", "2025-12-31"]
+    assert "before 2025-12-20, outside the past 6 months, are left out (2 records)" in text
+    assert _ids(findings) == ["rule_window"] and findings[0]["status"] == "info"
+    assert len(blocks[0]["rows"]) == 4, "the caller's blocks are not mutated"
+
+
+def test_window_prunes_old_citations_and_drops_sentences_citing_only_old_records(aloice):
+    answer = (
+        "Over the past 6 months, drug orders were placed for trimethoprim and sulfamethoxazole "
+        "[2][37][72][114][147] and efavirenz [4][34][71]. Additionally, chest X-rays were ordered "
+        "and a CD4 panel [307]."
+    )
+    text, citations, _blocks, findings = answer_rules.apply_answer_rules(
+        "What has been ordered for this patient over the past 6 months?", answer, [], [], aloice
+    )
+    assert "trimethoprim and sulfamethoxazole [2][37]" in text
+    assert "efavirenz [4][34]" in text
+    assert "CD4 panel" not in text
+    assert "rule_window" in _ids(findings)
+    assert 307 not in citations and {2, 37, 4, 34} <= set(citations)
+
+
+def test_window_leaves_an_answer_without_a_window_question_alone(aloice):
+    answer = "The CD4 count was 72 cells/uL on 2025-10-22 [311]."
+    text, _c, _b, findings = answer_rules.apply_answer_rules(
+        "What was the CD4 count?", answer, [311], [], aloice
+    )
+    assert "rule_window" not in _ids(findings)
+    assert text.startswith(answer)
+
+
+# R2 relative time -----------------------------------------------------------------------------------
+
+
+def test_relative_time_marks_a_span_the_cited_dates_contradict(zabella):
+    """Run D4: "a decrease from 75 to 71 kg over the last few months" for December and January
+    records under a June reference date (judged wrong_fact)."""
+    marks = answer_rules.claim_marks(
+        "Her weight decreased from 75 kg [90] to 71 kg [19] over the last few months.", zabella
+    )
+    assert _ids(marks) == ["rule_relative_time"]
+    assert "2025-12-15 to 2026-01-26, not the last few months before 2026-06-20" in marks[0]["reason"]
+
+
+def test_relative_time_leaves_spans_it_cannot_decide(zabella):
+    # anchored to a stated date
+    assert not answer_rules.claim_marks(
+        "She reported most adherence for the past week on 2026-01-26 [11].", zabella
+    )
+    # quoting the record's own question ("Antiretroviral adherence in past week: Most"); both
+    # judges called this point correct in run D4
+    assert not answer_rules.claim_marks("Records show 'Most' adherence in the past week [11].", zabella)
+    # no span named
+    assert not answer_rules.claim_marks("Adherence was poor in previous months [46].", zabella)
+    assert not answer_rules.claim_marks(
+        "Over the past year her weight went from 74 kg [350] to 71 kg [19].", zabella
+    )
+
+
+# R5 drug citation -----------------------------------------------------------------------------------
+
+
+def test_drug_citation_is_corrected_to_the_order_that_names_the_drug(zabella):
+    answer = "Stavudine [1] and nevirapine [2] were prescribed."
+    text, citations, _b, findings = answer_rules.apply_answer_rules(
+        "Was she ever on stavudine?", answer, [1, 2], [], zabella
+    )
+    assert text.startswith("Stavudine [3] and nevirapine [1] were prescribed.")
+    assert _ids(findings, "info").count("rule_drug_citation") == 2
+
+
+def test_drug_citation_drops_another_drugs_record_from_a_group(aloice):
+    text, _c, _b, _f = answer_rules.apply_answer_rules(
+        "What drugs were ordered on 2025-12-31?",
+        "Trimethoprim and sulfamethoxazole [2][34][37] were ordered.",
+        [2, 34, 37], [], aloice,
+    )
+    assert text.startswith("Trimethoprim and sulfamethoxazole [2][37] were ordered.")
+
+
+def test_drug_citation_leaves_correct_citations_and_text_without_a_drug_name(zabella):
+    answer = "The regimen includes nevirapine [1], lamivudine [2], and stavudine [3]. Adherence was Most [11]."
+    text, _c, _b, findings = answer_rules.apply_answer_rules(
+        "What medications is this patient on?", answer, [1, 2, 3, 11], [], zabella
+    )
+    assert text == answer
+    assert findings == []
+
+
+# R7 demographics citation ---------------------------------------------------------------------------
+
+
+def test_demographics_record_cited_for_a_clinical_fact_is_marked(zabella):
+    marks = answer_rules.claim_marks("The patient is living with HIV [365].", zabella)
+    assert _ids(marks) == ["rule_demographics_citation"]
+    assert not answer_rules.claim_marks("The patient is a female born in 1998 [365].", zabella)
+
+
+# R9 diagnosis presence ------------------------------------------------------------------------------
+
+
+def test_saying_no_diagnosis_is_recorded_with_an_hiv_programme_is_marked(zabella):
+    marks = answer_rules.claim_marks(
+        "The patient's record does not explicitly state a primary diagnosis, but she takes nevirapine [1].",
+        zabella,
+    )
+    assert "rule_diagnosis_presence" in _ids(marks)
+    finding = next(m for m in marks if m["id"] == "rule_diagnosis_presence")
+    assert "Human immunodeficiency virus (HIV) disease" in finding["reason"]
+
+
+# R3 stale latest value and R4 series ----------------------------------------------------------------
+
+
+def test_a_trend_answer_gets_its_readings_and_the_gap_to_the_reference_date(aloice):
+    text, citations, _b, findings = answer_rules.apply_answer_rules(
+        "How has this patient's weight changed over the past year?",
+        "The patient's weight dropped from 52 kg on 2025-10-22 [287] to 41 kg by 2026-01-07 [21].",
+        [287, 21], [], aloice,
+    )
+    assert (
+        "Recorded weight readings: 52 kg (2025-10-22) [287], 52 kg (2025-10-23) [217], "
+        "49.5 kg (2025-10-26) [184], 47 kg (2025-11-10) [132]"
+    ) in text
+    assert "41 kg (2026-01-07) [21]." in text
+    assert "The latest weight in the chart is from 2026-01-07 [21], about 5.5 months before 2026-06-20." in text
+    assert {"rule_series", "rule_stale"} <= set(_ids(findings, "info"))
+    assert {184, 132, 89, 56} <= set(citations)
+
+
+def test_steady_about_a_series_that_changes_direction_is_marked(aloice):
+    _t, _c, _b, findings = answer_rules.apply_answer_rules(
+        "How has this patient's weight changed over the past year?",
+        "Weight fell steadily from 52 kg [287] through 49.5 kg [184], 47 kg [132], 48 kg [89], "
+        "42 kg [56] to 41 kg [21]; no later weight is recorded.",
+        [287, 184, 132, 89, 56, 21], [], aloice,
+    )
+    assert "rule_series_shape" in _ids(findings, "fail")
+    assert "rule_series" not in _ids(findings), "every reading is already in the answer"
+    assert "rule_stale" not in _ids(findings), "the answer already says no later weight exists"
+
+
+def test_series_rules_leave_answers_the_question_does_not_ask_about_a_measurement(aloice):
+    _t, _c, _b, findings = answer_rules.apply_answer_rules(
+        "When was the last visit?",
+        "The last visit was an Adult Visit on 2026-01-07 [6]; weight was 41 kg [21].",
+        [6, 21], [], aloice,
+    )
+    assert not {"rule_series", "rule_stale"} & set(_ids(findings))
+
+
+# Where the rules run --------------------------------------------------------------------------------
+
+
+def test_the_answer_gate_applies_the_rule_edits_and_reports_them(zabella):
+    steps: list = []
+    answer, citations, _blocks, gate, original = team._apply_temporal_gate(
+        question="Which of those are antiretrovirals?",
+        answer_text="Stavudine [1] and nevirapine [2] are antiretrovirals.",
+        citations=[1, 2],
+        blocks=[],
+        temporal_facts=zabella,
+        temporal_gate_mode="enforce",
+        steps=steps,
+    )
+    assert answer.startswith("Stavudine [3] and nevirapine [1]")
+    assert original == "Stavudine [1] and nevirapine [2] are antiretrovirals."
+    assert gate["applied"] == "edit" and gate["rule_edits"] == ["rule_drug_citation", "rule_drug_citation"]
+    assert gate["status"] == "pass", "an edit from the chart is a note, not a mark"
+
+
+def test_the_answer_gate_in_warn_mode_reports_marks_without_editing(zabella):
+    answer, _c, _b, gate, original = team._apply_temporal_gate(
+        question="What is she being treated for?",
+        answer_text="The record does not explicitly state a primary diagnosis; she takes nevirapine [1].",
+        citations=[1],
+        blocks=[],
+        temporal_facts=zabella,
+        temporal_gate_mode="warn",
+        steps=[],
+    )
+    assert original is None and answer.startswith("The record does not explicitly state")
+    assert "rule_diagnosis_presence" in [c["id"] for c in gate["checks"]]
+
+
+def test_an_in_depth_point_a_rule_contradicts_is_flagged(zabella):
+    result = gate_indepth_claims(
+        ["HIV status is documented in the chart [365].", "Stavudine was ordered [3]."],
+        zabella,
+        mode="enforce",
+    )
+    assert result["flagged"] == [1]
+    failing = [c["id"] for c in result["checks"][0]["gate"]["checks"] if c["status"] == "fail"]
+    assert failing == ["rule_demographics_citation"]
+
+
+def test_the_chart_measuring_rhythm_decides_when_a_value_is_old():
+    def series(*dates):
+        return {"points": [{"date": d, "value": 1} for d in dates]}
+
+    reference = answer_rules._date("2026-06-20")
+    # monthly readings, then five months of silence
+    assert answer_rules._overdue(series("2026-01-04", "2026-01-19", "2026-02-02"), reference)
+    # yearly readings, five months since the last
+    assert not answer_rules._overdue(series("2024-01-10", "2025-01-12", "2026-01-15"), reference)
+    # one reading has no rhythm
+    assert not answer_rules._overdue(series("2025-01-01"), reference)
+
+
+_DIABETES_CHART = """Patient records (most recent first):
+[1] (2026-03-02) Drug order: Metformin. Action: REVISE. Urgency: ROUTINE
+[2] (2026-03-02) Drug order: Amlodipine. Action: NEW. Urgency: ROUTINE
+[3] (2026-03-02) Systolic blood pressure: 150 mmHg
+[4] (2026-03-02) HbA1c: 8.1 %
+[5] (2026-01-05) Systolic blood pressure: 138 mmHg
+[6] (2026-01-05) HbA1c: 7.4 %
+[7] (2025-11-03) Systolic blood pressure: 145 mmHg
+[8] (2025-11-03) Drug order: Metformin. Action: NEW. Urgency: ROUTINE
+[9] (2025-09-01) Program: Diabetes care program. Status: Active. Current state: Enrolled
+[10] (2025-09-01) Patient: Test Person. Male. Born 1960-02-01. Address: Town. Identifiers: X1
+"""
+
+
+def test_the_rules_read_another_disease_from_its_chart():
+    """Behavior on a chart unlike the ones the rules were written from (diabetes and
+    hypertension, no HIV): every rule takes its drugs, conditions and measurements from it."""
+    facts = build_temporal_facts(_DIABETES_CHART, "2026-09-01")
+    text, _c, _b, findings = answer_rules.apply_answer_rules(
+        "How has her systolic blood pressure changed over the past 6 months?",
+        "Amlodipine [1] was started, and systolic blood pressure rose from 138 mmHg [5] to 150 mmHg [3]. "
+        "It was 145 mmHg in November [7].",
+        [1, 5, 3, 7], [], facts,
+    )
+    assert "Amlodipine [2]" in text, "the citation moves to the amlodipine order"
+    assert "145 mmHg in November" not in text, "a sentence citing only records before the window goes"
+    assert "The latest systolic blood pressure in the chart is from 2026-03-02 [3]" in text
+    assert {"rule_drug_citation", "rule_window", "rule_stale"} <= set(_ids(findings, "info"))
+    marks = answer_rules.claim_marks("The record does not state a diagnosis for her metformin [1].", facts)
+    assert _ids(marks) == ["rule_diagnosis_presence"] and "Diabetes care program" in marks[0]["reason"]
+    assert _ids(answer_rules.claim_marks("She has diabetes [10].", facts)) == ["rule_demographics_citation"]
+
+
+_VACCINE_CHART = """Patient records (most recent first):
+[1] (2026-01-25) Drug order: Hemophilus influenza B vaccine. Action: NEW. Urgency: ROUTINE
+[2] (2026-01-25) Drug order: Polio vaccine (oral). Action: NEW. Urgency: ROUTINE
+[3] (2026-01-25) Drug order: Diphtheria tetanus and pertussis vaccination. Action: NEW. Urgency: ROUTINE
+[4] (2026-01-25) Drug order: Isoniazid. Action: NEW. Urgency: ROUTINE
+[5] (2026-01-25) Weight (kg): 11 kg
+[6] (2025-12-22) Weight (kg): 11 kg
+"""
+
+
+def test_an_abbreviation_names_the_order_its_initials_spell():
+    """Held-out pass (28 October): "Hib" and "DTP" in a cited list were read as naming no order."""
+    facts = build_temporal_facts(_VACCINE_CHART, "2026-06-20")
+    assert not answer_rules.claim_marks("Vaccines were ordered (Hib, Polio, DTP) [1][2][3].", facts)
+    marks = answer_rules.claim_marks("Vaccines were ordered (Hib, Polio, DTP) [1][2][3][4].", facts)
+    assert _ids(marks) == ["rule_drug_citation"] and "[4] is the order for Isoniazid" in marks[0]["reason"]
+
+
+def test_an_answer_with_nothing_in_the_window_keeps_its_records_behind_a_chart_lead():
+    """Held-out pass: leaving out every record older than "the last 3 months" emptied the answer.
+    With nothing of those kinds inside the window, the answer keeps them and says they are older."""
+    facts = build_temporal_facts(_VACCINE_CHART, "2026-06-20")
+    text, _c, _b, findings = answer_rules.apply_answer_rules(
+        "Has anything changed in the last 3 months?",
+        "Weight stayed at 11 kg from 2025-12-22 [6] to 2026-01-25 [5].",
+        [5, 6], [], facts,
+    )
+    assert text.startswith("The chart has no records of these kinds dated within the last 3 months (from 2026-03-20)")
+    assert text.endswith("Weight stayed at 11 kg from 2025-12-22 [6] to 2026-01-25 [5].")
+    assert _ids(findings, "info") == ["rule_window"]
+    # an answer that already says so is left alone
+    stated = "There are no records within the last three months; the last weight was 11 kg on 2026-01-25 [5]."
+    assert answer_rules.apply_answer_rules("Has anything changed in the last 3 months?", stated, [5], [], facts)[0] == stated
+
+
+def test_an_answer_that_misses_the_windows_records_is_marked_not_edited():
+    chart = _VACCINE_CHART.replace("Patient records (most recent first):\n", "Patient records (most recent first):\n[7] (2026-05-01) Weight (kg): 12 kg\n")
+    facts = build_temporal_facts(chart, "2026-06-20")
+    answer = "Weight stayed at 11 kg from 2025-12-22 [6] to 2026-01-25 [5]."
+    text, _c, _b, findings = answer_rules.apply_answer_rules(
+        "Has anything changed in the last 3 months?", answer, [5, 6], [], facts
+    )
+    assert text.startswith(answer)
+    window = next(f for f in findings if f["id"] == "rule_window")
+    assert window["status"] == "fail" and "latest 2026-05-01 [7]" in window["reason"]
+
+
+def test_an_old_item_inside_a_sentence_about_the_window_is_named_not_claimed_as_left_out():
+    """Judged run R10: "records before 2025-12-20 are left out" while an item citing only older
+    orders stayed in the sentence. The rule names such an item instead."""
+    chart = _VACCINE_CHART + "[9] (2025-11-01) Drug order: Dapsone. Action: NEW. Urgency: ROUTINE\n"
+    facts = build_temporal_facts(chart, "2026-06-20")
+    text, _c, _b, findings = answer_rules.apply_answer_rules(
+        "What medications were ordered in the past 6 months?",
+        "Orders in the past 6 months: isoniazid [4] and dapsone [9].",
+        [4, 9], [], facts,
+    )
+    window = [f for f in findings if f["id"] == "rule_window"]
+    assert [f["status"] for f in window] == ["fail"]
+    assert "[9] (2025-11-01)" in window[0]["reason"] and "left out" not in text
+
+
+def test_an_old_item_the_answer_frames_as_older_is_not_named():
+    chart = _VACCINE_CHART + "[9] (2025-11-01) Drug order: Dapsone. Action: NEW. Urgency: ROUTINE\n"
+    facts = build_temporal_facts(chart, "2026-06-20")
+    _t, _c, _b, findings = answer_rules.apply_answer_rules(
+        "What medications were ordered in the past 6 months?",
+        "Isoniazid was ordered [4]; dapsone was a previous order [9].",
+        [4, 9], [], facts,
+    )
+    assert not [f for f in findings if f["id"] == "rule_window" and f["status"] == "fail"]
