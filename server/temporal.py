@@ -44,6 +44,11 @@ _DATE_ID_TOKEN_RE = re.compile(r"\bD\d{4}_\d{2}_\d{2}\b")
 _LEADING_NUM_RE = re.compile(r"^([+-]?\d+(?:\.\d+)?)\s*(.*)$")
 _NUMBER_TOKEN_RE = re.compile(r"(?<![\[\d.-])([+-]?\d+(?:\.\d+)?)(?![\]\d.-])")
 _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+|\n+")
+_DELTA_PREFIX_RE = re.compile(
+    r"\b(?:(?:loss|gain|drop|decrease|increase|change|difference|reduction|fall|rise|decline)"
+    r"\s+of|by)\s+(?:about\s+|approximately\s+|~\s*)?$",
+    re.I,
+)
 _UPCOMING_RE = re.compile(
     r"\b(upcoming|future|next|scheduled|appointment|follow-?up|return visit)\b", re.I
 )
@@ -1104,6 +1109,23 @@ def _selected_series(
     return selected
 
 
+def _named_series(text: str, series: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The series ``text`` names in full ("CD4 count"), or all of them when it names none.
+
+    A trend claim is about the measurement it names; a series matched only by a shared word
+    ("cells" in "White blood cells" beside a CD4 count) is not checked for a trend."""
+    word_list = [token for token in re.split(r"[^a-z0-9%]+", (text or "").lower()) if token]
+    named = []
+    for item in series:
+        phrase_tokens, _aliases = _series_terms(item)
+        if phrase_tokens and any(
+            word_list[start : start + len(phrase_tokens)] == phrase_tokens
+            for start in range(len(word_list) - len(phrase_tokens) + 1)
+        ):
+            named.append(item)
+    return named or list(series)
+
+
 def _series_mention_spans(answer: str, item: Dict[str, Any]) -> List[Tuple[int, int]]:
     phrase_tokens, aliases = _series_terms(item)
     if phrase_tokens:
@@ -1293,6 +1315,12 @@ def _series_value_candidates(
     values: List[tuple[re.Match, float]] = []
     all_numbers: List[tuple[re.Match, float]] = []
     for match in _NUMBER_TOKEN_RE.finditer(text):
+        # A digit inside a unit ("cells/mm3") or a change amount ("a loss of 3 kg", "rose by
+        # 5") is not a recorded value of the series.
+        if match.start() and text[match.start() - 1].isalpha():
+            continue
+        if _DELTA_PREFIX_RE.search(text[max(0, match.start() - 24) : match.start()]):
+            continue
         try:
             all_numbers.append((match, float(match.group())))
         except ValueError:
@@ -1731,14 +1759,24 @@ def run_temporal_gate(
 
     selected = _selected_series(q, a, temporal_facts)
     if _TREND_RE.search(qa) and selected:
-        for s in selected:
+        for s in _named_series(a, selected):
             answer_dir = _answer_direction_for_series(a, s, selected)
             indices = [
                 p.get("index")
                 for p in (s.get("points") or [])
                 if isinstance(p.get("index"), int)
             ]
-            if not s.get("trend_supported"):
+            if not s.get("trend_supported") and _NO_TREND_CLAIM_RE.search(a):
+                _add_check(
+                    checks,
+                    "single_point_trend",
+                    "pass",
+                    "info",
+                    a[:240],
+                    f"{s.get('concept')} has one dated point and the answer says no trend can be drawn.",
+                    indices,
+                )
+            elif not s.get("trend_supported"):
                 _add_check(
                     checks,
                     "single_point_trend",
@@ -1771,8 +1809,8 @@ def run_temporal_gate(
                 _add_check(
                     checks,
                     "window_scope",
-                    "warn",
-                    "warn",
+                    "info",
+                    "info",
                     a[:240],
                     f"Answer/query names a strict window, but the documented {s.get('concept')} window is {window.get('start')}..{window.get('end')}.",
                     indices,
@@ -2021,7 +2059,8 @@ def verified_series_endpoints(
 _TREND_CHECK_IDS = {"single_point_trend", "trend_direction"}
 _NO_TREND_CLAIM_RE = re.compile(
     r"\b(?:insufficient|not enough|cannot|can't|unable|too few)\b.{0,60}\btrend\b|"
-    r"\bno\s+(?:clear\s+)?trend\b|\bsingle\b.{0,40}\b(?:value|count|measurement|reading)\b",
+    r"\bno\s+(?:clear\s+)?trend\b|\b(?:single|only one|one dated)\b.{0,40}\b(?:value|count|measurement|reading|point)\b|"
+    r"\bno other\b.{0,40}\b(?:values?|counts?|measurements?|readings?|results?|points?)\b",
     re.I,
 )
 

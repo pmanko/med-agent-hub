@@ -89,7 +89,7 @@ def test_product_single_profile_has_no_fake_orchestrator_and_correct_order():
     profile = levels_loader.get_profile("single-12b-checked")
     assert profile.topology == "single"
     assert "orchestrator" not in profile.models
-    assert profile.default is True
+    assert profile.default is False
     assert profile.policies["temporal_gate"] == "enforce"
     assert profile.exact_tokenizer is True
     assert profile.stages == (
