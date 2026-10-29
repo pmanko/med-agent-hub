@@ -288,3 +288,50 @@ def test_the_rules_read_another_disease_from_its_chart():
     marks = answer_rules.claim_marks("The record does not state a diagnosis for her metformin [1].", facts)
     assert _ids(marks) == ["rule_diagnosis_presence"] and "Diabetes care program" in marks[0]["reason"]
     assert _ids(answer_rules.claim_marks("She has diabetes [10].", facts)) == ["rule_demographics_citation"]
+
+
+_VACCINE_CHART = """Patient records (most recent first):
+[1] (2026-01-25) Drug order: Hemophilus influenza B vaccine. Action: NEW. Urgency: ROUTINE
+[2] (2026-01-25) Drug order: Polio vaccine (oral). Action: NEW. Urgency: ROUTINE
+[3] (2026-01-25) Drug order: Diphtheria tetanus and pertussis vaccination. Action: NEW. Urgency: ROUTINE
+[4] (2026-01-25) Drug order: Isoniazid. Action: NEW. Urgency: ROUTINE
+[5] (2026-01-25) Weight (kg): 11 kg
+[6] (2025-12-22) Weight (kg): 11 kg
+"""
+
+
+def test_an_abbreviation_names_the_order_its_initials_spell():
+    """Held-out pass (28 October): "Hib" and "DTP" in a cited list were read as naming no order."""
+    facts = build_temporal_facts(_VACCINE_CHART, "2026-06-20")
+    assert not answer_rules.claim_marks("Vaccines were ordered (Hib, Polio, DTP) [1][2][3].", facts)
+    marks = answer_rules.claim_marks("Vaccines were ordered (Hib, Polio, DTP) [1][2][3][4].", facts)
+    assert _ids(marks) == ["rule_drug_citation"] and "[4] is the order for Isoniazid" in marks[0]["reason"]
+
+
+def test_an_answer_with_nothing_in_the_window_keeps_its_records_behind_a_chart_lead():
+    """Held-out pass: leaving out every record older than "the last 3 months" emptied the answer.
+    With nothing of those kinds inside the window, the answer keeps them and says they are older."""
+    facts = build_temporal_facts(_VACCINE_CHART, "2026-06-20")
+    text, _c, _b, findings = answer_rules.apply_answer_rules(
+        "Has anything changed in the last 3 months?",
+        "Weight stayed at 11 kg from 2025-12-22 [6] to 2026-01-25 [5].",
+        [5, 6], [], facts,
+    )
+    assert text.startswith("The chart has no records of these kinds dated within the last 3 months (from 2026-03-20)")
+    assert text.endswith("Weight stayed at 11 kg from 2025-12-22 [6] to 2026-01-25 [5].")
+    assert _ids(findings, "info") == ["rule_window"]
+    # an answer that already says so is left alone
+    stated = "There are no records within the last three months; the last weight was 11 kg on 2026-01-25 [5]."
+    assert answer_rules.apply_answer_rules("Has anything changed in the last 3 months?", stated, [5], [], facts)[0] == stated
+
+
+def test_an_answer_that_misses_the_windows_records_is_marked_not_edited():
+    chart = _VACCINE_CHART.replace("Patient records (most recent first):\n", "Patient records (most recent first):\n[7] (2026-05-01) Weight (kg): 12 kg\n")
+    facts = build_temporal_facts(chart, "2026-06-20")
+    answer = "Weight stayed at 11 kg from 2025-12-22 [6] to 2026-01-25 [5]."
+    text, _c, _b, findings = answer_rules.apply_answer_rules(
+        "Has anything changed in the last 3 months?", answer, [5, 6], [], facts
+    )
+    assert text.startswith(answer)
+    window = next(f for f in findings if f["id"] == "rule_window")
+    assert window["status"] == "fail" and "latest 2026-05-01 [7]" in window["reason"]

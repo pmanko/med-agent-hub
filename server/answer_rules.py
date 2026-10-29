@@ -37,7 +37,14 @@ _SPAN_RE = re.compile(
     re.I,
 )
 
-_DRUG_STOP_TOKENS = {"and", "with", "tablet", "tablets", "oral", "plus", "fixed", "dose"}
+_DRUG_STOP_TOKENS = {"and", "with", "tablet", "tablets", "oral", "plus", "fixed", "dose", "vaccine", "vaccination"}
+# An answer that already says nothing falls inside the asked window, or places a record before it.
+_WINDOW_STATED_RE = re.compile(
+    r"\bno (?:records?|data|measurements?|entries|orders?|visits?|encounters?|changes?)\b.{0,80}"
+    r"\b(?:within|in|during|since)\b|\bmore than\b.{0,40}\b(?:before|ago|prior)\b|"
+    r"\b(?:older than|outside the|before the (?:asked|requested))\b",
+    re.I,
+)
 _DEMOGRAPHIC_WORDS_RE = re.compile(
     r"\b(?:name|named|female|male|sex|gender|born|birth|age|aged|years? old|address|lives|"
     r"identifier|identification|ID)\b",
@@ -118,11 +125,14 @@ def _drug_name(record: Dict[str, Any]) -> Optional[str]:
 
 
 def _drug_tokens(name: str) -> set:
-    return {
-        token
-        for token in re.split(r"[^a-z]+", (name or "").lower())
-        if len(token) >= 5 and token not in _DRUG_STOP_TOKENS
-    }
+    """The words that name a drug order: its long words and, for a name of several words, their
+    initials ("Diphtheria tetanus and pertussis vaccination" is also "dtp", "Hemophilus influenza
+    B vaccine" also "hib"), so an answer's abbreviation still names the order."""
+    words = [w for w in re.split(r"[^a-z]+", (name or "").lower()) if w and w not in _DRUG_STOP_TOKENS]
+    tokens = {w for w in words if len(w) >= 5}
+    if len(words) >= 2:
+        tokens.add("".join(w[0] for w in words))
+    return tokens
 
 
 def _words(text: str) -> set:
@@ -307,6 +317,48 @@ def _window_edits(
     start, words = window
     dropped: List[int] = []
     findings: List[Dict[str, Any]] = []
+    cited_anywhere = [i for i in _cites(text) + _row_refs(blocks) if i in records]
+    if cited_anywhere and _all_before(cited_anywhere, records, start):
+        # Nothing the answer cites falls inside the window: leaving it out would leave no answer.
+        # Does the chart hold records of the kinds the answer cites inside the window (up to the
+        # reference date)? Then the answer missed them; otherwise the chart has nothing newer.
+        reference = _date(facts.get("reference_date")) or start
+        kinds = {records[i].get("cls") for i in cited_anywhere}
+        in_window = sorted(
+            (
+                r
+                for r in records.values()
+                if r.get("cls") in kinds
+                and r.get("clinical", True)
+                and start <= (_date(r.get("date")) or _dt.date.min) <= reference
+            ),
+            key=lambda r: (str(r.get("date") or ""), -r["index"]),
+        )
+        if in_window:
+            latest = in_window[-1]
+            findings.append(
+                _finding(
+                    "window",
+                    "fail",
+                    text,
+                    f"the chart has {len(in_window)} {latest.get('cls', 'record').lower()} record"
+                    f"{'s' if len(in_window) != 1 else ''} of the kinds the answer cites dated within the "
+                    f"{words} (latest {latest['date']} [{latest['index']}]); the answer cites none of them",
+                    [r["index"] for r in in_window[-5:]],
+                )
+            )
+            return text, blocks, findings
+        if _WINDOW_STATED_RE.search(text):
+            return text, blocks, []
+        newest = max(cited_anywhere, key=lambda i: (str(records[i].get("date") or ""), -i))
+        lead = (
+            f"The chart has no records of these kinds dated within the {words} (from "
+            f"{start.isoformat()}); the records below are older, the latest from {records[newest]['date']}."
+        )
+        findings.append(
+            _finding("window", "info", question, f"the chart has no clinical record dated on or after {start.isoformat()}", cited_anywhere)
+        )
+        return lead + " " + text, blocks, findings
 
     new_blocks = copy.deepcopy(blocks)
     for block in new_blocks if isinstance(new_blocks, list) else []:
@@ -334,7 +386,7 @@ def _window_edits(
         kept_sentences = []
         for sentence in sentences:
             cited = _cites(sentence)
-            if cited and _all_before(cited, records, start):
+            if cited and _all_before(cited, records, start) and not _WINDOW_STATED_RE.search(sentence):
                 dropped.extend(cited)
                 continue
             # Within a sentence with in-window records, a citation group keeps only its in-window

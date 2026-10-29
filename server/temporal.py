@@ -639,7 +639,13 @@ def build_temporal_facts(
         "appointment_candidates": candidates_by_relation,
         # The answer rules read the records; render_temporal_facts never shows them to a model.
         "records": [
-            {"index": e["index"], "date": e["date"], "cls": e["cls"], "body": e["body"]}
+            {
+                "index": e["index"],
+                "date": e["date"],
+                "cls": e["cls"],
+                "body": e["body"],
+                "clinical": e["is_clinical_event"],
+            }
             for e in events
         ],
     }
