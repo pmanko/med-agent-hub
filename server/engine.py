@@ -8,6 +8,7 @@ import dataclasses
 import hashlib
 import json
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from typing import (
@@ -1004,9 +1005,10 @@ def _initial_answer_changed(state: _State) -> bool:
         list(state.citations) + current_block_refs,
         state.answer_text,
     )
+    # Citation order is not a change: resolving references can reorder the same records.
     return (state.answer_check_edited or state.review_edited) and initial is not None and (
         initial.strip() != state.answer_text.strip()
-        or initial_sources != current_sources
+        or set(initial_sources) != set(current_sources)
         or state.initial_answer_blocks != state.blocks
     )
 
@@ -1209,6 +1211,30 @@ def _indepth_mark_note(marked: int, total: int, review: Mapping[str, Any]) -> st
         return ""
     note = "; ".join(parts)
     return note[0].upper() + note[1:] + ". Verify marked points against the chart."
+
+
+def _date_check_label(entry: Mapping[str, Any]) -> str:
+    """A short inline reason for a claim the date check failed, in the chart's terms."""
+    for check in (entry.get("gate") or {}).get("checks") or []:
+        if check.get("status") != "fail":
+            continue
+        reason = str(check.get("reason") or "")
+        found = re.match(r"(.+?) has fewer than two dated points", reason)
+        if check.get("id") == "single_point_trend" and found:
+            return f"the chart has one dated {found.group(1)} value, so no trend"
+        found = re.search(r"binds value ([\d.]+) to (\d{4}-\d{2}-\d{2})", reason)
+        if check.get("id") == "date_value_binding" and found:
+            value = found.group(1).removesuffix(".0")
+            return f"the chart does not give {value} on {found.group(2)}"
+        found = re.search(r"emits '([^']+)'", reason)
+        if check.get("id") == "date_format" and found:
+            return f"{found.group(1)} is not a date in the chart"
+        found = re.search(r"last clinical encounter (\d{4}-\d{2}-\d{2})", reason)
+        if check.get("id") == "last_visit" and found:
+            return f"the last visit in the chart is {found.group(1)}"
+        if check.get("id") == "trend_direction":
+            return "the chart's values move the other way"
+    return "the date check found a conflict"
 
 
 def _marked_claim(claim: str, labels: Sequence[str], tag: str = "") -> str:
@@ -2214,8 +2240,16 @@ async def _execute_stages(
                         if (level, label) not in marks.setdefault(claim_index, []):
                             marks[claim_index].append((level, label))
 
+                    gate_entries = {
+                        entry.get("claim_index"): entry
+                        for entry in state.indepth_gate.get("checks") or []
+                    }
                     for claim_index in state.indepth_gate.get("flagged") or []:
-                        mark(claim_index, "red", "the date check found a conflict")
+                        mark(
+                            claim_index,
+                            "red",
+                            _date_check_label(gate_entries.get(claim_index) or {}),
+                        )
                     if review.get("status") == "flagged":
                         state.indepth_gate["review_status"] = "flagged"
                         state.indepth_gate["review_flagged"] = list(
@@ -2329,19 +2363,40 @@ async def _execute_stages(
                             in {"unsupported", "mixed"}
                         ]
                         if unsupported:
+                            not_found = "; ".join(
+                                dict.fromkeys(
+                                    check["not_found"]
+                                    for reference in unsupported
+                                    for check in reference.get("groundingChecks") or []
+                                    if check.get("not_found")
+                                )
+                            )
+                            cited = ", ".join(
+                                f"[{reference.get('index')}]" for reference in unsupported
+                            )
                             citation_checks.append(
                                 {
                                     "claim_index": claim_index,
                                     "claim": claim,
                                     "status": "fail",
-                                    "reason": "In-Depth claim is not supported by its cited source.",
+                                    "reason": (
+                                        f"Its cited record {cited} does not state: {not_found}."
+                                        if not_found
+                                        else "In-Depth claim is not supported by its cited source."
+                                    ),
                                     "source_indices": [
                                         reference.get("index")
                                         for reference in unsupported
                                     ],
                                 }
                             )
-                            mark(claim_index, "red", "its cited record does not support it")
+                            mark(
+                                claim_index,
+                                "red",
+                                f"{cited} does not state {not_found}"
+                                if not_found
+                                else "its cited record does not support it",
+                            )
                             continue
                         unchecked = [
                             reference
@@ -2375,9 +2430,11 @@ async def _execute_stages(
                         state.indepth_gate["marked"] = sorted(marks)
                     levels = {level for labels in marks.values() for level, _label in labels}
                     if state.claims and not state.indepth_error:
+                        # The level grades the In-Depth as a whole: one marked point among
+                        # several is a point to check, not a low-confidence section.
                         level = (
                             "red"
-                            if "red" in levels
+                            if "red" in levels and len(marks) >= len(state.claims)
                             else "yellow"
                             if levels or review.get("status") == "unreviewed"
                             else str(review.get("level") or "green")

@@ -1,0 +1,200 @@
+{
+  "reference_date": "2026-06-20",
+  "source": "run 5ac27952 (27 Oct 2026): every In-Depth claim the date check failed; expected flags reviewed by hand (remaining fails are dates not in the chart)",
+  "cases": [
+    {
+      "scenario": "date-zabella-weight-table",
+      "chart": "zabella-halambe",
+      "claim": "The patient's weight has fluctuated between 71 kg and 75 kg over the past year, with a recent decrease to 71 kg on 2026-01-26 [19].",
+      "flagged_in_run": [
+        "date_value_binding:fail",
+        "window_scope:warn"
+      ],
+      "expected": [
+        "window_scope:warn"
+      ]
+    },
+    {
+      "scenario": "date-aloice-last-visit-exact",
+      "chart": "aloice-mukangu",
+      "claim": "The patient's weight has shown a downward trend from 52.0 kg on 2025-10-22 to 41.0 kg by the most recent encounter on 2026-01-07 [21], which requires close monitoring during active TB treatment.",
+      "flagged_in_run": [
+        "last_visit:fail"
+      ],
+      "expected": []
+    },
+    {
+      "scenario": "single-upcoming-appointments",
+      "chart": "zabella-halambe",
+      "claim": "Based on the patient's most recent encounter on 2026-01-26, a return visit was scheduled for 2026-02-23 [22], which has already passed relative to today's date of 2026-06-20.",
+      "flagged_in_run": [
+        "last_visit:fail"
+      ],
+      "expected": []
+    },
+    {
+      "scenario": "am-last-visit",
+      "chart": "aloice-mukangu",
+      "claim": "The patient's weight has shown a significant downward trend from 52.0 kg on 2025-10-22 to 41.0 kg by the last visit [21], which requires close monitoring for nutritional status and medication tolerance.",
+      "flagged_in_run": [
+        "date_value_binding:fail",
+        "last_visit:fail"
+      ],
+      "expected": []
+    },
+    {
+      "scenario": "am-weight-trend",
+      "chart": "aloice-mukangu",
+      "claim": "The patient's current weight of 41 kg on 2026-01-07 [2] is notably lower than the baseline recorded on 2025-10-22, coinciding with a period where they were reported to have new complaints and active fever [33].",
+      "flagged_in_run": [
+        "date_value_binding:fail"
+      ],
+      "expected": []
+    },
+    {
+      "scenario": "am-cd4-history",
+      "chart": "aloice-mukangu",
+      "claim": "The low CD4 count reflects a severely compromised immune status, increasing the risk for serious infections such as cryptococcosis or tuberculosis.",
+      "flagged_in_run": [
+        "single_point_trend:fail"
+      ],
+      "expected": []
+    },
+    {
+      "scenario": "am-cd4-history",
+      "chart": "aloice-mukangu",
+      "claim": "Per WHO HIV guidelines, antiretroviral therapy (ART) should be initiated regardless of the CD4 count to improve long-term outcomes and reduce mortality.",
+      "flagged_in_run": [
+        "single_point_trend:fail"
+      ],
+      "expected": []
+    },
+    {
+      "scenario": "convo-diagnosis-evidence",
+      "chart": "zabella-halambe",
+      "claim": "A single CD4 count of 341 cells/uL [182] is insufficient to establish a clinical trend, as monitoring requires multiple measurements over time to assess the effectiveness of antiretroviral therapy.",
+      "flagged_in_run": [
+        "single_point_trend:fail"
+      ],
+      "expected": []
+    },
+    {
+      "scenario": "convo-vitals-monitoring",
+      "chart": "zabella-halambe",
+      "claim": "The patient's diastolic blood pressure has also remained relatively stable, currently at 60 mmHg on 2026-01-15 [15]",
+      "flagged_in_run": [
+        "date_format:fail",
+        "date_value_binding:fail"
+      ],
+      "expected": [
+        "date_format:fail",
+        "date_value_binding:fail"
+      ]
+    },
+    {
+      "scenario": "convo-vitals-monitoring",
+      "chart": "zabella-halambe",
+      "claim": "A weight loss of 3 kg (from 74 kg on 2025-10-23 to 71 kg on 2026-02-26) in a patient with HIV may be clinically significant and requires assessment for underlying causes such as opportunistic infections or medication side effects.",
+      "flagged_in_run": [
+        "date_format:fail",
+        "date_value_binding:fail"
+      ],
+      "expected": [
+        "date_format:fail",
+        "date_value_binding:fail"
+      ]
+    },
+    {
+      "scenario": "convo-vitals-monitoring",
+      "chart": "zabella-halambe",
+      "claim": "The patient's pulse oximetry reading of 93% on 2026-01_26 [14] is within a generally acceptable range, but the downward trend from 98% in December 2025 should be monitored.",
+      "flagged_in_run": [
+        "date_format:fail"
+      ],
+      "expected": [
+        "date_format:fail"
+      ]
+    },
+    {
+      "scenario": "convo-safety-escalation",
+      "chart": "zabella-halambe",
+      "claim": "Stopping treatment without medical supervision poses significant risks, including rapid CD4 count decline and increased susceptibility to opportunistic infections.",
+      "flagged_in_run": [
+        "single_point_trend:fail"
+      ],
+      "expected": []
+    },
+    {
+      "scenario": "am-cd4-history",
+      "chart": "aloice-mukangu",
+      "claim": "A CD4 count below 200 cells/mm\u00b3 indicates advanced HIV disease and necessitates opportunistic infection prophylaxis, which is relevant given this patient's result of 72 cells/uL on 2025-01-07 [311] [322].",
+      "flagged_in_run": [
+        "date_format:fail"
+      ],
+      "expected": [
+        "date_format:fail"
+      ]
+    },
+    {
+      "scenario": "am-cd4-history",
+      "chart": "aloice-mukangu",
+      "claim": "The low CD4 count reflects a severely compromised immune status, increasing the risk for serious infections and requiring close monitoring of clinical symptoms like fever or weight loss.",
+      "flagged_in_run": [
+        "single_point_trend:fail"
+      ],
+      "expected": []
+    },
+    {
+      "scenario": "convo-diagnosis-evidence",
+      "chart": "zabella-halambe",
+      "claim": "While no specific HIV stage or CD4 count trend is provided in the most recent visit summary beyond a single point on 2025-11-24, clinical management typically focuses on maintaining viral suppression and monitoring for opportunistic infections.",
+      "flagged_in_run": [
+        "last_visit:fail",
+        "single_point_trend:fail"
+      ],
+      "expected": []
+    },
+    {
+      "scenario": "convo-diagnosis-evidence",
+      "chart": "zabella-halambe",
+      "claim": "The presence of a CD4 count of 341 cells/uL (14%) on 2025-11-24 [182][183] indicates significant immunosuppression and necessitates ongoing monitoring for opportunistic infections.",
+      "flagged_in_run": [
+        "date_value_binding:fail"
+      ],
+      "expected": []
+    },
+    {
+      "scenario": "convo-vitals-monitoring",
+      "chart": "zabella-halambe",
+      "claim": "The patient's diastolic blood pressure has also remained relatively stable, currently at 60 mmHg on 2026-01-17 [15], which is within a normal range.",
+      "flagged_in_run": [
+        "date_format:fail",
+        "date_value_binding:fail"
+      ],
+      "expected": [
+        "date_format:fail",
+        "date_value_binding:fail"
+      ]
+    },
+    {
+      "scenario": "convo-safety-escalation",
+      "chart": "zabella-halambe",
+      "claim": "Per the 'treat-all' strategy, patients should remain on ART regardless of their current CD4 count or WHO clinical stage to maintain viral suppression and improve health outcomes [367].",
+      "flagged_in_run": [
+        "single_point_trend:fail"
+      ],
+      "expected": []
+    },
+    {
+      "scenario": "convo-medications-adherence",
+      "chart": "zabella-halambe",
+      "claim": "The patient's reported 'most' adherence for the past week on 2026-01-17 [11] contrasts with previous reports of no overall drug adherence in the last month as of late December 2025 [46][84].",
+      "flagged_in_run": [
+        "date_format:fail"
+      ],
+      "expected": [
+        "date_format:fail"
+      ]
+    }
+  ]
+}
