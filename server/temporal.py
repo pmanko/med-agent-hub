@@ -956,6 +956,35 @@ def _allowed_iso_dates(facts: Dict[str, Any]) -> set:
     }
 
 
+_GARBLED_ISO_RE = re.compile(r"\b(\d{4})[-_](\d{2})[-_](\d{2})\b")
+
+
+def repair_garbled_dates(text: str, facts: Optional[Dict[str, Any]]) -> Tuple[str, List[Dict[str, str]]]:
+    """Put a hyphen back where the sampler wrote an underscore in a chart date.
+
+    ``2026-01_26`` becomes ``2026-01-26`` only when that is a date in the chart's ledger; any
+    other malformed token is left for the date check to flag. Returns the text and one
+    ``{"from", "to"}`` entry per repair.
+    """
+    if not text or "_" not in text or not isinstance(facts, dict):
+        return text, []
+    allowed = _allowed_iso_dates(facts)
+    repairs: List[Dict[str, str]] = []
+
+    def fix(match: re.Match) -> str:
+        raw = match.group(0)
+        if "_" not in raw:
+            return raw
+        candidate = "-".join(match.groups())
+        if candidate not in allowed:
+            return raw
+        if not any(r["from"] == raw for r in repairs):
+            repairs.append({"from": raw, "to": candidate})
+        return candidate
+
+    return _GARBLED_ISO_RE.sub(fix, text), repairs
+
+
 def _date_output_failures(answer: str, facts: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Find dates the model should not have emitted: malformed date-like strings and
     valid ISO dates absent from the model-visible date ledger."""
@@ -2078,6 +2107,9 @@ def gate_indepth_claims(
         if citation_repair:
             claim, source_index, repair_reason = citation_repair
             edited = True
+        claim, date_repairs = repair_garbled_dates(claim or "", temporal_facts)
+        if date_repairs:
+            edited = True
         citations = [int(value) for value in re.findall(r"\[(\d+)]", claim or "")]
         gate = _scope_indepth_trend_checks(
             claim or "",
@@ -2105,6 +2137,9 @@ def gate_indepth_claims(
                 }
             )
         check = {"claim_index": index, "claim": original_claim, "gate": gate}
+        if date_repairs:
+            check["evaluated_claim"] = claim
+            check["date_repairs"] = date_repairs
         if citation_repair:
             check["evaluated_claim"] = claim
             check["citation_repair"] = {

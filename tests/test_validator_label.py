@@ -199,7 +199,7 @@ def test_answer_review_labels_a_flag_that_offers_no_correction():
         [
             {
                 "answer_ok": False,
-                "errors": [_err("aspirin", "no active med", "remove")],
+                "errors": [_err("aspirin", "no active med [1]", "remove")],
                 "corrected_answer": "",
             },
         ]
@@ -388,7 +388,7 @@ def test_answer_review_keeps_an_error_on_an_assertion_beside_a_confirmed_endpoin
             "content": json.dumps(
                 {
                     "answer_ok": False,
-                    "errors": [_err(wrong, "No record supports a safety claim", "Remove the safety claim")],
+                    "errors": [_err(wrong, "No record supports a safety claim; the weights are [350] and [19]", "Remove the safety claim")],
                     "corrected_answer": "The latest weight was 71 kg on 2026-01-26 [19].",
                 }
             )
@@ -573,7 +573,7 @@ def test_flagged_answer_is_neither_rewritten_nor_regenerated():
         [
             {
                 "answer_ok": False,
-                "errors": [_err("ans-v0", "weight 71 kg on 2026-01-26 [15]", "71 kg")],
+                "errors": [_err("ans-v0", "Aspirin active [1]", "71 kg")],
                 "corrected_answer": "The patient weighs 71 kg [15].",
             },
             {"answer_ok": True, "errors": [], "corrected_answer": ""},

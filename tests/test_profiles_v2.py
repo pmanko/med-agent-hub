@@ -538,7 +538,10 @@ def test_checked_answer_arms_change_only_their_declared_choice(
         default.exact_tokenizer,
     )
     assert dict(arm.models) == (models or dict(default.models))
-    assert arm.policies["review"] == {"action": "label", "grounding": grounding}
+    assert arm.policies["review"] == {
+        **default.policies["review"],
+        "grounding": grounding,
+    }
     assert {k: v for k, v in arm.policies.items() if k != "review"} == {
         k: v for k, v in default.policies.items() if k != "review"
     }

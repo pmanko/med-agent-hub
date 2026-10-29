@@ -5,6 +5,7 @@ not the LLM. A separate test pins the cancellation invariant (a cancelled _chat 
 
 import asyncio
 import json
+import re
 from contextvars import ContextVar
 
 import pytest
@@ -225,7 +226,7 @@ def test_staged_stream_with_validator_emits_full_phase_sequence(monkeypatch):
         if rewrite_calls == 1:
             return {
                 "answer_ok": False,
-                "errors": [{"chart": "Use record 2."}],
+                "errors": [{"chart": "Use record 2 [2]."}],
                 "corrected_answer": "Ans fixed [2].",
             }
         return {"answer_ok": True, "errors": []}
@@ -304,7 +305,7 @@ def test_review_flag_with_an_unusable_rewrite_keeps_the_answer_needs_review(
     async def punctuation_rewrite(*_args, **_kwargs):
         return {
             "answer_ok": False,
-            "errors": [{"chart": "The rewrite is unusable."}],
+            "errors": [{"chart": "The rewrite is unusable; see [1]."}],
             "corrected_answer": ".",
         }
 
@@ -672,7 +673,7 @@ def test_stage_drain_returns_final_post_review_envelope(monkeypatch):
         if rewrite_calls == 1:
             return {
                 "answer_ok": False,
-                "errors": [{"chart": "Use record 2."}],
+                "errors": [{"chart": "Use record 2 [2]."}],
                 "corrected_answer": "Ans fixed [2].",
             }
         return {"answer_ok": True, "errors": []}
@@ -706,21 +707,32 @@ def test_stage_drain_returns_final_post_review_envelope(monkeypatch):
     assert env["references"][0]["groundingStatus"] == "verified"
 
 
+def attribution_reply(verdicts):
+    """The citation checker's reply for a list of YES/NO verdicts: YES is a fact the record
+    states, NO is a fact it states differently, anything else is a malformed entry."""
+    pairs = []
+    for verdict in verdicts:
+        if verdict == "YES":
+            pairs.append({"facts": [{"fact": "the stated fact", "status": "found"}]})
+        elif verdict == "NO":
+            pairs.append({"facts": [{"fact": "the stated fact", "status": "differs",
+                                     "source_value": "another value"}]})
+        else:
+            pairs.append({"facts": "?"})
+    return {"pairs": pairs}
+
+
 def _fake_chat_returning_verdicts(verdicts_by_call):
     """Stub for team._chat that returns the next queued verdicts list as an entailment response."""
     calls = []
+    queue = [verdict for verdicts in verdicts_by_call for verdict in verdicts]
 
     async def fake_chat(_client, model, messages, **kwargs):
         calls.append({"model": model, "messages": messages, **kwargs})
-        verdicts = verdicts_by_call[len(calls) - 1]
-        schema = ((kwargs.get("response_format") or {}).get("json_schema") or {}).get("name")
-        if schema == "attribution_verdicts":
-            return {
-                "content": json.dumps(
-                    {"pairs": [{"facts": [], "verdict": verdict} for verdict in verdicts]}
-                )
-            }
-        return {"content": json.dumps({"verdicts": verdicts})}
+        # One verdict per pair in the request, in order, whatever the batch size.
+        n_pairs = len(re.findall(r"^PAIR \d+:", messages[-1]["content"], re.M))
+        verdicts = [queue.pop(0) for _ in range(min(n_pairs, len(queue)))]
+        return {"content": json.dumps(attribution_reply(verdicts))}
 
     return fake_chat, calls
 
@@ -737,9 +749,10 @@ def test_entailment_verdicts_maps_yes_no_positionally(monkeypatch):
         )
 
     verdicts = asyncio.run(_run())
-    assert verdicts == [True, False]
+    assert [v["support"] for v in verdicts] == ["supported", "contradicted"]
     assert len(calls) == 1  # ONE batched call for both pairs, not one per pair
-    assert calls[0]["response_format"]["json_schema"]["name"] == "entailment_verdicts"
+    assert calls[0]["response_format"]["json_schema"]["name"] == "attribution_verdicts"
+    assert calls[0]["dry_multiplier"] == 0.0
 
 
 def test_entailment_verdicts_fails_open_to_unchecked_on_call_error(monkeypatch):
@@ -753,7 +766,7 @@ def test_entailment_verdicts_fails_open_to_unchecked_on_call_error(monkeypatch):
             client=None, model="M", pairs=[("s", "c")]
         )
 
-    assert asyncio.run(_run()) == [None]
+    assert [v["support"] for v in asyncio.run(_run())] == ["unchecked"]
 
 
 def test_entailment_verdicts_fails_open_on_malformed_response(monkeypatch):
@@ -767,7 +780,7 @@ def test_entailment_verdicts_fails_open_on_malformed_response(monkeypatch):
             client=None, model="M", pairs=[("s", "c")]
         )
 
-    assert asyncio.run(_run()) == [None]
+    assert [v["support"] for v in asyncio.run(_run())] == ["unchecked"]
 
 
 def test_ground_references_verified_for_an_entailed_paraphrase_despite_low_word_overlap(
@@ -844,16 +857,17 @@ def test_ground_references_checks_a_multi_citation_claim_against_combined_source
     assert [item["groundingStatus"] for item in grounded] == ["verified", "verified"]
     assert [item["groundingScope"] for item in grounded] == ["source_set", "source_set"]
     assert [item["groundingGroup"] for item in grounded] == [[1, 2], [1, 2]]
+    expected = {
+        "status": "verified",
+        "support": "supported",
+        "claim": "Weight decreased from 74 kg on 2006-03-16 to 71 kg on 2006-06-06 .",
+        "location": "answer",
+        "path": "",
+        "source_indices": [1, 2],
+    }
     assert all(
-        item["groundingChecks"] == [
-            {
-                "status": "verified",
-                "claim": "Weight decreased from 74 kg on 2006-03-16 to 71 kg on 2006-06-06 .",
-                "location": "answer",
-                "path": "",
-                "source_indices": [1, 2],
-            }
-        ]
+        len(item["groundingChecks"]) == 1
+        and {key: item["groundingChecks"][0].get(key) for key in expected} == expected
         for item in grounded
     )
     prompt = calls[0]["messages"][0]["content"]
@@ -1353,8 +1367,9 @@ def test_ground_references_preserves_mixed_claim_level_verdicts(monkeypatch):
         )
 
     grounded = asyncio.run(_run())
-    assert grounded[0]["groundingStatus"] == "mixed"
-    assert grounded[0]["grounded"] is None
+    assert grounded[0]["groundingStatus"] == "unsupported"
+    assert grounded[0]["support"] == "contradicted"
+    assert grounded[0]["grounded"] is False
     assert [check["status"] for check in grounded[0]["groundingChecks"]] == [
         "verified",
         "unsupported",
@@ -1432,8 +1447,9 @@ def test_ground_references_checks_all_pairs_in_one_request_when_they_fit(monkeyp
         )
 
     grounded = asyncio.run(_run())
-    assert len(calls) == 1
-    assert calls[0]["messages"][0]["content"].count("PAIR ") == n
+    assert len(calls) == -(-n // team._CITATION_BATCH)
+    assert all(call["messages"][0]["content"].count("PAIR ") <= team._CITATION_BATCH for call in calls)
+    assert sum(call["messages"][0]["content"].count("PAIR ") for call in calls) == n
     verified = [r for r in grounded if r["groundingStatus"] == "verified"]
     unchecked = [r for r in grounded if r["groundingStatus"] == "unchecked"]
     assert len(verified) == n
@@ -1474,7 +1490,7 @@ def test_ground_references_marks_all_pairs_unchecked_when_a_fitting_call_fails(m
         team._ground_references(None, "M", answer, refs, mappings)
     )
 
-    assert len(calls) == 1
+    assert len(calls) == -(-n // team._CITATION_BATCH)
     assert [r["groundingStatus"] for r in grounded] == ["unchecked"] * n
 
 
@@ -1500,7 +1516,7 @@ def test_grounding_batch_splits_until_each_request_fits(monkeypatch):
     )
 
     assert verdicts == [True] * 5
-    assert calls == [5, 2, 3, 1, 2]
+    assert calls == [4, 2, 2, 1]
 
 
 def test_product_long_table_finishes_checked_after_all_grounding_batches(
@@ -1596,7 +1612,8 @@ def test_product_long_table_finishes_checked_after_all_grounding_batches(
     final = asyncio.run(collect())["done"]
     # Generic text cells still require semantic grounding; the shortcut is limited to canonical
     # mapping facts such as a record date or the value after a structured chart-field separator.
-    assert len(calls) == 2
+    # The answer's cells go in batches of four, then one call for the In-Depth claim.
+    assert len(calls) == -(-total // team._CITATION_BATCH) + 1
     assert final["answerValidation"]["status"] == "checked"
     assert len(final["references"]) == total
     assert all(
@@ -1676,7 +1693,7 @@ def test_product_long_indepth_keeps_all_verified_claims(monkeypatch):
         )
 
     final = asyncio.run(collect())["done"]
-    assert len(calls) == 2
+    assert len(calls) == 1 + -(-total // team._CITATION_BATCH)
     assert final["inDepth"]["status"] == "complete"
     assert final["inDepth"]["answer"].count("\n-") + 1 == total
     assert len(final["references"]) == total
@@ -1894,7 +1911,7 @@ def test_needs_review_answer_still_runs_indepth(monkeypatch):
     async def unusable_rewrite(*_args, **_kwargs):
         return {
             "answer_ok": False,
-            "errors": [{"chart": "The rewrite is unusable."}],
+            "errors": [{"chart": "The rewrite is unusable; see [1]."}],
             "corrected_answer": ".",
         }
 
@@ -1959,8 +1976,9 @@ def test_final_source_set_grounding_failure_is_reported_once(monkeypatch):
             "id": "citation_grounding",
             "status": "fail",
             "severity": "block",
-            "reason": "The cited source set did not fully support the associated claim.",
+            "reason": "[1], [2] states something different: see the record.",
             "source_indices": [1, 2],
+            "claim": "Collective unsupported claim .",
         }
     ]
     assert final["confidence"]["answer"]["level"] == "red"
@@ -2316,7 +2334,7 @@ def test_post_review_failure_restores_exact_emitted_answer_state(monkeypatch):
         if review_calls == 1:
             return {
                 "answer_ok": False,
-                "errors": [{"chart": "Use record 2."}],
+                "errors": [{"chart": "Use record 2 [2]."}],
                 "corrected_answer": "Reviewed answer [2].",
             }
         return {"answer_ok": True, "errors": []}
@@ -2353,7 +2371,7 @@ def test_indepth_failure_preserves_latest_validated_answer_state(monkeypatch):
         if review_calls == 1:
             return {
                 "answer_ok": False,
-                "errors": [{"chart": "Use record 2."}],
+                "errors": [{"chart": "Use record 2 [2]."}],
                 "corrected_answer": "Reviewed answer [2].",
             }
         return {"answer_ok": True, "errors": []}
@@ -2431,7 +2449,7 @@ def test_final_mixed_grounding_cannot_leave_answer_checked(monkeypatch):
     monkeypatch.setattr(team, "_ground_references", mixed)
 
     final = dict(_collect(_product_profile()))["done"]
-    assert final["references"][0]["groundingStatus"] == "mixed"
+    assert final["references"][0]["groundingStatus"] == "unsupported"
     assert final["answerValidation"]["status"] == "needs_review"
     assert final["answerValidation"]["issues"][-1]["id"] == "citation_grounding"
 
@@ -2635,17 +2653,17 @@ def test_indepth_citation_keeps_its_own_unsupported_verdict_beside_the_answer(mo
     assert len(calls) == 2
     assert final["inDepth"]["status"] == "complete"
     assert final["inDepth"]["answer"] == (
-        "- Unsupported In-Depth claim [1]. *(Check: its cited record does not support it.)*"
+        "- Unsupported In-Depth claim [1]. *(Check: [1] states something different.)*"
     )
     assert "reviewDraft" not in final["inDepth"]
     assert final["confidence"]["in_depth"]["level"] == "red"
     assert final["inDepth"]["validation"]["citation_checks"][0]["status"] == "fail"
-    assert "not supported by its cited source" in final["inDepth"]["validation"][
+    assert "states something different" in final["inDepth"]["validation"][
         "summary"
     ]
     assert final["inDepth"]["error"] == ""
     # The record supports the answer's use and not the In-Depth's, and says both.
-    assert final["references"][0]["groundingStatus"] == "mixed"
+    assert final["references"][0]["groundingStatus"] == "unsupported"
     assert {usage.get("location") for usage in final["references"][0]["usage"]} == {
         "answer",
         "indepth",
