@@ -181,7 +181,6 @@ def test_review_policy_accepts_only_known_confidence_values():
 def test_product_profiles_ship_findings():
     from server.levels_loader import get_profile
 
-    for profile_id in ("single-12b-checked", "single-12b-xcheck", "single-31b-xcheck",
-                       "single-12b-checked-folded", "single-12b-checked-noground",
-                       "single-12b-checked-nodry"):
-        assert get_profile(profile_id).policies["review"]["confidence"] == "findings", profile_id
+    for profile_id in ("single-12b-checked", "single-12b-answer", "single-31b-xcheck",
+                       "single-12b-bare", "single-12b-verify", "single-12b-agree"):
+        assert get_profile(profile_id).policies["confidence"] == "findings", profile_id

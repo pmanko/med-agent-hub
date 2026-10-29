@@ -133,13 +133,15 @@ def _answer_response_format(request: ExecutionRequest) -> Optional[Dict[str, Any
 
 
 def _confidence_policy(profile: Profile) -> str:
-    """What the confidence sections carry (``review.confidence``): ``levels`` (a green, yellow
-    or red grade) or ``findings`` (no grade; the list of what the checks found)."""
+    """What the confidence sections carry (``policies.confidence``, or ``review.confidence``):
+    ``levels`` (a green, yellow or red grade) or ``findings`` (no grade; the list of what the
+    checks found)."""
     review = profile.policies.get("review") or {}
-    return str(review.get("confidence") or "levels")
+    return str(profile.policies.get("confidence") or review.get("confidence") or "levels")
 
 
 _ISSUE_CHECKS = (
+    ("agreement", "agreement"),
     ("citation_grounding", "citation"),
     ("citation_not_addressed", "citation"),
     ("citation_grounding_unavailable", "citation"),
@@ -190,6 +192,8 @@ def _confidence_section(
 
 def _grounding_policy(profile: Profile) -> str:
     """How the profile checks that cited records support their sentences (``review.grounding``)."""
+    if "ground_verdicts" not in profile.stages:
+        return "off"
     review = profile.policies.get("review") or {}
     return str(review.get("grounding") or "separate")
 
@@ -242,6 +246,7 @@ class _State:
     # 1-based In-Depth claim index -> what each check marked on it; shown beside the claim.
     indepth_marks: Dict[int, List[str]] = field(default_factory=dict)
     indepth_findings: List[Dict[str, Any]] = field(default_factory=list)
+    agreement: Optional[Dict[str, Any]] = None
     # Neutral tags: what a claim is, not a call to check it (uncited general guidance).
     indepth_tags: Dict[int, str] = field(default_factory=dict)
     indepth_error: str = ""
@@ -1157,6 +1162,8 @@ def _stream_payload(
         payload["answerValidation"] = validation
     if state.answer_gate is not None:
         payload["temporalGate"] = state.answer_gate
+    if state.agreement is not None:
+        payload["agreement"] = state.agreement
     if in_depth is not None:
         payload["inDepth"] = in_depth
     safety_check = stages._compute_safety_check(
@@ -2001,6 +2008,70 @@ async def _execute_stages(
                                 prior_validation.get("originalAnswer")
                                 or (state.review_draft if state.review_edited else None)
                             ),
+                        )
+                    record_stage_timing()
+                    continue
+
+                if stage == "agree":
+                    # A second writer from another family answers the same question on its own;
+                    # the answer shown is the first writer's, never a merged text. Each sentence
+                    # of it is then checked against the second answer as a source: a fact the
+                    # second writer states differently is a disagreement the clinician sees.
+                    second_model = request.profile.models["second"]
+                    second_text, _second_citations, _second_blocks = await stages._synthesize_answer(
+                        client,
+                        second_model,
+                        state.messages,
+                        _prompt(request.profile, "answer", "synthesis-answer"),
+                        state.gathered,
+                        response_format=answer_response_format,
+                        temperature=sampling["answer_temperature"],
+                        max_tokens=request.max_tokens,
+                        repeat_penalty=sampling["answer_repeat_penalty"],
+                        dry=0.0,
+                    )
+                    claims = stages._answer_claims(state.answer_text, state.blocks)
+                    verdicts = (
+                        await stages._bounded_entailment_verdicts(
+                            client,
+                            second_model,
+                            [(second_text, claim) for claim in claims],
+                        )
+                        if claims and second_text.strip()
+                        else []
+                    )
+                    state.agreement = stages._agreement_record(
+                        second_model, second_text, claims, verdicts
+                    )
+                    state.steps.append(
+                        {
+                            "role": "second_writer",
+                            "model": second_model,
+                            "output": second_text,
+                            "agreement": state.agreement["status"],
+                            "claims": len(claims),
+                        }
+                    )
+                    issues = stages._agreement_issues(state.agreement)
+                    if issues:
+                        prior = state.answer_validation or {}
+                        differs = [issue for issue in issues if issue["status"] == "fail"]
+                        if differs:
+                            _mark_answer_low_confidence(
+                                state,
+                                "The two writers differ on " + "; ".join(
+                                    issue["claim"] for issue in differs
+                                ) + ".",
+                            )
+                        state.answer_validation = stages._answer_validation_wire(
+                            "needs_review" if differs else str(prior.get("status") or "checked"),
+                            summary=(
+                                "A second writer from another model family stated something different."
+                                if differs
+                                else str(prior.get("summary") or "")
+                            ),
+                            issues=list(prior.get("issues") or []) + issues,
+                            original_answer=prior.get("originalAnswer"),
                         )
                     record_stage_timing()
                     continue

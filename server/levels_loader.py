@@ -43,6 +43,7 @@ _ALLOWED_STAGES = {
     "resolve_refs",
     "review",
     "final_resolve_refs",
+    "agree",
     "ground_verdicts",
     "indepth",
     "indepth_gate",
@@ -426,6 +427,9 @@ def _review_policy(profile: Profile) -> Optional[str]:
 
     A profile that reviews or grounds its answer declares ``review: {action, grounding}``.
     """
+    confidence = str(profile.policies.get("confidence") or "levels")
+    if confidence not in _CONFIDENCE_POLICIES:
+        raise ValueError(f"profile {profile.id!r} has invalid confidence policy {confidence!r}")
     checks = {"review", "ground_verdicts"} & set(profile.stages)
     review = profile.policies.get("review")
     if not checks:
@@ -515,6 +519,7 @@ def compile_profile(profile: Profile) -> Profile:
     for stage, role in (
         ("answer", "answer"),
         ("review", "review"),
+        ("agree", "second"),
         ("ground_verdicts" if grounding == "separate" else "", "grounding"),
         ("indepth_gate" if grounding == "separate" else "", "grounding"),
         ("indepth", "indepth"),
@@ -607,17 +612,27 @@ def compile_profile(profile: Profile) -> Profile:
             "gate",
             "resolve_refs",
             "final_resolve_refs",
-            "ground_verdicts",
         }
+        # A profile that checks citations (a review policy) grounds them after the final
+        # citation resolution; one without any citation check carries no grounding stage.
+        if profile.policies.get("review") is not None:
+            required.add("ground_verdicts")
         if "indepth" in stages:
             required.add("indepth_gate")
         missing = sorted(required - set(stages))
         if missing:
             raise ValueError(f"product profile {profile.id!r} lacks stages {missing}")
-        if stages.index("final_resolve_refs") >= stages.index("ground_verdicts") or (
+        if (
+            "ground_verdicts" in stages
+            and stages.index("final_resolve_refs") >= stages.index("ground_verdicts")
+        ) or (
             "indepth" in stages
             and not (
-                stages.index("ground_verdicts")
+                (
+                    stages.index("ground_verdicts")
+                    if "ground_verdicts" in stages
+                    else stages.index("final_resolve_refs")
+                )
                 < stages.index("indepth")
                 < stages.index("indepth_gate")
             )

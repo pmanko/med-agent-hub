@@ -52,7 +52,9 @@ querystore_config = QueryStoreConfig()
 SYNTH_REPEAT_PENALTY = float(os.getenv("SYNTH_REPEAT_PENALTY", "1.15"))
 ORCHESTRATOR_DRY_MULTIPLIER = float(os.getenv("ORCHESTRATOR_DRY_MULTIPLIER", "0.0"))
 EXPERT_DRY_MULTIPLIER = float(os.getenv("EXPERT_DRY_MULTIPLIER", "0.8"))
-SYNTH_DRY_MULTIPLIER = float(os.getenv("SYNTH_DRY_MULTIPLIER", "0.8"))
+# Off by default: with DRY on the writer garbled copied dates (2026-01_26) and scored the same
+# without it (run 8dacd7b1, 27 October 2026).
+SYNTH_DRY_MULTIPLIER = float(os.getenv("SYNTH_DRY_MULTIPLIER", "0.0"))
 
 _COMMIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 

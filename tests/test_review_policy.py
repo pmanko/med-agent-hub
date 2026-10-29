@@ -275,7 +275,8 @@ def test_label_reviewer_is_not_asked_for_a_fix_or_a_corrected_answer(monkeypatch
     )
 
     properties = seen["schema"]["properties"]
-    assert set(properties) == {"answer_ok", "errors"}
+    assert set(properties) == {"answer_ok", "errors", "checked"}
+    assert "corrected_answer" not in properties and "fix" not in properties
     assert set(properties["errors"]["items"]["properties"]) == {"wrong", "chart"}
     assert "CITATION SUPPORT" not in seen["prompt"]
 
