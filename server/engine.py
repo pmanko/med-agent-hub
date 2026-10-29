@@ -147,6 +147,7 @@ _ISSUE_CHECKS = (
     ("citation_grounding_unavailable", "citation"),
     ("review_doubt", "review"),
     ("citation_", "record"),
+    ("rule_", "rule"),
 )
 
 
@@ -1286,12 +1287,22 @@ def _indepth_mark_note(marked: int, total: int, review: Mapping[str, Any]) -> st
     return note[0].upper() + note[1:] + ". Verify marked points against the chart."
 
 
+def _flag_check(entry: Mapping[str, Any]) -> str:
+    """The check that flagged an In-Depth claim: a chart rule (answer rules) or the date check."""
+    for check in (entry.get("gate") or {}).get("checks") or []:
+        if check.get("status") == "fail":
+            return "rule" if str(check.get("id") or "").startswith("rule_") else "date"
+    return "date"
+
+
 def _date_check_label(entry: Mapping[str, Any]) -> str:
     """A short inline reason for a claim the date check failed, in the chart's terms."""
     for check in (entry.get("gate") or {}).get("checks") or []:
         if check.get("status") != "fail":
             continue
         reason = str(check.get("reason") or "")
+        if str(check.get("id") or "").startswith("rule_"):
+            return reason
         found = re.match(r"(.+?) has fewer than two dated points", reason)
         if check.get("id") == "single_point_trend" and found:
             return f"the chart has one dated {found.group(1)} value, so no trend"
@@ -1692,7 +1703,7 @@ async def _execute_stages(
                             state.answer_conf, state.answer_gate
                         )
                         state.answer_check_edited = state.answer_check_edited or (
-                            state.answer_gate.get("applied") in {"patch", "fallback"}
+                            state.answer_gate.get("applied") in {"patch", "fallback", "edit"}
                         )
                     elif state.review_edited:
                         (
@@ -1716,7 +1727,7 @@ async def _execute_stages(
                             prior_original_answer=state.original_answer,
                         )
                         state.answer_check_edited = state.answer_check_edited or (
-                            state.answer_gate.get("applied") in {"patch", "fallback"}
+                            state.answer_gate.get("applied") in {"patch", "fallback", "edit"}
                         )
                     else:
                         state.answer_conf = stages._merge_temporal_gate_conf(
@@ -2450,12 +2461,8 @@ async def _execute_stages(
                         for entry in state.indepth_gate.get("checks") or []
                     }
                     for claim_index in state.indepth_gate.get("flagged") or []:
-                        mark(
-                            claim_index,
-                            "red",
-                            _date_check_label(gate_entries.get(claim_index) or {}),
-                            "date",
-                        )
+                        entry = gate_entries.get(claim_index) or {}
+                        mark(claim_index, "red", _date_check_label(entry), _flag_check(entry))
                     if review.get("status") == "flagged":
                         state.indepth_gate["review_status"] = "flagged"
                         state.indepth_gate["review_flagged"] = list(

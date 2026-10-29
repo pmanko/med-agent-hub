@@ -13,7 +13,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Sequ
 
 import httpx
 
-from . import drug_safety, temporal
+from . import answer_rules, drug_safety, temporal
 from .config import EXPERT_DRY_MULTIPLIER, llm_config, resolve_hub_build_revision
 from .context_sources import (
     CHART_MARKER,
@@ -1929,6 +1929,20 @@ def _apply_temporal_gate(
                 [],
             )
             gate["applied"] = "fallback"
+    if gate.get("mode") in {"warn", "enforce"} and gate.get("applied") != "fallback":
+        enforce = gate.get("mode") == "enforce"
+        ruled_text, ruled_citations, ruled_blocks, rule_findings = answer_rules.apply_answer_rules(
+            question, answer_text, citations, blocks, temporal_facts, edit=enforce
+        )
+        if rule_findings:
+            gate["checks"] = list(gate.get("checks") or []) + rule_findings
+            gate["status"] = temporal._final_gate_status(gate["checks"])
+        if enforce and (ruled_text != answer_text or ruled_blocks != blocks):
+            original_answer = original_answer if original_answer is not None else answer_text
+            answer_text, citations, blocks = ruled_text, ruled_citations, ruled_blocks
+            gate["rule_edits"] = [f["id"] for f in rule_findings if f.get("status") == "info"]
+            if gate.get("applied") in {"none", "repair"}:
+                gate["applied"] = "edit"
     steps.append(
         {
         "role": "temporal_gate",
