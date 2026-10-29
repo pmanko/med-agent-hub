@@ -2009,6 +2009,40 @@ async def _execute_stages(
                                 or (state.review_draft if state.review_edited else None)
                             ),
                         )
+                    elif "ground_verdicts" not in request.profile.stages:
+                        # No review and no citation check: the deterministic checks alone set
+                        # the status (a gate patch is an edit, a failed gate or an unresolved
+                        # record needs review).
+                        prior = state.answer_validation or {}
+                        unresolved_final = any(
+                            reference.get("resolutionStatus") == "unresolved"
+                            for reference in state.references
+                        )
+                        if unresolved_final:
+                            _mark_answer_low_confidence(
+                                state,
+                                "One or more citations do not resolve to the current evidence ledger.",
+                            )
+                        if state.citation_issues:
+                            _mark_answer_low_confidence(
+                                state,
+                                "The answer has a blocking citation-format or citation-scope issue.",
+                            )
+                        status = (
+                            "needs_review"
+                            if unresolved_final
+                            or state.citation_issues
+                            or state.answer_conf.get("level") == "red"
+                            else "edited"
+                            if _initial_answer_changed(state)
+                            else "checked"
+                        )
+                        state.answer_validation = stages._answer_validation_wire(
+                            status,
+                            summary=prior.get("summary") or state.answer_conf.get("note", ""),
+                            issues=list(prior.get("issues") or []) + list(state.citation_issues),
+                            original_answer=prior.get("originalAnswer"),
+                        )
                     record_stage_timing()
                     continue
 
@@ -2092,13 +2126,28 @@ async def _execute_stages(
                         grounding_options: Dict[str, Any] = {}
                         if deterministic_checks:
                             grounding_options["deterministic_checks"] = deterministic_checks
-                        if folded:
+                        # A folded review that judged no cited record (the 9B returned an empty
+                        # list in 5 of 7 verify turns on 28 October) falls back to the separate
+                        # check with the review model, so citations are never left unchecked
+                        # by an omission.
+                        cited_now = {
+                            reference.get("index")
+                            for reference in state.references
+                            if reference.get("resolutionStatus") == "resolved"
+                        }
+                        fold_missed = folded and bool(cited_now) and not (
+                            cited_now & set((state.review_citation_verdicts or {}).keys())
+                        )
+                        if folded and not fold_missed:
                             grounding_options["index_verdicts"] = (
                                 state.review_citation_verdicts or {}
                             )
                         state.references = await stages._ground_references(
                             client,
-                            None if folded else request.profile.models["grounding"],
+                            None
+                            if folded and not fold_missed
+                            else request.profile.models.get("grounding")
+                            or request.profile.models["review"],
                             state.answer_text,
                             state.references,
                             state.mappings,
@@ -2107,7 +2156,7 @@ async def _execute_stages(
                         state.steps.append(
                             {
                                 "role": "grounding",
-                                "policy": grounding,
+                                "policy": "folded-fallback" if fold_missed else grounding,
                                 "model": (
                                     request.profile.models["review"]
                                     if folded
@@ -2419,7 +2468,7 @@ async def _execute_stages(
                             mark(claim_index, "yellow", "flagged on review", "review")
                     elif review.get("status") == "unreviewed":
                         state.indepth_gate["review_status"] = "unavailable"
-                    else:
+                    elif "review" in request.profile.models:
                         state.indepth_gate["review_status"] = "clean"
                     citation_checks: list[dict[str, Any]] = []
                     candidates: list[tuple[int, str, list[dict[str, Any]]]] = []
@@ -2472,7 +2521,12 @@ async def _execute_stages(
                         for _claim_index, _claim, references in candidates
                         for reference in references
                     ]
-                    if grounding == "folded" and flattened and state.mappings:
+                    if (
+                        grounding == "folded"
+                        and flattened
+                        and state.mappings
+                        and review.get("citation_unsupported") is not None
+                    ):
                         # The In-Depth review judged each claim's citations in its own call.
                         unsupported_claims = review.get("citation_unsupported")
                         grounded: list[dict[str, Any]] = []
@@ -2497,10 +2551,12 @@ async def _execute_stages(
                                 )
                             )
                         flattened = grounded
-                    elif grounding == "separate" and flattened and state.mappings:
+                    elif grounding in {"separate", "folded"} and flattened and state.mappings:
+                        # Separate, or a folded In-Depth review that returned no citation list.
                         flattened = await stages._ground_references(
                             client,
-                            request.profile.models["grounding"],
+                            request.profile.models.get("grounding")
+                            or request.profile.models["review"],
                             "\n".join(claim for _index, claim, _refs in candidates),
                             flattened,
                             state.mappings,

@@ -277,13 +277,16 @@ profiles:
     context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true, supplemental_sources: [knowledge-base]}
     knobs: {answer: {temperature: 0}}
 
+  # The verifier reads the chart once per section: its verification questions carry the citation
+  # verdicts (grounding folded), so no separate citation call; Qwen3.5-9B keeps 10 GB free for
+  # the writer's prompt cache (run D on 28 October: the 12B ran twice as slow beside the 35B).
   single-12b-verify:
-    label: Checked answer (12B writer, Qwen3.6 35B-A3B verifier)
+    label: Checked answer (12B writer, Qwen3.5 9B verifier)
     topology: single
     stages: *product
-    models: {answer: gemma-4-12b, review: qwen3.6-35b, grounding: qwen3.6-35b, indepth: gemma-4-12b}
+    models: {answer: gemma-4-12b, review: qwen3.5-9b, indepth: gemma-4-12b}
     prompts: {answer: synthesis-answer, review: validation-verify, indepth: synthesis-indepth}
-    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true, review: {action: label, grounding: separate}, confidence: findings}
+    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true, review: {action: label, grounding: folded}, confidence: findings}
     visibility: product
     selection_priority: 55
     context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true, supplemental_sources: [knowledge-base]}

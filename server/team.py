@@ -1555,6 +1555,16 @@ _LABEL_WITH_CITATIONS_VERDICT_RF = {
             "type": "object",
             "properties": {
                 **_LABEL_VERDICT_RF["json_schema"]["schema"]["properties"],
+                "checked": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "question": {"type": "string"},
+                            "chart": {"type": "string"},
+                        },
+                    },
+                },
                 "citations": {
                     "type": "array",
                     "items": {

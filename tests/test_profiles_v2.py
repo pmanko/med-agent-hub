@@ -505,8 +505,8 @@ def test_compiled_profile_configuration_is_immutable():
     [
         (
             "single-12b-verify",
-            {"answer": "gemma-4-12b", "review": "qwen3.6-35b", "grounding": "qwen3.6-35b", "indepth": "gemma-4-12b"},
-            "separate",
+            {"answer": "gemma-4-12b", "review": "qwen3.5-9b", "indepth": "gemma-4-12b"},
+            "folded",
             0.7,
         ),
         (
