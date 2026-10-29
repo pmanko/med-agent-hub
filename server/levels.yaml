@@ -244,6 +244,56 @@ profiles:
     context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true, supplemental_sources: [knowledge-base]}
     knobs: {answer: {temperature: 0}}
 
+  # Checked-answer research arms: the default profile's stages, context and policies with one
+  # choice changed each. Offered in the app after the default; the harness runs them as arms.
+  single-12b-xcheck:
+    label: Checked answer (12B writer, Qwen3.6 35B-A3B checker)
+    topology: single
+    stages: *product
+    models: {answer: gemma-4-12b, review: qwen3.6-35b, grounding: qwen3.6-35b, indepth: gemma-4-12b}
+    prompts: {answer: synthesis-answer, review: validation-label, indepth: synthesis-indepth}
+    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true, review: {action: label, grounding: separate}}
+    visibility: product
+    selection_priority: 50
+    context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true, supplemental_sources: [knowledge-base]}
+    knobs: {answer: {temperature: 0}, review: {temperature: 0.7}}
+
+  single-31b-xcheck:
+    label: Checked answer (31B writer, Qwen3.5 9B checker)
+    topology: single
+    stages: *product
+    models: {answer: gemma-31b, review: qwen3.5-9b, grounding: qwen3.5-9b, indepth: gemma-31b}
+    prompts: {answer: synthesis-answer, review: validation-label, indepth: synthesis-indepth}
+    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true, review: {action: label, grounding: separate}}
+    visibility: product
+    selection_priority: 51
+    context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true, supplemental_sources: [knowledge-base]}
+    knobs: {answer: {temperature: 0}, review: {temperature: 0.7}}
+
+  single-12b-checked-folded:
+    label: Checked answer (12B, citation support judged in the review)
+    topology: single
+    stages: *product
+    models: {answer: gemma-4-12b, review: gemma-4-12b, grounding: gemma-4-12b, indepth: gemma-4-12b}
+    prompts: {answer: synthesis-answer, review: validation-label, indepth: synthesis-indepth}
+    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true, review: {action: label, grounding: folded}}
+    visibility: product
+    selection_priority: 52
+    context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true, supplemental_sources: [knowledge-base]}
+    knobs: {answer: {temperature: 0}}
+
+  single-12b-checked-noground:
+    label: Checked answer (12B, no citation support check)
+    topology: single
+    stages: *product
+    models: {answer: gemma-4-12b, review: gemma-4-12b, grounding: gemma-4-12b, indepth: gemma-4-12b}
+    prompts: {answer: synthesis-answer, review: validation-label, indepth: synthesis-indepth}
+    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true, review: {action: label, grounding: "off"}}
+    visibility: product
+    selection_priority: 53
+    context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true, supplemental_sources: [knowledge-base]}
+    knobs: {answer: {temperature: 0}}
+
   team-med-checked:
     label: Checked medical team
     topology: team
