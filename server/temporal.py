@@ -42,6 +42,10 @@ _DATE_LIKE_RE = re.compile(
 )
 _DATE_ID_TOKEN_RE = re.compile(r"\bD\d{4}_\d{2}_\d{2}\b")
 _LEADING_NUM_RE = re.compile(r"^([+-]?\d+(?:\.\d+)?)\s*(.*)$")
+_TRAJECTORY_SUFFIX_RE = re.compile(
+    r"\s*\((?:initial\s+(?P<init_val>[+-]?\d+(?:\.\d+)?)\s+on\s+(?P<init_date>\d{4}-\d{2}-\d{2})\b.*|"
+    r"recorded\s+\d{4}-\d{2}-\d{2},\s*n=1)\)\s*$"
+)
 _NUMBER_TOKEN_RE = re.compile(r"(?<![\[\d.-])([+-]?\d+(?:\.\d+)?)(?![\]\d.-])")
 _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+|\n+")
 _DELTA_PREFIX_RE = re.compile(
@@ -343,6 +347,24 @@ def parse_dated_observations(chart: str) -> List[Dict[str, Any]]:
         concept = _clean_concept(head)
         if not concept:
             continue
+        raw_unit = nm.group(2).strip()
+        traj_match = _TRAJECTORY_SUFFIX_RE.search(raw_unit)
+        unit = _TRAJECTORY_SUFFIX_RE.sub("", raw_unit).strip() if traj_match else raw_unit
+        if traj_match and traj_match.group("init_val") and traj_match.group("init_date"):
+            init_date = traj_match.group("init_date")
+            init_key = (concept, init_date)
+            if init_key not in seen:
+                seen.add(init_key)
+                out.append(
+                    {
+                        "index": index,
+                        "date": init_date,
+                        "concept": concept,
+                        "value": float(traj_match.group("init_val")),
+                        "unit": unit,
+                        "raw": line.strip(),
+                    }
+                )
         key = (concept, date)
         if key in seen:
             continue
@@ -353,7 +375,7 @@ def parse_dated_observations(chart: str) -> List[Dict[str, Any]]:
                 "date": date,
                 "concept": concept,
                 "value": float(nm.group(1)),
-                "unit": nm.group(2).strip(),
+                "unit": unit,
                 "raw": line.strip(),
             }
         )
@@ -504,11 +526,14 @@ def build_temporal_facts(
             "past_12_months_window_start",
         )
     for e in events:
+        role = "admin_record_date" if _is_admin_event(e) else "clinical_record_date"
         _add_date_role(
             date_roles,
             e.get("date"),
-            "admin_record_date" if _is_admin_event(e) else "clinical_record_date",
+            role,
         )
+        for body_iso in _ISO_TOKEN_RE.findall(str(e.get("body") or "")):
+            _add_date_role(date_roles, body_iso, role)
 
     by_concept: Dict[str, List[Dict[str, Any]]] = {}
     observations = parse_dated_observations(chart)
