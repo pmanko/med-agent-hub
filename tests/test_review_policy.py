@@ -65,7 +65,7 @@ def test_every_configured_reviewing_profile_labels_and_names_its_grounding():
             continue
         review = profile.policies["review"]
         assert review["action"] == "label", profile_id
-        assert review["grounding"] in {"separate", "folded", "off"}, profile_id
+        assert review["grounding"] in {"separate", "decision", "folded", "off"}, profile_id
 
 
 @pytest.mark.parametrize("action", ["apply", "redo"])
