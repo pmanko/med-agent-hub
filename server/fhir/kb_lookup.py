@@ -205,53 +205,54 @@ def extract_chart_kb_codes(extracted: Any) -> List[str]:
 
 def audit_cohort_code_coverage(extracted: Any) -> Dict[str, Any]:
     """Audit exact KB resolution coverage across active conditions, medications, lab panels,
-    and immunizations in an `ExtractedChart`."""
+    and immunizations in an `ExtractedChart`, separating direct code-only lookup (`precoded_pct`)
+    from Layer 2–4 text/ingredient fallback recovery (`text_fallback_recovered_pct`)."""
     counts = {
-        "condition_active": {"total": 0, "resolved": 0},
-        "medications": {"total": 0, "resolved": 0},
-        "immunizations": {"total": 0, "resolved": 0},
-        "lab_panels_and_vitals": {"total": 0, "resolved": 0},
+        "condition_active": {"total": 0, "code_only": 0, "text_fallback": 0, "resolved": 0},
+        "medications": {"total": 0, "code_only": 0, "text_fallback": 0, "resolved": 0},
+        "immunizations": {"total": 0, "code_only": 0, "text_fallback": 0, "resolved": 0},
+        "lab_panels_and_vitals": {"total": 0, "code_only": 0, "text_fallback": 0, "resolved": 0},
     }
     unresolved: List[Dict[str, str]] = []
+    code_only_methods = {"snomed_code", "rxnorm_code", "cvx_code", "loinc_code"}
+
+    def _record(cat: str, sec: str, code: str, disp: str, res: Mapping[str, Any]) -> None:
+        counts[cat]["total"] += 1
+        method = str(res.get("resolved_by") or "")
+        if method in code_only_methods:
+            counts[cat]["code_only"] += 1
+            counts[cat]["resolved"] += 1
+        elif method != "heuristic_fallback":
+            counts[cat]["text_fallback"] += 1
+            counts[cat]["resolved"] += 1
+        else:
+            unresolved.append({"section": sec, "code": code, "display": disp})
 
     for it in getattr(extracted, "items", None) or []:
         sec = getattr(it, "section", "")
         code = str(getattr(it, "code", "") or "")
         disp = str(getattr(it, "display", "") or "")
         if sec == "condition_active":
-            counts["condition_active"]["total"] += 1
-            res = resolve_condition_code(code, disp)
-            if res.get("resolved_by") != "heuristic_fallback":
-                counts["condition_active"]["resolved"] += 1
-            else:
-                unresolved.append({"section": sec, "code": code, "display": disp})
+            _record("condition_active", sec, code, disp, resolve_condition_code(code, disp))
         elif sec in {"med_active", "med_historical"}:
-            counts["medications"]["total"] += 1
-            res = resolve_medication_code(code, disp)
-            if res.get("resolved_by") != "heuristic_fallback":
-                counts["medications"]["resolved"] += 1
-            else:
-                unresolved.append({"section": sec, "code": code, "display": disp})
+            _record("medications", sec, code, disp, resolve_medication_code(code, disp))
         elif sec == "immunization":
-            counts["immunizations"]["total"] += 1
-            res = resolve_immunization_code(code, disp)
-            if res.get("resolved_by") != "heuristic_fallback":
-                counts["immunizations"]["resolved"] += 1
-            else:
-                unresolved.append({"section": sec, "code": code, "display": disp})
+            _record("immunizations", sec, code, disp, resolve_immunization_code(code, disp))
         elif sec in {"lab_panel", "vital_sign"}:
-            counts["lab_panels_and_vitals"]["total"] += 1
-            res = resolve_lab_code(code, disp)
-            if res.get("resolved_by") != "heuristic_fallback":
-                counts["lab_panels_and_vitals"]["resolved"] += 1
-            else:
-                unresolved.append({"section": sec, "code": code, "display": disp})
+            _record("lab_panels_and_vitals", sec, code, disp, resolve_lab_code(code, disp))
 
     total_checked = sum(v["total"] for v in counts.values())
+    code_only_total = sum(v["code_only"] for v in counts.values())
+    fallback_total = sum(v["text_fallback"] for v in counts.values())
     total_resolved = sum(v["resolved"] for v in counts.values())
+    denom = max(total_checked, 1)
     return {
         "total_checked": total_checked,
+        "code_only_resolved": code_only_total,
+        "text_fallback_recovered": fallback_total,
         "total_resolved": total_resolved,
+        "precoded_pct": round((code_only_total / denom) * 100.0, 1) if total_checked else 100.0,
+        "text_fallback_recovered_pct": round((fallback_total / denom) * 100.0, 1) if total_checked else 0.0,
         "resolution_rate": 1.0 if total_checked == 0 else total_resolved / total_checked,
         "by_category": counts,
         "unresolved": unresolved,

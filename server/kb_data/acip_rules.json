@@ -108,6 +108,30 @@
       "series_rule": "2-dose series separated by 2 to 6 months for adults aged 50 years and older.",
       "max_recommended_doses": 2,
       "duplicate_window_days": 28
+    },
+    "33": {
+      "cvx": "33",
+      "vaccine_group": "Pneumococcal",
+      "display": "Pneumococcal polysaccharide vaccine, 23 valent (PPSV23)",
+      "plain_purpose": "Pneumococcal vaccine protecting older adults and high-risk patients against serious pneumococcal pneumonia and bloodstream infections.",
+      "series_rule": "Doses recorded within 14 days across clinic and pharmacy/registry sources indicate a cross-source duplicate.",
+      "duplicate_window_days": 14
+    },
+    "215": {
+      "cvx": "215",
+      "vaccine_group": "Pneumococcal",
+      "display": "Pneumococcal conjugate vaccine 15-valent (PCV15)",
+      "plain_purpose": "Conjugate pneumococcal vaccine protecting against invasive pneumococcal disease.",
+      "series_rule": "Doses recorded within 14 days across clinic and pharmacy/registry sources indicate a cross-source duplicate.",
+      "duplicate_window_days": 14
+    },
+    "216": {
+      "cvx": "216",
+      "vaccine_group": "Pneumococcal",
+      "display": "Pneumococcal conjugate vaccine 20-valent (PCV20)",
+      "plain_purpose": "20-valent pneumococcal conjugate vaccine for adults aged 65+ or with chronic conditions.",
+      "series_rule": "Single-dose adult recommendation; doses recorded within 14 days across sources indicate a duplicate record.",
+      "duplicate_window_days": 14
     }
   }
 }

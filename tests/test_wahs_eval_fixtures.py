@@ -6,12 +6,15 @@ from typing import Any, Dict
 
 from scripts.build_wahs_eval_fixtures import (
     NATURAL_ANOMALIES_BY_PATIENT,
+    build_deidentified_real_clinical_summaries,
     build_eval_cases,
     inject_byron_multisource_perturbations,
     inject_lamar_multisource_perturbations,
     inject_maurice_multisource_perturbations,
+    inject_messy_ehr_perturbations,
 )
 from server.fhir import (
+    audit_cohort_code_coverage,
     condense_bundle_to_budget,
     detect_condition_conflicts,
     detect_medication_conflicts,
@@ -148,13 +151,22 @@ def test_build_eval_cases_covers_all_wahs_use_cases() -> None:
     assert len(cases) >= 30
 
     by_use_case: Dict[str, int] = {}
+    real_summary_keys = set(build_deidentified_real_clinical_summaries().keys())
     for c in cases:
         use_case = str(c["use_case"])
         by_use_case[use_case] = by_use_case.get(use_case, 0) + 1
         assert c["case_id"]
         assert str(c["patient_bundle"]).endswith(".json")
-        stem = str(c["patient_bundle"]).replace("_multisource.json", "").replace(".json", "")
-        assert stem in NATURAL_ANOMALIES_BY_PATIENT
+        stem = (
+            str(c["patient_bundle"])
+            .replace("_multisource.json", "")
+            .replace("_messy.json", "")
+            .replace(".json", "")
+        )
+        assert (
+            stem in NATURAL_ANOMALIES_BY_PATIENT
+            or str(c["patient_bundle"]) in real_summary_keys
+        )
         assert c["mode"] in {"reconcile", "summary", "qa"}
         assert c["question"]
 
@@ -169,3 +181,81 @@ def test_build_eval_cases_covers_all_wahs_use_cases() -> None:
         if c["use_case"] == "B3_qa_abstention":
             assert c["expected_answer_type"] == "abstain_not_in_chart"
             assert c["expected_facts"] == []
+
+
+def test_messy_set_c_and_real_clinical_summaries_recover_uncoded_entries_and_note_contradictions() -> None:
+    """Set C messy perturbations and Pathway B de-identified real clinical summaries
+    strip ~25% of standard codes (lowering `precoded_pct`) while Layer 2/3 text/ingredient
+    fallback recovers 100% of clinical concepts and flags note-vs-medication contradictions."""
+    base_bundle: Dict[str, Any] = _make_synthetic_wahs_bundle()
+    lamar_b, _ = inject_lamar_multisource_perturbations(base_bundle)
+    lamar_c, messy_anoms = inject_messy_ehr_perturbations(lamar_b, "Lamar193_Beer512")
+
+    ext_b = extract_bundle(lamar_b)
+    ext_c = extract_bundle(lamar_c)
+    cov_b = audit_cohort_code_coverage(ext_b)
+    cov_c = audit_cohort_code_coverage(ext_c)
+
+    assert cov_c["precoded_pct"] < cov_b["precoded_pct"]
+    assert cov_c["text_fallback_recovered"] >= 1
+    assert cov_c["resolution_rate"] == 1.0
+    assert any("note_medication_contradiction" in (it.conflict_note or "") for it in ext_c.items)
+    assert len(messy_anoms) == 1
+
+    real_summaries = build_deidentified_real_clinical_summaries()
+    assert "MIMIC_IV_Cardiorenal_Summary.json" in real_summaries
+    assert "SMART_IPS_Transition_Summary.json" in real_summaries
+    for label, (r_bundle, r_anoms) in real_summaries.items():
+        ext_r = extract_bundle(r_bundle)
+        cov_r = audit_cohort_code_coverage(ext_r)
+        if label != "Arthur_Pendelton_Anticoag.json":
+            assert cov_r["precoded_pct"] < 100.0, f"Expected uncoded entries in {label}"
+            assert cov_r["text_fallback_recovered"] >= 1
+        assert cov_r["resolution_rate"] == 1.0
+        cond_r = condense_bundle_to_budget(ext_r, target_tokens=2048)
+        present_r = {
+            str(u)
+            for m in cond_r.mappings
+            for u in ([m.get("resourceUuid")] + list(m.get("memberUuids") or []))
+            if u
+        }
+        for a in r_anoms:
+            for uid in a["expected_resource_uuids"]:
+                assert uid in present_r, f"Missing {uid} in {label}"
+
+
+def test_w17_script_modularity_archetypes_and_demo_exporter(tmp_path: Any) -> None:
+    """W17: `wahs_uscore_archetypes` and `wahs_demo_exporter` expose standalone builders and re-exports."""
+    from scripts.wahs_demo_exporter import (
+        PERSONA_BIOS,
+        PRIMARY_PERSONA_IDS,
+        QUESTIONS_BY_PATIENT,
+        write_wahs_demo_data_js,
+    )
+    from scripts.wahs_uscore_archetypes import (
+        build_deidentified_real_clinical_summaries as build_archetypes_direct,
+    )
+
+    assert build_archetypes_direct is build_deidentified_real_clinical_summaries
+    assert len(PRIMARY_PERSONA_IDS) == 6
+    assert set(PERSONA_BIOS.keys()) == {
+        "Maurice742_Auer97",
+        "Elena_Rostova_Cardiorenal",
+        "Arthur_Pendelton_Anticoag",
+        "Margaret_Chen_Polypharmacy",
+        "Lamar193_Beer512",
+        "Byron202_Emard19",
+    }
+    assert "default" in QUESTIONS_BY_PATIENT
+
+    out_js = tmp_path / "wahs_demo_data.js"
+    stub_results = {
+        "code_coverage": {"resolution_rate": 1.0},
+        "ablation_rows": [],
+        "demo_patients": {pid: {"id": pid} for pid in PRIMARY_PERSONA_IDS},
+    }
+    written_bytes = write_wahs_demo_data_js(stub_results, out_js)
+    assert written_bytes > 100
+    assert "window.WAHS_DEMO_DATA = " in out_js.read_text(encoding="utf-8")
+
+

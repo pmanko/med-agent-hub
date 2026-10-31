@@ -2,9 +2,27 @@
 
 from __future__ import annotations
 
+import functools
+import json
+import os
 import re
 from datetime import date
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
+
+_KB_DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "kb_data")
+
+
+@functools.lru_cache(maxsize=4)
+def _load_kb_pack(filename: str) -> Dict[str, Any]:
+    path = os.path.join(_KB_DATA_DIR, filename)
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
 
 # Sensitive SNOMED-CT / ICD-10 / LOINC codes and patterns requiring sharing warnings or redaction
 # under HL7 DS4P / SAMHSA 42 CFR Part 2 / Gravity Project SDOH guidance.
@@ -139,21 +157,35 @@ def is_clinic_room_equipment(display: str) -> bool:
     return bool(_CLINIC_ROOM_DEVICE_PATTERNS.search(display or ""))
 
 
+def _get_brand_to_generic_map() -> Dict[str, str]:
+    merged = dict(_BRAND_TO_GENERIC)
+    kb_rx = _load_kb_pack("rxnorm_lookup.json")
+    for k, v in (kb_rx.get("brand_to_generic") or {}).items():
+        if k and v:
+            merged[str(k).lower()] = str(v).lower()
+    return merged
+
+
 def normalize_drug_ingredient(display: str) -> str:
     """Normalize a medication display string to its canonical active-ingredient key."""
     text = (display or "").lower()
+    brand_map = _get_brand_to_generic_map()
     # Replace bracketed brand names e.g. "[Plavix]" -> check brand map first
-    for brand, generic in _BRAND_TO_GENERIC.items():
+    for brand, generic in brand_map.items():
         if re.search(rf"\b{re.escape(brand)}\b", text):
             return generic
     text = re.sub(r"\[[^\]]*\]", " ", text)
+    # preserve 'potassium chloride' before stripping salt noise
+    if re.search(r"\bpotassium\s+chloride\b", text):
+        return "potassium chloride"
     text = _DOSE_NOISE.sub(" ", text)
     text = re.sub(r"[^a-z0-9/+\s-]", " ", text)
     tokens = [tok for tok in text.split() if len(tok) > 1 and not tok.isdigit()]
     if not tokens:
         return (display or "unknown-medication").strip().lower()
     head = " ".join(tokens[:3]).strip()
-    return _BRAND_TO_GENERIC.get(tokens[0], head)
+    return brand_map.get(tokens[0], head)
+
 
 
 def detect_condition_conflicts(
@@ -175,11 +207,16 @@ def detect_condition_conflicts(
             continue
         stage = _CKD_STAGE_BY_CODE.get(code)
         if stage is None:
-            m = re.search(r"chronic\s+kidney\s+disease\s+stage\s+([1-5])", display, re.IGNORECASE)
+            m = re.search(
+                r"\b(?:chronic\s+kidney\s+disease|ckd)\s*(?:stage\s*)?([1-5])(?:[ab])?\b",
+                display,
+                re.IGNORECASE,
+            )
             if m:
                 stage = int(m.group(1))
         if stage is not None:
             ckd_by_stage.setdefault(stage, []).append(uuid)
+
 
         if code in _PREDIABETES_CODES or re.search(r"\bprediabetes\b", display, re.IGNORECASE):
             prediabetes_uuids.append(uuid)
@@ -207,23 +244,43 @@ def detect_condition_conflicts(
                 f"stage_conflict: Prediabetes marked ACTIVE alongside established diabetes ({dm_names})"
             )
 
-    # Check cross-source active vs resolved contradiction for the same medical condition code
-    resolved_by_code: Dict[str, List[Mapping[str, Any]]] = {}
+    def _norm_cond_key(code: str, display: str) -> str:
+        c = (code or "").strip()
+        if c and c not in _SDOH_NON_MEDICAL_CODES:
+            return f"code:{c}"
+        d = re.sub(r"\s*\((?:disorder|finding|situation)\)\s*$", "", (display or "").strip(), flags=re.I).lower()
+        return f"disp:{d}" if d else ""
+
+    # Check cross-source active vs resolved contradiction for the same medical condition code or normalized display
+    resolved_by_key: Dict[str, List[Mapping[str, Any]]] = {}
     for rc in resolved_conditions:
         rcode = str(rc.get("code") or "")
-        if rcode and rcode not in _SDOH_NON_MEDICAL_CODES:
-            resolved_by_code.setdefault(rcode, []).append(rc)
+        rdisp = str(rc.get("display") or "")
+        if rcode in _SDOH_NON_MEDICAL_CODES:
+            continue
+        if rcode:
+            resolved_by_key.setdefault(f"code:{rcode}", []).append(rc)
+        dkey = _norm_cond_key("", rdisp)
+        if dkey:
+            resolved_by_key.setdefault(dkey, []).append(rc)
 
     for ac in active_conditions:
         acode = str(ac.get("code") or "")
+        adisp = str(ac.get("display") or "")
         auuid = str(ac.get("resourceUuid") or "")
         a_onset = str(ac.get("onset") or "")
-        if not acode or not auuid or acode not in resolved_by_code:
+        if not auuid:
             continue
-        for rc in resolved_by_code[acode]:
+        candidate_keys = [k for k in (f"code:{acode}" if acode else "", _norm_cond_key("", adisp)) if k]
+        matched_rcs: List[Mapping[str, Any]] = []
+        for ck in candidate_keys:
+            for rc in resolved_by_key.get(ck, []):
+                if rc not in matched_rcs:
+                    matched_rcs.append(rc)
+        for rc in matched_rcs:
             r_abatement = str(rc.get("abatement") or rc.get("onset") or "")
             ruuid = str(rc.get("resourceUuid") or "")
-            # If a record with the same SNOMED code was marked resolved on or after the active onset
+            # If a record with the same condition was marked resolved on or after the active onset
             if r_abatement and (not a_onset or r_abatement >= a_onset):
                 msg = (
                     f"status_conflict: {ac.get('display')} marked ACTIVE (onset {a_onset or 'unknown'}) "
@@ -247,14 +304,39 @@ _STATIN_INGREDIENTS: Set[str] = {
 }
 
 
+def _ingredient_matches_group(ing: str, candidates: Iterable[str]) -> bool:
+    ing_low = (ing or "").lower()
+    ing_tokens = set(re.split(r"[/+\s-]+", ing_low))
+    for cand in candidates:
+        c_low = str(cand).lower()
+        if not c_low:
+            continue
+        if ing_low == c_low or c_low in ing_low or c_low in ing_tokens:
+            return True
+    return False
+
+
 def detect_medication_conflicts(
     active_medications: Sequence[Mapping[str, Any]],
 ) -> Dict[str, str]:
-    """Return `resourceUuid -> conflict_tag` for duplicate active ingredients (brand vs generic)
-    or therapeutic class duplication (e.g. concurrent active statins)."""
+    """Return `resourceUuid -> conflict_tag` for duplicate active ingredients (brand vs generic),
+    KB-driven therapeutic class duplication (statins, anticoagulants, RAAS inhibitors, CNS sedative-hypnotics,
+    NSAIDs, antiplatelets, sulfonylureas), and high-risk drug-electrolyte/bleeding interactions."""
     conflicts: Dict[str, str] = {}
     by_ingredient: Dict[str, List[Mapping[str, Any]]] = {}
-    statins: List[Mapping[str, Any]] = []
+
+    kb_rx = _load_kb_pack("rxnorm_lookup.json")
+    class_rules: Dict[str, Mapping[str, Any]] = kb_rx.get("therapeutic_class_rules") or {
+        "statin_lipid_lowering": {
+            "rule_id": "wahs-kb-rx-duplicate-statin-01",
+            "label": "HMG-CoA Reductase Inhibitor (Statin)",
+            "ingredients": list(_STATIN_INGREDIENTS),
+        }
+    }
+    interaction_rules: Sequence[Mapping[str, Any]] = kb_rx.get("interaction_hazard_rules") or ()
+
+    by_class: Dict[str, List[Mapping[str, Any]]] = {}
+    normalized_meds: List[Tuple[str, Mapping[str, Any]]] = []
 
     for med in active_medications:
         uuid = str(med.get("resourceUuid") or "")
@@ -263,8 +345,12 @@ def detect_medication_conflicts(
         if not uuid or not ing:
             continue
         by_ingredient.setdefault(ing, []).append(med)
-        if ing in _STATIN_INGREDIENTS or any(s in ing.split() for s in _STATIN_INGREDIENTS):
-            statins.append(med)
+        normalized_meds.append((ing, med))
+
+        for class_key, rule in class_rules.items():
+            ingredients = rule.get("ingredients") or []
+            if _ingredient_matches_group(ing, ingredients):
+                by_class.setdefault(class_key, []).append(med)
 
     for ing, group in by_ingredient.items():
         if len(group) > 1:
@@ -276,16 +362,45 @@ def detect_medication_conflicts(
                         f"duplicate_therapy: multiple ACTIVE prescriptions for ingredient '{ing}' ({names})"
                     )
 
-    if len(statins) > 1:
-        names = ", ".join(str(m.get("display") or "") for m in statins)
-        for m in statins:
-            u = str(m.get("resourceUuid") or "")
-            if u and u not in conflicts:
-                conflicts[u] = (
-                    f"duplicate_therapy: concurrent ACTIVE statin prescriptions ({names})"
-                )
+    for class_key, group in by_class.items():
+        # Only flag therapeutic class duplication if >=2 distinct prescriptions exist
+        if len(group) > 1:
+            rule = class_rules.get(class_key) or {}
+            rule_id = str(rule.get("rule_id") or f"wahs-kb-rx-class-{class_key}")
+            label = str(rule.get("label") or class_key.replace("_", " ").title())
+            names = ", ".join(str(m.get("display") or "") for m in group)
+            for m in group:
+                u = str(m.get("resourceUuid") or "")
+                if u and u not in conflicts:
+                    if class_key == "statin_lipid_lowering":
+                        conflicts[u] = (
+                            f"duplicate_therapy: concurrent ACTIVE statin prescriptions ({names})"
+                        )
+                    else:
+                        conflicts[u] = (
+                            f"duplicate_therapy [{rule_id}]: concurrent ACTIVE {label} prescriptions ({names})"
+                        )
+
+    for irule in interaction_rules:
+        group_a_ings = irule.get("group_a_ingredients") or []
+        group_b_ings = irule.get("group_b_ingredients") or []
+        group_a_meds = [m for ing, m in normalized_meds if _ingredient_matches_group(ing, group_a_ings)]
+        group_b_meds = [m for ing, m in normalized_meds if _ingredient_matches_group(ing, group_b_ings)]
+        if group_a_meds and group_b_meds:
+            rule_id = str(irule.get("rule_id") or "wahs-kb-rx-interaction")
+            label = str(irule.get("label") or "High-Risk Drug Interaction")
+            hazard = str(irule.get("hazard") or "Concurrent high-risk therapy requires reconciliation.")
+            combined = group_a_meds + [m for m in group_b_meds if m not in group_a_meds]
+            names = ", ".join(str(m.get("display") or "") for m in combined)
+            for m in combined:
+                u = str(m.get("resourceUuid") or "")
+                if u and u not in conflicts:
+                    conflicts[u] = (
+                        f"interaction_hazard [{rule_id}]: {label} ({names}) — {hazard}"
+                    )
 
     return conflicts
+
 
 
 def classify_vaccine_group(code: Optional[str], display: str) -> str:
