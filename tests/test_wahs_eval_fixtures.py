@@ -223,3 +223,39 @@ def test_messy_set_c_and_real_clinical_summaries_recover_uncoded_entries_and_not
             for uid in a["expected_resource_uuids"]:
                 assert uid in present_r, f"Missing {uid} in {label}"
 
+
+def test_w17_script_modularity_archetypes_and_demo_exporter(tmp_path: Any) -> None:
+    """W17: `wahs_uscore_archetypes` and `wahs_demo_exporter` expose standalone builders and re-exports."""
+    from scripts.wahs_demo_exporter import (
+        PERSONA_BIOS,
+        PRIMARY_PERSONA_IDS,
+        QUESTIONS_BY_PATIENT,
+        write_wahs_demo_data_js,
+    )
+    from scripts.wahs_uscore_archetypes import (
+        build_deidentified_real_clinical_summaries as build_archetypes_direct,
+    )
+
+    assert build_archetypes_direct is build_deidentified_real_clinical_summaries
+    assert len(PRIMARY_PERSONA_IDS) == 6
+    assert set(PERSONA_BIOS.keys()) == {
+        "Maurice742_Auer97",
+        "Elena_Rostova_Cardiorenal",
+        "Arthur_Pendelton_Anticoag",
+        "Margaret_Chen_Polypharmacy",
+        "Lamar193_Beer512",
+        "Byron202_Emard19",
+    }
+    assert "default" in QUESTIONS_BY_PATIENT
+
+    out_js = tmp_path / "wahs_demo_data.js"
+    stub_results = {
+        "code_coverage": {"resolution_rate": 1.0},
+        "ablation_rows": [],
+        "demo_patients": {pid: {"id": pid} for pid in PRIMARY_PERSONA_IDS},
+    }
+    written_bytes = write_wahs_demo_data_js(stub_results, out_js)
+    assert written_bytes > 100
+    assert "window.WAHS_DEMO_DATA = " in out_js.read_text(encoding="utf-8")
+
+
