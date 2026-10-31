@@ -2774,7 +2774,7 @@ def test_product_review_and_final_event_preserve_grounded_knowledge_reference(mo
     monkeypatch.setattr(team, "_gather_evidence", fake_gather)
     monkeypatch.setattr(
         "server.context_sources.kb.search",
-        lambda _query, k=3: [
+        lambda _query, k=3, *, corpus="default", codes=None: [
             {
                 "id": "guide-1",
                 "title": "Example guidance",
