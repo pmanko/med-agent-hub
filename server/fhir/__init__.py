@@ -31,6 +31,12 @@ from .normalizers import (
     normalize_drug_ingredient,
 )
 from .source import FhirBundleContextSource, ResilientTokenCounter
+from .wahs_analyzer import (
+    analyze_data_quality_and_conflicts,
+    analyze_duplicates_and_bloat,
+    analyze_patterns_and_summaries,
+    answer_wahs_question,
+)
 
 __all__ = [
     "ClinicalItem",
@@ -39,7 +45,11 @@ __all__ = [
     "FhirBundleContextSource",
     "NumericPoint",
     "ResilientTokenCounter",
+    "analyze_data_quality_and_conflicts",
+    "analyze_duplicates_and_bloat",
+    "analyze_patterns_and_summaries",
     "annotate_immunization_anomalies",
+    "answer_wahs_question",
     "audit_cohort_code_coverage",
     "build_tier_items",
     "classify_sensitivity",
