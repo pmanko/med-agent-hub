@@ -926,7 +926,9 @@ def build_tier_items(
                 )
             )
 
-        core = patient_items + allergies + cond_active + med_active + folded_devices
+        anomalous_notes_t3 = [n for n in notes if n.conflict_note]
+        other_notes_t3 = [n for n in notes if not n.conflict_note]
+        core = patient_items + allergies + cond_active + med_active + folded_devices + anomalous_notes_t3
         rest = (
             folded_imms
             + folded_procs_major[:10]
@@ -936,7 +938,7 @@ def build_tier_items(
             + med_cond_res
             + folded_med_hist[:12]
             + folded_social[:4]
-            + notes[:1]
+            + other_notes_t3[:1]
         )
         rest.sort(key=lambda x: _date_sort_key(x.date), reverse=True)
         body_items = core + rest
@@ -1043,6 +1045,7 @@ def build_tier_items(
         folded_procs_major = _fold_procedures(procs_major, section="procedure_major")
         folded_enc_acuity = _fold_encounters(enc_acuity, keep_latest_individual=1)
 
+        anomalous_notes_t4 = [_compact_item_for_micro_tier(n) for n in notes if n.conflict_note]
         core = (
             patient_items
             + compact_allergies
@@ -1051,6 +1054,7 @@ def build_tier_items(
             + compact_med_active
             + anomalous_imms
             + folded_devices
+            + anomalous_notes_t4
         )
         rest = (
             trajectories
@@ -1189,6 +1193,11 @@ def _pack_items_to_token_budget(
             for it in mandatory_items
             if it.section == "immunization" and it.conflict_note
         ]
+        conflict_notes = [
+            it
+            for it in mandatory_items
+            if it.section in {"clinical_note", "note"}
+        ]
         other_conds = [
             it
             for it in mandatory_items
@@ -1199,7 +1208,9 @@ def _pack_items_to_token_budget(
             for it in mandatory_items
             if it.section == "med_active"
         ]
-        compressed_mandatory: List[ClinicalItem] = list(patient_only + allergy_only)
+        compressed_mandatory: List[ClinicalItem] = list(
+            patient_only + allergy_only + conflict_notes
+        )
         # Group conflict conditions that share the exact same conflict_note (e.g. CKD stages 1, 2, 3)
         by_conflict_key: Dict[str, List[ClinicalItem]] = {}
         for cc in conflict_conds:

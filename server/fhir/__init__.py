@@ -37,6 +37,11 @@ from .wahs_analyzer import (
     analyze_patterns_and_summaries,
     answer_wahs_question,
 )
+from .wahs_tools import (
+    get_lab_history,
+    read_clinical_note,
+    search_chart_entries,
+)
 
 __all__ = [
     "ClinicalItem",
@@ -62,12 +67,15 @@ __all__ = [
     "extract_chart_kb_codes",
     "get_acip_rules",
     "get_clinical_exclusivity_and_privacy",
+    "get_lab_history",
     "get_rxnorm_lookup",
     "is_clinic_room_equipment",
     "items_to_querystore_records",
     "normalize_drug_ingredient",
+    "read_clinical_note",
     "resolve_condition_code",
     "resolve_immunization_code",
     "resolve_lab_code",
     "resolve_medication_code",
+    "search_chart_entries",
 ]

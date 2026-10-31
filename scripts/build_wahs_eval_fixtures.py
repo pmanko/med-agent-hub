@@ -17,12 +17,14 @@ Generates:
 from __future__ import annotations
 
 import argparse
+import base64
 import copy
+import hashlib
 import json
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from server.fhir import condense_bundle_to_budget, extract_bundle
+from server.fhir import audit_cohort_code_coverage, condense_bundle_to_budget, extract_bundle
 
 
 def inject_byron_multisource_perturbations(bundle: Mapping[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
@@ -809,11 +811,484 @@ def build_eval_cases() -> List[Dict[str, Any]]:
         ]
     )
 
+    for case in cases:
+        _enrich_case_with_rubric_and_entailment(case)
+
     return cases
 
 
+def _enrich_case_with_rubric_and_entailment(case: Dict[str, Any]) -> None:
+    """Attach HealthBench-style weighted criteria, VeriFact atomic entailment assertions,
+    question horizon, and patient question category to each evaluation case."""
+    cid = str(case.get("case_id") or "")
+    uc = str(case.get("use_case") or "")
+    cat = str(case.get("category") or "")
+
+    # 1. Assign question_horizon (for Slice 4 condensation & retrieval ablation)
+    if "cabg" in cid or "antibiotic" in cid:
+        case.setdefault("question_horizon", "full_text_note")
+    elif "egfr" in cid or "zoster" in cid or "hpv" in cid or "sinusitis" in cid:
+        case.setdefault("question_horizon", "trend_24m")
+    elif uc == "B3_qa_abstention":
+        case.setdefault("question_horizon", "deep_historical")
+    else:
+        case.setdefault("question_horizon", "current_active_state")
+
+    # 2. Assign patient_category (6-category Patient Question Taxonomy)
+    if "plavix" in cid or "simvastatin" in cid or "lisinopril" in cid or "active_meds" in cid:
+        case.setdefault("patient_category", "medication_reconciliation")
+    elif "ckd" in cid or "prediabetes" in cid or "egfr" in cid or "renal" in cid:
+        case.setdefault("patient_category", "lab_trends")
+    elif "cabg" in cid:
+        case.setdefault("patient_category", "hospital_icu_stay")
+    elif "flu" in cid or "covid" in cid or "hpv" in cid or "zoster" in cid or "school" in cid:
+        case.setdefault("patient_category", "immunization_readiness")
+    elif "sdoh" in cid or case.get("sharing_posture") == "external_share":
+        case.setdefault("patient_category", "privacy_sharing_preview")
+    else:
+        case.setdefault("patient_category", "next_visit_checklist")
+
+    # 3. Build positive_rubric_items and negative_penalty_items
+    facts = [str(f) for f in (case.get("expected_facts") or []) if str(f).strip()]
+    pos_items: List[Dict[str, Any]] = []
+    for idx, fact in enumerate(facts):
+        pos_items.append(
+            {
+                "id": f"{cid}_fact_{idx + 1}",
+                "criterion": f"Grounds clinical fact '{fact}' from FHIR bundle",
+                "required_any": [fact],
+                "weight": 1.5 if idx == 0 else 1.0,
+            }
+        )
+
+    neg_items: List[Dict[str, Any]] = []
+    entailment_items: List[Dict[str, Any]] = []
+    exp_uuids = [str(u) for u in (case.get("expected_resource_uuids") or [])]
+
+    if cid == "uc_b3_maurice_qa_egfr_trend":
+        neg_items.append(
+            {
+                "id": "neg_egfr_improved",
+                "criterion": "Must not claim eGFR improved from 2017 to 2026",
+                "forbidden_any": ["egfr improved from 2017", "kidney function improved overall"],
+                "penalty": 0.5,
+            }
+        )
+        entailment_items.append(
+            {
+                "resource_uuid": "",
+                "must_mention_any": ["124.48", "47.95"],
+                "must_not_distort": ["egfr 95.0", "egfr 110.0"],
+            }
+        )
+    elif cid == "uc_b3_maurice_qa_cabg_antibiotic":
+        entailment_items.append(
+            {
+                "resource_uuid": "7cc9226f-0107-73ef-ed06-6dd1095f35ff",
+                "must_mention_any": ["cefazolin", "2000 mg"],
+                "must_not_distort": ["vancomycin 1000 mg", "piperacillin"],
+            }
+        )
+    elif cid == "uc_b3_maurice_qa_plavix_duplicate":
+        entailment_items.append(
+            {
+                "resource_uuid": "med-cardio-maurice-plavix",
+                "must_mention_any": ["plavix", "clopidogrel"],
+                "must_not_distort": ["no duplicate medications", "no active blood thinners"],
+            }
+        )
+    elif cid == "uc_b3_lamar_qa_sinusitis_conflict":
+        entailment_items.append(
+            {
+                "resource_uuid": "cond-ext-lamar-sinusitis-resolved",
+                "must_mention_any": ["resolved", "2024-09-10"],
+                "must_not_distort": ["no conflict", "never had sinusitis"],
+            }
+        )
+    elif exp_uuids and uc != "B3_qa_abstention":
+        entailment_items.append(
+            {
+                "resource_uuid": exp_uuids[0],
+                "must_mention_any": facts[:1] if facts else [],
+                "must_not_distort": [],
+            }
+        )
+
+    case.setdefault("positive_rubric_items", pos_items)
+    case.setdefault("negative_penalty_items", neg_items)
+    case.setdefault("citation_entailment_assertions", entailment_items)
+
+
+def inject_messy_ehr_perturbations(
+    multisource_bundle: Mapping[str, Any], patient_stem: str
+) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    """Pathway A (Set C — Pragmatic Messy Multi-Source):
+    1. Deterministically strips standard SNOMED/RxNorm/CVX/LOINC `coding` arrays on ~25% of
+       clinical entries (leaving only `text` or local EHR descriptions).
+    2. Injects a free-text `DocumentReference` clinical note that contradicts an active
+       `MedicationRequest.status == 'active'` (note-vs-structured hold/discontinue conflict).
+    """
+    messy = copy.deepcopy(dict(multisource_bundle))
+    entries = list(messy.get("entry") or [])
+    patient_id = "patient-1"
+    clinical_idx = 0
+
+    for e in entries:
+        res = (e or {}).get("resource") or {}
+        rtype = str(res.get("resourceType") or "")
+        if rtype == "Patient" and res.get("id"):
+            patient_id = str(res["id"])
+        if rtype in {"Condition", "MedicationRequest", "Immunization", "Observation"}:
+            clinical_idx += 1
+            if clinical_idx % 4 == 0:
+                for field_name in ("code", "medicationCodeableConcept", "vaccineCode"):
+                    codeable = res.get(field_name)
+                    if isinstance(codeable, dict):
+                        codings = codeable.get("coding") or []
+                        fallback_txt = str(codeable.get("text") or "").strip()
+                        if not fallback_txt and codings and isinstance(codings[0], dict):
+                            fallback_txt = str(codings[0].get("display") or codings[0].get("code") or "")
+                        if fallback_txt:
+                            codeable["text"] = fallback_txt
+                            codeable["coding"] = []
+
+    if patient_stem == "Byron202_Emard19":
+        entries.append(
+            {
+                "fullUrl": "urn:uuid:med-messy-byron-cetirizine",
+                "resource": {
+                    "resourceType": "MedicationRequest",
+                    "id": "med-messy-byron-cetirizine",
+                    "status": "active",
+                    "intent": "order",
+                    "medicationCodeableConcept": {
+                        "text": "cetirizine hydrochloride 10 MG Oral Tablet"
+                    },
+                    "subject": {"reference": f"urn:uuid:{patient_id}"},
+                    "authoredOn": "2026-01-15T10:00:00+00:00",
+                    "requester": {"display": "Pediatric Primary Care Clinic"},
+                },
+            }
+        )
+
+    note_specs = {
+        "Maurice742_Auer97": (
+            "note-messy-maurice-hold-simvastatin",
+            "2026-06-10T15:00:00+00:00",
+            "# Chief Complaint\nPost-Cardiology Medication Review\n# Assessment and Plan\nDiscontinue simvastatin immediately while patient is taking Lipitor 40 MG daily to prevent statin myopathy.",
+            "5693c080-f485-91e7-aca9-a1fd06a66487",
+            "Clinical note (2026-06-10) instructs to discontinue simvastatin, while structured MedicationRequest remains ACTIVE.",
+        ),
+        "Lamar193_Beer512": (
+            "note-messy-lamar-hold-lisinopril",
+            "2026-05-20T11:00:00+00:00",
+            "# Chief Complaint\nFollow-up Hypertension & Renal Lab Check\n# Assessment and Plan\nHold lisinopril until potassium and renal panel are rechecked next week; patient already filled Prinivil from cardiology.",
+            "med-pcp-lamar-lisinopril",
+            "Clinical note (2026-05-20) instructs to hold lisinopril, while structured MedicationRequest remains ACTIVE.",
+        ),
+        "Byron202_Emard19": (
+            "note-messy-byron-hold-cetirizine",
+            "2026-02-01T09:30:00+00:00",
+            "# Chief Complaint\nAllergy Clinic Pre-Visit Note\n# Assessment and Plan\nHold cetirizine for 7 days prior to allergy skin testing panel.",
+            "med-messy-byron-cetirizine",
+            "Clinical note (2026-02-01) instructs to hold cetirizine prior to allergy testing.",
+        ),
+    }
+    note_id, note_dt, note_body, linked_uuid, note_desc = note_specs[patient_stem]
+    b64_payload = base64.b64encode(note_body.encode("utf-8")).decode("ascii")
+    entries.append(
+        {
+            "fullUrl": f"urn:uuid:{note_id}",
+            "resource": {
+                "resourceType": "DocumentReference",
+                "id": note_id,
+                "status": "current",
+                "type": {"text": "Outpatient Progress Note (Unstructured Text)"},
+                "subject": {"reference": f"urn:uuid:{patient_id}"},
+                "date": note_dt,
+                "author": [{"display": "Regional HIE Care Coordination Note"}],
+                "content": [
+                    {
+                        "attachment": {
+                            "contentType": "text/plain; charset=utf-8",
+                            "data": b64_payload,
+                        }
+                    }
+                ],
+            },
+        }
+    )
+    messy["entry"] = entries
+    messy_anomalies = [
+        {
+            "anomaly_id": f"{patient_stem.lower()}-setc-note-med-contradiction",
+            "category": "note_vs_structured_medication_contradiction",
+            "severity": "high",
+            "description": note_desc,
+            "expected_resource_uuids": [note_id, linked_uuid],
+        }
+    ]
+    return messy, messy_anomalies
+
+
+def build_deidentified_real_clinical_summaries() -> Dict[str, Tuple[Dict[str, Any], List[Dict[str, Any]]]]:
+    """Pathway B: Two de-identified real clinical summary fixtures modeled on public
+    MIMIC-IV-on-FHIR cardiorenal discharge summaries and SMART IPS Sandbox transition bundles."""
+    mimic_note = (
+        "# Chief Complaint\nDecompensated cardiorenal syndrome & hyperkalemia\n"
+        "# Assessment and Plan\nHold lisinopril at hospital discharge due to acute-on-chronic kidney injury "
+        "(eGFR 34 mL/min/1.73m2) and potassium 5.4 mEq/L. Continue Plavix 75mg daily; reconcile outpatient clopidogrel bottle."
+    )
+    mimic_bundle: Dict[str, Any] = {
+        "resourceType": "Bundle",
+        "type": "collection",
+        "id": "mimic-iv-cardiorenal-summary",
+        "entry": [
+            {
+                "fullUrl": "urn:uuid:mimic-pat-1001",
+                "resource": {
+                    "resourceType": "Patient",
+                    "id": "mimic-pat-1001",
+                    "name": [{"use": "official", "family": "Cardiorenal", "given": ["Elena"]}],
+                    "gender": "female",
+                    "birthDate": "1954-04-12",
+                },
+            },
+            {
+                "fullUrl": "urn:uuid:mimic-allergy-1",
+                "resource": {
+                    "resourceType": "AllergyIntolerance",
+                    "id": "mimic-allergy-1",
+                    "clinicalStatus": {"coding": [{"code": "active"}]},
+                    "code": {"text": "Iodinated contrast media"},
+                    "criticality": "high",
+                },
+            },
+            {
+                "fullUrl": "urn:uuid:mimic-cond-ckd2",
+                "resource": {
+                    "resourceType": "Condition",
+                    "id": "mimic-cond-ckd2",
+                    "clinicalStatus": {"coding": [{"code": "active"}]},
+                    "code": {"text": "Chronic kidney disease stage 2 (disorder)"},
+                    "onsetDateTime": "2021-06-10",
+                },
+            },
+            {
+                "fullUrl": "urn:uuid:mimic-cond-ckd3",
+                "resource": {
+                    "resourceType": "Condition",
+                    "id": "mimic-cond-ckd3",
+                    "clinicalStatus": {"coding": [{"code": "active"}]},
+                    "code": {
+                        "coding": [{"system": "http://snomed.info/sct", "code": "433144002", "display": "Chronic kidney disease stage 3 (disorder)"}],
+                        "text": "Chronic kidney disease stage 3 (disorder)",
+                    },
+                    "onsetDateTime": "2025-11-04",
+                },
+            },
+            {
+                "fullUrl": "urn:uuid:mimic-med-lisinopril",
+                "resource": {
+                    "resourceType": "MedicationRequest",
+                    "id": "mimic-med-lisinopril",
+                    "status": "active",
+                    "intent": "order",
+                    "medicationCodeableConcept": {"text": "lisinopril 20 MG Oral Tablet"},
+                    "authoredOn": "2025-08-14",
+                    "performer": [{"actor": {"display": "Community Primary Care"}}],
+                },
+            },
+            {
+                "fullUrl": "urn:uuid:mimic-med-clopidogrel",
+                "resource": {
+                    "resourceType": "MedicationRequest",
+                    "id": "mimic-med-clopidogrel",
+                    "status": "active",
+                    "intent": "order",
+                    "medicationCodeableConcept": {
+                        "coding": [{"system": "http://www.nlm.nih.gov/research/umls/rxnorm", "code": "309362", "display": "Clopidogrel 75 MG Oral Tablet"}],
+                        "text": "Clopidogrel 75 MG Oral Tablet",
+                    },
+                    "authoredOn": "2025-10-01",
+                    "performer": [{"actor": {"display": "Community Primary Care"}}],
+                },
+            },
+            {
+                "fullUrl": "urn:uuid:mimic-med-plavix",
+                "resource": {
+                    "resourceType": "MedicationRequest",
+                    "id": "mimic-med-plavix",
+                    "status": "active",
+                    "intent": "order",
+                    "medicationCodeableConcept": {"text": "Plavix 75 MG Oral Tablet"},
+                    "authoredOn": "2026-01-19",
+                    "performer": [{"actor": {"display": "BIDMC Inpatient Cardiology Discharge"}}],
+                },
+            },
+            {
+                "fullUrl": "urn:uuid:mimic-obs-egfr-1",
+                "resource": {
+                    "resourceType": "Observation",
+                    "id": "mimic-obs-egfr-1",
+                    "status": "final",
+                    "category": [{"coding": [{"code": "laboratory"}]}],
+                    "code": {
+                        "coding": [{"system": "http://loinc.org", "code": "33914-3", "display": "Glomerular filtration rate/1.73 sq M.predicted"}],
+                        "text": "Glomerular filtration rate/1.73 sq M.predicted",
+                    },
+                    "effectiveDateTime": "2026-01-19",
+                    "valueQuantity": {"value": 34.0, "unit": "mL/min/1.73_m2"},
+                },
+            },
+            {
+                "fullUrl": "urn:uuid:mimic-note-discharge",
+                "resource": {
+                    "resourceType": "DocumentReference",
+                    "id": "mimic-note-discharge",
+                    "status": "current",
+                    "type": {"text": "MIMIC-IV Inpatient Discharge Summary"},
+                    "date": "2026-01-19T16:00:00+00:00",
+                    "content": [
+                        {
+                            "attachment": {
+                                "contentType": "text/plain; charset=utf-8",
+                                "data": base64.b64encode(mimic_note.encode("utf-8")).decode("ascii"),
+                            }
+                        }
+                    ],
+                },
+            },
+        ],
+    }
+    mimic_anomalies = [
+        {
+            "anomaly_id": "mimic-ckd-stage2-vs-stage3",
+            "category": "mutually_exclusive_condition_stages",
+            "severity": "high",
+            "description": "Uncoded CKD Stage 2 and coded CKD Stage 3 simultaneously active in MIMIC-IV transition summary.",
+            "expected_resource_uuids": ["mimic-cond-ckd2", "mimic-cond-ckd3"],
+        },
+        {
+            "anomaly_id": "mimic-plavix-clopidogrel-dup",
+            "category": "cross_source_brand_generic_medication_duplicate",
+            "severity": "high",
+            "description": "Uncoded discharge Plavix 75 MG duplicates outpatient Clopidogrel 75 MG.",
+            "expected_resource_uuids": ["mimic-med-clopidogrel", "mimic-med-plavix"],
+        },
+        {
+            "anomaly_id": "mimic-note-hold-lisinopril",
+            "category": "note_vs_structured_medication_contradiction",
+            "severity": "high",
+            "description": "Discharge summary instructs to hold lisinopril while outpatient MedicationRequest remains active.",
+            "expected_resource_uuids": ["mimic-med-lisinopril", "mimic-note-discharge"],
+        },
+    ]
+
+    smart_ips_bundle: Dict[str, Any] = {
+        "resourceType": "Bundle",
+        "type": "document",
+        "id": "smart-ips-transition-summary",
+        "entry": [
+            {
+                "fullUrl": "urn:uuid:smart-pat-2002",
+                "resource": {
+                    "resourceType": "Patient",
+                    "id": "smart-pat-2002",
+                    "name": [{"use": "official", "family": "Valdez", "given": ["Mateo"]}],
+                    "gender": "male",
+                    "birthDate": "1968-09-22",
+                    "communication": [{"language": {"text": "Spanish"}}],
+                },
+            },
+            {
+                "fullUrl": "urn:uuid:smart-cond-predm",
+                "resource": {
+                    "resourceType": "Condition",
+                    "id": "smart-cond-predm",
+                    "clinicalStatus": {"coding": [{"code": "active"}]},
+                    "code": {"text": "Prediabetes (finding)"},
+                    "onsetDateTime": "2019-03-11",
+                },
+            },
+            {
+                "fullUrl": "urn:uuid:smart-cond-t2dm",
+                "resource": {
+                    "resourceType": "Condition",
+                    "id": "smart-cond-t2dm",
+                    "clinicalStatus": {"coding": [{"code": "active"}]},
+                    "code": {
+                        "coding": [{"system": "http://snomed.info/sct", "code": "44054006", "display": "Diabetes mellitus type 2 (disorder)"}],
+                        "text": "Diabetes mellitus type 2 (disorder)",
+                    },
+                    "onsetDateTime": "2024-07-18",
+                },
+            },
+            {
+                "fullUrl": "urn:uuid:smart-cond-sdoh-ipv",
+                "resource": {
+                    "resourceType": "Condition",
+                    "id": "smart-cond-sdoh-ipv",
+                    "clinicalStatus": {"coding": [{"code": "active"}]},
+                    "code": {
+                        "coding": [{"system": "http://snomed.info/sct", "code": "706893006", "display": "Victim of intimate partner abuse (finding)"}],
+                        "text": "Victim of intimate partner abuse (finding)",
+                    },
+                    "onsetDateTime": "2025-05-02",
+                },
+            },
+            {
+                "fullUrl": "urn:uuid:smart-med-atorva",
+                "resource": {
+                    "resourceType": "MedicationRequest",
+                    "id": "smart-med-atorva",
+                    "status": "active",
+                    "intent": "order",
+                    "medicationCodeableConcept": {"text": "Lipitor 40 MG Oral Tablet"},
+                    "authoredOn": "2025-11-10",
+                },
+            },
+            {
+                "fullUrl": "urn:uuid:smart-med-simva",
+                "resource": {
+                    "resourceType": "MedicationRequest",
+                    "id": "smart-med-simva",
+                    "status": "active",
+                    "intent": "order",
+                    "medicationCodeableConcept": {
+                        "coding": [{"system": "http://www.nlm.nih.gov/research/umls/rxnorm", "code": "312961", "display": "Simvastatin 20 MG Oral Tablet"}],
+                        "text": "Simvastatin 20 MG Oral Tablet",
+                    },
+                    "authoredOn": "2025-04-02",
+                },
+            },
+        ],
+    }
+    smart_anomalies = [
+        {
+            "anomaly_id": "smart-predm-t2dm-conflict",
+            "category": "mutually_exclusive_condition_stages",
+            "severity": "high",
+            "description": "Uncoded Prediabetes and coded Type 2 Diabetes Mellitus simultaneously active in SMART IPS summary.",
+            "expected_resource_uuids": ["smart-cond-predm", "smart-cond-t2dm"],
+        },
+        {
+            "anomaly_id": "smart-statin-class-dup",
+            "category": "cross_source_therapeutic_class_duplicate",
+            "severity": "high",
+            "description": "Uncoded Lipitor 40 MG and coded Simvastatin 20 MG simultaneously active.",
+            "expected_resource_uuids": ["smart-med-atorva", "smart-med-simva"],
+        },
+    ]
+    return {
+        "MIMIC_IV_Cardiorenal_Summary.json": (mimic_bundle, mimic_anomalies),
+        "SMART_IPS_Transition_Summary.json": (smart_ips_bundle, smart_anomalies),
+    }
+
+
 def generate_wahs_eval_suite(source_dir: Path, output_dir: Path) -> Dict[str, Any]:
-    """Generate Set B multi-source FHIR Bundles, `ground_truth.json`, and `wahs_eval_cases.jsonl`."""
+    """Generate Set B multi-source & Set C messy FHIR Bundles, de-identified real clinical summaries,
+    `ground_truth.json`, and `wahs_eval_cases.jsonl`."""
     output_dir.mkdir(parents=True, exist_ok=True)
 
     perturb_fns = {
@@ -829,22 +1304,35 @@ def generate_wahs_eval_suite(source_dir: Path, output_dir: Path) -> Dict[str, An
             raise FileNotFoundError(f"Missing source bundle: {src_path}")
         natural_bundle = json.loads(src_path.read_text(encoding="utf-8"))
         perturbed_bundle, injected_anomalies = perturb_fn(natural_bundle)
+        messy_bundle, messy_anomalies = inject_messy_ehr_perturbations(
+            perturbed_bundle, patient_stem
+        )
 
         out_bundle_path = output_dir / f"{patient_stem}_multisource.json"
         out_bundle_path.write_text(
             json.dumps(perturbed_bundle, indent=2, sort_keys=False) + "\n",
             encoding="utf-8",
         )
+        out_messy_path = output_dir / f"{patient_stem}_messy.json"
+        out_messy_path.write_text(
+            json.dumps(messy_bundle, indent=2, sort_keys=False) + "\n",
+            encoding="utf-8",
+        )
 
-        # Verify that both Set A and Set B preserve 100% of ground-truth anomaly UUIDs across condensation budgets
+        # Verify that Set A, Set B, and Set C preserve 100% of ground-truth anomaly UUIDs across condensation budgets
         nat_anomalies = NATURAL_ANOMALIES_BY_PATIENT[patient_stem]
         all_set_b_anomalies = nat_anomalies + injected_anomalies
+        all_set_c_anomalies = all_set_b_anomalies + messy_anomalies
 
         for label, b_obj, anom_list in (
             (f"{patient_stem}.json", natural_bundle, nat_anomalies),
             (f"{patient_stem}_multisource.json", perturbed_bundle, all_set_b_anomalies),
+            (f"{patient_stem}_messy.json", messy_bundle, all_set_c_anomalies),
         ):
             ext = extract_bundle(b_obj)
+            cov = audit_cohort_code_coverage(ext)
+            raw_bytes = json.dumps(b_obj, sort_keys=True).encode("utf-8")
+            sha256_hex = hashlib.sha256(raw_bytes).hexdigest()
             required_uuids = {
                 u for a in anom_list for u in a["expected_resource_uuids"]
             }
@@ -869,11 +1357,56 @@ def generate_wahs_eval_suite(source_dir: Path, output_dir: Path) -> Dict[str, An
                     "all_ground_truth_uuids_present": True,
                 }
             bundles_manifest[label] = {
+                "sha256": sha256_hex,
                 "total_bundle_entries": ext.total_bundle_entries,
                 "extracted_clinical_items": len(ext.items),
+                "code_coverage": {
+                    "precoded_pct": cov["precoded_pct"],
+                    "text_fallback_recovered_pct": cov["text_fallback_recovered_pct"],
+                    "overall_resolution_pct": round(cov["resolution_rate"] * 100.0, 1),
+                },
                 "anomalies": anom_list,
                 "budget_verification": budget_checks,
             }
+
+    # Pathway B: De-identified real clinical summary fixtures
+    for real_label, (real_bundle, real_anoms) in build_deidentified_real_clinical_summaries().items():
+        real_path = output_dir / real_label
+        real_path.write_text(json.dumps(real_bundle, indent=2, sort_keys=False) + "\n", encoding="utf-8")
+        ext_r = extract_bundle(real_bundle)
+        cov_r = audit_cohort_code_coverage(ext_r)
+        sha_r = hashlib.sha256(json.dumps(real_bundle, sort_keys=True).encode("utf-8")).hexdigest()
+        req_r = {u for a in real_anoms for u in a["expected_resource_uuids"]}
+        b_checks_r: Dict[str, Any] = {}
+        for budget in (16384, 8192, 4096, 2048):
+            res_r = condense_bundle_to_budget(ext_r, target_tokens=budget)
+            present_r = {
+                u
+                for m in res_r.mappings
+                for u in ([m.get("resourceUuid")] + list(m.get("memberUuids") or []))
+                if u
+            }
+            missing_r = sorted(req_r - present_r)
+            if missing_r:
+                raise AssertionError(f"Real clinical summary {real_label} lost UUIDs: {missing_r}")
+            b_checks_r[str(budget)] = {
+                "tier": res_r.tier,
+                "actual_tokens": res_r.actual_tokens,
+                "rendered_lines": len(res_r.records),
+                "all_ground_truth_uuids_present": True,
+            }
+        bundles_manifest[real_label] = {
+            "sha256": sha_r,
+            "total_bundle_entries": ext_r.total_bundle_entries,
+            "extracted_clinical_items": len(ext_r.items),
+            "code_coverage": {
+                "precoded_pct": cov_r["precoded_pct"],
+                "text_fallback_recovered_pct": cov_r["text_fallback_recovered_pct"],
+                "overall_resolution_pct": round(cov_r["resolution_rate"] * 100.0, 1),
+            },
+            "anomalies": real_anoms,
+            "budget_verification": b_checks_r,
+        }
 
     eval_cases = build_eval_cases()
     cases_path = output_dir / "wahs_eval_cases.jsonl"

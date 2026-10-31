@@ -1278,6 +1278,32 @@ def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
                 )
             )
 
+    # 11. Detect free-text clinical note vs. structured active MedicationRequest contradictions
+    active_med_items = [it for it in items if it.section == "med_active"]
+    note_items = [it for it in items if it.section in {"clinical_note", "note"}]
+    hold_re = re.compile(
+        r"\b(?:hold|stop|discontinue|held|stopped|do\s+not\s+take)\s+([a-z][a-z0-9-]{2,25})\b",
+        re.IGNORECASE,
+    )
+    for n_item in note_items:
+        for match in hold_re.finditer(n_item.text or ""):
+            raw_drug = match.group(1)
+            norm_ing = normalize_drug_ingredient(raw_drug)
+            for m_item in active_med_items:
+                if m_item.ingredient_key == norm_ing or norm_ing in m_item.display.lower():
+                    msg = (
+                        f"note_medication_contradiction: Clinical note ({n_item.clinical_date or 'recent'}) "
+                        f"instructs to hold/discontinue {m_item.display}, but structured MedicationRequest remains ACTIVE"
+                    )
+                    if not m_item.conflict_note:
+                        m_item.conflict_note = msg
+                        m_item.text += f" [{msg}]"
+                    if n_item.resource_uuid not in m_item.member_uuids:
+                        m_item.member_uuids = tuple(list(m_item.member_uuids) + [n_item.resource_uuid])
+                    if not n_item.conflict_note:
+                        n_item.conflict_note = msg
+                        n_item.mandatory = True
+
     return ExtractedChart(
         patient_id=patient_id,
         patient_name=patient_name,

@@ -52,6 +52,14 @@
       "sensitivity": null,
       "plain_description": "Blood sugar levels higher than normal (HbA1c 5.7%–6.4%) but below the threshold for overt type 2 diabetes. Once overt type 2 diabetes or diabetic kidney disease develops, prediabetes should be resolved."
     },
+    "44054006": {
+      "snomed": "44054006",
+      "display": "Diabetes mellitus type 2 (disorder)",
+      "exclusivity_group": "glycemic_progression",
+      "stage_rank": 2,
+      "sensitivity": null,
+      "plain_description": "Established Type 2 Diabetes Mellitus (HbA1c >= 6.5% or fasting glucose >= 126 mg/dL); supersedes prior Prediabetes on the active problem list."
+    },
     "127013003": {
       "snomed": "127013003",
       "display": "Disorder of kidney due to diabetes mellitus (disorder)",

@@ -207,23 +207,43 @@ def detect_condition_conflicts(
                 f"stage_conflict: Prediabetes marked ACTIVE alongside established diabetes ({dm_names})"
             )
 
-    # Check cross-source active vs resolved contradiction for the same medical condition code
-    resolved_by_code: Dict[str, List[Mapping[str, Any]]] = {}
+    def _norm_cond_key(code: str, display: str) -> str:
+        c = (code or "").strip()
+        if c and c not in _SDOH_NON_MEDICAL_CODES:
+            return f"code:{c}"
+        d = re.sub(r"\s*\((?:disorder|finding|situation)\)\s*$", "", (display or "").strip(), flags=re.I).lower()
+        return f"disp:{d}" if d else ""
+
+    # Check cross-source active vs resolved contradiction for the same medical condition code or normalized display
+    resolved_by_key: Dict[str, List[Mapping[str, Any]]] = {}
     for rc in resolved_conditions:
         rcode = str(rc.get("code") or "")
-        if rcode and rcode not in _SDOH_NON_MEDICAL_CODES:
-            resolved_by_code.setdefault(rcode, []).append(rc)
+        rdisp = str(rc.get("display") or "")
+        if rcode in _SDOH_NON_MEDICAL_CODES:
+            continue
+        if rcode:
+            resolved_by_key.setdefault(f"code:{rcode}", []).append(rc)
+        dkey = _norm_cond_key("", rdisp)
+        if dkey:
+            resolved_by_key.setdefault(dkey, []).append(rc)
 
     for ac in active_conditions:
         acode = str(ac.get("code") or "")
+        adisp = str(ac.get("display") or "")
         auuid = str(ac.get("resourceUuid") or "")
         a_onset = str(ac.get("onset") or "")
-        if not acode or not auuid or acode not in resolved_by_code:
+        if not auuid:
             continue
-        for rc in resolved_by_code[acode]:
+        candidate_keys = [k for k in (f"code:{acode}" if acode else "", _norm_cond_key("", adisp)) if k]
+        matched_rcs: List[Mapping[str, Any]] = []
+        for ck in candidate_keys:
+            for rc in resolved_by_key.get(ck, []):
+                if rc not in matched_rcs:
+                    matched_rcs.append(rc)
+        for rc in matched_rcs:
             r_abatement = str(rc.get("abatement") or rc.get("onset") or "")
             ruuid = str(rc.get("resourceUuid") or "")
-            # If a record with the same SNOMED code was marked resolved on or after the active onset
+            # If a record with the same condition was marked resolved on or after the active onset
             if r_abatement and (not a_onset or r_abatement >= a_onset):
                 msg = (
                     f"status_conflict: {ac.get('display')} marked ACTIVE (onset {a_onset or 'unknown'}) "
