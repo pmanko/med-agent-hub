@@ -1662,14 +1662,15 @@ def condense_bundle_to_budget(
     condense_mode: str = "tiered",
     question: str = "",
     sharing_posture: str = "patient_self",
+    filter_room_equipment_devices: Optional[bool] = None,
     token_counter: Optional[Callable[[str], int]] = None,
 ) -> CondensedChartResult:
     """Condense a FHIR R4 Bundle (or `ExtractedChart`) into `target_tokens`.
 
     Supports two `condense_mode` strategies:
-    - `"tiered"` (default): 5-Tier Progressive Condensation Ladder (`Tiers 0 -> 4`) with semantic
-      renewal folding and conflict-preserving prioritization.
-    - `"lossless_structural"` (`W12`): Non-destructive structural condensation that strips only FHIR
+    - `"tiered"` / `"hierarchical"` (default): 5-Tier Progressive Condensation Ladder (`Tiers 0 -> 4`) with semantic
+      renewal folding, same-day vital panel grouping, and longitudinal lab trend compression.
+    - `"lossless_structural"` (`W12`/`W15`): Non-destructive structural condensation that strips only FHIR
       JSON syntax overhead and SHA-256 byte-identical Base64 duplicates while keeping active conditions,
       active medications, allergies, and recent clinical records verbatim without pre-baked
       `[conflict_note]` annotations.
@@ -1679,6 +1680,7 @@ def condense_bundle_to_budget(
 
     counter = token_counter or estimate_tokens_local
     if condense_mode == "lossless_structural":
+        filter_equip = False if filter_room_equipment_devices is None else filter_room_equipment_devices
         extracted = (
             bundle
             if isinstance(bundle, ExtractedChart)
@@ -1688,6 +1690,7 @@ def condense_bundle_to_budget(
                 enable_privacy_classification=(sharing_posture == "external_share"),
                 preserve_intraday_timestamps=True,
                 preserve_all_note_sections=True,
+                filter_room_equipment_devices=filter_equip,
             )
         )
         return _condense_lossless_structural(
@@ -1698,7 +1701,12 @@ def condense_bundle_to_budget(
             token_counter=counter,
         )
 
-    extracted = bundle if isinstance(bundle, ExtractedChart) else extract_bundle(bundle)
+    filter_equip_tiered = True if filter_room_equipment_devices is None else filter_room_equipment_devices
+    extracted = (
+        bundle
+        if isinstance(bundle, ExtractedChart)
+        else extract_bundle(bundle, filter_room_equipment_devices=filter_equip_tiered)
+    )
 
     prev_tier_data: Optional[Tuple[int, List[ClinicalItem], List[Dict[str, Any]], Dict[str, Any]]] = None
 

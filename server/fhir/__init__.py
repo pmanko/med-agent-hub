@@ -13,6 +13,7 @@ from .extractors import (
     ClinicalItem,
     ExtractedChart,
     NumericPoint,
+    build_fhir_browser_index,
     extract_bundle,
     extract_bundle_lossless,
 )
@@ -42,6 +43,7 @@ from .wahs_analyzer import (
     analyze_duplicates_and_bloat,
     analyze_patterns_and_summaries,
     answer_wahs_question,
+    build_patient_skills_and_condensation_matrix,
 )
 from .wahs_skills import (
     ChartFinding,

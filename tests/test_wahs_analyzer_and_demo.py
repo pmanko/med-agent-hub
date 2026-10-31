@@ -9,6 +9,8 @@ from server.fhir import (
     analyze_duplicates_and_bloat,
     analyze_patterns_and_summaries,
     answer_wahs_question,
+    build_fhir_browser_index,
+    build_patient_skills_and_condensation_matrix,
     condense_bundle_to_budget,
     extract_bundle,
     extract_bundle_lossless,
@@ -416,6 +418,45 @@ def test_general_us_core_chart_reconciliation_across_drug_classes_and_interactio
     assert "Potassium Chloride" in ans["answer"]
     assert "Eliquis" in ans["answer"]
     assert "Warfarin" in ans["answer"]
+
+
+def test_w15_fhir_browser_condensation_matrix_and_readonly_skills() -> None:
+    bundle = _make_synthetic_wahs_bundle()
+    # Non-destructive default in extract_bundle_lossless retains clinic room equipment with metadata
+    extracted_lossless = extract_bundle_lossless(bundle)
+    room_devs = [
+        it for it in extracted_lossless.items if it.resource_uuid == "dev-xray-room"
+    ]
+    assert len(room_devs) == 1
+    assert room_devs[0].metadata.get("is_room_equipment") is True
+
+    browser = build_fhir_browser_index(bundle)
+    assert browser["total_bundle_entries"] == len(bundle["entry"])
+    assert browser["category_counts"]["Conditions"] >= 4
+    assert browser["category_counts"]["Medications"] >= 4
+    assert browser["category_counts"]["Devices"] >= 2
+    assert any(r["decodedNoteText"] for r in browser["resources"] if r["category"] == "Clinical Notes")
+
+    w15 = build_patient_skills_and_condensation_matrix(bundle)
+    assert "lossless_structural" in w15["condensation_matrix"]
+    assert "hierarchical" in w15["condensation_matrix"]
+    for mode in ("lossless_structural", "hierarchical"):
+        for budget in ("16384", "8192", "4096", "2048", "1024"):
+            cell = w15["condensation_matrix"][mode][budget]
+            assert cell["actual_tokens"] <= int(budget)
+            assert cell["human_summary"]["what_changed_at_this_lever"]
+
+    skills = w15["skills"]
+    assert len(skills) == 9
+    everyday = [s for s in skills if s["group"] == "everyday_task"]
+    checks = [s for s in skills if s["group"] == "health_check"]
+    assert len(everyday) == 5
+    assert len(checks) == 4
+    for s in skills:
+        assert s["plain_english_summary"]
+        assert len(s["structured_rows"]) >= 1
+        assert len(s["suggested_remediation"]) >= 1
+
 
 
 

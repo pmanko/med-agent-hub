@@ -25,6 +25,7 @@ from server.fhir import (
     analyze_patterns_and_summaries,
     answer_wahs_question,
     audit_cohort_code_coverage,
+    build_patient_skills_and_condensation_matrix,
     condense_bundle_to_budget,
     estimate_tokens_local,
     extract_bundle,
@@ -246,6 +247,62 @@ def evaluate_cohort(source_dir: Path, eval_dir: Path) -> Dict[str, Any]:
         ],
     }
 
+    persona_bios: Dict[str, Dict[str, str]] = {
+        "Maurice742_Auer97": {
+            "short_tag": "Complex Post-CABG & Renal Progression (18.8 MB Chart)",
+            "persona_bio": (
+                "Older adult following triple coronary bypass (CABG) surgery with chronic kidney disease, "
+                "multi-clinic prescriptions (brand vs. generic Plavix/clopidogrel, duplicate statins), "
+                "1,599 raw FHIR entries, and clinic room-equipment export artifacts."
+            ),
+            "key_highlights": "CABG Surgery • CKD Stages 1–3 • Brand/Generic Plavix • 1,599 Raw FHIR Entries",
+        },
+        "Elena_Rostova_Cardiorenal": {
+            "short_tag": "Heart Failure & Cardiorenal Hospital Discharge",
+            "persona_bio": (
+                "73-year-old woman after a heart failure & kidney admission where the hospital discharge note "
+                "instructed to HOLD spironolactone and potassium due to high potassium (5.8 mEq/L), "
+                "while outpatient clinic orders still list both pills as active."
+            ),
+            "key_highlights": "Discharge Note 'Hold' Mismatch • Hyperkalemia Risk • CKD Stage 3a vs 3b",
+        },
+        "Arthur_Pendelton_Anticoag": {
+            "short_tag": "Mechanical Heart Valve, GI Bleed & Blood Thinners",
+            "persona_bio": (
+                "67-year-old man with a mechanical aortic valve and recent upper GI bleed hospitalization "
+                "whose multi-clinic medication list carries overlapping blood thinners (Eliquis + Warfarin) "
+                "alongside an active NSAID (Naproxen)."
+            ),
+            "key_highlights": "Eliquis + Warfarin + Naproxen • Mechanical Valve • GI Bleed Status Conflict",
+        },
+        "Margaret_Chen_Polypharmacy": {
+            "short_tag": "Geriatric Fall Risk, Diabetes & Privacy-Sensitive Care",
+            "persona_bio": (
+                "80-year-old woman evaluated after a fall with two overlapping sedative-hypnotic prescriptions "
+                "(Ativan + Ambien), concurrent Prediabetes and Type 2 Diabetes on her problem list, "
+                "duplicate registry vaccines, and sensitive social-safety records."
+            ),
+            "key_highlights": "Ativan + Ambien Fall Risk • Prediabetes + T2DM • Sensitive SDOH Preview",
+        },
+        "Lamar193_Beer512": {
+            "short_tag": "Adult Preventive Care, Sinusitis & Multi-Clinic Records",
+            "persona_bio": (
+                "Middle-aged adult with longitudinal primary-care and urgent-care visits, cross-clinic "
+                "chronic sinusitis status discrepancies, NSAID + ACE-inhibitor prescriptions, and "
+                "state immunization registry sync entries."
+            ),
+            "key_highlights": "Active vs. Resolved Sinusitis • Lisinopril + Ibuprofen • WA IIS Sync",
+        },
+        "Byron202_Emard19": {
+            "short_tag": "Adolescent / Young Adult Well-Child & Vaccine Series",
+            "persona_bio": (
+                "Young patient with longitudinal pediatric/adolescent growth curves, multi-dose vaccine "
+                "series (HPV, Influenza), repeated wellness panels, and social/school readiness records."
+            ),
+            "key_highlights": "HPV & Flu Vaccine Series • Pediatric Growth Trends • School Readiness",
+        },
+    }
+
     for p in all_demo_patients:
         is_us_core = p in us_core_patients
         patient_questions = questions_by_patient.get(p, questions_by_patient["default"])
@@ -330,6 +387,14 @@ def evaluate_cohort(source_dir: Path, eval_dir: Path) -> Dict[str, Any]:
                     "qa_samples": qa_samples,
                 }
 
+            p_bio = persona_bios.get(p, {})
+            w15_ws = (
+                build_patient_skills_and_condensation_matrix(
+                    bundle, raw_json_tokens=raw_tokens_a[p]
+                )
+                if ds_key == "set_b"
+                else None
+            )
             demo_patients[combo_id] = {
                 "id": combo_id,
                 "patient_id": p,
@@ -339,10 +404,23 @@ def evaluate_cohort(source_dir: Path, eval_dir: Path) -> Dict[str, Any]:
                 "cohort_type": "us_core_archetype" if is_us_core else "ehignite_synthea",
                 "dataset_key": ds_key,
                 "dataset_label": ds_label,
+                "short_tag": p_bio.get("short_tag", ds_label),
+                "persona_bio": p_bio.get("persona_bio", ""),
+                "key_highlights": p_bio.get("key_highlights", ""),
                 "raw_mb": round(max(raw_bytes_a[p] / (1024 * 1024), 0.01), 2),
                 "raw_est_tokens": raw_tokens_a[p],
                 "total_bundle_entries": extracted.total_bundle_entries,
                 "postures": postures_data,
+                **(
+                    {
+                        "fhir_browser": w15_ws["fhir_browser"],
+                        "prep_lever_summary": w15_ws["prep_lever_summary"],
+                        "condensation_matrix": w15_ws["condensation_matrix"],
+                        "skills": w15_ws["skills"],
+                    }
+                    if w15_ws is not None
+                    else {}
+                ),
             }
 
 
@@ -555,12 +633,21 @@ def main() -> int:
 
     if args.demo_data_out:
         args.demo_data_out.parent.mkdir(parents=True, exist_ok=True)
+        primary_ids = [
+            "Maurice742_Auer97_set_b",
+            "Elena_Rostova_Cardiorenal_set_b",
+            "Arthur_Pendelton_Anticoag_set_b",
+            "Margaret_Chen_Polypharmacy_set_b",
+            "Lamar193_Beer512_set_b",
+            "Byron202_Emard19_set_b",
+        ]
         payload = {
             "generated_at": "2026-10-31",
             "cohort_size": 6,
+            "primary_persona_ids": primary_ids,
             "code_coverage": results["code_coverage"],
             "ablation_rows": results["ablation_rows"],
-            "patients": results["demo_patients"],
+            "patients": {pid: results["demo_patients"][pid] for pid in primary_ids if pid in results["demo_patients"]},
         }
 
         js_content = (
