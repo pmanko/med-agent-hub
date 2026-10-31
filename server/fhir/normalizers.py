@@ -158,8 +158,10 @@ def normalize_drug_ingredient(display: str) -> str:
 
 def detect_condition_conflicts(
     active_conditions: Sequence[Mapping[str, Any]],
+    resolved_conditions: Sequence[Mapping[str, Any]] = (),
 ) -> Dict[str, str]:
-    """Return a map of condition `resourceUuid -> conflict_tag` for mutually exclusive active conditions."""
+    """Return a map of condition `resourceUuid -> conflict_tag` for mutually exclusive active conditions
+    or cross-source active-vs-resolved status contradictions."""
     conflicts: Dict[str, str] = {}
     ckd_by_stage: Dict[int, List[str]] = {}
     prediabetes_uuids: List[str] = []
@@ -204,6 +206,84 @@ def detect_condition_conflicts(
             conflicts[uuid] = (
                 f"stage_conflict: Prediabetes marked ACTIVE alongside established diabetes ({dm_names})"
             )
+
+    # Check cross-source active vs resolved contradiction for the same medical condition code
+    resolved_by_code: Dict[str, List[Mapping[str, Any]]] = {}
+    for rc in resolved_conditions:
+        rcode = str(rc.get("code") or "")
+        if rcode and rcode not in _SDOH_NON_MEDICAL_CODES:
+            resolved_by_code.setdefault(rcode, []).append(rc)
+
+    for ac in active_conditions:
+        acode = str(ac.get("code") or "")
+        auuid = str(ac.get("resourceUuid") or "")
+        a_onset = str(ac.get("onset") or "")
+        if not acode or not auuid or acode not in resolved_by_code:
+            continue
+        for rc in resolved_by_code[acode]:
+            r_abatement = str(rc.get("abatement") or rc.get("onset") or "")
+            ruuid = str(rc.get("resourceUuid") or "")
+            # If a record with the same SNOMED code was marked resolved on or after the active onset
+            if r_abatement and (not a_onset or r_abatement >= a_onset):
+                msg = (
+                    f"status_conflict: {ac.get('display')} marked ACTIVE (onset {a_onset or 'unknown'}) "
+                    f"but also recorded as RESOLVED on {r_abatement}"
+                )
+                conflicts.setdefault(auuid, msg)
+                if ruuid:
+                    conflicts.setdefault(ruuid, msg)
+
+    return conflicts
+
+
+_STATIN_INGREDIENTS: Set[str] = {
+    "atorvastatin",
+    "simvastatin",
+    "rosuvastatin",
+    "pravastatin",
+    "lovastatin",
+    "fluvastatin",
+    "pitavastatin",
+}
+
+
+def detect_medication_conflicts(
+    active_medications: Sequence[Mapping[str, Any]],
+) -> Dict[str, str]:
+    """Return `resourceUuid -> conflict_tag` for duplicate active ingredients (brand vs generic)
+    or therapeutic class duplication (e.g. concurrent active statins)."""
+    conflicts: Dict[str, str] = {}
+    by_ingredient: Dict[str, List[Mapping[str, Any]]] = {}
+    statins: List[Mapping[str, Any]] = []
+
+    for med in active_medications:
+        uuid = str(med.get("resourceUuid") or "")
+        disp = str(med.get("display") or "")
+        ing = str(med.get("ingredient_key") or normalize_drug_ingredient(disp))
+        if not uuid or not ing:
+            continue
+        by_ingredient.setdefault(ing, []).append(med)
+        if ing in _STATIN_INGREDIENTS or any(s in ing.split() for s in _STATIN_INGREDIENTS):
+            statins.append(med)
+
+    for ing, group in by_ingredient.items():
+        if len(group) > 1:
+            names = ", ".join(str(m.get("display") or "") for m in group)
+            for m in group:
+                u = str(m.get("resourceUuid") or "")
+                if u:
+                    conflicts[u] = (
+                        f"duplicate_therapy: multiple ACTIVE prescriptions for ingredient '{ing}' ({names})"
+                    )
+
+    if len(statins) > 1:
+        names = ", ".join(str(m.get("display") or "") for m in statins)
+        for m in statins:
+            u = str(m.get("resourceUuid") or "")
+            if u and u not in conflicts:
+                conflicts[u] = (
+                    f"duplicate_therapy: concurrent ACTIVE statin prescriptions ({names})"
+                )
 
     return conflicts
 

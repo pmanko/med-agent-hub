@@ -15,6 +15,7 @@ from .normalizers import (
     classify_sensitivity,
     classify_vaccine_group,
     detect_condition_conflicts,
+    detect_medication_conflicts,
     is_clinic_room_equipment,
     normalize_drug_ingredient,
 )
@@ -33,6 +34,7 @@ __all__ = [
     "classify_vaccine_group",
     "condense_bundle_to_budget",
     "detect_condition_conflicts",
+    "detect_medication_conflicts",
     "estimate_tokens_local",
     "extract_bundle",
     "is_clinic_room_equipment",
