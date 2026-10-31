@@ -412,9 +412,31 @@ class StaticKnowledgeSource:
     priority = 20
     supports_patient = False
 
+    def __init__(
+        self,
+        corpus: str = "default",
+        bundles_by_patient: Optional[Mapping[str, Mapping[str, Any]]] = None,
+    ) -> None:
+        self.corpus = corpus
+        self.bundles_by_patient = dict(bundles_by_patient or {})
+
     async def fetch(self, request: ContextRequest) -> EvidenceLedger:
         query = request.question.strip()
-        rows = kb.search(query, k=3)
+        effective_corpus = self.corpus
+        if effective_corpus == "default":
+            if request.source == "fhir" or "fhir" in (request.sources or ()):
+                effective_corpus = "wahs"
+
+        kb_codes: Optional[Sequence[str]] = None
+        if effective_corpus == "wahs" and request.patient and request.patient in self.bundles_by_patient:
+            from server.fhir.extractors import extract_bundle
+            from server.fhir.kb_lookup import extract_chart_kb_codes
+
+            kb_codes = extract_chart_kb_codes(
+                extract_bundle(self.bundles_by_patient[request.patient])
+            )
+
+        rows = kb.search(query, k=3, corpus=effective_corpus, codes=kb_codes)
         prior_answer = next(
             (
                 str(message.get("content") or "").strip()
@@ -429,7 +451,9 @@ class StaticKnowledgeSource:
             expanded_query = (
                 f"{query}\nPrior answer context: {prior_answer[:1200]}".strip()
             )
-            expanded_rows = kb.search(expanded_query, k=3)
+            expanded_rows = kb.search(
+                expanded_query, k=3, corpus=effective_corpus, codes=kb_codes
+            )
             # Protect current-topic recall while reserving one slot for anaphoric follow-ups.
             # Stable-id deduplication and fixed lane order keep the merge deterministic.
             merged: list[dict[str, Any]] = []

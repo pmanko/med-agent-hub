@@ -10,6 +10,17 @@ from .condenser import (
     items_to_querystore_records,
 )
 from .extractors import ClinicalItem, ExtractedChart, NumericPoint, extract_bundle
+from .kb_lookup import (
+    audit_cohort_code_coverage,
+    extract_chart_kb_codes,
+    get_acip_rules,
+    get_clinical_exclusivity_and_privacy,
+    get_rxnorm_lookup,
+    resolve_condition_code,
+    resolve_immunization_code,
+    resolve_lab_code,
+    resolve_medication_code,
+)
 from .normalizers import (
     annotate_immunization_anomalies,
     classify_sensitivity,
@@ -29,6 +40,7 @@ __all__ = [
     "NumericPoint",
     "ResilientTokenCounter",
     "annotate_immunization_anomalies",
+    "audit_cohort_code_coverage",
     "build_tier_items",
     "classify_sensitivity",
     "classify_vaccine_group",
@@ -37,7 +49,15 @@ __all__ = [
     "detect_medication_conflicts",
     "estimate_tokens_local",
     "extract_bundle",
+    "extract_chart_kb_codes",
+    "get_acip_rules",
+    "get_clinical_exclusivity_and_privacy",
+    "get_rxnorm_lookup",
     "is_clinic_room_equipment",
     "items_to_querystore_records",
     "normalize_drug_ingredient",
+    "resolve_condition_code",
+    "resolve_immunization_code",
+    "resolve_lab_code",
+    "resolve_medication_code",
 ]
