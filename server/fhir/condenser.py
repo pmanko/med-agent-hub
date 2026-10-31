@@ -328,12 +328,15 @@ def _fold_stopped_medications(meds: Sequence[ClinicalItem]) -> List[ClinicalItem
 
 
 def _fold_resolved_conditions(conds: Sequence[ClinicalItem]) -> List[ClinicalItem]:
-    """Run-length fold resolved conditions by code/display while preserving sensitivity tags."""
+    """Run-length fold resolved conditions by code/display while preserving sensitivity and conflict tags."""
+    anomalous = [c for c in conds if c.conflict_note]
+    routine = [c for c in conds if not c.conflict_note]
+
     by_code: Dict[str, List[ClinicalItem]] = {}
-    for c in conds:
+    for c in routine:
         by_code.setdefault(c.code or c.display, []).append(c)
 
-    folded: List[ClinicalItem] = []
+    folded: List[ClinicalItem] = list(anomalous)
     for _code, group in by_code.items():
         ordered = sorted(group, key=lambda x: _date_sort_key(x.date))
         latest = ordered[-1]
@@ -970,6 +973,11 @@ def build_tier_items(
             for x in cond_active
             if x.sensitivity != "SDOH-SOCIAL"
         ]
+        anomalous_cond_res = [
+            _compact_item_for_micro_tier(x)
+            for x in cond_resolved
+            if x.conflict_note
+        ]
         sdoh_active = [x for x in cond_active if x.sensitivity == "SDOH-SOCIAL"]
         if sdoh_active:
             l_date, _ = _span_phrase([x.date for x in sdoh_active])
@@ -1039,6 +1047,7 @@ def build_tier_items(
             patient_items
             + compact_allergies
             + compact_cond_active
+            + anomalous_cond_res
             + compact_med_active
             + anomalous_imms
             + folded_devices
@@ -1172,7 +1181,7 @@ def _pack_items_to_token_budget(
         conflict_conds = [
             it
             for it in mandatory_items
-            if it.section == "condition_active"
+            if it.section in {"condition_active", "condition_resolved"}
             and (it.conflict_note or it.sensitivity == "SDOH/PRIVACY-SENSITIVE")
         ]
         conflict_imms = [

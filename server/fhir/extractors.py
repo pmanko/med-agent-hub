@@ -24,6 +24,7 @@ from .normalizers import (
     classify_sensitivity,
     classify_vaccine_group,
     detect_condition_conflicts,
+    detect_medication_conflicts,
     is_clinic_room_equipment,
     normalize_drug_ingredient,
 )
@@ -575,7 +576,10 @@ def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
     active_cond_dicts = [
         c for c in raw_conditions if c["status"] in {"active", "recurrence", "relapse"}
     ]
-    condition_conflicts = detect_condition_conflicts(active_cond_dicts)
+    resolved_cond_dicts = [
+        c for c in raw_conditions if c["status"] not in {"active", "recurrence", "relapse"}
+    ]
+    condition_conflicts = detect_condition_conflicts(active_cond_dicts, resolved_cond_dicts)
 
     for c in raw_conditions:
         rid = c["resourceUuid"]
@@ -607,7 +611,7 @@ def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
                 code=c["code"] or c["display"],
                 display=c["display"],
                 text=f"Condition: {c['display']} ({', '.join(details)}){suffix}",
-                mandatory=is_active,
+                mandatory=is_active or bool(conflict),
                 status=c["status"],
                 end_date=c["abatement"],
                 source_org=c["source_org"],
@@ -625,6 +629,7 @@ def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
         "MedicationStatement",
         "MedicationDispense",
     }
+    raw_meds: List[Dict[str, Any]] = []
     for res in resources:
         rtype = str(res.get("resourceType") or "")
         if rtype not in med_types:
@@ -674,30 +679,56 @@ def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
         setting = "inpatient/administered" if rtype == "MedicationAdministration" else "prescribed"
         is_active = status in {"active", "in-progress", "on-hold"}
         ingredient = normalize_drug_ingredient(disp or code)
-        quals = [f"status: {status}", f"type: {setting}"]
-        if dose_strs:
-            quals.append(f"dosage: {'; '.join(dose_strs[:2])}")
-        if reasons:
-            quals.append(f"reason: {', '.join(dict.fromkeys(reasons))}")
-        if code:
-            quals.append(f"RxNorm: {code}")
+        raw_meds.append(
+            {
+                "resourceType": rtype,
+                "resourceUuid": rid,
+                "code": code,
+                "display": disp or code or "Medication",
+                "status": status,
+                "is_active": is_active,
+                "date": m_date,
+                "end_date": end_date,
+                "dose_strs": dose_strs,
+                "reasons": reasons,
+                "setting": setting,
+                "ingredient_key": ingredient,
+                "source_org": resolve_source_org(res),
+            }
+        )
+
+    med_conflicts = detect_medication_conflicts([m for m in raw_meds if m["is_active"]])
+    for m in raw_meds:
+        rid = m["resourceUuid"]
+        m_conflict = med_conflicts.get(rid)
+        quals = [f"status: {m['status']}", f"type: {m['setting']}"]
+        if m["dose_strs"]:
+            quals.append(f"dosage: {'; '.join(m['dose_strs'][:2])}")
+        if m["reasons"]:
+            quals.append(f"reason: {', '.join(dict.fromkeys(m['reasons']))}")
+        if m["source_org"]:
+            quals.append(f"source: {m['source_org']}")
+        if m["code"]:
+            quals.append(f"RxNorm: {m['code']}")
+        suffix = f" [{m_conflict}]" if m_conflict else ""
         items.append(
             ClinicalItem(
-                resource_type=rtype,
+                resource_type=m["resourceType"],
                 resource_uuid=rid,
-                date=m_date,
-                clinical_date=m_date,
+                date=m["date"],
+                clinical_date=m["date"],
                 date_kind="clinical_event",
-                section="med_active" if is_active else "med_historical",
-                code=code or ingredient,
-                display=disp or code or "Medication",
-                text=f"Medication: {disp or code} ({', '.join(quals)})",
-                mandatory=is_active,
-                status=status,
-                end_date=end_date,
-                source_org=resolve_source_org(res),
-                ingredient_key=ingredient,
-                metadata={"reasons": reasons, "dosage": dose_strs, "setting": setting},
+                section="med_active" if m["is_active"] else "med_historical",
+                code=m["code"] or m["ingredient_key"],
+                display=m["display"],
+                text=f"Medication: {m['display']} ({', '.join(quals)}){suffix}",
+                mandatory=m["is_active"],
+                status=m["status"],
+                end_date=m["end_date"],
+                source_org=m["source_org"],
+                conflict_note=m_conflict,
+                ingredient_key=m["ingredient_key"],
+                metadata={"reasons": m["reasons"], "dosage": m["dose_strs"], "setting": m["setting"]},
             )
         )
 
@@ -723,6 +754,10 @@ def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
         )
 
     imm_anomalies = annotate_immunization_anomalies(raw_imms, birth_date)
+    imms_by_group: Dict[str, List[str]] = {}
+    for imm in raw_imms:
+        imms_by_group.setdefault(imm["group"], []).append(imm["resourceUuid"])
+
     for imm in raw_imms:
         rid = imm["resourceUuid"]
         anom = imm_anomalies.get(rid)
@@ -732,6 +767,13 @@ def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
         if imm["source_org"]:
             quals.append(f"source: {imm['source_org']}")
         suffix = f" [{anom}]" if anom else ""
+        # Attach all series UUIDs to ACIP schedule anomaly items so every dose UUID in the series
+        # survives even in Tier 4 micro-capsules.
+        series_members: Tuple[str, ...] = (
+            tuple(imms_by_group.get(imm["group"], [rid]))
+            if anom and anom.startswith("acip_schedule_note:")
+            else ()
+        )
         items.append(
             ClinicalItem(
                 resource_type="Immunization",
@@ -743,11 +785,12 @@ def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
                 code=imm["code"] or imm["group"],
                 display=imm["display"],
                 text=f"Immunization: {imm['display']} ({', '.join(quals)}){suffix}",
-                mandatory=bool(anom),  # Always protect anomalous/duplicate immunizations in IPS core
+                mandatory=bool(anom),
                 status=imm["status"],
                 source_org=imm["source_org"],
                 conflict_note=anom,
                 ingredient_key=imm["group"],
+                member_uuids=series_members,
             )
         )
 
