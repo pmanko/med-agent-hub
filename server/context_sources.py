@@ -196,6 +196,10 @@ class EvidenceRecord:
         }
         if provenance:
             mapping["provenance"] = provenance
+        if self.metadata.get("memberUuids"):
+            mapping["memberUuids"] = list(self.metadata["memberUuids"])
+        if self.metadata.get("sensitivity"):
+            mapping["sensitivity"] = self.metadata["sensitivity"]
         return mapping
 
 
