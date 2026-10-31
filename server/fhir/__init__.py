@@ -13,10 +13,10 @@ from .extractors import (
     ClinicalItem,
     ExtractedChart,
     NumericPoint,
-    build_fhir_browser_index,
     extract_bundle,
     extract_bundle_lossless,
 )
+from .fhir_browser import build_fhir_browser_index
 from .kb_lookup import (
     audit_cohort_code_coverage,
     extract_chart_kb_codes,
@@ -43,8 +43,8 @@ from .wahs_analyzer import (
     analyze_duplicates_and_bloat,
     analyze_patterns_and_summaries,
     answer_wahs_question,
-    build_patient_skills_and_condensation_matrix,
 )
+from .wahs_patient_workspace import build_patient_skills_and_condensation_matrix
 from .wahs_skills import (
     ChartFinding,
     run_acip_immunization_skill,
@@ -73,6 +73,8 @@ __all__ = [
     "annotate_immunization_anomalies",
     "answer_wahs_question",
     "audit_cohort_code_coverage",
+    "build_fhir_browser_index",
+    "build_patient_skills_and_condensation_matrix",
     "build_tier_items",
     "classify_sensitivity",
     "classify_vaccine_group",

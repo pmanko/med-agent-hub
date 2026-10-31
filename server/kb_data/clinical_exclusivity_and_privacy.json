@@ -569,6 +569,18 @@
       "display": "Hemoglobin [Mass/volume] in Blood",
       "plain_description": "Oxygen-carrying hemoglobin protein in red blood cells, monitored for anemia and blood loss.",
       "reference_range": "13.5–17.5 g/dL (men); 12.0–15.5 g/dL (women)"
+    },
+    "8480-6": {
+      "loinc": "8480-6",
+      "display": "Systolic blood pressure",
+      "plain_description": "Systolic arterial blood pressure (top number) measuring pressure in the arteries when the heart contracts.",
+      "reference_range": "Normal: < 120 mm[Hg]; Hypotension: < 90–100 mm[Hg]; Hypertension: >= 130–140 mm[Hg]"
+    },
+    "8462-4": {
+      "loinc": "8462-4",
+      "display": "Diastolic blood pressure",
+      "plain_description": "Diastolic arterial blood pressure (bottom number) measuring pressure in the arteries when the heart rests between beats.",
+      "reference_range": "Normal: < 80 mm[Hg]; Hypertension: >= 80–90 mm[Hg]"
     }
   }
 }
