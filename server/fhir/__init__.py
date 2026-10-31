@@ -9,7 +9,13 @@ from .condenser import (
     estimate_tokens_local,
     items_to_querystore_records,
 )
-from .extractors import ClinicalItem, ExtractedChart, NumericPoint, extract_bundle
+from .extractors import (
+    ClinicalItem,
+    ExtractedChart,
+    NumericPoint,
+    extract_bundle,
+    extract_bundle_lossless,
+)
 from .kb_lookup import (
     audit_cohort_code_coverage,
     extract_chart_kb_codes,
@@ -37,6 +43,14 @@ from .wahs_analyzer import (
     analyze_patterns_and_summaries,
     answer_wahs_question,
 )
+from .wahs_skills import (
+    ChartFinding,
+    run_acip_immunization_skill,
+    run_chart_hygiene_and_reconciliation_skills,
+    run_condition_stage_reconciliation_skill,
+    run_duplicate_and_redundancy_skill,
+    run_medication_reconciliation_skill,
+)
 from .wahs_tools import (
     get_lab_history,
     read_clinical_note,
@@ -44,6 +58,7 @@ from .wahs_tools import (
 )
 
 __all__ = [
+    "ChartFinding",
     "ClinicalItem",
     "CondensedChartResult",
     "ExtractedChart",
@@ -64,6 +79,7 @@ __all__ = [
     "detect_medication_conflicts",
     "estimate_tokens_local",
     "extract_bundle",
+    "extract_bundle_lossless",
     "extract_chart_kb_codes",
     "get_acip_rules",
     "get_clinical_exclusivity_and_privacy",
@@ -77,5 +93,10 @@ __all__ = [
     "resolve_immunization_code",
     "resolve_lab_code",
     "resolve_medication_code",
+    "run_acip_immunization_skill",
+    "run_chart_hygiene_and_reconciliation_skills",
+    "run_condition_stage_reconciliation_skill",
+    "run_duplicate_and_redundancy_skill",
+    "run_medication_reconciliation_skill",
     "search_chart_entries",
 ]

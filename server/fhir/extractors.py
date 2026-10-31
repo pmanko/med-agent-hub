@@ -172,6 +172,17 @@ def _iso_date(val: Optional[str]) -> Optional[str]:
     return None
 
 
+def _iso_timestamp(val: Optional[str]) -> Optional[str]:
+    """Return `YYYY-MM-DDTHH:MM` when an intraday time component is present on an ISO datetime string."""
+    if not val:
+        return None
+    s = str(val).strip()
+    m = re.match(r"^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2})", s)
+    if m:
+        return f"{m.group(1)}T{m.group(2)}"
+    return None
+
+
 def _coding_pair(codeable: Optional[Mapping[str, Any]]) -> Tuple[str, str]:
     if not isinstance(codeable, Mapping):
         return "", ""
@@ -275,9 +286,11 @@ def _format_obs_value(obs: Mapping[str, Any]) -> Tuple[str, Optional[float], str
     return "", None, ""
 
 
-def _extract_unique_note_narrative(decoded_text: str) -> str:
+def _extract_unique_note_narrative(decoded_text: str, *, preserve_all_sections: bool = False) -> str:
     """Extract unique encounter narrative (`# Chief Complaint`, `# Assessment and Plan`, etc.)
-    from a clinical note while stripping repeated Synthea template header/table dumps."""
+    from a clinical note. When `preserve_all_sections=True` (non-destructive W12 mode), retains
+    all non-empty sections (including `# Medications`, `# Allergies`, `# HPI`) unless they are
+    literal empty placeholders (`no active allergies.`, `none`, `n/a`)."""
     lines = [line.strip() for line in (decoded_text or "").splitlines()]
     if not lines:
         return ""
@@ -298,7 +311,9 @@ def _extract_unique_note_narrative(decoded_text: str) -> str:
     has_markdown_headers = any(k != "preamble" for k in sections)
     if has_markdown_headers:
         for header, body_lines in sections.items():
-            if header == "preamble" or header in _BOILERPLATE_NOTE_SECTIONS:
+            if header == "preamble":
+                continue
+            if not preserve_all_sections and header in _BOILERPLATE_NOTE_SECTIONS:
                 continue
             compact_body = " ".join(body_lines).strip()
             if not compact_body or compact_body.lower() in {"no active allergies.", "none", "n/a"}:
@@ -306,7 +321,8 @@ def _extract_unique_note_narrative(decoded_text: str) -> str:
             kept_parts.append(f"{header.title()}: {compact_body}")
         if kept_parts:
             summary = " | ".join(kept_parts)
-            return summary[:360] + ("..." if len(summary) > 360 else "")
+            limit = 520 if preserve_all_sections else 360
+            return summary[:limit] + ("..." if len(summary) > limit else "")
         # If every section was boilerplate (e.g. "No complaints."), check chief complaint fallback
         cc = " ".join(sections.get("chief complaint") or []).strip()
         ap = " ".join(sections.get("assessment and plan") or []).strip()
@@ -320,7 +336,34 @@ def _extract_unique_note_narrative(decoded_text: str) -> str:
     return joined[:280] + ("..." if len(joined) > 280 else "")
 
 
-def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
+def extract_bundle_lossless(
+    bundle: Mapping[str, Any],
+    *,
+    enable_privacy_classification: bool = False,
+) -> ExtractedChart:
+    """Non-destructive W12 FHIR Bundle extractor:
+    - Zero pre-baked `[conflict_note]` mutations in rendered chart lines
+    - Optional `enable_privacy_classification` (`False` by default, deferred to W9)
+    - Preserves intraday timestamps (`YYYY-MM-DDTHH:MM`) on lab/vital observations
+    - Preserves all non-empty clinical note sections (`# Medications`, `# HPI`, etc.)
+    """
+    return extract_bundle(
+        bundle,
+        include_conflict_annotations=False,
+        enable_privacy_classification=enable_privacy_classification,
+        preserve_intraday_timestamps=True,
+        preserve_all_note_sections=True,
+    )
+
+
+def extract_bundle(
+    bundle: Mapping[str, Any],
+    *,
+    include_conflict_annotations: bool = True,
+    enable_privacy_classification: bool = True,
+    preserve_intraday_timestamps: bool = False,
+    preserve_all_note_sections: bool = False,
+) -> ExtractedChart:
     """Parse a FHIR R4 Bundle dict into normalized `ClinicalItem` objects and numeric series points."""
     entries = bundle.get("entry") or []
     resources: List[Mapping[str, Any]] = []
@@ -563,7 +606,7 @@ def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
         onset = _iso_date(res.get("onsetDateTime") or res.get("recordedDate"))
         abatement = _iso_date(res.get("abatementDateTime"))
         cats = _categories(res)
-        sens = classify_sensitivity(code, disp, cats)
+        sens = classify_sensitivity(code, disp, cats) if enable_privacy_classification else None
         raw_conditions.append(
             {
                 "resourceUuid": rid,
@@ -585,7 +628,11 @@ def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
     resolved_cond_dicts = [
         c for c in raw_conditions if c["status"] not in {"active", "recurrence", "relapse"}
     ]
-    condition_conflicts = detect_condition_conflicts(active_cond_dicts, resolved_cond_dicts)
+    condition_conflicts = (
+        detect_condition_conflicts(active_cond_dicts, resolved_cond_dicts)
+        if include_conflict_annotations
+        else {}
+    )
 
     for c in raw_conditions:
         rid = c["resourceUuid"]
@@ -708,7 +755,11 @@ def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
             }
         )
 
-    med_conflicts = detect_medication_conflicts([m for m in raw_meds if m["is_active"]])
+    med_conflicts = (
+        detect_medication_conflicts([m for m in raw_meds if m["is_active"]])
+        if include_conflict_annotations
+        else {}
+    )
     for m in raw_meds:
         rid = m["resourceUuid"]
         m_conflict = med_conflicts.get(rid)
@@ -778,7 +829,11 @@ def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
             }
         )
 
-    imm_anomalies = annotate_immunization_anomalies(raw_imms, birth_date)
+    imm_anomalies = (
+        annotate_immunization_anomalies(raw_imms, birth_date)
+        if include_conflict_annotations
+        else {}
+    )
     imms_by_group: Dict[str, List[str]] = {}
     for imm in raw_imms:
         imms_by_group.setdefault(imm["group"], []).append(imm["resourceUuid"])
@@ -883,7 +938,10 @@ def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
                         }
 
     for note_info in notes_by_hash.values():
-        snippet = _extract_unique_note_narrative(note_info["decoded"])
+        snippet = _extract_unique_note_narrative(
+            note_info["decoded"],
+            preserve_all_sections=preserve_all_note_sections,
+        )
         if not snippet:
             continue
         members = tuple(dict.fromkeys(note_info["member_uuids"]))
@@ -939,14 +997,22 @@ def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
             o_code, o_disp = _coding_pair(child_obs.get("code"))
             val_str, num_val, unit = _format_obs_value(child_obs)
             o_cats = _categories(child_obs)
-            o_sens = classify_sensitivity(o_code, f"{o_disp} {val_str}", o_cats)
+            o_sens = (
+                classify_sensitivity(o_code, f"{o_disp} {val_str}", o_cats)
+                if enable_privacy_classification
+                else None
+            )
             if o_sens:
                 child_sensitivities.append(o_sens)
             short_label = o_disp or o_code or "item"
             if val_str:
                 child_parts.append(f"{short_label}: {val_str}")
             if num_val is not None:
-                o_date = _iso_date(child_obs.get("effectiveDateTime") or child_obs.get("issued")) or p_date
+                o_date_raw = child_obs.get("effectiveDateTime") or child_obs.get("issued")
+                o_date = (
+                    (_iso_timestamp(o_date_raw) if preserve_intraday_timestamps else _iso_date(o_date_raw))
+                    or p_date
+                )
                 if o_date:
                     numeric_points.append(
                         NumericPoint(
@@ -961,9 +1027,13 @@ def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
                     )
 
         panel_sens = (
-            "SDOH/PRIVACY-SENSITIVE"
-            if "SDOH/PRIVACY-SENSITIVE" in child_sensitivities
-            else classify_sensitivity(code, disp)
+            (
+                "SDOH/PRIVACY-SENSITIVE"
+                if "SDOH/PRIVACY-SENSITIVE" in child_sensitivities
+                else classify_sensitivity(code, disp)
+            )
+            if enable_privacy_classification
+            else None
         )
         sens_suffix = " [sensitivity: SDOH/PRIVACY-SENSITIVE]" if panel_sens == "SDOH/PRIVACY-SENSITIVE" else ""
         joined_children = "; ".join(child_parts) if child_parts else "completed"
@@ -998,10 +1068,16 @@ def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
         if rid in claimed_obs_ids:
             continue
         code, disp = _coding_pair(res.get("code"))
-        o_date = _iso_date(res.get("effectiveDateTime") or res.get("issued")) or reference_date
+        raw_obs_dt = res.get("effectiveDateTime") or res.get("issued")
+        o_date = _iso_date(raw_obs_dt) or reference_date
+        o_ts = (_iso_timestamp(raw_obs_dt) if preserve_intraday_timestamps else None) or o_date
         cats = _categories(res)
         val_str, num_val, unit = _format_obs_value(res)
-        sens = classify_sensitivity(code, f"{disp} {val_str}", cats)
+        sens = (
+            classify_sensitivity(code, f"{disp} {val_str}", cats)
+            if enable_privacy_classification
+            else None
+        )
 
         primary_cat = cats[0] if cats else "observation"
         has_components = bool(res.get("component"))
@@ -1017,7 +1093,7 @@ def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
                             numeric_points.append(
                                 NumericPoint(
                                     resource_uuid=rid,
-                                    date=o_date,
+                                    date=o_ts or o_date,
                                     code=c_code or c_disp,
                                     concept=c_disp or c_code,
                                     value=c_num,
@@ -1031,7 +1107,7 @@ def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
             numeric_points.append(
                 NumericPoint(
                     resource_uuid=rid,
-                    date=o_date,
+                    date=o_ts or o_date,
                     code=code or disp,
                     concept=disp or code or "Observation",
                     value=num_val,
@@ -1057,6 +1133,7 @@ def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
             cls_label = "Finding"
 
         sens_suffix = " [sensitivity: SDOH/PRIVACY-SENSITIVE]" if sens == "SDOH/PRIVACY-SENSITIVE" else ""
+        ts_suffix = f" (timestamp: {o_ts})" if (preserve_intraday_timestamps and o_ts and "T" in o_ts) else ""
         body_val = f": {val_str}" if val_str else ""
         obs_kb = resolve_lab_code(code, disp) if sec in {"vital_sign", "lab_observation"} else {}
         items.append(
@@ -1069,7 +1146,7 @@ def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
                 section=sec,
                 code=code or disp,
                 display=disp or code or "Observation",
-                text=f"{cls_label} — {disp or code}{body_val}{sens_suffix}",
+                text=f"{cls_label} — {disp or code}{body_val}{ts_suffix}{sens_suffix}",
                 mandatory=False,
                 status=str(res.get("status") or "final").lower(),
                 source_org=resolve_source_org(res),
@@ -1080,6 +1157,7 @@ def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
                     "numeric": num_val,
                     "unit": unit,
                     "category": primary_cat,
+                    "timestamp": o_ts,
                     **({"kb_resolution": obs_kb} if obs_kb else {}),
                 },
             )
@@ -1279,30 +1357,31 @@ def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
             )
 
     # 11. Detect free-text clinical note vs. structured active MedicationRequest contradictions
-    active_med_items = [it for it in items if it.section == "med_active"]
-    note_items = [it for it in items if it.section in {"clinical_note", "note"}]
-    hold_re = re.compile(
-        r"\b(?:hold|stop|discontinue|held|stopped|do\s+not\s+take)\s+([a-z][a-z0-9-]{2,25})\b",
-        re.IGNORECASE,
-    )
-    for n_item in note_items:
-        for match in hold_re.finditer(n_item.text or ""):
-            raw_drug = match.group(1)
-            norm_ing = normalize_drug_ingredient(raw_drug)
-            for m_item in active_med_items:
-                if m_item.ingredient_key == norm_ing or norm_ing in m_item.display.lower():
-                    msg = (
-                        f"note_medication_contradiction: Clinical note ({n_item.clinical_date or 'recent'}) "
-                        f"instructs to hold/discontinue {m_item.display}, but structured MedicationRequest remains ACTIVE"
-                    )
-                    if not m_item.conflict_note:
-                        m_item.conflict_note = msg
-                        m_item.text += f" [{msg}]"
-                    if n_item.resource_uuid not in m_item.member_uuids:
-                        m_item.member_uuids = tuple(list(m_item.member_uuids) + [n_item.resource_uuid])
-                    if not n_item.conflict_note:
-                        n_item.conflict_note = msg
-                        n_item.mandatory = True
+    if include_conflict_annotations:
+        active_med_items = [it for it in items if it.section == "med_active"]
+        note_items = [it for it in items if it.section in {"clinical_note", "note"}]
+        hold_re = re.compile(
+            r"\b(?:hold|stop|discontinue|held|stopped|do\s+not\s+take)\s+([a-z][a-z0-9-]{2,25})\b",
+            re.IGNORECASE,
+        )
+        for n_item in note_items:
+            for match in hold_re.finditer(n_item.text or ""):
+                raw_drug = match.group(1)
+                norm_ing = normalize_drug_ingredient(raw_drug)
+                for m_item in active_med_items:
+                    if m_item.ingredient_key == norm_ing or norm_ing in m_item.display.lower():
+                        msg = (
+                            f"note_medication_contradiction: Clinical note ({n_item.clinical_date or 'recent'}) "
+                            f"instructs to hold/discontinue {m_item.display}, but structured MedicationRequest remains ACTIVE"
+                        )
+                        if not m_item.conflict_note:
+                            m_item.conflict_note = msg
+                            m_item.text += f" [{msg}]"
+                        if n_item.resource_uuid not in m_item.member_uuids:
+                            m_item.member_uuids = tuple(list(m_item.member_uuids) + [n_item.resource_uuid])
+                        if not n_item.conflict_note:
+                            n_item.conflict_note = msg
+                            n_item.mandatory = True
 
     return ExtractedChart(
         patient_id=patient_id,

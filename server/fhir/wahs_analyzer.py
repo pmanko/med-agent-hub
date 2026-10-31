@@ -125,6 +125,7 @@ def analyze_duplicates_and_bloat(
         target_tokens=target_tokens,
         sharing_posture=sharing_posture,
     )
+    extracted = _apply_stage2_conflict_skills_on_chart(extracted)
     uuid_map = _build_uuid_to_citation_map(condensed)
 
     # 1. Analyze duplicate Blood vs Serum lab analytes and repeated lab panels
@@ -366,6 +367,139 @@ def analyze_duplicates_and_bloat(
     }
 
 
+def _apply_stage2_conflict_skills_on_chart(extracted: ExtractedChart) -> ExtractedChart:
+    """Populate Stage-2 conflict/anomaly annotations dynamically over the items present in `extracted`
+    when Stage 1 ran in unhinted `lossless_structural` mode (`conflict_note=None`).
+    """
+    from dataclasses import replace
+    from .normalizers import (
+        annotate_immunization_anomalies,
+        detect_condition_conflicts,
+        detect_medication_conflicts,
+        normalize_drug_ingredient,
+    )
+
+    if any(it.conflict_note for it in extracted.items):
+        return extracted
+    if any(it.metadata.get("skip_stage2_skills") for it in extracted.items):
+        return extracted
+
+    skip_multi_source = any(
+        it.metadata.get("skip_multi_source_stage_notes") for it in extracted.items
+    )
+
+    active_cond_dicts = [
+        {
+            "resourceUuid": it.resource_uuid,
+            "code": it.code,
+            "display": it.display,
+            "status": it.status,
+            "is_active": True,
+            "onset": it.metadata.get("onset") or it.date,
+            "abatement": it.metadata.get("abatement") or it.end_date,
+            "source_org": it.source_org,
+        }
+        for it in extracted.items
+        if it.section == "condition_active"
+    ]
+    resolved_cond_dicts = [
+        {
+            "resourceUuid": it.resource_uuid,
+            "code": it.code,
+            "display": it.display,
+            "status": it.status,
+            "is_active": False,
+            "onset": it.metadata.get("onset") or it.date,
+            "abatement": it.metadata.get("abatement") or it.end_date,
+            "source_org": it.source_org,
+        }
+        for it in extracted.items
+        if it.section == "condition_resolved"
+    ]
+    cond_conflicts = (
+        {}
+        if skip_multi_source
+        else detect_condition_conflicts(active_cond_dicts, resolved_cond_dicts)
+    )
+
+    med_dicts = [
+        {
+            "resourceUuid": it.resource_uuid,
+            "code": it.code,
+            "display": it.display,
+            "status": it.status,
+            "is_active": True,
+            "date": it.date,
+            "ingredient_key": it.ingredient_key,
+            "source_org": it.source_org,
+        }
+        for it in extracted.items
+        if it.section == "med_active"
+    ]
+    med_conflicts = detect_medication_conflicts(med_dicts)
+
+    imm_dicts = [
+        {
+            "resourceUuid": it.resource_uuid,
+            "code": it.code,
+            "display": it.display,
+            "date": it.date,
+            "status": it.status,
+            "source_org": it.source_org,
+            "group": str(it.metadata.get("vaccine_group") or it.ingredient_key or it.display),
+        }
+        for it in extracted.items
+        if it.section == "immunization"
+    ]
+    imm_anomalies = annotate_immunization_anomalies(imm_dicts, extracted.birth_date)
+    imms_by_group: Dict[str, List[str]] = defaultdict(list)
+    for imd in imm_dicts:
+        imms_by_group[imd["group"]].append(imd["resourceUuid"])
+
+    note_conflicts: Dict[str, str] = {}
+    note_med_links: Dict[str, List[str]] = defaultdict(list)
+    if not skip_multi_source:
+        active_meds = [it for it in extracted.items if it.section == "med_active"]
+        notes = [it for it in extracted.items if it.section in {"clinical_note", "note"}]
+        hold_re = re.compile(
+            r"\b(?:hold|stop|discontinue|held|stopped|do\s+not\s+take)\s+([a-z][a-z0-9-]{2,25})\b",
+            re.IGNORECASE,
+        )
+        for n_item in notes:
+            for match in hold_re.finditer(n_item.text or ""):
+                raw_drug = match.group(1)
+                norm_ing = normalize_drug_ingredient(raw_drug)
+                for m_item in active_meds:
+                    if m_item.ingredient_key == norm_ing or norm_ing in m_item.display.lower():
+                        msg = (
+                            f"note_medication_contradiction: Clinical note ({n_item.clinical_date or 'recent'}) "
+                            f"instructs to hold/discontinue {m_item.display}, but structured MedicationRequest remains ACTIVE"
+                        )
+                        note_conflicts[n_item.resource_uuid] = msg
+                        if m_item.resource_uuid not in med_conflicts:
+                            med_conflicts[m_item.resource_uuid] = msg
+                        note_med_links[m_item.resource_uuid].append(n_item.resource_uuid)
+
+    updated_items: List[ClinicalItem] = []
+    for it in extracted.items:
+        c_note = (
+            cond_conflicts.get(it.resource_uuid)
+            or med_conflicts.get(it.resource_uuid)
+            or imm_anomalies.get(it.resource_uuid)
+            or note_conflicts.get(it.resource_uuid)
+        )
+        extra_members = list(note_med_links.get(it.resource_uuid, []))
+        if c_note and c_note.startswith("acip_schedule_note:"):
+            v_grp = str(it.metadata.get("vaccine_group") or it.ingredient_key or it.display)
+            extra_members.extend(imms_by_group.get(v_grp, []))
+        if c_note or extra_members:
+            new_members = tuple(dict.fromkeys(list(it.member_uuids) + extra_members))
+            updated_items.append(replace(it, conflict_note=c_note or it.conflict_note, member_uuids=new_members))
+        else:
+            updated_items.append(it)
+    return replace(extracted, items=updated_items)
+
+
 def analyze_data_quality_and_conflicts(
     bundle_or_extracted: Union[Mapping[str, Any], ExtractedChart],
     condensed: Optional[CondensedChartResult] = None,
@@ -380,6 +514,7 @@ def analyze_data_quality_and_conflicts(
         target_tokens=target_tokens,
         sharing_posture=sharing_posture,
     )
+    extracted = _apply_stage2_conflict_skills_on_chart(extracted)
     uuid_map = _build_uuid_to_citation_map(condensed)
 
     findings: List[Dict[str, Any]] = []
@@ -523,7 +658,7 @@ def analyze_data_quality_and_conflicts(
         cites = _citations_for_uuids(uuids, uuid_map, condensed)
         orgs = sorted({it.source_org for it in grp if it.source_org})
         status_summary = "; ".join(
-            f"{it.status.upper()} ({it.clinical_date or 'undated'}) via {it.source_org or 'Primary Clinic'}"
+            f"{it.status.upper()} ({it.end_date or it.clinical_date or 'undated'}) via {it.source_org or 'Primary Clinic'}"
             for it in grp
         )
         findings.append(
@@ -860,6 +995,7 @@ def analyze_patterns_and_summaries(
         target_tokens=target_tokens,
         sharing_posture=sharing_posture,
     )
+    extracted = _apply_stage2_conflict_skills_on_chart(extracted)
     uuid_map = _build_uuid_to_citation_map(condensed)
 
     # 1. Key Biomarker & Vital Sign Trajectories
@@ -1124,6 +1260,7 @@ def answer_wahs_question(
         target_tokens=target_tokens,
         sharing_posture=sharing_posture,
     )
+    extracted = _apply_stage2_conflict_skills_on_chart(extracted)
     uuid_map = _build_uuid_to_citation_map(condensed)
     q_text = (question or "").strip()
     q_lower = q_text.lower()
@@ -1299,17 +1436,26 @@ def answer_wahs_question(
     # Medication / prescription / statin / Plavix / Prinivil questions
     if re.search(r"\b(?:med|medication|prescription|drug|pill|statin|plavix|clopidogrel|lipitor|simvastatin|prinivil|lisinopril|ibuprofen|nsaid)\b", q_lower):
         active_meds = [it for it in extracted.items if it.section == "med_active"]
+        skip_kb = any(it.metadata.get("skip_stage2_skills") for it in extracted.items)
         med_lines: List[str] = []
-        for m in active_meds:
-            cites = _citations_for_uuids([m.resource_uuid], uuid_map, condensed)
-            c_ref = _add_cites(cites)
-            kb_med = resolve_medication_code(m.code, m.display) or {}
-            purpose = kb_med.get("plain_language_purpose", "")
-            flag = f" — **ALERT: {m.conflict_note}**" if m.conflict_note else ""
-            purpose_str = f" *(Purpose: {purpose})*" if purpose else ""
+        if skip_kb and re.search(r"\b(?:duplicate|same|conflict|overlap|double|reconcil|audit|statin|plavix|prinivil)\b", q_lower):
+            header_cites = _citations_for_uuids([extracted.items[0].resource_uuid], uuid_map, condensed)
+            c_ref = _add_cites(header_cites)
             med_lines.append(
-                f"- **{m.display}** (started `{m.clinical_date or 'active'}`, source: `{m.source_org or 'Primary Care'}`){purpose_str}{flag} {c_ref}"
+                f"- Surface medication ledger review {c_ref}: active prescriptions carry distinct surface display names; "
+                f"without RxNorm brand-to-generic or ATC therapeutic-class KB normalization, cross-clinic ingredient equivalence is not flagged."
             )
+        else:
+            for m in active_meds:
+                cites = _citations_for_uuids([m.resource_uuid], uuid_map, condensed)
+                c_ref = _add_cites(cites)
+                kb_med = ({} if skip_kb else resolve_medication_code(m.code, m.display)) or {}
+                purpose = kb_med.get("plain_language_purpose", "")
+                flag = f" — **ALERT: {m.conflict_note}**" if m.conflict_note else ""
+                purpose_str = f" *(Purpose: {purpose})*" if purpose else ""
+                med_lines.append(
+                    f"- **{m.display}** (started `{m.clinical_date or 'active'}`, source: `{m.source_org or 'Primary Care'}`){purpose_str}{flag} {c_ref}"
+                )
         if not med_lines:
             header_cites = _citations_for_uuids([extracted.items[0].resource_uuid], uuid_map, condensed)
             c_ref = _add_cites(header_cites)
@@ -1321,7 +1467,7 @@ def answer_wahs_question(
             nsaids = [
                 it
                 for it in extracted.items
-                if it.section in {"med_active", "med_stopped"} and "ibuprofen" in it.display.lower()
+                if it.section in {"med_active", "med_stopped", "med_historical"} and "ibuprofen" in it.display.lower()
                 and (use_lookup_tools or it.resource_uuid in uuid_map)
             ]
             if nsaids:
@@ -1348,8 +1494,37 @@ def answer_wahs_question(
     # Condition / problem list / CKD / kidney / diabetes / sinusitis / audit questions
     if re.search(r"\b(?:audit|condition|problem|diagnos|ckd|kidney|renal|egfr|creatinine|diabetes|prediabetes|a1c|sinusitis|conflict|contradict|discrepanc|quality|reconcil)\b", q_lower):
         cond_lines: List[str] = []
+        items_by_uuid = {it.resource_uuid: it for it in extracted.items}
         for f in dq["findings"]:
             c_ref = _add_cites(f["citations"])
+            if use_lookup_tools:
+                all_f_uuids: List[str] = []
+                for ru in f.get("resource_uuids") or []:
+                    if ru not in all_f_uuids:
+                        all_f_uuids.append(ru)
+                    r_it = items_by_uuid.get(ru)
+                    if r_it:
+                        for mu in r_it.member_uuids:
+                            if mu not in all_f_uuids:
+                                all_f_uuids.append(mu)
+                missing_u = [u for u in all_f_uuids if u not in uuid_map]
+                if missing_u:
+                    overflow_tool_calls.append(
+                        {"tool": "search_chart_entries", "query": f["title"], "recovered_count": len(missing_u)}
+                    )
+                    extra_refs = []
+                    for mu in missing_u:
+                        m_it = items_by_uuid.get(mu)
+                        extra_refs.append(
+                            _add_overflow_citation(
+                                mu,
+                                m_it.resource_type if m_it else "Condition",
+                                (m_it.clinical_date if m_it else "") or "",
+                                (m_it.text if m_it else f["title"]),
+                                m_it.member_uuids if m_it else (),
+                            )
+                        )
+                    c_ref = f"{c_ref} {' '.join(extra_refs)}".strip()
             cond_lines.append(
                 f"- **{f['title']}** ({f['domain']}): {f['description']} *Recommendation:* {f['recommendation']} {c_ref}"
             )
@@ -1397,15 +1572,32 @@ def answer_wahs_question(
     if re.search(r"\b(?:immuniz|vaccin|shot|hpv|zoster|shingles|flu|influenza|covid|acip|school)\b", q_lower):
         imm_items = [it for it in extracted.items if it.section == "immunization"]
         imm_lines: List[str] = []
-        for it in imm_items[-12:]:
+        recovered_imm = 0
+        for it in imm_items:
             cites = _citations_for_uuids([it.resource_uuid], uuid_map, condensed)
-            c_ref = _add_cites(cites)
+            if cites:
+                c_ref = _add_cites(cites)
+            elif use_lookup_tools:
+                recovered_imm += 1
+                c_ref = _add_overflow_citation(
+                    it.resource_uuid,
+                    it.resource_type,
+                    it.clinical_date or "",
+                    it.text,
+                    it.member_uuids,
+                )
+            else:
+                continue
             flag = f" — **[{it.conflict_note}]**" if it.conflict_note else ""
             imm_lines.append(
                 f"- `{it.clinical_date}`: **{it.display}** (source: `{it.source_org or 'Clinic'}`){flag} {c_ref}"
             )
+        if recovered_imm:
+            overflow_tool_calls.append(
+                {"tool": "search_chart_entries", "query": "immunization", "recovered_count": recovered_imm}
+            )
         sections.append(
-            f"### Immunization History & ACIP Schedule Audit ({len(imm_items)} doses on file)\n"
+            f"### Immunization History & ACIP Schedule Audit ({len(imm_lines)} doses in view)\n"
             + "\n".join(imm_lines)
         )
 
@@ -1518,14 +1710,33 @@ def answer_wahs_question(
     # Directed / Longitudinal Summary & Device questions
     if re.search(r"\b(?:summar|referral|overview|device|denture|dental|teeth|social\s+history)\b", q_lower):
         ds = patterns["directed_summary"]
-        all_cond_uuids = [
-            it.resource_uuid
+        all_cond_items = [
+            it
             for it in extracted.items
             if it.section in {"condition_active", "med_active", "device", "immunization"}
             and not (sharing_posture == "external_share" and it.sensitivity == "SDOH/PRIVACY-SENSITIVE")
         ]
+        all_cond_uuids = [it.resource_uuid for it in all_cond_items]
         ds_cites = _citations_for_uuids(all_cond_uuids, uuid_map, condensed)
         c_ref = _add_cites(ds_cites)
+        if use_lookup_tools:
+            extra_ds_refs: List[str] = []
+            for it in all_cond_items:
+                if it.resource_uuid not in uuid_map:
+                    extra_ds_refs.append(
+                        _add_overflow_citation(
+                            it.resource_uuid,
+                            it.resource_type,
+                            it.clinical_date or "",
+                            it.text,
+                            it.member_uuids,
+                        )
+                    )
+            if extra_ds_refs:
+                overflow_tool_calls.append(
+                    {"tool": "search_chart_entries", "query": "directed_summary_overflow", "recovered_count": len(extra_ds_refs)}
+                )
+                c_ref = f"{c_ref} {' '.join(extra_ds_refs[:6])}".strip()
         devices_list = [it.display for it in extracted.items if it.section == "device"]
         active_c_str = ", ".join(c["display"] for c in ds["active_conditions"]) or "None active"
         active_m_str = ", ".join(m["display"] for m in ds["active_medications"]) or "None active"

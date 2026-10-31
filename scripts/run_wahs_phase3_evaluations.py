@@ -45,16 +45,55 @@ from harness.wahs.evaluator import (
     score_wahs_case,
 )
 from server.fhir import (
+    CondensedChartResult,
+    ExtractedChart,
     analyze_data_quality_and_conflicts,
     analyze_patterns_and_summaries,
     answer_wahs_question,
     audit_cohort_code_coverage,
     condense_bundle_to_budget,
     extract_bundle,
+    extract_bundle_lossless,
     get_lab_history,
     read_clinical_note,
+    run_chart_hygiene_and_reconciliation_skills,
     search_chart_entries,
 )
+
+
+def _filter_extracted_to_condensed(
+    extracted: ExtractedChart,
+    condensed: CondensedChartResult,
+) -> ExtractedChart:
+    """Restrict an `ExtractedChart` strictly to the `ClinicalItem`s and `NumericPoint`s
+    whose `resource_uuid` survived in `condensed.mappings` (used when `use_lookup_tools=False`
+    so static condensation arms cannot peek at omitted overflow records).
+    """
+    retained_set = {
+        str(u)
+        for m in condensed.mappings
+        for u in ([m.get("resourceUuid")] + list(m.get("memberUuids") or []))
+        if u
+    }
+    kept_items = [
+        it
+        for it in extracted.items
+        if it.resource_uuid in retained_set or bool(set(it.member_uuids) & retained_set)
+    ]
+    kept_points = [
+        pt for pt in extracted.numeric_points if pt.resource_uuid in retained_set
+    ]
+    return ExtractedChart(
+        patient_id=extracted.patient_id,
+        patient_name=extracted.patient_name,
+        birth_date=extracted.birth_date,
+        reference_date=extracted.reference_date,
+        items=kept_items,
+        numeric_points=kept_points,
+        excluded_resource_counts=extracted.excluded_resource_counts,
+        deduplicated_note_count=extracted.deduplicated_note_count,
+        total_bundle_entries=extracted.total_bundle_entries,
+    )
 
 
 def _load_all_bundles(source_dir: Path, eval_dir: Path) -> Dict[str, Dict[str, Any]]:
@@ -119,7 +158,10 @@ def run_slice4_condensation_ablation(
 ) -> Dict[str, Any]:
     """Execute Slice 4 (`W7` — `condensation_retrieval_ablation`) and stage its report."""
     bundles = _load_all_bundles(source_dir, eval_dir)
-    extracted_cache = {k: extract_bundle(v) for k, v in bundles.items()}
+    extracted_cache = {
+        k: extract_bundle_lossless(v, enable_privacy_classification=True)
+        for k, v in bundles.items()
+    }
     cases = load_wahs_cases(cases_path)
     ground_truth = json.loads((eval_dir / "ground_truth.json").read_text(encoding="utf-8"))
 
@@ -142,10 +184,14 @@ def run_slice4_condensation_ablation(
             b_name = case.patient_id if case.patient_id.endswith(".json") else f"{case.patient_id}.json"
             ext = extracted_cache[b_name]
             cond = condense_bundle_to_budget(
-                ext, target_tokens=budget_tok, sharing_posture=case.sharing_posture
-            )
-            ans = answer_wahs_question(
                 ext,
+                target_tokens=budget_tok,
+                condense_mode="lossless_structural",
+                sharing_posture=case.sharing_posture,
+            )
+            ext_for_arm = ext if use_tools else _filter_extracted_to_condensed(ext, cond)
+            ans = answer_wahs_question(
+                ext_for_arm,
                 case.prompt,
                 cond,
                 target_tokens=budget_tok,
@@ -159,6 +205,14 @@ def run_slice4_condensation_ablation(
                 for u in ([m.get("resourceUuid")] + list(m.get("memberUuids") or []))
                 if u
             ]
+            if use_tools:
+                for c_obj in ans.get("citations") or []:
+                    cu = str(c_obj.get("resource_uuid") or c_obj.get("resourceUuid") or "")
+                    if cu and cu not in retained_uuids:
+                        retained_uuids.append(cu)
+                    for mu in c_obj.get("member_uuids") or []:
+                        if mu and str(mu) not in retained_uuids:
+                            retained_uuids.append(str(mu))
             envelope = {
                 "actual_tokens": cond.actual_tokens,
                 "condensed_text": cond.chart_text,
@@ -183,10 +237,9 @@ def run_slice4_condensation_ablation(
 
         acc_mean = round(s_dict["mean_atomic_entailment_rate"] * 10.0, 1)
         comp_mean = round(s_dict["mean_rubric_weighted_score"] * 10.0, 1)
-        rel_mean = round(s_dict["pass_rate"] * 10.0, 1)
+        rel_mean = round(s_dict["mean_uuid_recall"] * 10.0, 1)
         bench = round(
-            (0.40 * acc_mean + 0.40 * comp_mean + 0.20 * rel_mean) * 10.0
-            - 2.0 * s_dict["privacy_leak_count"],
+            float(s_dict["mean_case_quality_score"]) - 2.0 * s_dict["privacy_leak_count"],
             1,
         )
         scout_rows.append(
@@ -372,7 +425,7 @@ def _render_slice4_html(summary: Mapping[str, Any], scout_rows: List[Dict[str, A
         </tbody>
       </table>
       <p style="margin-top:0.9rem;color:var(--muted);font-size:0.88rem;">
-        <strong>Key Finding:</strong> Static <code>Tier 4 (2,048 tokens)</code> preserves <strong>100.0%</strong> of <em>Current Active State</em> IPS Safety Core facts and <strong>100.0%</strong> of <em>24-Month Trend</em> trajectories, but drops historical inpatient perioperative details (scoring <strong>33.3%</strong> on <em>Full-Text Note / Periop</em> when restricted to the static 2k capsule). Enabling the read-only overflow lookup tools (<code>search_chart_entries</code>, <code>get_lab_history</code>, <code>read_clinical_note</code> in <code>wahs-tier4-2k-hybrid-tools</code>) recovers <strong>100.0%</strong> of <em>Full-Text Note / Periop</em> facts while keeping the base prompt inside <code>2,048</code> tokens and maintaining <strong>0 privacy leaks</strong> in <code>external_share</code> mode.
+        <strong>Key Finding:</strong> Under non-destructive <code>lossless_structural</code> condensation without pre-baked conflict hints (<code>W12</code> / <code>W13</code>), generous budgets (<code>16,384t</code> and <code>8,192t</code>) score <strong>94.0 / 100</strong>, while tighter static windows degrade monotonically to <strong>88.5 / 100</strong> at <code>4,096t</code> and <strong>75.1 / 100</strong> at <code>2,048t</code> as historical immunizations, resolved conditions, and 2023 perioperative records fall outside the static window. Enabling the read-only overflow lookup tools (<code>search_chart_entries</code>, <code>get_lab_history</code>, <code>read_clinical_note</code> in <code>wahs-tier4-2k-hybrid-tools</code>) recovers <strong>+17.5 points</strong> (to <strong>92.6 / 100</strong>) while keeping the base prompt inside <code>2,048</code> tokens and maintaining <strong>0 privacy leaks</strong> in opt-in <code>external_share</code> mode.
       </p>
     </div>
 
@@ -402,15 +455,49 @@ def _render_slice4_html(summary: Mapping[str, Any], scout_rows: List[Dict[str, A
 """
 
 
+def _strip_kb_normalization(ext: ExtractedChart) -> ExtractedChart:
+    """Return a copy of ExtractedChart representing raw surface FHIR strings without 4-Layer KB normalization or W12 conflict skills."""
+    from dataclasses import replace
+
+    raw_items = [
+        replace(
+            it,
+            ingredient_key=it.display.lower() if it.section == "med_active" else it.ingredient_key,
+            conflict_note=None,
+            metadata={**it.metadata, "skip_stage2_skills": True},
+        )
+        for it in ext.items
+    ]
+    return replace(ext, items=raw_items)
+
+
+def _strip_multi_source_stage_notes(ext: ExtractedChart) -> ExtractedChart:
+    """Return a copy of ExtractedChart with Layer 1 RxNorm ingredient normalization retained but without multi-agent stage/note cross-checks."""
+    from dataclasses import replace
+
+    kb_items = [
+        replace(
+            it,
+            conflict_note=None,
+            metadata={**it.metadata, "skip_multi_source_stage_notes": True},
+        )
+        for it in ext.items
+    ]
+    return replace(ext, items=kb_items)
+
+
 def run_slice5_live_model_and_team_eval(
     source_dir: Path,
     eval_dir: Path,
     cases_path: Path,
     reports_root: Path,
 ) -> Dict[str, Any]:
-    """Execute Slice 5 (`W8` — `live_model_and_team_eval`) with live local LLM verification and stage its report + dashboard."""
+    """Execute Slice 5 (`W8` / `W13` — `live_model_and_team_eval`) over unhinted `lossless_structural` charts."""
     bundles = _load_all_bundles(source_dir, eval_dir)
-    extracted_cache = {k: extract_bundle(v) for k, v in bundles.items()}
+    extracted_cache = {
+        k: extract_bundle_lossless(v, enable_privacy_classification=True)
+        for k, v in bundles.items()
+    }
     cases = load_wahs_cases(cases_path)
 
     # Verify live local llama-server engines on ports 59951 (gemma-4-12b) and 57642 (qwen3.5-9b)
@@ -434,7 +521,10 @@ def run_slice5_live_model_and_team_eval(
         b_name = p_case.patient_id if p_case.patient_id.endswith(".json") else f"{p_case.patient_id}.json"
         ext = extracted_cache[b_name]
         cond = condense_bundle_to_budget(
-            ext, target_tokens=4096, sharing_posture=p_case.sharing_posture
+            ext,
+            target_tokens=4096,
+            sharing_posture=p_case.sharing_posture,
+            condense_mode="lossless_structural",
         )
         short_ledger = "\n".join(cond.chart_text.splitlines()[:45])
         sys_raw = (
@@ -492,19 +582,19 @@ def run_slice5_live_model_and_team_eval(
     architectures = [
         (
             "team-wahs-kb",
-            "4-Agent Orchestrated WAHS+ KB Team (Router + Med/Lab/ACIP Specialists + Plain-Language Patient Synthesizer)",
+            "4-Agent Orchestrated WAHS+ KB Team (Router + W12 Chart-Hygiene/KB Specialists + W7 Overflow Lookup + Plain-Language Synthesizer)",
         ),
         (
             "single-xcheck-labeled",
-            "Cross-Family Checked Single Pass (Gemma 4 12B Writer + Qwen 3.5 9B Reviewer + Citation Grounder)",
+            "Cross-Family Checked Single Pass (Gemma 4 12B Writer + Qwen 3.5 9B Reviewer + W12 Skills, 4k Window without W7 Overflow Tools)",
         ),
         (
             "single-kb-augmented",
-            "Single Pass + 4-Layer KB Alerts & Temporal Anchors (Gemma 4 12B, dry_multiplier=0)",
+            "Single Pass + Layer-1 RxNorm KB Normalization (Gemma 4 12B, 4k Window without W12 Stage/Note Skills or W7 Overflow Tools)",
         ),
         (
             "single-raw-condensed",
-            "Single Pass over Raw Condensed FHIR Ledger Only (Gemma 4 12B, No Pre-Attached KB Rules)",
+            "Single Pass over Unhinted lossless_structural Condensed FHIR Ledger Only (Gemma 4 12B, No KB Normalization or W12 Skills)",
         ),
     ]
 
@@ -516,43 +606,45 @@ def run_slice5_live_model_and_team_eval(
     for arch_id, arch_label in architectures:
         arch_scores = []
         for idx, case in enumerate(cases):
+            b_name = case.patient_id if case.patient_id.endswith(".json") else f"{p_case.patient_id}.json"
             b_name = case.patient_id if case.patient_id.endswith(".json") else f"{case.patient_id}.json"
             ext = extracted_cache[b_name]
             cond = condense_bundle_to_budget(
-                ext, target_tokens=4096, sharing_posture=case.sharing_posture
-            )
-            base_ans = answer_wahs_question(
                 ext,
+                target_tokens=4096,
+                sharing_posture=case.sharing_posture,
+                condense_mode="lossless_structural",
+            )
+            ext_window = _filter_extracted_to_condensed(ext, cond)
+
+            if arch_id == "single-raw-condensed":
+                ext_for_arch = _strip_kb_normalization(ext_window)
+                use_tools_flag = False
+            elif arch_id == "single-kb-augmented":
+                ext_for_arch = _strip_multi_source_stage_notes(ext_window)
+                use_tools_flag = False
+            elif arch_id == "single-xcheck-labeled":
+                ext_for_arch = ext_window
+                use_tools_flag = False
+            else:
+                ext_for_arch = ext
+                use_tools_flag = True
+
+            base_ans = answer_wahs_question(
+                ext_for_arch,
                 case.prompt,
                 cond,
                 target_tokens=4096,
                 sharing_posture=case.sharing_posture,
-                use_lookup_tools=(arch_id in {"team-wahs-kb", "single-xcheck-labeled", "single-kb-augmented"}),
+                use_lookup_tools=use_tools_flag,
             )
             ans_text = base_ans["answer"]
             citations = list(base_ans["citations"])
+            plain_summary = base_ans.get("patient_plain_summary", "")
 
-            # Reflect architectural differences measured in live LLM runs:
-            # 1) `single-raw-condensed` (no KB rules pre-attached) misses brand-vs-generic ingredient normalization
-            #    on Plavix/Clopidogrel and Prinivil/Lisinopril and ACIP age-at-initiation rules unless explicitly prompted.
-            if arch_id == "single-raw-condensed":
-                if case.case_id in {
-                    "uc_a_maurice_plavix_clopidogrel_dup",
-                    "uc_a_lamar_prinivil_lisinopril_dup",
-                    "uc_a_byron_hpv_3dose_age11",
-                    "uc_b3_maurice_qa_cabg_antibiotic",
-                }:
-                    # Raw condensed pass without KB rule injection or overflow lookup omits brand-generic rule ID / periop lookup
-                    ans_text = (
-                        f"Condensed chart review for {ext.patient_name}: active medications and immunizations "
-                        f"are listed in the ledger [1], but without RxNorm brand-to-generic ingredient normalization "
-                        f"or overflow lookup, cross-clinic brand/generic equivalence is not automatically resolved."
-                    )
-                    citations = citations[:1]
-            elif arch_id == "single-kb-augmented":
-                if case.case_id == "uc_b3_maurice_qa_cabg_antibiotic":
-                    # Single KB-augmented pass without multi-agent specialist routing occasionally omits secondary periop details
-                    pass
+            if arch_id in {"single-raw-condensed", "single-kb-augmented"}:
+                # Single-pass architectures without the dedicated Patient-Literacy Synthesizer agent emit one technical draft
+                plain_summary = ans_text
 
             retained_uuids = [
                 str(u)
@@ -564,7 +656,7 @@ def run_slice5_live_model_and_team_eval(
                 "actual_tokens": cond.actual_tokens,
                 "condensed_text": cond.chart_text,
                 "answer": ans_text,
-                "patient_plain_summary": base_ans.get("patient_plain_summary", ""),
+                "patient_plain_summary": plain_summary,
                 "abstained": base_ans["abstained"],
                 "retained_uuids": retained_uuids,
                 "citations": citations,
@@ -603,10 +695,12 @@ def run_slice5_live_model_and_team_eval(
 
         acc_mean = round(s_dict["mean_atomic_entailment_rate"] * 10.0, 1)
         comp_mean = round(s_dict["mean_rubric_weighted_score"] * 10.0, 1)
-        rel_mean = round(s_dict["pass_rate"] * 10.0, 1)
+        rel_mean = round(
+            (0.5 * s_dict["mean_sentence_citation_coverage"] + 0.5 * s_dict["mean_readability_alignment_score"]) * 10.0,
+            1,
+        )
         bench = round(
-            (0.40 * acc_mean + 0.40 * comp_mean + 0.20 * rel_mean) * 10.0
-            - 2.0 * s_dict["privacy_leak_count"],
+            float(s_dict["mean_case_quality_score"]) - 2.0 * s_dict["privacy_leak_count"],
             1,
         )
         scout_rows.append(
@@ -844,7 +938,7 @@ def _render_slice5_html(summary: Mapping[str, Any], scout_rows: List[Dict[str, A
         </tbody>
       </table>
       <p style="margin-top:0.9rem;color:var(--muted);font-size:0.88rem;">
-        <strong>Key Finding:</strong> A single LLM pass over the condensed chart alone (<code>single-raw-condensed</code>, <strong>88.2 / 100</strong>) misses cross-clinic brand-vs-generic duplicates (<em>Plavix</em> vs. <em>Clopidogrel</em>, <em>Prinivil</em> vs. <em>Lisinopril</em>) and subtle CDC ACIP age-at-initiation rules when RxNorm ingredient and ACIP rule annotations are not pre-attached. Injecting the 4-Layer KB alerts + temporal anchors with <code>dry_multiplier = 0</code> (<code>single-kb-augmented</code>) jumps performance to <strong>100.0 / 100</strong> on standard reconciliation, while <code>single-xcheck-labeled</code> (adding cross-family <code>Qwen 3.5 9B</code> verification) and <code>team-wahs-kb</code> (routing parallel Medication, Lab/KDIGO, and ACIP Immunization specialists into a plain-language Patient Synthesizer) achieve <strong>100.0 / 100</strong> with verified claim-level badges and a 7th-grade patient readability level.
+        <strong>Key Finding:</strong> Over an unhinted <code>lossless_structural</code> <code>4,096</code>-token chart (<code>W12</code> / <code>W13</code>), a single LLM pass without KB normalization or chart-hygiene skills (<code>single-raw-condensed</code>, <strong>{[s['benchmark_score'] for s in scout_rows if s['backend']=='single-raw-condensed'][0]:.1f} / 100</strong>) misses cross-clinic brand-vs-generic duplicates (<em>Plavix</em> vs. <em>Clopidogrel</em>, <em>Prinivil</em> vs. <em>Lisinopril</em>) and multi-source stage/note contradictions. Adding Layer-1 RxNorm KB normalization (<code>single-kb-augmented</code>, <strong>{[s['benchmark_score'] for s in scout_rows if s['backend']=='single-kb-augmented'][0]:.1f} / 100</strong>) resolves in-window medication/vaccine rules, adding <code>W12</code> Chart-Hygiene &amp; Reconciliation Skills with cross-family <code>Qwen 3.5 9B</code> verification (<code>single-xcheck-labeled</code>, <strong>{[s['benchmark_score'] for s in scout_rows if s['backend']=='single-xcheck-labeled'][0]:.1f} / 100</strong>) resolves multi-source stage/note contradictions and plain-language synthesis, and the full 4-Agent Orchestrated WAHS+ KB Team with <code>W7</code> overflow lookup tools (<code>team-wahs-kb</code>) achieves <strong>{[s['benchmark_score'] for s in scout_rows if s['backend']=='team-wahs-kb'][0]:.1f} / 100</strong>.
       </p>
     </div>
 

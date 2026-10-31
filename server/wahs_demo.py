@@ -29,6 +29,7 @@ from .fhir import (
     answer_wahs_question,
     condense_bundle_to_budget,
     extract_bundle,
+    run_chart_hygiene_and_reconciliation_skills,
 )
 
 router = APIRouter(prefix="/wahs", tags=["wahs"])
@@ -529,6 +530,11 @@ class AnalyzeRequest(BaseModel):
         pattern="^(patient_self|external_share)$",
         description="Privacy posture ('patient_self' or 'external_share').",
     )
+    condense_mode: str = Field(
+        default="tiered",
+        pattern="^(tiered|lossless_structural)$",
+        description="Condensation mode ('tiered' 5-Tier ladder or 'lossless_structural' W12 non-destructive mode).",
+    )
 
 
 class ChatRequest(AnalyzeRequest):
@@ -579,8 +585,9 @@ def run_wahs_analysis(req: AnalyzeRequest) -> Dict[str, Any]:
     bundle = _resolve_bundle(req)
     extracted = extract_bundle(bundle)
     condensed = condense_bundle_to_budget(
-        extracted,
+        bundle if req.condense_mode == "lossless_structural" else extracted,
         target_tokens=req.target_tokens,
+        condense_mode=req.condense_mode,
         sharing_posture=req.sharing_posture,
     )
     duplicates_and_bloat = analyze_duplicates_and_bloat(
@@ -601,6 +608,10 @@ def run_wahs_analysis(req: AnalyzeRequest) -> Dict[str, Any]:
         target_tokens=req.target_tokens,
         sharing_posture=req.sharing_posture,
     )
+    skill_findings = run_chart_hygiene_and_reconciliation_skills(
+        bundle,
+        mappings=condensed.mappings,
+    )
     return {
         "patient_name": extracted.patient_name,
         "birth_date": extracted.birth_date,
@@ -608,6 +619,7 @@ def run_wahs_analysis(req: AnalyzeRequest) -> Dict[str, Any]:
         "condensation": {
             "tier": condensed.tier,
             "tier_name": condensed.tier_name,
+            "condense_mode": req.condense_mode,
             "target_tokens": condensed.target_tokens,
             "actual_tokens": condensed.actual_tokens,
             "sharing_posture": req.sharing_posture,
@@ -621,6 +633,7 @@ def run_wahs_analysis(req: AnalyzeRequest) -> Dict[str, Any]:
             "duplicates_and_bloat": duplicates_and_bloat,
             "data_quality_and_conflicts": data_quality,
             "patterns_and_summaries": patterns,
+            "chart_hygiene_and_reconciliation_skills": skill_findings,
         },
     }
 

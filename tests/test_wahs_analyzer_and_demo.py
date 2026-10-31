@@ -11,8 +11,10 @@ from server.fhir import (
     answer_wahs_question,
     condense_bundle_to_budget,
     extract_bundle,
+    extract_bundle_lossless,
     get_lab_history,
     read_clinical_note,
+    run_chart_hygiene_and_reconciliation_skills,
     search_chart_entries,
 )
 from server.main import app
@@ -222,5 +224,76 @@ def test_wahs_overflow_lookup_tools_recover_deep_history_and_enforce_privacy() -
     assert "cefazolin" in ans_hybrid["answer"].lower()
     assert len(ans_hybrid["overflow_tool_calls"]) >= 1
     assert any(c["resource_uuid"] == "medadm-cefazolin" for c in ans_hybrid["citations"])
+
+
+def test_lossless_structural_condensation_and_chart_hygiene_skills() -> None:
+    bundle = _make_synthetic_wahs_bundle()
+    # Add two intraday lab observations on the same date with different timestamps & values
+    bundle["entry"].extend(
+        [
+            {
+                "resource": {
+                    "resourceType": "Observation",
+                    "id": "obs-egfr-am",
+                    "status": "final",
+                    "category": [{"coding": [{"code": "laboratory"}]}],
+                    "code": {"coding": [{"code": "33914-3", "display": "Glomerular filtration rate"}]},
+                    "effectiveDateTime": "2025-11-12T08:15:00Z",
+                    "valueQuantity": {"value": 52.0, "unit": "mL/min"},
+                }
+            },
+            {
+                "resource": {
+                    "resourceType": "Observation",
+                    "id": "obs-egfr-pm",
+                    "status": "final",
+                    "category": [{"coding": [{"code": "laboratory"}]}],
+                    "code": {"coding": [{"code": "33914-3", "display": "Glomerular filtration rate"}]},
+                    "effectiveDateTime": "2025-11-12T16:45:00Z",
+                    "valueQuantity": {"value": 39.0, "unit": "mL/min"},
+                }
+            },
+        ]
+    )
+
+    extracted_lossless = extract_bundle_lossless(bundle)
+    # 1. Verify no pre-baked conflict annotations or privacy sensitivity tags exist in lossless mode
+    for item in extracted_lossless.items:
+        assert item.conflict_note is None
+        assert item.sensitivity is None
+        assert "[conflict_note:" not in item.text
+        assert "[sensitivity:" not in item.text
+
+    # 2. Verify intraday timestamps are preserved on Observation items and numeric points
+    intraday_items = [
+        it for it in extracted_lossless.items if it.resource_uuid in {"obs-egfr-am", "obs-egfr-pm"}
+    ]
+    assert len(intraday_items) == 2
+    assert any("2025-11-12T08:15" in it.text for it in intraday_items)
+    assert any("2025-11-12T16:45" in it.text for it in intraday_items)
+
+    # 3. Verify condense_mode="lossless_structural" produces unhinted chart text and preserves intraday range
+    condensed_structural = condense_bundle_to_budget(
+        bundle,
+        target_tokens=8192,
+        condense_mode="lossless_structural",
+        sharing_posture="patient_self",
+    )
+    assert condensed_structural.completeness_manifest["condense_mode"] == "lossless_structural"
+    assert "[conflict_note:" not in condensed_structural.chart_text
+    assert "[sensitivity:" not in condensed_structural.chart_text
+    assert "39" in condensed_structural.chart_text and "52" in condensed_structural.chart_text
+
+    # 4. Verify explicit chart-hygiene & reconciliation skills detect duplicates and conflicts on the lossless chart
+    skill_report = run_chart_hygiene_and_reconciliation_skills(
+        extracted_lossless,
+        mappings=condensed_structural.mappings,
+    )
+    assert skill_report["total_findings"] >= 3
+    categories = set(skill_report["counts_by_category"].keys())
+    assert "DuplicateCandidate" in categories or "ScheduleAnomaly" in categories
+    assert "ReconciliationFinding" in categories
+    assert "Source" in skill_report["formatted_findings_block"]
+
 
 

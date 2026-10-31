@@ -20,7 +20,13 @@ from datetime import date, timedelta
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 from ..chart_serializer import render_chart
-from .extractors import ClinicalItem, ExtractedChart, NumericPoint, extract_bundle
+from .extractors import (
+    ClinicalItem,
+    ExtractedChart,
+    NumericPoint,
+    extract_bundle,
+    extract_bundle_lossless,
+)
 
 # Priority analytes surfaced first in Tier 3 / Tier 4 LabTrajectory rollups.
 _PRIORITY_ANALYTE_PATTERNS = (
@@ -459,7 +465,10 @@ def _fold_procedures(procs: Sequence[ClinicalItem], *, section: str) -> List[Cli
 
 
 def _group_vitals_by_date(vitals: Sequence[ClinicalItem]) -> List[ClinicalItem]:
-    """Group standalone Vital Sign observations on the same date into a single Vital Signs Panel line."""
+    """Group standalone Vital Sign observations on the same date into a single Vital Signs Panel line.
+
+    Preserves distinct intraday readings for the same vital sign when values or timestamps differ.
+    """
     by_date: Dict[str, List[ClinicalItem]] = {}
     for v in vitals:
         by_date.setdefault(v.date or "unknown", []).append(v)
@@ -470,15 +479,19 @@ def _group_vitals_by_date(vitals: Sequence[ClinicalItem]) -> List[ClinicalItem]:
             grouped.append(items_on_date[0])
             continue
         parts: List[str] = []
-        seen_disp: Set[str] = set()
+        seen_disp_val: Set[Tuple[str, str]] = set()
         for it in items_on_date:
             val = str(it.metadata.get("value") or "").strip()
+            ts = str(it.metadata.get("timestamp") or "").strip()
             label = it.display
-            if label in seen_disp:
+            if (label, val) in seen_disp_val:
                 continue
-            seen_disp.add(label)
+            seen_disp_val.add((label, val))
             if val:
-                parts.append(f"{label}: {val}")
+                if ts and "T" in ts:
+                    parts.append(f"{label}: {val} @{ts[11:16]}")
+                else:
+                    parts.append(f"{label}: {val}")
         lead = items_on_date[0]
         grouped.append(
             ClinicalItem(
@@ -556,15 +569,18 @@ def _build_lab_trajectories(
     for concept in sorted_concepts:
         pts = sorted(by_concept[concept], key=lambda p: p.date)
         dedup_pts: List[NumericPoint] = []
-        seen_dates: Set[str] = set()
+        seen_date_vals: Set[Tuple[str, float]] = set()
         for p in pts:
-            if p.date not in seen_dates:
-                seen_dates.add(p.date)
+            key = (p.date, round(float(p.value), 4))
+            if key not in seen_date_vals:
+                seen_date_vals.add(key)
                 dedup_pts.append(p)
         if not dedup_pts:
             continue
         latest = dedup_pts[-1]
         first = dedup_pts[0]
+        latest_day = (latest.date or "")[:10]
+        first_day = (first.date or "")[:10]
         vals = [p.value for p in dedup_pts]
         v_min, v_max = min(vals), max(vals)
         unit = latest.unit
@@ -574,7 +590,7 @@ def _build_lab_trajectories(
 
         unit_sp = f" {unit}" if unit else ""
         if len(dedup_pts) == 1:
-            text = f"Finding — {concept}: {fmt(latest.value)}{unit_sp} (recorded {latest.date}, n=1)"
+            text = f"Finding — {concept}: {fmt(latest.value)}{unit_sp} (recorded {latest_day}, n=1)"
         else:
             if latest.value > first.value:
                 direction = "up"
@@ -584,9 +600,9 @@ def _build_lab_trajectories(
                 direction = "flat"
             text = (
                 f"Finding — {concept}: {fmt(latest.value)}{unit_sp} "
-                f"(initial {fmt(first.value)} on {first.date} -> latest {fmt(latest.value)} on {latest.date}; "
+                f"(initial {fmt(first.value)} on {first_day} -> latest {fmt(latest.value)} on {latest_day}; "
                 f"range {fmt(v_min)} to {fmt(v_max)}{unit_sp} over n={len(dedup_pts)} measurements, "
-                f"first recorded {first.date} through {latest.date}, trend: {direction})"
+                f"first recorded {first_day} through {latest_day}, trend: {direction})"
             )
         member_uuids = tuple(dict.fromkeys(p.resource_uuid for p in pts if p.resource_uuid))
         p_group, p_idx, _ = analyte_priority(concept)
@@ -594,8 +610,8 @@ def _build_lab_trajectories(
             ClinicalItem(
                 resource_type="Observation",
                 resource_uuid=latest.resource_uuid,
-                date=latest.date,
-                clinical_date=latest.date,
+                date=latest_day,
+                clinical_date=latest_day,
                 date_kind="clinical_event",
                 section="lab_trajectory",
                 code=latest.code,
@@ -1380,31 +1396,308 @@ def _pack_items_to_token_budget(
     return render_candidate(mandatory_items + accepted_optional)
 
 
+def _strip_prebaked_tags(item: ClinicalItem) -> ClinicalItem:
+    """Remove pre-baked `[conflict_note: ...]` / `[ingredient_group: ...]` / `[sensitivity: ...]`
+    annotations from `ClinicalItem.text` and reset `conflict_note=None` for `lossless_structural` mode.
+    """
+    cleaned_text = re.sub(
+        r"\s*\[(?:conflict_note:|ingredient_group:|acip_schedule_note:|duplicate_immunization_note:|note_medication_contradiction:|sensitivity:)[^\]]*\]",
+        "",
+        item.text or "",
+    )
+    is_core_mandatory = item.section in {
+        "patient",
+        "allergy",
+        "condition_active",
+        "med_active",
+    } or (item.section == "device" and item.status == "active")
+    return ClinicalItem(
+        resource_type=item.resource_type,
+        resource_uuid=item.resource_uuid,
+        date=item.date,
+        clinical_date=item.clinical_date,
+        date_kind=item.date_kind,
+        section=item.section,
+        code=item.code,
+        display=item.display,
+        text=cleaned_text,
+        mandatory=is_core_mandatory,
+        status=item.status,
+        end_date=item.end_date,
+        source_org=item.source_org,
+        sensitivity=None,
+        conflict_note=None,
+        ingredient_key=item.ingredient_key,
+        is_routine=item.is_routine,
+        member_uuids=item.member_uuids if item.section == "clinical_note" else (),
+        metadata=item.metadata,
+    )
+
+
+def _condense_lossless_structural(
+    extracted: ExtractedChart,
+    *,
+    target_tokens: int,
+    question: str,
+    sharing_posture: str,
+    token_counter: Callable[[str], int],
+) -> CondensedChartResult:
+    """Non-destructive structural condensation (`W12`):
+    - Strips FHIR JSON boilerplate without mutating clinical content or pre-annotating `[conflict_note]` tags.
+    - Preserves active conditions, active medications, allergies, and active patient devices verbatim
+      (1 line per FHIR resource; no folding by ingredient or clinical display).
+    - Orders optional records (lab trajectories, recent clinical notes, immunizations, resolved conditions,
+      historical medications, procedures, encounters) chronologically and packs them up to `target_tokens`
+      while recording exact overflow counts per section in `[Completeness Manifest]`.
+    """
+    from .normalizers import classify_sensitivity
+
+    redacted: List[Dict[str, Any]] = []
+    clean_items: List[ClinicalItem] = []
+    for raw_it in extracted.items:
+        eff_sens = raw_it.sensitivity or (
+            classify_sensitivity(raw_it.code, f"{raw_it.display} {raw_it.text}")
+            if sharing_posture == "external_share"
+            else None
+        )
+        if sharing_posture == "external_share" and eff_sens == "SDOH/PRIVACY-SENSITIVE":
+            redacted.append(
+                {
+                    "resourceType": raw_it.resource_type,
+                    "resourceUuid": raw_it.resource_uuid,
+                    "date": raw_it.date,
+                    "display": raw_it.display,
+                    "sensitivity": eff_sens,
+                }
+            )
+            continue
+        clean_items.append(_strip_prebaked_tags(raw_it))
+
+    trajectories = _build_lab_trajectories(extracted.numeric_points, max_analytes=24)
+
+    mandatory_items = [it for it in clean_items if it.mandatory]
+    optional_raw = [it for it in clean_items if not it.mandatory] + trajectories
+
+    q_terms = {
+        tok.lower()
+        for tok in re.findall(r"[A-Za-z0-9]+", question or "")
+        if len(tok) >= 3
+    }
+    section_rank = {
+        "lab_trajectory": 1,
+        "immunization": 2,
+        "condition_resolved": 3,
+        "encounter_acuity": 4,
+        "procedure_major": 5,
+        "clinical_note": 6,
+        "med_historical": 7,
+        "vital_sign": 8,
+        "careplan_active": 9,
+        "lab_panel": 10,
+        "lab_observation": 11,
+        "social_history": 12,
+        "imaging": 13,
+        "survey_panel": 14,
+        "procedure_routine": 15,
+        "encounter_routine": 16,
+    }
+    scale = 1.6 if target_tokens >= 12000 else (1.0 if target_tokens >= 6000 else (0.45 if target_tokens >= 3000 else 0.20))
+    primary_window_caps = {
+        "lab_trajectory": max(6, int(24 * scale)),
+        "immunization": max(3, int(24 * scale)),
+        "condition_resolved": max(3, int(25 * scale)),
+        "encounter_acuity": max(2, int(10 * scale)),
+        "procedure_major": max(3, int(18 * scale)),
+        "clinical_note": max(2, int(8 * scale)),
+        "med_historical": max(4, int(35 * scale)),
+        "vital_sign": max(4, int(12 * scale)),
+        "lab_panel": max(2, int(10 * scale)),
+    }
+    by_sec_ordered: Dict[str, List[ClinicalItem]] = {}
+    for it in optional_raw:
+        by_sec_ordered.setdefault(it.section, []).append(it)
+    within_sec_rank: Dict[int, int] = {}
+    for sec_name, sec_items in by_sec_ordered.items():
+        if sec_name == "med_historical":
+            sec_items.sort(
+                key=lambda x: (
+                    1 if x.metadata.get("setting") == "inpatient/administered" else 0,
+                    _date_sort_key(x.date),
+                ),
+                reverse=True,
+            )
+        elif sec_name in {"procedure_major", "encounter_acuity"}:
+            sec_items.sort(
+                key=lambda x: (
+                    1
+                    if any(
+                        w in x.display.lower()
+                        for w in ("bypass", "cabg", "graft", "stent", "valve", "intensive care", "icu", "surgery")
+                    )
+                    else 0,
+                    _date_sort_key(x.date),
+                ),
+                reverse=True,
+            )
+        else:
+            sec_items.sort(key=lambda x: _date_sort_key(x.date), reverse=True)
+        for idx_in_sec, x in enumerate(sec_items):
+            within_sec_rank[id(x)] = idx_in_sec
+
+    ranked_optional = sorted(
+        optional_raw,
+        key=lambda it: (
+            -sum(1 for t in q_terms if t in f"{it.display} {it.text}".lower()),
+            0 if within_sec_rank.get(id(it), 999) < primary_window_caps.get(it.section, 4) else 1,
+            section_rank.get(it.section, 20),
+            within_sec_rank.get(id(it), 999),
+            -_int_date(it.date),
+        ),
+    )
+
+    def render_structural(
+        cand_body: Sequence[ClinicalItem],
+        omitted_by_sec: Dict[str, int],
+    ) -> Tuple[List[ClinicalItem], Dict[str, Any], str, List[Dict[str, Any]], int]:
+        tier_num = 0 if not omitted_by_sec else (1 if target_tokens >= 8192 else (2 if target_tokens >= 4096 else 3))
+        tier_label = (
+            "Lossless Structural Ledger"
+            if not omitted_by_sec
+            else f"Lossless Structural Window ({target_tokens}t budget)"
+        )
+        manifest_item, manifest_dict = _build_completeness_manifest(
+            extracted, tier_num, tier_label, cand_body, len(redacted)
+        )
+        if omitted_by_sec:
+            omitted_str = ", ".join(f"{k}={v}" for k, v in sorted(omitted_by_sec.items()))
+            manifest_item = ClinicalItem(
+                resource_type=manifest_item.resource_type,
+                resource_uuid=manifest_item.resource_uuid,
+                date=manifest_item.date,
+                clinical_date=manifest_item.clinical_date,
+                date_kind=manifest_item.date_kind,
+                section="manifest",
+                code=manifest_item.code,
+                display=manifest_item.display,
+                text=f"{manifest_item.text} | budget_overflow_omitted: {omitted_str}",
+                mandatory=True,
+                status="current",
+            )
+            manifest_dict["omitted_section_counts"] = dict(omitted_by_sec)
+        else:
+            manifest_dict["omitted_section_counts"] = {}
+        manifest_dict["condense_mode"] = "lossless_structural"
+
+        if cand_body and cand_body[0].section == "patient":
+            ordered = [cand_body[0], manifest_item] + list(cand_body[1:])
+        else:
+            ordered = [manifest_item] + list(cand_body)
+        recs = items_to_querystore_records(ordered)
+        c_text, c_maps = render_chart(recs)
+        toks = token_counter(c_text)
+        return ordered, manifest_dict, c_text, c_maps, toks
+
+    # Reserve at least 30% of budget for top trajectories/notes when mandatory items are large
+    mand_ceiling = int(target_tokens * 0.70) if target_tokens <= 4096 else target_tokens
+    kept_mandatory: List[ClinicalItem] = []
+    omitted_counts: Dict[str, int] = {}
+    running_est = 95  # manifest + header reserve
+    for m_it in mandatory_items:
+        est_it = max(8, token_counter(m_it.text) + 6)
+        if running_est + est_it <= mand_ceiling or m_it.section in {"patient", "allergy"}:
+            kept_mandatory.append(m_it)
+            running_est += est_it
+        else:
+            omitted_counts[m_it.section] = omitted_counts.get(m_it.section, 0) + 1
+
+    accepted_optional: List[ClinicalItem] = []
+    soft_ceiling = max(128, target_tokens - 90)
+    for opt in ranked_optional:
+        est_opt = max(8, token_counter(opt.text) + 6)
+        if running_est + est_opt <= soft_ceiling:
+            accepted_optional.append(opt)
+            running_est += est_opt
+        else:
+            omitted_counts[opt.section] = omitted_counts.get(opt.section, 0) + 1
+
+    final_items, manifest_dict, chart_text, mappings, actual_toks = render_structural(
+        kept_mandatory + sorted(accepted_optional, key=lambda x: _date_sort_key(x.date), reverse=True),
+        omitted_counts,
+    )
+    while actual_toks > target_tokens and accepted_optional:
+        dropped = accepted_optional.pop()
+        omitted_counts[dropped.section] = omitted_counts.get(dropped.section, 0) + 1
+        final_items, manifest_dict, chart_text, mappings, actual_toks = render_structural(
+            kept_mandatory + sorted(accepted_optional, key=lambda x: _date_sort_key(x.date), reverse=True),
+            omitted_counts,
+        )
+    records = items_to_querystore_records(final_items)
+    return CondensedChartResult(
+        tier=manifest_dict["tier"],
+        tier_name=manifest_dict["tier_name"],
+        target_tokens=target_tokens,
+        actual_tokens=actual_toks,
+        chart_text=chart_text,
+        records=records,
+        mappings=mappings,
+        completeness_manifest=manifest_dict,
+        redacted_for_privacy=redacted,
+        compression_stats={
+            "condense_mode": "lossless_structural",
+            "bundle_entries": extracted.total_bundle_entries,
+            "extracted_clinical_items": len(extracted.items),
+            "rendered_records": len(records),
+            "target_tokens": target_tokens,
+            "actual_tokens": actual_toks,
+            "budget_utilization": round(actual_toks / target_tokens, 3),
+        },
+    )
+
+
 def condense_bundle_to_budget(
     bundle: Mapping[str, Any] | ExtractedChart,
     *,
     target_tokens: int = 8192,
     mode: str = "full",
+    condense_mode: str = "tiered",
     question: str = "",
     sharing_posture: str = "patient_self",
     token_counter: Optional[Callable[[str], int]] = None,
 ) -> CondensedChartResult:
-    """Condense a FHIR R4 Bundle (or `ExtractedChart`) into `target_tokens` across Tiers 0 -> 4.
+    """Condense a FHIR R4 Bundle (or `ExtractedChart`) into `target_tokens`.
 
-    Steps deterministically through the 5-Tier Progressive Condensation Ladder:
-    - Evaluates Tiers 0 -> 4 in order.
-    - If a tier fits wholly inside `target_tokens` and utilizes at least 55% of `target_tokens`
-      (or is `Tier 0`, the lossless full ledger), returns that tier directly.
-    - If dropping from `tier - 1` (which exceeded `target_tokens`) to `tier` leaves `> 45%` of
-      `target_tokens` unused, packs `tier - 1` down to `target_tokens` so the model gets the
-      richest clinical evidence that fits inside `target_tokens`.
-    - If even `Tier 4` exceeds `target_tokens` (e.g. `1,024` tokens on a 7,096-resource chart),
-      packs `Tier 4` deterministically into `target_tokens`.
+    Supports two `condense_mode` strategies:
+    - `"tiered"` (default): 5-Tier Progressive Condensation Ladder (`Tiers 0 -> 4`) with semantic
+      renewal folding and conflict-preserving prioritization.
+    - `"lossless_structural"` (`W12`): Non-destructive structural condensation that strips only FHIR
+      JSON syntax overhead and SHA-256 byte-identical Base64 duplicates while keeping active conditions,
+      active medications, allergies, and recent clinical records verbatim without pre-baked
+      `[conflict_note]` annotations.
     """
     if target_tokens <= 0:
         raise ValueError("target_tokens must be positive")
 
     counter = token_counter or estimate_tokens_local
+    if condense_mode == "lossless_structural":
+        extracted = (
+            bundle
+            if isinstance(bundle, ExtractedChart)
+            else extract_bundle(
+                bundle,
+                include_conflict_annotations=False,
+                enable_privacy_classification=(sharing_posture == "external_share"),
+                preserve_intraday_timestamps=True,
+                preserve_all_note_sections=True,
+            )
+        )
+        return _condense_lossless_structural(
+            extracted,
+            target_tokens=target_tokens,
+            question=question,
+            sharing_posture=sharing_posture,
+            token_counter=counter,
+        )
+
     extracted = bundle if isinstance(bundle, ExtractedChart) else extract_bundle(bundle)
 
     prev_tier_data: Optional[Tuple[int, List[ClinicalItem], List[Dict[str, Any]], Dict[str, Any]]] = None
