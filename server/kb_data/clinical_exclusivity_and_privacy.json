@@ -3,6 +3,29 @@
   "source": "KDIGO 2024 CKD Guidelines / ADA 2025 Standards of Care / MedlinePlus / LOINC Consumer Reference",
   "version": "2025",
   "license": "US Public Domain (NLM / MedlinePlus) & Clinical Practice Summaries",
+  "exclusivity_group_rules": {
+    "ckd_stage": {
+      "rule_id": "wahs-kb-ckd-staging-01",
+      "domain": "Condition Stage Conflict (KDIGO)",
+      "title": "Mutually Exclusive Active CKD Stages simultaneously on Problem List",
+      "guideline": "KDIGO 2024 Clinical Practice Guideline for Chronic Kidney Disease",
+      "biomarker_keywords": ["glomerular", "egfr", "creatinine"]
+    },
+    "glycemic_progression": {
+      "rule_id": "wahs-kb-glycemic-exclusivity-01",
+      "domain": "Condition Exclusivity Conflict (ADA)",
+      "title": "Concurrent Active Prediabetes and Established Diabetes Mellitus",
+      "guideline": "ADA 2025 Standards of Care in Diabetes",
+      "biomarker_keywords": ["a1c", "glucose"]
+    },
+    "heart_failure_stage": {
+      "rule_id": "wahs-kb-hf-staging-01",
+      "domain": "Condition Stage Conflict (AHA/ACC/HFSA)",
+      "title": "Mutually Exclusive Active Heart Failure NYHA / ACC Stages on Problem List",
+      "guideline": "AHA/ACC/HFSA Heart Failure Guideline",
+      "biomarker_keywords": ["natriuretic", "bnp", "ejection fraction"]
+    }
+  },
   "snomed_conditions": {
     "431855005": {
       "snomed": "431855005",
@@ -254,6 +277,86 @@
       "stage_rank": null,
       "sensitivity": "SDOH-SOCIAL",
       "plain_description": "Social history entry indicating current part-time employment status."
+    },
+    "700379002": {
+      "snomed": "700379002",
+      "display": "Chronic kidney disease stage 3B (disorder)",
+      "exclusivity_group": "ckd_stage",
+      "stage_rank": 3,
+      "sensitivity": null,
+      "plain_description": "Moderate-to-severe decrease in kidney filtration rate (eGFR 30–44 mL/min/1.73m2); supersedes earlier CKD stage 1 and stage 2 diagnoses."
+    },
+    "84114007": {
+      "snomed": "84114007",
+      "display": "Heart failure (disorder)",
+      "exclusivity_group": null,
+      "stage_rank": null,
+      "sensitivity": null,
+      "plain_description": "Chronic heart condition in which the heart muscle does not pump blood as effectively as needed."
+    },
+    "441481004": {
+      "snomed": "441481004",
+      "display": "Chronic systolic heart failure (disorder)",
+      "exclusivity_group": "heart_failure_stage",
+      "stage_rank": 3,
+      "sensitivity": null,
+      "plain_description": "Heart failure with reduced ejection fraction (HFrEF), where the left ventricle loses pumping strength."
+    },
+    "14140009": {
+      "snomed": "14140009",
+      "display": "Hyperkalemia (disorder)",
+      "exclusivity_group": null,
+      "stage_rank": null,
+      "sensitivity": null,
+      "plain_description": "Elevated potassium level in the blood (> 5.0 mmol/L), which requires urgent medication review to prevent cardiac arrhythmias."
+    },
+    "49436004": {
+      "snomed": "49436004",
+      "display": "Atrial fibrillation (disorder)",
+      "exclusivity_group": null,
+      "stage_rank": null,
+      "sensitivity": null,
+      "plain_description": "Irregular, often rapid upper heart chamber rhythm that increases stroke risk and is typically managed with a single oral anticoagulant."
+    },
+    "74474003": {
+      "snomed": "74474003",
+      "display": "Gastrointestinal hemorrhage (disorder)",
+      "exclusivity_group": null,
+      "stage_rank": null,
+      "sensitivity": null,
+      "plain_description": "Bleeding in the digestive tract (stomach or intestines), requiring careful reconciliation of blood thinners and avoidance of NSAIDs."
+    },
+    "28651003": {
+      "snomed": "28651003",
+      "display": "Orthostatic hypotension (disorder)",
+      "exclusivity_group": null,
+      "stage_rank": null,
+      "sensitivity": null,
+      "plain_description": "Drop in blood pressure when standing up from sitting or lying down, causing dizziness, lightheadedness, and fall risk."
+    },
+    "161898004": {
+      "snomed": "161898004",
+      "display": "Falls (finding)",
+      "exclusivity_group": null,
+      "stage_rank": null,
+      "sensitivity": null,
+      "plain_description": "History of falls, requiring a review of sedative, sleep, and blood-pressure medications under AGS Beers Criteria."
+    },
+    "64859006": {
+      "snomed": "64859006",
+      "display": "Osteoporosis (disorder)",
+      "exclusivity_group": null,
+      "stage_rank": null,
+      "sensitivity": null,
+      "plain_description": "Reduced bone mineral density that makes bones more fragile and increases fracture risk after a fall."
+    },
+    "55600006": {
+      "snomed": "55600006",
+      "display": "Social isolation (finding)",
+      "exclusivity_group": null,
+      "stage_rank": null,
+      "sensitivity": "SDOH/PRIVACY-SENSITIVE",
+      "plain_description": "Sensitive social determinant of health finding documenting social isolation or lack of support system."
     }
   },
   "loinc_labs_and_vitals": {
@@ -436,6 +539,36 @@
       "display": "Pain severity - 0-10 verbal numeric rating [Score] - Reported",
       "plain_description": "Patient-reported pain intensity score on a 0 (no pain) to 10 (worst possible pain) scale.",
       "reference_range": "0 (no pain); 1–3 (mild); 4–6 (moderate); 7–10 (severe)"
+    },
+    "2823-3": {
+      "loinc": "2823-3",
+      "display": "Potassium [Moles/volume] in Serum or Plasma",
+      "plain_description": "Serum potassium electrolyte level critical for normal heart rhythm and muscle function.",
+      "reference_range": "3.5–5.0 mmol/L (Hyperkalemia: > 5.0 mmol/L)"
+    },
+    "6298-4": {
+      "loinc": "6298-4",
+      "display": "Potassium [Moles/volume] in Blood",
+      "plain_description": "Whole-blood potassium electrolyte measurement.",
+      "reference_range": "3.5–5.0 mmol/L"
+    },
+    "6301-6": {
+      "loinc": "6301-6",
+      "display": "INR in Platelet poor plasma by Coagulation assay",
+      "plain_description": "International Normalized Ratio (INR) measuring blood clotting speed on warfarin therapy.",
+      "reference_range": "0.8–1.1 (baseline); 2.0–3.0 (standard anticoagulation); 2.5–3.5 (mechanical heart valve)"
+    },
+    "33762-6": {
+      "loinc": "33762-6",
+      "display": "Natriuretic peptide.B prohormone N-Terminal [Mass/volume] in Serum or Plasma",
+      "plain_description": "NT-proBNP cardiac biomarker released when the heart wall is stretched by fluid overload or heart failure.",
+      "reference_range": "< 125 pg/mL (< 75 years); < 450 pg/mL (>= 75 years)"
+    },
+    "718-7": {
+      "loinc": "718-7",
+      "display": "Hemoglobin [Mass/volume] in Blood",
+      "plain_description": "Oxygen-carrying hemoglobin protein in red blood cells, monitored for anemia and blood loss.",
+      "reference_range": "13.5–17.5 g/dL (men); 12.0–15.5 g/dL (women)"
     }
   }
 }

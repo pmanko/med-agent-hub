@@ -478,7 +478,84 @@ def _builtin_sample_bundles() -> Dict[str, Dict[str, Any]]:
             },
         ],
     }
-    return {"Maurice742_Auer97_sample": maurice_sample}
+    elena_sample: Dict[str, Any] = {
+        "resourceType": "Bundle",
+        "type": "collection",
+        "entry": [
+            {
+                "resource": {
+                    "resourceType": "Patient",
+                    "id": "pat-elena-1001",
+                    "name": [{"given": ["Elena"], "family": "Rostova"}],
+                    "birthDate": "1954-04-12",
+                    "gender": "female",
+                }
+            },
+            {
+                "resource": {
+                    "resourceType": "Encounter",
+                    "id": "enc-elena-hf",
+                    "status": "finished",
+                    "class": {"code": "IMP"},
+                    "type": [{"text": "Inpatient Cardiology Admission (Decompensated HFrEF & Hyperkalemia)"}],
+                    "period": {"start": "2026-01-15", "end": "2026-01-19"},
+                }
+            },
+            {
+                "resource": {
+                    "resourceType": "Condition",
+                    "id": "cond-elena-ckd2",
+                    "clinicalStatus": {"coding": [{"code": "active"}]},
+                    "code": {"text": "Chronic kidney disease stage 2 (disorder)"},
+                    "onsetDateTime": "2021-06-10",
+                }
+            },
+            {
+                "resource": {
+                    "resourceType": "Condition",
+                    "id": "cond-elena-ckd3b",
+                    "clinicalStatus": {"coding": [{"code": "active"}]},
+                    "code": {
+                        "coding": [{"system": "http://snomed.info/sct", "code": "700379002", "display": "Chronic kidney disease stage 3B (disorder)"}]
+                    },
+                    "onsetDateTime": "2025-11-04",
+                }
+            },
+            {
+                "resource": {
+                    "resourceType": "MedicationRequest",
+                    "id": "med-elena-aldactone",
+                    "status": "active",
+                    "authoredOn": "2025-09-12",
+                    "medicationCodeableConcept": {"text": "Aldactone 25 MG Oral Tablet [spironolactone]"},
+                }
+            },
+            {
+                "resource": {
+                    "resourceType": "MedicationRequest",
+                    "id": "med-elena-kcl",
+                    "status": "active",
+                    "authoredOn": "2025-10-04",
+                    "medicationCodeableConcept": {"text": "Potassium Chloride 20 mEq Extended Release Oral Tablet"},
+                }
+            },
+            {
+                "resource": {
+                    "resourceType": "Observation",
+                    "id": "obs-elena-k-peak",
+                    "status": "final",
+                    "category": [{"coding": [{"code": "laboratory"}]}],
+                    "code": {"coding": [{"system": "http://loinc.org", "code": "2823-3", "display": "Potassium [Moles/volume] in Serum or Plasma"}]},
+                    "effectiveDateTime": "2026-01-15T07:30:00Z",
+                    "valueQuantity": {"value": 5.7, "unit": "mmol/L"},
+                }
+            },
+        ],
+    }
+    return {
+        "Maurice742_Auer97_sample": maurice_sample,
+        "Elena_Rostova_Cardiorenal_sample": elena_sample,
+    }
 
 
 def _load_patient_catalog() -> Dict[str, Dict[str, Any]]:
@@ -497,7 +574,9 @@ def _load_patient_catalog() -> Dict[str, Dict[str, Any]]:
                 continue
         eval_sub = b_path / "eval"
         if eval_sub.is_dir():
-            for p in sorted(eval_sub.glob("*_multisource.json")):
+            for p in sorted(eval_sub.glob("*.json")):
+                if p.name == "ground_truth.json":
+                    continue
                 try:
                     data = json.loads(p.read_text(encoding="utf-8"))
                     if isinstance(data, dict) and data.get("resourceType") == "Bundle":
@@ -508,6 +587,7 @@ def _load_patient_catalog() -> Dict[str, Dict[str, Any]]:
     if not catalog:
         catalog.update(_builtin_sample_bundles())
     return catalog
+
 
 
 class AnalyzeRequest(BaseModel):
@@ -531,10 +611,11 @@ class AnalyzeRequest(BaseModel):
         description="Privacy posture ('patient_self' or 'external_share').",
     )
     condense_mode: str = Field(
-        default="tiered",
+        default="lossless_structural",
         pattern="^(tiered|lossless_structural)$",
-        description="Condensation mode ('tiered' 5-Tier ladder or 'lossless_structural' W12 non-destructive mode).",
+        description="Condensation mode ('lossless_structural' W12 non-destructive mode or 'tiered' 5-Tier ladder).",
     )
+
 
 
 class ChatRequest(AnalyzeRequest):

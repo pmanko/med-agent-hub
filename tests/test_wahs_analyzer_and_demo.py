@@ -67,10 +67,12 @@ def test_wahs_analyzers_detect_bloat_conflicts_and_trajectories() -> None:
     concepts = {t["concept"] for t in patterns["trajectories"]}
     assert any("Glomerular filtration rate" in c for c in concepts)
     assert any("Hemoglobin A1c" in c for c in concepts)
-    assert "Nov 20–28, 2023" in patterns["highlight_encounter"]["title"]
+    assert "2023-11-21" in patterns["highlight_encounter"]["title"]
+    assert "coronary artery bypass" in patterns["highlight_encounter"]["title"].lower()
     assert (
         len(patterns["directed_summary"]["sensitive_sdoh_included"]) >= 1
     )
+
 
     # Verify external_share redacts all sensitive SDOH across condensed text, directed summary, and DQ findings
     condensed_ext = condense_bundle_to_budget(
@@ -294,6 +296,127 @@ def test_lossless_structural_condensation_and_chart_hygiene_skills() -> None:
     assert "DuplicateCandidate" in categories or "ScheduleAnomaly" in categories
     assert "ReconciliationFinding" in categories
     assert "Source" in skill_report["formatted_findings_block"]
+
+
+def test_general_us_core_chart_reconciliation_across_drug_classes_and_interactions() -> None:
+    import base64
+
+    note_b64 = base64.b64encode(
+        b"Hospital Discharge Summary (2025-11-18): Acute on chronic HFrEF with hyperkalemia (K+ 5.6 mmol/L). "
+        b"Hold spironolactone and potassium chloride until repeat BMP in 7 days."
+    ).decode("ascii")
+    us_core_bundle = {
+        "resourceType": "Bundle",
+        "type": "collection",
+        "entry": [
+            {
+                "resource": {
+                    "resourceType": "Patient",
+                    "id": "pat-elena-rostova",
+                    "name": [{"given": ["Elena"], "family": "Rostova"}],
+                    "gender": "female",
+                    "birthDate": "1954-04-12",
+                }
+            },
+            {
+                "resource": {
+                    "resourceType": "Encounter",
+                    "id": "enc-hf-admit",
+                    "status": "finished",
+                    "class": {"code": "IMP"},
+                    "type": [{"text": "Inpatient Cardiology Admission (HFrEF & Hyperkalemia)"}],
+                    "period": {"start": "2025-11-14", "end": "2025-11-18"},
+                }
+            },
+            {
+                "resource": {
+                    "resourceType": "Condition",
+                    "id": "cond-ckd2-uncoded",
+                    "clinicalStatus": {"coding": [{"code": "active"}]},
+                    "code": {"text": "CKD Stage 2"},
+                    "onsetDateTime": "2021-05-10",
+                }
+            },
+            {
+                "resource": {
+                    "resourceType": "Condition",
+                    "id": "cond-ckd3b-coded",
+                    "clinicalStatus": {"coding": [{"code": "active"}]},
+                    "code": {"coding": [{"code": "700379002", "display": "Chronic kidney disease stage 3B (disorder)"}]},
+                    "onsetDateTime": "2025-11-15",
+                }
+            },
+            {
+                "resource": {
+                    "resourceType": "MedicationRequest",
+                    "id": "med-aldactone",
+                    "status": "active",
+                    "medicationCodeableConcept": {"text": "Aldactone 25 MG Oral Tablet [spironolactone]"},
+                    "authoredOn": "2025-09-01",
+                }
+            },
+            {
+                "resource": {
+                    "resourceType": "MedicationRequest",
+                    "id": "med-kcl",
+                    "status": "active",
+                    "medicationCodeableConcept": {"text": "Potassium Chloride 20 mEq Extended Release Oral Tablet"},
+                    "authoredOn": "2025-10-05",
+                }
+            },
+            {
+                "resource": {
+                    "resourceType": "MedicationRequest",
+                    "id": "med-eliquis",
+                    "status": "active",
+                    "medicationCodeableConcept": {"text": "Eliquis 5 MG Oral Tablet [apixaban]"},
+                    "authoredOn": "2025-10-12",
+                }
+            },
+            {
+                "resource": {
+                    "resourceType": "MedicationRequest",
+                    "id": "med-warfarin",
+                    "status": "active",
+                    "medicationCodeableConcept": {"text": "Warfarin Sodium 5 MG Oral Tablet"},
+                    "authoredOn": "2025-06-20",
+                }
+            },
+            {
+                "resource": {
+                    "resourceType": "DocumentReference",
+                    "id": "doc-hf-discharge",
+                    "status": "current",
+                    "type": {"text": "Discharge Summary"},
+                    "date": "2025-11-18T14:30:00Z",
+                    "content": [{"attachment": {"contentType": "text/plain", "data": note_b64}}],
+                }
+            },
+        ],
+    }
+
+    dq = analyze_data_quality_and_conflicts(us_core_bundle)
+    rule_ids = {f["kb_rule_id"] for f in dq["findings"]}
+    assert "wahs-kb-ckd-staging-01" in rule_ids
+    assert "wahs-kb-rx-hyperkalemia-01" in rule_ids
+    assert "wahs-kb-rx-dual-anticoag-01" in rule_ids
+    assert "wahs-kb-note-med-contradiction-01" in rule_ids
+
+
+    patterns = analyze_patterns_and_summaries(us_core_bundle)
+    assert "Elena Rostova" in patterns["highlight_encounter"]["narrative"]
+    assert "2025-11-14" in patterns["highlight_encounter"]["window"]
+
+    ans = answer_wahs_question(
+        us_core_bundle,
+        "Are there any medication conflicts or note instructions about spironolactone, potassium, or blood thinners?",
+    )
+    assert ans["abstained"] is False
+    assert "Aldactone" in ans["answer"]
+    assert "Potassium Chloride" in ans["answer"]
+    assert "Eliquis" in ans["answer"]
+    assert "Warfarin" in ans["answer"]
+
 
 
 

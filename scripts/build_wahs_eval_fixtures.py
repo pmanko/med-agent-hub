@@ -808,8 +808,127 @@ def build_eval_cases() -> List[Dict[str, Any]]:
                 "expected_answer_type": "abstain_not_in_chart",
                 "expected_facts": [],
             },
+            # --- US Core / IPS Multi-Domain Clinical Archetype Cases (Elena, Arthur, Margaret) ---
+            {
+                "case_id": "uc_a_elena_cardiorenal_hyperkalemia_reconcile",
+                "use_case": "A_reconcile",
+                "mode": "reconcile",
+                "dataset": "US_Core_Archetypes",
+                "patient_bundle": "Elena_Rostova_Cardiorenal.json",
+                "question": "Audit Elena Rostova's cardiorenal chart for conflicting CKD stages, high-risk potassium/diuretic interactions, duplicate antiplatelet prescriptions, and discharge note hold contradictions.",
+                "anomaly_id": "elena-hyperkalemia-and-ckd-reconcile",
+                "category": "multi_domain_cardiorenal_reconciliation",
+                "expected_resource_uuids": [
+                    "mimic-cond-ckd2",
+                    "mimic-cond-ckd3",
+                    "mimic-med-aldactone",
+                    "mimic-med-kcl",
+                    "mimic-med-clopidogrel",
+                    "mimic-med-plavix",
+                    "mimic-note-discharge",
+                ],
+                "expected_description": "Detect CKD stage 2 vs 3B conflict, spironolactone + potassium chloride hyperkalemia hazard, Plavix vs Clopidogrel duplicate, and discharge note hold instruction.",
+            },
+            {
+                "case_id": "uc_b3_elena_qa_potassium_spironolactone",
+                "use_case": "B3_qa_answerable",
+                "mode": "qa",
+                "dataset": "US_Core_Archetypes",
+                "patient_bundle": "Elena_Rostova_Cardiorenal.json",
+                "question": "Why did the hospital discharge note say to hold spironolactone and potassium chloride, and what were Elena's potassium and eGFR levels?",
+                "expected_answer_type": "grounded_answer",
+                "expected_facts": ["Aldactone", "Potassium Chloride", "5.7", "31.0"],
+                "expected_resource_uuids": [
+                    "mimic-med-aldactone",
+                    "mimic-med-kcl",
+                    "mimic-note-discharge",
+                ],
+            },
+            {
+                "case_id": "uc_a_arthur_anticoag_bleed_reconcile",
+                "use_case": "A_reconcile",
+                "mode": "reconcile",
+                "dataset": "US_Core_Archetypes",
+                "patient_bundle": "Arthur_Pendelton_Anticoag.json",
+                "question": "Audit Arthur Pendelton's chart for dual oral anticoagulation, NSAID bleeding interactions, active vs resolved GI hemorrhage status conflicts, and discharge note medication stops.",
+                "anomaly_id": "arthur-dual-anticoag-and-gib-reconcile",
+                "category": "multi_domain_anticoagulation_reconciliation",
+                "expected_resource_uuids": [
+                    "arthur-med-eliquis",
+                    "arthur-med-warfarin",
+                    "arthur-med-naproxen",
+                    "arthur-cond-gib-active",
+                    "arthur-cond-gib-resolved",
+                    "arthur-note-discharge",
+                ],
+                "expected_description": "Detect concurrent Eliquis + Warfarin dual oral anticoagulation, Naproxen NSAID bleeding hazard, active vs resolved GI hemorrhage, and discharge note stop instruction.",
+            },
+            {
+                "case_id": "uc_b1_arthur_gi_bleed_encounter_summary",
+                "use_case": "B1_encounter_summary",
+                "mode": "summary",
+                "dataset": "US_Core_Archetypes",
+                "patient_bundle": "Arthur_Pendelton_Anticoag.json",
+                "sharing_posture": "patient_self",
+                "question": "Summarize Arthur Pendelton's February 2026 hospitalization for gastrointestinal hemorrhage, endoscopic treatment, mechanical aortic valve anticoagulation, and hemoglobin/INR trends.",
+                "expected_resource_uuids": [
+                    "arthur-enc-gib-admit",
+                    "arthur-proc-egd",
+                    "arthur-dev-valve",
+                    "arthur-med-warfarin",
+                ],
+            },
+            {
+                "case_id": "uc_a_margaret_geriatric_polypharmacy_reconcile",
+                "use_case": "A_reconcile",
+                "mode": "reconcile",
+                "dataset": "US_Core_Archetypes",
+                "patient_bundle": "Margaret_Chen_Polypharmacy.json",
+                "question": "Audit Margaret Chen's geriatric chart for Beers Criteria sedative-hypnotic duplication, Prediabetes vs Type 2 Diabetes conflicts, duplicate pneumococcal vaccines, and note discontinuation orders.",
+                "anomaly_id": "margaret-beers-sedative-and-glycemic-reconcile",
+                "category": "multi_domain_geriatric_polypharmacy_reconciliation",
+                "expected_resource_uuids": [
+                    "smart-cond-predm",
+                    "smart-cond-t2dm",
+                    "margaret-med-ativan",
+                    "margaret-med-ambien",
+                    "margaret-imm-pneumo-clinic",
+                    "margaret-imm-pneumo-iis",
+                    "margaret-note-geriatrics",
+                ],
+                "expected_description": "Detect Ativan + Ambien Beers Criteria sedative duplication, Prediabetes + T2DM stage conflict, duplicate PCV20 pneumococcal vaccine, and note stop order.",
+            },
+            {
+                "case_id": "uc_b2_margaret_external_share_privacy",
+                "use_case": "B2_directed_summary",
+                "mode": "summary",
+                "dataset": "US_Core_Archetypes",
+                "patient_bundle": "Margaret_Chen_Polypharmacy.json",
+                "sharing_posture": "external_share",
+                "question": "Generate an external physical therapy & fall-prevention referral summary for Margaret Chen, ensuring privacy-sensitive abuse and social isolation records are excluded.",
+                "expected_resource_uuids": [
+                    "smart-cond-t2dm",
+                    "margaret-cond-falls",
+                    "margaret-dev-walker",
+                ],
+                "forbidden_resource_uuids": [
+                    "smart-cond-sdoh-ipv",
+                    "margaret-cond-sdoh-iso",
+                ],
+            },
+            {
+                "case_id": "uc_b3_arthur_qa_abstain_colonoscopy",
+                "use_case": "B3_qa_abstention",
+                "mode": "qa",
+                "dataset": "US_Core_Archetypes",
+                "patient_bundle": "Arthur_Pendelton_Anticoag.json",
+                "question": "What did Arthur Pendelton's colonoscopy polyp biopsy pathology report show?",
+                "expected_answer_type": "abstain_not_in_chart",
+                "expected_facts": [],
+            },
         ]
     )
+
 
     for case in cases:
         _enrich_case_with_rubric_and_entailment(case)
@@ -1032,26 +1151,49 @@ def inject_messy_ehr_perturbations(
 
 
 def build_deidentified_real_clinical_summaries() -> Dict[str, Tuple[Dict[str, Any], List[Dict[str, Any]]]]:
-    """Pathway B: Two de-identified real clinical summary fixtures modeled on public
-    MIMIC-IV-on-FHIR cardiorenal discharge summaries and SMART IPS Sandbox transition bundles."""
-    mimic_note = (
-        "# Chief Complaint\nDecompensated cardiorenal syndrome & hyperkalemia\n"
-        "# Assessment and Plan\nHold lisinopril at hospital discharge due to acute-on-chronic kidney injury "
-        "(eGFR 34 mL/min/1.73m2) and potassium 5.4 mEq/L. Continue Plavix 75mg daily; reconcile outpatient clopidogrel bottle."
+    """Pathway B: Three multi-domain US Core / IPS clinical transition patient bundles
+    (Elena Rostova — Cardiorenal HFrEF & Hyperkalemia; Arthur Pendelton — AFib + Mechanical Valve
+    Dual-Anticoagulation & Upper GI Bleed; Margaret Chen — Geriatric Polypharmacy, Beers Criteria
+    CNS Sedation & Falls), plus backward-compatible MIMIC-IV / SMART IPS aliases."""
+    elena_note = (
+        "# Chief Complaint\nDecompensated HFrEF, cardiorenal syndrome & hyperkalemia (peak K+ 5.7 mmol/L)\n"
+        "# Assessment and Plan\nHold spironolactone and potassium chloride at hospital discharge due to "
+        "hyperkalemia (5.7 mmol/L) and acute-on-chronic kidney injury (eGFR nadir 31.0 mL/min/1.73m2). "
+        "Hold lisinopril while continuing Entresto 49/51 MG BID and Furosemide 40 MG daily; reconcile outpatient Plavix vs Clopidogrel bottles."
     )
-    mimic_bundle: Dict[str, Any] = {
+    elena_note_b64 = base64.b64encode(elena_note.encode("utf-8")).decode("ascii")
+    elena_bundle: Dict[str, Any] = {
         "resourceType": "Bundle",
         "type": "collection",
-        "id": "mimic-iv-cardiorenal-summary",
+        "id": "elena-rostova-cardiorenal",
         "entry": [
             {
                 "fullUrl": "urn:uuid:mimic-pat-1001",
                 "resource": {
                     "resourceType": "Patient",
                     "id": "mimic-pat-1001",
-                    "name": [{"use": "official", "family": "Cardiorenal", "given": ["Elena"]}],
+                    "name": [{"use": "official", "family": "Rostova", "given": ["Elena"]}],
                     "gender": "female",
                     "birthDate": "1954-04-12",
+                },
+            },
+            {
+                "fullUrl": "urn:uuid:elena-org-cardio",
+                "resource": {"resourceType": "Organization", "id": "elena-org-cardio", "name": "UW Medicine Heart Institute"},
+            },
+            {
+                "fullUrl": "urn:uuid:elena-org-nephro",
+                "resource": {"resourceType": "Organization", "id": "elena-org-nephro", "name": "Northwest Kidney Centers"},
+            },
+            {
+                "fullUrl": "urn:uuid:elena-enc-admit",
+                "resource": {
+                    "resourceType": "Encounter",
+                    "id": "elena-enc-admit",
+                    "status": "finished",
+                    "class": {"code": "IMP"},
+                    "type": [{"text": "Inpatient Cardiology & Nephrology Admission (Decompensated HFrEF & Hyperkalemia)"}],
+                    "period": {"start": "2026-01-15", "end": "2026-01-19"},
                 },
             },
             {
@@ -1060,8 +1202,21 @@ def build_deidentified_real_clinical_summaries() -> Dict[str, Tuple[Dict[str, An
                     "resourceType": "AllergyIntolerance",
                     "id": "mimic-allergy-1",
                     "clinicalStatus": {"coding": [{"code": "active"}]},
-                    "code": {"text": "Iodinated contrast media"},
+                    "code": {"text": "Iodinated contrast media (anaphylactoid reaction)"},
                     "criticality": "high",
+                },
+            },
+            {
+                "fullUrl": "urn:uuid:elena-cond-hfref",
+                "resource": {
+                    "resourceType": "Condition",
+                    "id": "elena-cond-hfref",
+                    "clinicalStatus": {"coding": [{"code": "active"}]},
+                    "code": {
+                        "coding": [{"system": "http://snomed.info/sct", "code": "441481004", "display": "Chronic systolic heart failure (disorder)"}],
+                        "text": "Chronic systolic heart failure (disorder)",
+                    },
+                    "onsetDateTime": "2022-08-14",
                 },
             },
             {
@@ -1081,10 +1236,72 @@ def build_deidentified_real_clinical_summaries() -> Dict[str, Tuple[Dict[str, An
                     "id": "mimic-cond-ckd3",
                     "clinicalStatus": {"coding": [{"code": "active"}]},
                     "code": {
-                        "coding": [{"system": "http://snomed.info/sct", "code": "433144002", "display": "Chronic kidney disease stage 3 (disorder)"}],
-                        "text": "Chronic kidney disease stage 3 (disorder)",
+                        "coding": [{"system": "http://snomed.info/sct", "code": "700379002", "display": "Chronic kidney disease stage 3B (disorder)"}],
+                        "text": "Chronic kidney disease stage 3B (disorder)",
                     },
                     "onsetDateTime": "2025-11-04",
+                },
+            },
+            {
+                "fullUrl": "urn:uuid:elena-cond-hyperk",
+                "resource": {
+                    "resourceType": "Condition",
+                    "id": "elena-cond-hyperk",
+                    "clinicalStatus": {"coding": [{"code": "active"}]},
+                    "code": {
+                        "coding": [{"system": "http://snomed.info/sct", "code": "14140009", "display": "Hyperkalemia (disorder)"}],
+                        "text": "Hyperkalemia (disorder)",
+                    },
+                    "onsetDateTime": "2026-01-15",
+                },
+            },
+            {
+                "fullUrl": "urn:uuid:elena-proc-echo",
+                "resource": {
+                    "resourceType": "Procedure",
+                    "id": "elena-proc-echo",
+                    "status": "completed",
+                    "code": {"text": "Transthoracic echocardiography and Doppler hemodynamic assessment"},
+                    "performedDateTime": "2026-01-16",
+                },
+            },
+            {
+                "fullUrl": "urn:uuid:elena-dev-icd",
+                "resource": {
+                    "resourceType": "Device",
+                    "id": "elena-dev-icd",
+                    "status": "active",
+                    "type": {"text": "Dual-chamber implantable cardioverter-defibrillator (ICD)"},
+                },
+            },
+            {
+                "fullUrl": "urn:uuid:mimic-med-aldactone",
+                "resource": {
+                    "resourceType": "MedicationRequest",
+                    "id": "mimic-med-aldactone",
+                    "status": "active",
+                    "intent": "order",
+                    "medicationCodeableConcept": {
+                        "coding": [{"system": "http://www.nlm.nih.gov/research/umls/rxnorm", "code": "313096", "display": "Aldactone 25 MG Oral Tablet [spironolactone]"}],
+                        "text": "Aldactone 25 MG Oral Tablet [spironolactone]",
+                    },
+                    "authoredOn": "2025-09-12",
+                    "performer": [{"actor": {"display": "UW Medicine Heart Institute"}}],
+                },
+            },
+            {
+                "fullUrl": "urn:uuid:mimic-med-kcl",
+                "resource": {
+                    "resourceType": "MedicationRequest",
+                    "id": "mimic-med-kcl",
+                    "status": "active",
+                    "intent": "order",
+                    "medicationCodeableConcept": {
+                        "coding": [{"system": "http://www.nlm.nih.gov/research/umls/rxnorm", "code": "628958", "display": "Potassium Chloride 20 mEq Extended Release Oral Tablet"}],
+                        "text": "Potassium Chloride 20 mEq Extended Release Oral Tablet",
+                    },
+                    "authoredOn": "2025-10-04",
+                    "performer": [{"actor": {"display": "Community Primary Care"}}],
                 },
             },
             {
@@ -1123,7 +1340,34 @@ def build_deidentified_real_clinical_summaries() -> Dict[str, Tuple[Dict[str, An
                     "intent": "order",
                     "medicationCodeableConcept": {"text": "Plavix 75 MG Oral Tablet"},
                     "authoredOn": "2026-01-19",
-                    "performer": [{"actor": {"display": "BIDMC Inpatient Cardiology Discharge"}}],
+                    "performer": [{"actor": {"display": "Harborview Inpatient Cardiology"}}],
+                },
+            },
+            {
+                "fullUrl": "urn:uuid:elena-med-furosemide",
+                "resource": {
+                    "resourceType": "MedicationRequest",
+                    "id": "elena-med-furosemide",
+                    "status": "active",
+                    "intent": "order",
+                    "medicationCodeableConcept": {
+                        "coding": [{"system": "http://www.nlm.nih.gov/research/umls/rxnorm", "code": "310429", "display": "Furosemide 40 MG Oral Tablet"}],
+                        "text": "Furosemide 40 MG Oral Tablet",
+                    },
+                    "authoredOn": "2026-01-19",
+                    "performer": [{"actor": {"display": "UW Medicine Heart Institute"}}],
+                },
+            },
+            {
+                "fullUrl": "urn:uuid:elena-obs-egfr-2023",
+                "resource": {
+                    "resourceType": "Observation",
+                    "id": "elena-obs-egfr-2023",
+                    "status": "final",
+                    "category": [{"coding": [{"code": "laboratory"}]}],
+                    "code": {"coding": [{"system": "http://loinc.org", "code": "33914-3", "display": "Glomerular filtration rate/1.73 sq M.predicted"}]},
+                    "effectiveDateTime": "2023-05-10",
+                    "valueQuantity": {"value": 58.0, "unit": "mL/min/1.73_m2"},
                 },
             },
             {
@@ -1133,12 +1377,81 @@ def build_deidentified_real_clinical_summaries() -> Dict[str, Tuple[Dict[str, An
                     "id": "mimic-obs-egfr-1",
                     "status": "final",
                     "category": [{"coding": [{"code": "laboratory"}]}],
-                    "code": {
-                        "coding": [{"system": "http://loinc.org", "code": "33914-3", "display": "Glomerular filtration rate/1.73 sq M.predicted"}],
-                        "text": "Glomerular filtration rate/1.73 sq M.predicted",
-                    },
-                    "effectiveDateTime": "2026-01-19",
-                    "valueQuantity": {"value": 34.0, "unit": "mL/min/1.73_m2"},
+                    "code": {"coding": [{"system": "http://loinc.org", "code": "33914-3", "display": "Glomerular filtration rate/1.73 sq M.predicted"}]},
+                    "effectiveDateTime": "2026-01-15T07:30:00Z",
+                    "valueQuantity": {"value": 31.0, "unit": "mL/min/1.73_m2"},
+                },
+            },
+            {
+                "fullUrl": "urn:uuid:elena-obs-egfr-2",
+                "resource": {
+                    "resourceType": "Observation",
+                    "id": "elena-obs-egfr-2",
+                    "status": "final",
+                    "category": [{"coding": [{"code": "laboratory"}]}],
+                    "code": {"coding": [{"system": "http://loinc.org", "code": "33914-3", "display": "Glomerular filtration rate/1.73 sq M.predicted"}]},
+                    "effectiveDateTime": "2026-01-19T06:00:00Z",
+                    "valueQuantity": {"value": 38.5, "unit": "mL/min/1.73_m2"},
+                },
+            },
+            {
+                "fullUrl": "urn:uuid:elena-obs-k-1",
+                "resource": {
+                    "resourceType": "Observation",
+                    "id": "elena-obs-k-1",
+                    "status": "final",
+                    "category": [{"coding": [{"code": "laboratory"}]}],
+                    "code": {"coding": [{"system": "http://loinc.org", "code": "6298-4", "display": "Potassium [Moles/volume] in Blood"}]},
+                    "effectiveDateTime": "2025-11-04",
+                    "valueQuantity": {"value": 4.4, "unit": "mmol/L"},
+                },
+            },
+            {
+                "fullUrl": "urn:uuid:elena-obs-k-2",
+                "resource": {
+                    "resourceType": "Observation",
+                    "id": "elena-obs-k-2",
+                    "status": "final",
+                    "category": [{"coding": [{"code": "laboratory"}]}],
+                    "code": {"coding": [{"system": "http://loinc.org", "code": "2823-3", "display": "Potassium [Moles/volume] in Serum or Plasma"}]},
+                    "effectiveDateTime": "2026-01-15T07:30:00Z",
+                    "valueQuantity": {"value": 5.7, "unit": "mmol/L"},
+                },
+            },
+            {
+                "fullUrl": "urn:uuid:elena-obs-k-3",
+                "resource": {
+                    "resourceType": "Observation",
+                    "id": "elena-obs-k-3",
+                    "status": "final",
+                    "category": [{"coding": [{"code": "laboratory"}]}],
+                    "code": {"coding": [{"system": "http://loinc.org", "code": "2823-3", "display": "Potassium [Moles/volume] in Serum or Plasma"}]},
+                    "effectiveDateTime": "2026-01-19T06:00:00Z",
+                    "valueQuantity": {"value": 4.5, "unit": "mmol/L"},
+                },
+            },
+            {
+                "fullUrl": "urn:uuid:elena-obs-bnp-1",
+                "resource": {
+                    "resourceType": "Observation",
+                    "id": "elena-obs-bnp-1",
+                    "status": "final",
+                    "category": [{"coding": [{"code": "laboratory"}]}],
+                    "code": {"coding": [{"system": "http://loinc.org", "code": "33762-6", "display": "Natriuretic peptide.B prohormone N-Terminal [Mass/volume] in Serum or Plasma"}]},
+                    "effectiveDateTime": "2026-01-15T07:30:00Z",
+                    "valueQuantity": {"value": 4850.0, "unit": "pg/mL"},
+                },
+            },
+            {
+                "fullUrl": "urn:uuid:elena-obs-bnp-2",
+                "resource": {
+                    "resourceType": "Observation",
+                    "id": "elena-obs-bnp-2",
+                    "status": "final",
+                    "category": [{"coding": [{"code": "laboratory"}]}],
+                    "code": {"coding": [{"system": "http://loinc.org", "code": "33762-6", "display": "Natriuretic peptide.B prohormone N-Terminal [Mass/volume] in Serum or Plasma"}]},
+                    "effectiveDateTime": "2026-01-19T06:00:00Z",
+                    "valueQuantity": {"value": 1890.0, "unit": "pg/mL"},
                 },
             },
             {
@@ -1147,27 +1460,38 @@ def build_deidentified_real_clinical_summaries() -> Dict[str, Tuple[Dict[str, An
                     "resourceType": "DocumentReference",
                     "id": "mimic-note-discharge",
                     "status": "current",
-                    "type": {"text": "MIMIC-IV Inpatient Discharge Summary"},
+                    "type": {"text": "Inpatient Cardiology Discharge Summary"},
                     "date": "2026-01-19T16:00:00+00:00",
-                    "content": [
-                        {
-                            "attachment": {
-                                "contentType": "text/plain; charset=utf-8",
-                                "data": base64.b64encode(mimic_note.encode("utf-8")).decode("ascii"),
-                            }
-                        }
-                    ],
+                    "content": [{"attachment": {"contentType": "text/plain; charset=utf-8", "data": elena_note_b64}}],
+                },
+            },
+            {
+                "fullUrl": "urn:uuid:elena-note-dup",
+                "resource": {
+                    "resourceType": "DocumentReference",
+                    "id": "elena-note-dup",
+                    "status": "current",
+                    "type": {"text": "Duplicate HIE Discharge Copy"},
+                    "date": "2026-01-19T16:05:00+00:00",
+                    "content": [{"attachment": {"contentType": "text/plain; charset=utf-8", "data": elena_note_b64}}],
                 },
             },
         ],
     }
-    mimic_anomalies = [
+    elena_anomalies = [
         {
             "anomaly_id": "mimic-ckd-stage2-vs-stage3",
             "category": "mutually_exclusive_condition_stages",
             "severity": "high",
-            "description": "Uncoded CKD Stage 2 and coded CKD Stage 3 simultaneously active in MIMIC-IV transition summary.",
+            "description": "Uncoded CKD Stage 2 and coded CKD Stage 3B simultaneously active in cardiorenal summary.",
             "expected_resource_uuids": ["mimic-cond-ckd2", "mimic-cond-ckd3"],
+        },
+        {
+            "anomaly_id": "elena-hyperkalemia-spironolactone-kcl",
+            "category": "high_risk_drug_electrolyte_interaction",
+            "severity": "high",
+            "description": "Concurrent active Aldactone 25 MG [spironolactone] and Potassium Chloride 20 mEq with hyperkalemia (K+ 5.7 mmol/L).",
+            "expected_resource_uuids": ["mimic-med-aldactone", "mimic-med-kcl"],
         },
         {
             "anomaly_id": "mimic-plavix-clopidogrel-dup",
@@ -1180,25 +1504,330 @@ def build_deidentified_real_clinical_summaries() -> Dict[str, Tuple[Dict[str, An
             "anomaly_id": "mimic-note-hold-lisinopril",
             "category": "note_vs_structured_medication_contradiction",
             "severity": "high",
-            "description": "Discharge summary instructs to hold lisinopril while outpatient MedicationRequest remains active.",
-            "expected_resource_uuids": ["mimic-med-lisinopril", "mimic-note-discharge"],
+            "description": "Discharge summary instructs to hold spironolactone, potassium chloride, and lisinopril while outpatient MedicationRequests remain active.",
+            "expected_resource_uuids": ["mimic-med-aldactone", "mimic-med-kcl", "mimic-med-lisinopril", "mimic-note-discharge"],
         },
     ]
 
-    smart_ips_bundle: Dict[str, Any] = {
+    arthur_note = (
+        "# Chief Complaint\nAcute upper gastrointestinal hemorrhage & supratherapeutic INR (4.8)\n"
+        "# Assessment and Plan\nStop Eliquis and Naproxen immediately. Patient has a mechanical aortic valve "
+        "requiring single-agent Warfarin anticoagulation (target INR 2.5-3.5) with Pantoprazole 40 MG BID GI prophylaxis. "
+        "Upper GI bleeding resolved following endoscopic hemoclip placement on 2026-02-11."
+    )
+    arthur_note_b64 = base64.b64encode(arthur_note.encode("utf-8")).decode("ascii")
+    arthur_bundle: Dict[str, Any] = {
+        "resourceType": "Bundle",
+        "type": "collection",
+        "id": "arthur-pendelton-anticoag",
+        "entry": [
+            {
+                "fullUrl": "urn:uuid:arthur-pat-2001",
+                "resource": {
+                    "resourceType": "Patient",
+                    "id": "arthur-pat-2001",
+                    "name": [{"use": "official", "family": "Pendelton", "given": ["Arthur"]}],
+                    "gender": "male",
+                    "birthDate": "1947-08-19",
+                },
+            },
+            {
+                "fullUrl": "urn:uuid:arthur-enc-gib-admit",
+                "resource": {
+                    "resourceType": "Encounter",
+                    "id": "arthur-enc-gib-admit",
+                    "status": "finished",
+                    "class": {"code": "IMP"},
+                    "type": [{"text": "Inpatient Gastroenterology & Cardiology Admission (Upper GI Bleed & Coagulopathy)"}],
+                    "period": {"start": "2026-02-10", "end": "2026-02-14"},
+                },
+            },
+            {
+                "fullUrl": "urn:uuid:arthur-allergy-sulfa",
+                "resource": {
+                    "resourceType": "AllergyIntolerance",
+                    "id": "arthur-allergy-sulfa",
+                    "clinicalStatus": {"coding": [{"code": "active"}]},
+                    "code": {"text": "Sulfonamide antibiotics (maculopapular rash)"},
+                    "criticality": "low",
+                },
+            },
+            {
+                "fullUrl": "urn:uuid:arthur-cond-afib",
+                "resource": {
+                    "resourceType": "Condition",
+                    "id": "arthur-cond-afib",
+                    "clinicalStatus": {"coding": [{"code": "active"}]},
+                    "code": {
+                        "coding": [{"system": "http://snomed.info/sct", "code": "49436004", "display": "Atrial fibrillation (disorder)"}],
+                        "text": "Atrial fibrillation (disorder)",
+                    },
+                    "onsetDateTime": "2019-04-12",
+                },
+            },
+            {
+                "fullUrl": "urn:uuid:arthur-cond-gib-active",
+                "resource": {
+                    "resourceType": "Condition",
+                    "id": "arthur-cond-gib-active",
+                    "clinicalStatus": {"coding": [{"code": "active"}]},
+                    "code": {
+                        "coding": [{"system": "http://snomed.info/sct", "code": "74474003", "display": "Gastrointestinal hemorrhage (disorder)"}],
+                        "text": "Gastrointestinal hemorrhage (disorder)",
+                    },
+                    "onsetDateTime": "2026-02-10",
+                },
+            },
+            {
+                "fullUrl": "urn:uuid:arthur-cond-gib-resolved",
+                "resource": {
+                    "resourceType": "Condition",
+                    "id": "arthur-cond-gib-resolved",
+                    "clinicalStatus": {"coding": [{"code": "resolved"}]},
+                    "code": {
+                        "coding": [{"system": "http://snomed.info/sct", "code": "74474003", "display": "Gastrointestinal hemorrhage (disorder)"}],
+                        "text": "Gastrointestinal hemorrhage (disorder)",
+                    },
+                    "onsetDateTime": "2026-02-10",
+                    "abatementDateTime": "2026-02-14",
+                },
+            },
+            {
+                "fullUrl": "urn:uuid:arthur-proc-egd",
+                "resource": {
+                    "resourceType": "Procedure",
+                    "id": "arthur-proc-egd",
+                    "status": "completed",
+                    "code": {"text": "Esophagogastroduodenoscopy (EGD) with endoscopic hemoclip hemostasis of duodenal ulcer"},
+                    "performedDateTime": "2026-02-11",
+                },
+            },
+            {
+                "fullUrl": "urn:uuid:arthur-proc-transfusion",
+                "resource": {
+                    "resourceType": "Procedure",
+                    "id": "arthur-proc-transfusion",
+                    "status": "completed",
+                    "code": {"text": "Transfusion of packed red blood cells (2 units)"},
+                    "performedDateTime": "2026-02-10",
+                },
+            },
+            {
+                "fullUrl": "urn:uuid:arthur-dev-valve",
+                "resource": {
+                    "resourceType": "Device",
+                    "id": "arthur-dev-valve",
+                    "status": "active",
+                    "type": {"text": "St. Jude Mechanical Aortic Valve Prosthesis"},
+                },
+            },
+            {
+                "fullUrl": "urn:uuid:arthur-med-eliquis",
+                "resource": {
+                    "resourceType": "MedicationRequest",
+                    "id": "arthur-med-eliquis",
+                    "status": "active",
+                    "intent": "order",
+                    "medicationCodeableConcept": {
+                        "coding": [{"system": "http://www.nlm.nih.gov/research/umls/rxnorm", "code": "1364430", "display": "Eliquis 5 MG Oral Tablet [apixaban]"}],
+                        "text": "Eliquis 5 MG Oral Tablet [apixaban]",
+                    },
+                    "authoredOn": "2026-01-20",
+                    "performer": [{"actor": {"display": "Eastside Primary Care"}}],
+                },
+            },
+            {
+                "fullUrl": "urn:uuid:arthur-med-warfarin",
+                "resource": {
+                    "resourceType": "MedicationRequest",
+                    "id": "arthur-med-warfarin",
+                    "status": "active",
+                    "intent": "order",
+                    "medicationCodeableConcept": {
+                        "coding": [{"system": "http://www.nlm.nih.gov/research/umls/rxnorm", "code": "855332", "display": "Warfarin Sodium 5 MG Oral Tablet"}],
+                        "text": "Warfarin Sodium 5 MG Oral Tablet",
+                    },
+                    "authoredOn": "2025-05-12",
+                    "performer": [{"actor": {"display": "Swedish Heart & Vascular Anticoagulation Clinic"}}],
+                },
+            },
+            {
+                "fullUrl": "urn:uuid:arthur-med-naproxen",
+                "resource": {
+                    "resourceType": "MedicationRequest",
+                    "id": "arthur-med-naproxen",
+                    "status": "active",
+                    "intent": "order",
+                    "medicationCodeableConcept": {
+                        "coding": [{"system": "http://www.nlm.nih.gov/research/umls/rxnorm", "code": "849574", "display": "Naproxen 220 MG Oral Tablet"}],
+                        "text": "Naproxen 220 MG Oral Tablet",
+                    },
+                    "authoredOn": "2026-01-28",
+                    "performer": [{"actor": {"display": "Urgent Care Walk-In Clinic"}}],
+                },
+            },
+            {
+                "fullUrl": "urn:uuid:arthur-med-pantoprazole",
+                "resource": {
+                    "resourceType": "MedicationRequest",
+                    "id": "arthur-med-pantoprazole",
+                    "status": "active",
+                    "intent": "order",
+                    "medicationCodeableConcept": {
+                        "coding": [{"system": "http://www.nlm.nih.gov/research/umls/rxnorm", "code": "314153", "display": "Pantoprazole 40 MG Delayed Release Oral Tablet"}],
+                        "text": "Pantoprazole 40 MG Delayed Release Oral Tablet",
+                    },
+                    "authoredOn": "2026-02-11",
+                    "performer": [{"actor": {"display": "Virginia Mason Gastroenterology"}}],
+                },
+            },
+            {
+                "fullUrl": "urn:uuid:arthur-obs-hgb-1",
+                "resource": {
+                    "resourceType": "Observation",
+                    "id": "arthur-obs-hgb-1",
+                    "status": "final",
+                    "category": [{"coding": [{"code": "laboratory"}]}],
+                    "code": {"coding": [{"system": "http://loinc.org", "code": "718-7", "display": "Hemoglobin [Mass/volume] in Blood"}]},
+                    "effectiveDateTime": "2025-09-15",
+                    "valueQuantity": {"value": 13.4, "unit": "g/dL"},
+                },
+            },
+            {
+                "fullUrl": "urn:uuid:arthur-obs-hgb-2",
+                "resource": {
+                    "resourceType": "Observation",
+                    "id": "arthur-obs-hgb-2",
+                    "status": "final",
+                    "category": [{"coding": [{"code": "laboratory"}]}],
+                    "code": {"coding": [{"system": "http://loinc.org", "code": "718-7", "display": "Hemoglobin [Mass/volume] in Blood"}]},
+                    "effectiveDateTime": "2026-02-10T06:15:00Z",
+                    "valueQuantity": {"value": 7.6, "unit": "g/dL"},
+                },
+            },
+            {
+                "fullUrl": "urn:uuid:arthur-obs-hgb-3",
+                "resource": {
+                    "resourceType": "Observation",
+                    "id": "arthur-obs-hgb-3",
+                    "status": "final",
+                    "category": [{"coding": [{"code": "laboratory"}]}],
+                    "code": {"coding": [{"system": "http://loinc.org", "code": "718-7", "display": "Hemoglobin [Mass/volume] in Blood"}]},
+                    "effectiveDateTime": "2026-02-14T08:00:00Z",
+                    "valueQuantity": {"value": 10.2, "unit": "g/dL"},
+                },
+            },
+            {
+                "fullUrl": "urn:uuid:arthur-obs-inr-1",
+                "resource": {
+                    "resourceType": "Observation",
+                    "id": "arthur-obs-inr-1",
+                    "status": "final",
+                    "category": [{"coding": [{"code": "laboratory"}]}],
+                    "code": {"coding": [{"system": "http://loinc.org", "code": "6301-6", "display": "INR in Platelet poor plasma by Coagulation assay"}]},
+                    "effectiveDateTime": "2025-11-20",
+                    "valueQuantity": {"value": 2.6, "unit": "{INR}"},
+                },
+            },
+            {
+                "fullUrl": "urn:uuid:arthur-obs-inr-2",
+                "resource": {
+                    "resourceType": "Observation",
+                    "id": "arthur-obs-inr-2",
+                    "status": "final",
+                    "category": [{"coding": [{"code": "laboratory"}]}],
+                    "code": {"coding": [{"system": "http://loinc.org", "code": "6301-6", "display": "INR in Platelet poor plasma by Coagulation assay"}]},
+                    "effectiveDateTime": "2026-02-10T06:15:00Z",
+                    "valueQuantity": {"value": 4.8, "unit": "{INR}"},
+                },
+            },
+            {
+                "fullUrl": "urn:uuid:arthur-obs-inr-3",
+                "resource": {
+                    "resourceType": "Observation",
+                    "id": "arthur-obs-inr-3",
+                    "status": "final",
+                    "category": [{"coding": [{"code": "laboratory"}]}],
+                    "code": {"coding": [{"system": "http://loinc.org", "code": "6301-6", "display": "INR in Platelet poor plasma by Coagulation assay"}]},
+                    "effectiveDateTime": "2026-02-14T08:00:00Z",
+                    "valueQuantity": {"value": 2.7, "unit": "{INR}"},
+                },
+            },
+            {
+                "fullUrl": "urn:uuid:arthur-note-discharge",
+                "resource": {
+                    "resourceType": "DocumentReference",
+                    "id": "arthur-note-discharge",
+                    "status": "current",
+                    "type": {"text": "Gastroenterology & Anticoagulation Discharge Summary"},
+                    "date": "2026-02-14T15:30:00+00:00",
+                    "content": [{"attachment": {"contentType": "text/plain; charset=utf-8", "data": arthur_note_b64}}],
+                },
+            },
+        ],
+    }
+    arthur_anomalies = [
+        {
+            "anomaly_id": "arthur-dual-oral-anticoagulant",
+            "category": "cross_source_therapeutic_class_duplicate",
+            "severity": "high",
+            "description": "Concurrent active Eliquis 5 MG [apixaban] and Warfarin Sodium 5 MG across primary care and cardiology.",
+            "expected_resource_uuids": ["arthur-med-eliquis", "arthur-med-warfarin"],
+        },
+        {
+            "anomaly_id": "arthur-anticoag-nsaid-bleed-hazard",
+            "category": "high_risk_drug_bleeding_interaction",
+            "severity": "high",
+            "description": "Concurrent systemic NSAID (Naproxen 220 MG) with oral anticoagulation precipitating upper GI hemorrhage.",
+            "expected_resource_uuids": ["arthur-med-naproxen", "arthur-med-warfarin", "arthur-med-eliquis"],
+        },
+        {
+            "anomaly_id": "arthur-gib-active-vs-resolved",
+            "category": "cross_source_condition_status_conflict",
+            "severity": "medium",
+            "description": "Gastrointestinal hemorrhage marked ACTIVE in primary care but RESOLVED after endoscopic hemoclip therapy.",
+            "expected_resource_uuids": ["arthur-cond-gib-active", "arthur-cond-gib-resolved"],
+        },
+        {
+            "anomaly_id": "arthur-note-stop-eliquis-naproxen",
+            "category": "note_vs_structured_medication_contradiction",
+            "severity": "high",
+            "description": "Discharge note instructs to stop Eliquis and Naproxen immediately while structured orders remain active.",
+            "expected_resource_uuids": ["arthur-med-eliquis", "arthur-med-naproxen", "arthur-note-discharge"],
+        },
+    ]
+
+    margaret_note = (
+        "# Chief Complaint\nGeriatric fall evaluation, orthostatic hypotension & polypharmacy review\n"
+        "# Assessment and Plan\nDiscontinue Ambien and lorazepam immediately due to recurrent falls and "
+        "AGS Beers Criteria CNS sedative-hypnotic duplication. Hold glipizide to prevent nocturnal hypoglycemia "
+        "(HbA1c 6.7% on metformin monotherapy)."
+    )
+    margaret_note_b64 = base64.b64encode(margaret_note.encode("utf-8")).decode("ascii")
+    margaret_bundle: Dict[str, Any] = {
         "resourceType": "Bundle",
         "type": "document",
-        "id": "smart-ips-transition-summary",
+        "id": "margaret-chen-polypharmacy",
         "entry": [
             {
                 "fullUrl": "urn:uuid:smart-pat-2002",
                 "resource": {
                     "resourceType": "Patient",
                     "id": "smart-pat-2002",
-                    "name": [{"use": "official", "family": "Valdez", "given": ["Mateo"]}],
-                    "gender": "male",
-                    "birthDate": "1968-09-22",
-                    "communication": [{"language": {"text": "Spanish"}}],
+                    "name": [{"use": "official", "family": "Chen", "given": ["Margaret"]}],
+                    "gender": "female",
+                    "birthDate": "1943-11-03",
+                },
+            },
+            {
+                "fullUrl": "urn:uuid:margaret-enc-ed-fall",
+                "resource": {
+                    "resourceType": "Encounter",
+                    "id": "margaret-enc-ed-fall",
+                    "status": "finished",
+                    "class": {"code": "EMER"},
+                    "type": [{"text": "Emergency Department Evaluation for Mechanical Fall & Orthostatic Syncope"}],
+                    "period": {"start": "2026-01-28", "end": "2026-01-29"},
                 },
             },
             {
@@ -1225,6 +1854,32 @@ def build_deidentified_real_clinical_summaries() -> Dict[str, Tuple[Dict[str, An
                 },
             },
             {
+                "fullUrl": "urn:uuid:margaret-cond-ortho",
+                "resource": {
+                    "resourceType": "Condition",
+                    "id": "margaret-cond-ortho",
+                    "clinicalStatus": {"coding": [{"code": "active"}]},
+                    "code": {
+                        "coding": [{"system": "http://snomed.info/sct", "code": "28651003", "display": "Orthostatic hypotension (disorder)"}],
+                        "text": "Orthostatic hypotension (disorder)",
+                    },
+                    "onsetDateTime": "2025-10-14",
+                },
+            },
+            {
+                "fullUrl": "urn:uuid:margaret-cond-falls",
+                "resource": {
+                    "resourceType": "Condition",
+                    "id": "margaret-cond-falls",
+                    "clinicalStatus": {"coding": [{"code": "active"}]},
+                    "code": {
+                        "coding": [{"system": "http://snomed.info/sct", "code": "161898004", "display": "Falls (finding)"}],
+                        "text": "Falls (finding)",
+                    },
+                    "onsetDateTime": "2026-01-28",
+                },
+            },
+            {
                 "fullUrl": "urn:uuid:smart-cond-sdoh-ipv",
                 "resource": {
                     "resourceType": "Condition",
@@ -1238,6 +1893,58 @@ def build_deidentified_real_clinical_summaries() -> Dict[str, Tuple[Dict[str, An
                 },
             },
             {
+                "fullUrl": "urn:uuid:margaret-cond-sdoh-iso",
+                "resource": {
+                    "resourceType": "Condition",
+                    "id": "margaret-cond-sdoh-iso",
+                    "clinicalStatus": {"coding": [{"code": "active"}]},
+                    "code": {
+                        "coding": [{"system": "http://snomed.info/sct", "code": "55600006", "display": "Social isolation (finding)"}],
+                        "text": "Social isolation (finding)",
+                    },
+                    "onsetDateTime": "2025-08-19",
+                },
+            },
+            {
+                "fullUrl": "urn:uuid:margaret-dev-walker",
+                "resource": {
+                    "resourceType": "Device",
+                    "id": "margaret-dev-walker",
+                    "status": "active",
+                    "type": {"text": "Four-wheeled rollator walker & bilateral digital hearing aids"},
+                },
+            },
+            {
+                "fullUrl": "urn:uuid:margaret-med-ativan",
+                "resource": {
+                    "resourceType": "MedicationRequest",
+                    "id": "margaret-med-ativan",
+                    "status": "active",
+                    "intent": "order",
+                    "medicationCodeableConcept": {
+                        "coding": [{"system": "http://www.nlm.nih.gov/research/umls/rxnorm", "code": "197901", "display": "Ativan 1 MG Oral Tablet [lorazepam]"}],
+                        "text": "Ativan 1 MG Oral Tablet [lorazepam]",
+                    },
+                    "authoredOn": "2025-11-14",
+                    "performer": [{"actor": {"display": "Pacific Northwest Geriatrics"}}],
+                },
+            },
+            {
+                "fullUrl": "urn:uuid:margaret-med-ambien",
+                "resource": {
+                    "resourceType": "MedicationRequest",
+                    "id": "margaret-med-ambien",
+                    "status": "active",
+                    "intent": "order",
+                    "medicationCodeableConcept": {
+                        "coding": [{"system": "http://www.nlm.nih.gov/research/umls/rxnorm", "code": "854873", "display": "Ambien 10 MG Oral Tablet [zolpidem]"}],
+                        "text": "Ambien 10 MG Oral Tablet [zolpidem]",
+                    },
+                    "authoredOn": "2025-12-02",
+                    "performer": [{"actor": {"display": "Overlake Sleep & Behavioral Clinic"}}],
+                },
+            },
+            {
                 "fullUrl": "urn:uuid:smart-med-atorva",
                 "resource": {
                     "resourceType": "MedicationRequest",
@@ -1246,6 +1953,7 @@ def build_deidentified_real_clinical_summaries() -> Dict[str, Tuple[Dict[str, An
                     "intent": "order",
                     "medicationCodeableConcept": {"text": "Lipitor 40 MG Oral Tablet"},
                     "authoredOn": "2025-11-10",
+                    "performer": [{"actor": {"display": "Pacific Northwest Geriatrics"}}],
                 },
             },
             {
@@ -1260,17 +1968,127 @@ def build_deidentified_real_clinical_summaries() -> Dict[str, Tuple[Dict[str, An
                         "text": "Simvastatin 20 MG Oral Tablet",
                     },
                     "authoredOn": "2025-04-02",
+                    "performer": [{"actor": {"display": "Community Pharmacy Refill"}}],
+                },
+            },
+            {
+                "fullUrl": "urn:uuid:margaret-med-glipizide",
+                "resource": {
+                    "resourceType": "MedicationRequest",
+                    "id": "margaret-med-glipizide",
+                    "status": "active",
+                    "intent": "order",
+                    "medicationCodeableConcept": {
+                        "coding": [{"system": "http://www.nlm.nih.gov/research/umls/rxnorm", "code": "310490", "display": "Glipizide 5 MG Extended Release Oral Tablet"}],
+                        "text": "Glipizide 5 MG Extended Release Oral Tablet",
+                    },
+                    "authoredOn": "2025-06-15",
+                    "performer": [{"actor": {"display": "Pacific Northwest Geriatrics"}}],
+                },
+            },
+            {
+                "fullUrl": "urn:uuid:margaret-imm-pneumo-clinic",
+                "resource": {
+                    "resourceType": "Immunization",
+                    "id": "margaret-imm-pneumo-clinic",
+                    "status": "completed",
+                    "vaccineCode": {
+                        "coding": [{"system": "http://hl7.org/fhir/sid/cvx", "code": "216", "display": "Pneumococcal conjugate vaccine 20-valent (PCV20)"}],
+                        "text": "Pneumococcal conjugate vaccine 20-valent (PCV20)",
+                    },
+                    "occurrenceDateTime": "2025-11-10",
+                    "performer": [{"actor": {"display": "Pacific Northwest Geriatrics"}}],
+                },
+            },
+            {
+                "fullUrl": "urn:uuid:margaret-imm-pneumo-iis",
+                "resource": {
+                    "resourceType": "Immunization",
+                    "id": "margaret-imm-pneumo-iis",
+                    "status": "completed",
+                    "vaccineCode": {
+                        "coding": [{"system": "http://hl7.org/fhir/sid/cvx", "code": "216", "display": "Pneumococcal conjugate vaccine 20-valent (PCV20)"}],
+                        "text": "Pneumococcal conjugate vaccine 20-valent (PCV20)",
+                    },
+                    "occurrenceDateTime": "2025-11-12",
+                    "performer": [{"actor": {"display": "WA State IIS Immunization Registry"}}],
+                },
+            },
+            {
+                "fullUrl": "urn:uuid:margaret-obs-a1c-1",
+                "resource": {
+                    "resourceType": "Observation",
+                    "id": "margaret-obs-a1c-1",
+                    "status": "final",
+                    "category": [{"coding": [{"code": "laboratory"}]}],
+                    "code": {"coding": [{"system": "http://loinc.org", "code": "4548-4", "display": "Hemoglobin A1c/Hemoglobin.total in Blood"}]},
+                    "effectiveDateTime": "2024-07-18",
+                    "valueQuantity": {"value": 7.4, "unit": "%"},
+                },
+            },
+            {
+                "fullUrl": "urn:uuid:margaret-obs-a1c-2",
+                "resource": {
+                    "resourceType": "Observation",
+                    "id": "margaret-obs-a1c-2",
+                    "status": "final",
+                    "category": [{"coding": [{"code": "laboratory"}]}],
+                    "code": {"coding": [{"system": "http://loinc.org", "code": "4548-4", "display": "Hemoglobin A1c/Hemoglobin.total in Blood"}]},
+                    "effectiveDateTime": "2026-02-12",
+                    "valueQuantity": {"value": 6.7, "unit": "%"},
+                },
+            },
+            {
+                "fullUrl": "urn:uuid:margaret-obs-sbp-1",
+                "resource": {
+                    "resourceType": "Observation",
+                    "id": "margaret-obs-sbp-1",
+                    "status": "final",
+                    "category": [{"coding": [{"code": "vital-signs"}]}],
+                    "code": {"coding": [{"system": "http://loinc.org", "code": "8480-6", "display": "Systolic blood pressure"}]},
+                    "effectiveDateTime": "2026-01-28",
+                    "valueQuantity": {"value": 96.0, "unit": "mm[Hg]"},
+                },
+            },
+            {
+                "fullUrl": "urn:uuid:margaret-obs-sbp-2",
+                "resource": {
+                    "resourceType": "Observation",
+                    "id": "margaret-obs-sbp-2",
+                    "status": "final",
+                    "category": [{"coding": [{"code": "vital-signs"}]}],
+                    "code": {"coding": [{"system": "http://loinc.org", "code": "8480-6", "display": "Systolic blood pressure"}]},
+                    "effectiveDateTime": "2026-02-12",
+                    "valueQuantity": {"value": 124.0, "unit": "mm[Hg]"},
+                },
+            },
+            {
+                "fullUrl": "urn:uuid:margaret-note-geriatrics",
+                "resource": {
+                    "resourceType": "DocumentReference",
+                    "id": "margaret-note-geriatrics",
+                    "status": "current",
+                    "type": {"text": "Geriatric Fall & Polypharmacy Consultation Note"},
+                    "date": "2026-02-12T10:30:00+00:00",
+                    "content": [{"attachment": {"contentType": "text/plain; charset=utf-8", "data": margaret_note_b64}}],
                 },
             },
         ],
     }
-    smart_anomalies = [
+    margaret_anomalies = [
         {
             "anomaly_id": "smart-predm-t2dm-conflict",
             "category": "mutually_exclusive_condition_stages",
             "severity": "high",
-            "description": "Uncoded Prediabetes and coded Type 2 Diabetes Mellitus simultaneously active in SMART IPS summary.",
+            "description": "Uncoded Prediabetes and coded Type 2 Diabetes Mellitus simultaneously active.",
             "expected_resource_uuids": ["smart-cond-predm", "smart-cond-t2dm"],
+        },
+        {
+            "anomaly_id": "margaret-beers-sedative-dup",
+            "category": "cross_source_therapeutic_class_duplicate",
+            "severity": "high",
+            "description": "Concurrent active Ativan 1 MG [lorazepam] and Ambien 10 MG [zolpidem] in an older adult with falls.",
+            "expected_resource_uuids": ["margaret-med-ativan", "margaret-med-ambien"],
         },
         {
             "anomaly_id": "smart-statin-class-dup",
@@ -1279,11 +2097,29 @@ def build_deidentified_real_clinical_summaries() -> Dict[str, Tuple[Dict[str, An
             "description": "Uncoded Lipitor 40 MG and coded Simvastatin 20 MG simultaneously active.",
             "expected_resource_uuids": ["smart-med-atorva", "smart-med-simva"],
         },
+        {
+            "anomaly_id": "margaret-pneumo-iis-dup",
+            "category": "cross_source_immunization_duplicate",
+            "severity": "medium",
+            "description": "PCV20 pneumococcal vaccine recorded 2 days apart across clinic and WA IIS registry.",
+            "expected_resource_uuids": ["margaret-imm-pneumo-clinic", "margaret-imm-pneumo-iis"],
+        },
+        {
+            "anomaly_id": "margaret-note-stop-sedatives-glipizide",
+            "category": "note_vs_structured_medication_contradiction",
+            "severity": "high",
+            "description": "Geriatrics note instructs to discontinue Ambien and lorazepam and hold glipizide while structured orders remain active.",
+            "expected_resource_uuids": ["margaret-med-ambien", "margaret-med-ativan", "margaret-med-glipizide", "margaret-note-geriatrics"],
+        },
     ]
     return {
-        "MIMIC_IV_Cardiorenal_Summary.json": (mimic_bundle, mimic_anomalies),
-        "SMART_IPS_Transition_Summary.json": (smart_ips_bundle, smart_anomalies),
+        "Elena_Rostova_Cardiorenal.json": (elena_bundle, elena_anomalies),
+        "Arthur_Pendelton_Anticoag.json": (arthur_bundle, arthur_anomalies),
+        "Margaret_Chen_Polypharmacy.json": (margaret_bundle, margaret_anomalies),
+        "MIMIC_IV_Cardiorenal_Summary.json": (elena_bundle, elena_anomalies),
+        "SMART_IPS_Transition_Summary.json": (margaret_bundle, margaret_anomalies),
     }
+
 
 
 def generate_wahs_eval_suite(source_dir: Path, output_dir: Path) -> Dict[str, Any]:

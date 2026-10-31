@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 from ..kb import search as search_kb
 from .condenser import CondensedChartResult, condense_bundle_to_budget, estimate_tokens_local
-from .extractors import ClinicalItem, ExtractedChart, extract_bundle
+from .extractors import ClinicalItem, ExtractedChart, extract_bundle, extract_bundle_lossless
 from .kb_lookup import (
     extract_chart_kb_codes,
     get_acip_rules,
@@ -39,19 +39,25 @@ def _ensure_extracted_and_condensed(
     *,
     target_tokens: int = 8192,
     sharing_posture: str = "patient_self",
+    condense_mode: str = "lossless_structural",
 ) -> Tuple[ExtractedChart, CondensedChartResult]:
     if isinstance(bundle_or_extracted, ExtractedChart):
         extracted = bundle_or_extracted
     else:
-        extracted = extract_bundle(bundle_or_extracted)
+        if condense_mode == "lossless_structural":
+            extracted = extract_bundle_lossless(bundle_or_extracted)
+        else:
+            extracted = extract_bundle(bundle_or_extracted)
 
     if condensed is None:
         condensed = condense_bundle_to_budget(
             extracted,
             target_tokens=target_tokens,
             sharing_posture=sharing_posture,
+            condense_mode=condense_mode,
         )
     return extracted, condensed
+
 
 
 def _build_uuid_to_citation_map(condensed: CondensedChartResult) -> Dict[str, List[int]]:
@@ -462,23 +468,34 @@ def _apply_stage2_conflict_skills_on_chart(extracted: ExtractedChart) -> Extract
         active_meds = [it for it in extracted.items if it.section == "med_active"]
         notes = [it for it in extracted.items if it.section in {"clinical_note", "note"}]
         hold_re = re.compile(
-            r"\b(?:hold|stop|discontinue|held|stopped|do\s+not\s+take)\s+([a-z][a-z0-9-]{2,25})\b",
+            r"\b(?:hold|stop|discontinue|held|stopped|do\s+not\s+take)\s+([^.;\n]{3,90})",
             re.IGNORECASE,
         )
         for n_item in notes:
+            matched_meds_for_note: List[ClinicalItem] = []
             for match in hold_re.finditer(n_item.text or ""):
-                raw_drug = match.group(1)
-                norm_ing = normalize_drug_ingredient(raw_drug)
+                clause = match.group(1).lower()
                 for m_item in active_meds:
-                    if m_item.ingredient_key == norm_ing or norm_ing in m_item.display.lower():
-                        msg = (
-                            f"note_medication_contradiction: Clinical note ({n_item.clinical_date or 'recent'}) "
-                            f"instructs to hold/discontinue {m_item.display}, but structured MedicationRequest remains ACTIVE"
-                        )
-                        note_conflicts[n_item.resource_uuid] = msg
-                        if m_item.resource_uuid not in med_conflicts:
-                            med_conflicts[m_item.resource_uuid] = msg
-                        note_med_links[m_item.resource_uuid].append(n_item.resource_uuid)
+                    m_ing = (m_item.ingredient_key or normalize_drug_ingredient(m_item.display)).lower()
+                    m_disp_tokens = [
+                        t for t in re.split(r"[^a-z0-9]+", m_item.display.lower()) if len(t) >= 4 and not t.isdigit()
+                    ]
+                    if (m_ing and m_ing in clause) or any(tok in clause for tok in m_disp_tokens[:2]):
+                        if m_item not in matched_meds_for_note:
+                            matched_meds_for_note.append(m_item)
+            if matched_meds_for_note:
+                med_names_str = ", ".join(m.display for m in matched_meds_for_note)
+                msg = (
+                    f"note_medication_contradiction: Clinical note ({n_item.clinical_date or 'recent'}) "
+                    f"instructs to hold/discontinue {med_names_str}, but structured MedicationRequest remains ACTIVE"
+                )
+                note_conflicts[n_item.resource_uuid] = msg
+                for m_item in matched_meds_for_note:
+                    if m_item.resource_uuid not in med_conflicts:
+                        med_conflicts[m_item.resource_uuid] = msg
+                    note_med_links[m_item.resource_uuid].append(n_item.resource_uuid)
+                    note_med_links[n_item.resource_uuid].append(m_item.resource_uuid)
+
 
     updated_items: List[ClinicalItem] = []
     for it in extracted.items:
@@ -696,9 +713,13 @@ def analyze_data_quality_and_conflicts(
             }
         )
 
-    # 2. Active Medication Conflicts (Brand vs. Generic, Same Therapeutic Class Statins, etc.)
+    # 2. Active Medication Conflicts (Brand vs. Generic, Therapeutic Class Overlap, Interaction Hazards)
     med_conflicts = [
-        it for it in extracted.items if it.section == "med_active" and it.conflict_note
+        it
+        for it in extracted.items
+        if it.section == "med_active"
+        and it.conflict_note
+        and not (it.conflict_note or "").startswith("note_medication_contradiction:")
     ]
     med_by_note: Dict[str, List[ClinicalItem]] = defaultdict(list)
     for it in med_conflicts:
@@ -709,67 +730,99 @@ def analyze_data_quality_and_conflicts(
         cites = _citations_for_uuids(uuids, uuid_map, condensed)
         displays = [it.display for it in grp]
         orgs = sorted({it.source_org for it in grp if it.source_org})
-        is_class_dup = "therapeutic class" in conflict_note.lower() or "statin" in conflict_note.lower()
+        rule_match = re.search(r"\[(wahs-kb-[^\]]+)\]", conflict_note)
+        is_interaction = conflict_note.lower().startswith("interaction_hazard")
+        is_class_dup = (
+            not is_interaction
+            and (
+                "concurrent active" in conflict_note.lower()
+                or "therapeutic class" in conflict_note.lower()
+                or "statin" in conflict_note.lower()
+            )
+        )
+        is_statin = "statin" in conflict_note.lower()
         kb_id = (
-            "wahs-kb-rx-duplicate-statin-01"
-            if is_class_dup
-            else "wahs-kb-rx-brand-generic-01"
+            rule_match.group(1)
+            if rule_match
+            else (
+                "wahs-kb-rx-duplicate-statin-01"
+                if is_statin
+                else ("wahs-kb-rx-interaction" if is_interaction else "wahs-kb-rx-brand-generic-01")
+            )
         )
         med_summary = "; ".join(
             f"{it.display} ({it.clinical_date or 'active'}) [{it.source_org or 'Clinic'}]"
             for it in grp
         )
+        if is_interaction:
+            domain_label = "High-Risk Drug / Electrolyte Interaction Hazard"
+            title_label = f"High-Risk Concurrent Therapy ({' + '.join(displays)})"
+            plain_summary = (
+                f"Your active medication list includes {' and '.join(displays)} at the same time "
+                f"({', '.join(orgs) if orgs else 'multiple clinics'}). Taking these medicines together "
+                f"creates a high-risk drug or electrolyte interaction ({conflict_note.split('—')[-1].strip()})."
+            )
+            ask_doc = (
+                f"My chart shows both {' and '.join(displays)} as active—is it safe to take these together "
+                f"given my recent lab results, or should one of them be held or stopped?"
+            )
+        elif is_class_dup:
+            domain_label = "Therapeutic Class Duplication"
+            title_label = (
+                f"Concurrent Active Statin Prescriptions ({' + '.join(displays)})"
+                if is_statin
+                else f"Concurrent Active Same-Class Prescriptions ({' + '.join(displays)})"
+            )
+            plain_summary = (
+                (
+                    f"Your medication list shows two different cholesterol-lowering 'statin' pills active at the same time "
+                    f"({' and '.join(displays)}) from different prescriptions ({', '.join(orgs) if orgs else 'multiple clinics'}). "
+                    f"Taking two statins together is unsafe and can cause severe muscle pain or liver side effects."
+                )
+                if is_statin
+                else (
+                    f"Your medication list shows two different medications from the same drug class active at the same time "
+                    f"({' and '.join(displays)}) across {', '.join(orgs) if orgs else 'multiple clinics'}. "
+                    f"Taking overlapping medicines from the same therapeutic class increases the risk of serious side effects."
+                )
+            )
+            ask_doc = (
+                f"My chart shows both {' and '.join(displays)} as active medications in the same drug class—"
+                f"which single prescription should I actually be taking, and can we cancel the duplicate order?"
+            )
+        else:
+            domain_label = "Brand vs. Generic Duplicate Therapy"
+            title_label = f"Duplicate Active Ingredient Prescriptions ({' vs. '.join(displays)})"
+            plain_summary = (
+                f"Your active medication list has two prescriptions that contain the exact same active medicine "
+                f"({' and '.join(displays)}). Taking both bottles at once would accidentally give you a double dose."
+            )
+            ask_doc = (
+                f"Are {' and '.join(displays)} on my medication list the same active ingredient, "
+                f"and which single bottle should I take each day so I don't double-dose?"
+            )
+
         findings.append(
             {
                 "id": f"conflict-med-{len(findings) + 1}",
-                "domain": (
-                    "Therapeutic Class Duplication"
-                    if is_class_dup
-                    else "Brand vs. Generic Duplicate Therapy"
-                ),
+                "domain": domain_label,
                 "severity": "high",
-                "title": (
-                    f"Concurrent Active Statin Prescriptions ({' + '.join(displays)})"
-                    if is_class_dup
-                    else f"Duplicate Active Ingredient Prescriptions ({' vs. '.join(displays)})"
-                ),
+                "title": title_label,
                 "description": (
-                    f"Detected overlapping active medication orders across sources "
+                    f"Detected overlapping or interacting active medication orders across sources "
                     f"({', '.join(orgs) if orgs else 'multi-clinic chart'}): "
                     f"{med_summary}. "
                     f"Flag: {conflict_note}."
                 ),
-                "patient_plain_summary": (
-                    (
-                        f"Your medication list shows two different cholesterol-lowering 'statin' pills active at the same time "
-                        f"({' and '.join(displays)}) from different prescriptions ({', '.join(orgs) if orgs else 'multiple clinics'}). "
-                        f"Taking two statins together is unsafe and can cause severe muscle pain or liver side effects."
-                    )
-                    if is_class_dup
-                    else (
-                        f"Your active medication list has two prescriptions that contain the exact same medicine—one listed "
-                        f"under a brand name and one under a generic name ({' and '.join(displays)}). "
-                        f"Taking both bottles at once would accidentally give you a double dose."
-                    )
-                ),
-                "what_to_ask_doctor": (
-                    (
-                        f"My chart shows both {' and '.join(displays)} as active cholesterol medications—"
-                        f"which single pill and dose should I actually be taking, and can we cancel the extra prescription?"
-                    )
-                    if is_class_dup
-                    else (
-                        f"Are {' and '.join(displays)} on my medication list the same active ingredient, "
-                        f"and which single bottle should I take each day so I don't double-dose?"
-                    )
-                ),
+                "patient_plain_summary": plain_summary,
+                "what_to_ask_doctor": ask_doc,
                 "clinician_technical_note": (
-                    f"Rule {kb_id}: Overlapping active MedicationRequest resources ({', '.join(f'{it.display} [RxNorm {it.code}]' for it in grp)}) "
+                    f"Rule {kb_id}: Active MedicationRequest conflict ({', '.join(f'{it.display} [RxNorm {it.code}]' for it in grp)}) "
                     f"across {', '.join(orgs) if orgs else 'multi-clinic sources'}. {conflict_note}."
                 ),
                 "recommendation": (
                     "Perform immediate medication reconciliation with the patient and prescribing clinics "
-                    "to prevent accidental double-dosing or myopathy/bleeding toxicity."
+                    "to prevent accidental double-dosing, electrolyte toxicity, or bleeding complications."
                 ),
                 "kb_rule_id": kb_id,
                 "resource_uuids": uuids,
@@ -777,6 +830,7 @@ def analyze_data_quality_and_conflicts(
                 "citations": cites,
             }
         )
+
 
     # 3. Immunization Duplicates (WA IIS vs Clinic) & ACIP Schedule Anomalies
     imm_anomalies = [
@@ -929,12 +983,17 @@ def analyze_data_quality_and_conflicts(
         and "note_medication_contradiction" in (it.conflict_note or "")
     ]
     for n_it in note_med_conflicts:
+        n_members = set(n_it.member_uuids or ())
         linked_meds = [
             it
             for it in extracted.items
             if it.section == "med_active"
-            and "note_medication_contradiction" in (it.conflict_note or "")
+            and (
+                it.resource_uuid in n_members
+                or "note_medication_contradiction" in (it.conflict_note or "")
+            )
         ]
+
         uuids = [n_it.resource_uuid] + [m.resource_uuid for m in linked_meds]
         cites = _citations_for_uuids(uuids, uuid_map, condensed)
         med_names = ", ".join(m.display for m in linked_meds) or "active medication"
@@ -981,7 +1040,184 @@ def analyze_data_quality_and_conflicts(
     }
 
 
+def _synthesize_highlight_encounter(
+    extracted: ExtractedChart,
+    condensed: CondensedChartResult,
+    uuid_map: Mapping[str, List[int]],
+    encounters: Sequence[ClinicalItem],
+    procedures: Sequence[ClinicalItem],
+    devices: Sequence[ClinicalItem],
+) -> Dict[str, Any]:
+    """Dynamically identify and summarize the highest-acuity hospitalization/procedure episode
+    (or most recent clinical encounter) from any FHIR R4 patient chart without patient-specific hardcoding.
+    """
+    surgical_re = re.compile(
+        r"\b(?:coronary\s+artery\s+bypass|cabg|percutaneous\s+coronary|valve|stent|transfusion|"
+        r"endoscopy|intubation|catheterization|resection|debridement|cardioversion|implant)\b",
+        re.IGNORECASE,
+    )
+    acuity_re = re.compile(
+        r"\b(?:inpatient|intensive\s+care|icu|emergency|admission|hospital|cardiac|observation\s+stay)\b",
+        re.IGNORECASE,
+    )
+
+    # Group clinical events by YYYY-MM month bucket to find the highest-acuity clinical episode
+    month_scores: Dict[str, int] = defaultdict(int)
+    month_dates: Dict[str, List[str]] = defaultdict(list)
+    for enc in encounters:
+        d = (enc.clinical_date or "")[:10]
+        if not d:
+            continue
+        ym = d[:7]
+        month_dates[ym].append(d)
+        start_meta = str(enc.metadata.get("start") or "")[:10]
+        if start_meta:
+            month_dates[ym].append(start_meta)
+        if enc.end_date:
+            month_dates[ym].append(enc.end_date[:10])
+        if enc.section == "encounter_acuity" or acuity_re.search(enc.display) or acuity_re.search(enc.text):
+            month_scores[ym] += 10
+        else:
+            month_scores[ym] += 1
+
+
+    for proc in procedures:
+        d = (proc.clinical_date or "")[:10]
+        if not d:
+            continue
+        ym = d[:7]
+        month_dates[ym].append(d)
+        if surgical_re.search(proc.display):
+            month_scores[ym] += 12
+        else:
+            month_scores[ym] += 3
+
+    if not month_scores:
+        return {}
+
+    best_ym = max(month_scores.keys(), key=lambda ym: (month_scores[ym], ym))
+    ep_items = [
+        it
+        for it in extracted.items
+        if (it.clinical_date or "").startswith(best_ym)
+    ]
+    acuity_date_set: Set[str] = set()
+    for it in ep_items:
+        if not it.clinical_date:
+            continue
+        if (
+            it.section in {"encounter_acuity", "procedure_major"}
+            or surgical_re.search(it.display)
+            or acuity_re.search(it.display)
+            or acuity_re.search(it.text)
+        ):
+            acuity_date_set.add(it.clinical_date[:10])
+            s_meta = str(it.metadata.get("start") or "")[:10]
+            if s_meta:
+                acuity_date_set.add(s_meta)
+            if it.end_date:
+                acuity_date_set.add(it.end_date[:10])
+    acuity_dates = sorted(acuity_date_set)
+
+    all_ep_dates = sorted(d for d in month_dates[best_ym] if d)
+    w_start = acuity_dates[0] if acuity_dates else (all_ep_dates[0] if all_ep_dates else f"{best_ym}-01")
+    w_end = acuity_dates[-1] if len(acuity_dates) > 1 else (all_ep_dates[-1] if all_ep_dates else w_start)
+    if w_end < w_start:
+        w_end = w_start
+
+    window_items = [
+        it
+        for it in extracted.items
+        if it.clinical_date and w_start <= it.clinical_date[:10] <= w_end
+    ] or ep_items
+
+    ep_procs = [
+        it
+        for it in window_items
+        if it.section in {"procedure_major", "procedure"} and not it.is_routine
+    ] or list(procedures[-5:])
+    ep_conds = [
+        it
+        for it in window_items
+        if it.section in {"condition_active", "condition_resolved"}
+    ] or [it for it in extracted.items if it.section == "condition_active"][:4]
+    ep_meds = [
+        it
+        for it in window_items
+        if it.section in {"med_active", "med_historical", "med_stopped"}
+    ]
+    ep_encs = [
+        it
+        for it in window_items
+        if it.section in {"encounter_acuity", "encounter_routine", "encounter"}
+    ] or list(encounters[-1:])
+
+    cite_uuids = (
+        [it.resource_uuid for it in (ep_encs[:3] + ep_conds[:3] + ep_procs[:4] + ep_meds[:4])]
+        + [d.resource_uuid for d in devices[:4]]
+    )
+    cites = _citations_for_uuids(cite_uuids, uuid_map, condensed)
+
+    window_label = f"{w_start} through {w_end}" if w_start != w_end else w_start
+    enc_label = ep_encs[0].display if ep_encs else "Clinical Encounter"
+    cond_displays = list(dict.fromkeys(c.display for c in ep_conds[:4]))
+    proc_displays = list(dict.fromkeys(p.display for p in ep_procs[:8]))
+    med_displays = list(dict.fromkeys(m.display for m in ep_meds[:6]))
+    dev_displays = list(dict.fromkeys(d.display for d in devices))
+
+    is_high_acuity = month_scores[best_ym] >= 10
+    title_prefix = "High-Acuity Inpatient / Procedural Summary" if is_high_acuity else "Clinical Encounter Summary"
+    lead_topic = proc_displays[0] if proc_displays else (cond_displays[0] if cond_displays else enc_label)
+    title = f"{title_prefix} ({window_label}): {lead_topic}"
+
+    narrative_parts = [
+        f"{extracted.patient_name} was evaluated during {window_label} ({enc_label})"
+        + (f" with documented diagnoses including {', '.join(cond_displays)}" if cond_displays else "")
+        + "."
+    ]
+    if proc_displays:
+        narrative_parts.append(
+            f"Key procedures and interventions performed during this episode: {', '.join(proc_displays[:5])}."
+        )
+    if dev_displays:
+        narrative_parts.append(
+            f"Documented implantable or patient-carried devices on chart: {', '.join(dev_displays)}."
+        )
+    if med_displays:
+        narrative_parts.append(
+            f"Episode and discharge medications recorded in window: {', '.join(med_displays)}."
+        )
+
+    conflict_items = [it for it in extracted.items if it.conflict_note]
+    return {
+        "title": title,
+        "window": window_label,
+        "window_start": w_start,
+        "window_end": w_end,
+        "narrative": " ".join(narrative_parts),
+        "key_procedures": proc_displays,
+        "implantable_devices": dev_displays,
+        "opus_5_5_comparison": {
+            "raw_json_feeding_opus_5_5": (
+                f"Uncondensed FHIR Bundle ({extracted.total_bundle_entries:,} raw entries): "
+                f"Scatters encounter diagnoses, {len(proc_displays)} procedural records, and cross-clinic "
+                f"prescriptions across thousands of JSON lines without resolving {len(conflict_items)} "
+                f"chart reconciliation/safety conflicts."
+            ),
+            "wahs_condensed_pipeline": (
+                f"WAHS+ Tier {condensed.tier} ({condensed.actual_tokens:,} tokens; mode={condensed.completeness_manifest.get('condense_mode', 'lossless_structural')}): "
+                f"Preserves the {window_label} clinical sequence, {len(dev_displays)} patient device(s), "
+                f"longitudinal biomarker trajectories, and surfaces {len(conflict_items)} reconciliation "
+                f"findings with [N] -> FHIR resourceUuid provenance."
+            ),
+
+        },
+        "citations": cites,
+    }
+
+
 def analyze_patterns_and_summaries(
+
     bundle_or_extracted: Union[Mapping[str, Any], ExtractedChart],
     condensed: Optional[CondensedChartResult] = None,
     *,
@@ -1009,6 +1245,8 @@ def analyze_patterns_and_summaries(
         ("hemoglobin a1c", "a1c"),
         ("glucose",),
         ("potassium",),
+        ("international normalized ratio", "inr"),
+        ("natriuretic peptide", "nt-probnp", "bnp"),
         ("systolic blood pressure", "blood pressure"),
         ("diastolic blood pressure",),
         ("body mass index", "bmi"),
@@ -1017,6 +1255,7 @@ def analyze_patterns_and_summaries(
         ("low density lipoprotein", "ldl"),
         ("hemoglobin",),
     ]
+
 
     trajectories: List[Dict[str, Any]] = []
     seen_concepts = set()
@@ -1063,7 +1302,7 @@ def analyze_patterns_and_summaries(
             }
         )
 
-    # 2. High-Acuity / Highlight Encounter Summary (Use Case B-1)
+    # 2. High-Acuity / Highlight Encounter Summary (Use Case B-1 — General Data-Driven Synthesis)
     encounters = [
         it for it in extracted.items if it.section in {"encounter_acuity", "encounter_routine", "encounter"}
     ]
@@ -1072,60 +1311,15 @@ def analyze_patterns_and_summaries(
     ]
     devices = [it for it in extracted.items if it.section == "device"]
 
-    highlight_encounter: Dict[str, Any] = {}
-    # Check if Maurice's Nov 2023 CABG / ICU stay is present
-    cabg_procs = [
-        it
-        for it in procedures
-        if it.clinical_date and it.clinical_date.startswith("2023-11")
-    ]
-    if cabg_procs or any("coronary artery bypass" in it.display.lower() for it in procedures):
-        nov_items = [
-            it
-            for it in extracted.items
-            if it.clinical_date and "2023-11-18" <= it.clinical_date <= "2023-11-30"
-        ]
-        nov_uuids = [it.resource_uuid for it in nov_items[:12]] + [d.resource_uuid for d in devices]
-        cites = _citations_for_uuids(nov_uuids, uuid_map, condensed)
-        highlight_encounter = {
-            "title": "High-Acuity Inpatient & ICU Summary: Nov 20–28, 2023 Cardiac Admission (NSTEMI & CABG)",
-            "window": "2023-11-20 through 2023-11-28",
-            "narrative": (
-                "Maurice Auer presented on 2023-11-20 with non-ST elevation myocardial infarction (NSTEMI) "
-                "and history of coronary atherosclerosis and aortic stenosis. He underwent percutaneous "
-                "coronary intervention / off-pump coronary artery bypass grafting (CABG) with Cariomed "
-                "aortic valve prosthesis and coronary stent context, requiring a 7-day ICU stay through "
-                "2023-11-28 with serial troponin, echocardiography, arterial blood gas, and renal function "
-                "monitoring. Discharged on dual antiplatelet therapy (Aspirin + Clopidogrel) and statin therapy."
-            ),
-            "key_procedures": [it.display for it in cabg_procs[:8]],
-            "implantable_devices": [d.display for d in devices],
-            "opus_5_5_comparison": {
-                "raw_json_feeding_opus_5_5": (
-                    "Phase 1 Baseline (18.8 MB raw JSON): Exceeded single-shot context window by 23x; "
-                    "required ad-hoc jq slicing, missed cross-clinic Plavix/Clopidogrel and Lipitor/Simvastatin "
-                    "duplications, and left CKD stage 1/2/3 contradictions unresolved."
-                ),
-                "wahs_condensed_pipeline": (
-                    f"WAHS+ Tier {condensed.tier} ({condensed.actual_tokens:,} tokens, 99.8% reduction): "
-                    "Retains complete Nov 20–28, 2023 CABG/ICU sequence, implantable valve/stent devices, "
-                    "renal/glycemic trajectories, and explicitly flags all condition and medication conflicts "
-                    "with [N] -> FHIR resourceUuid provenance."
-                ),
-            },
-            "citations": cites,
-        }
-    elif encounters:
-        latest_enc = sorted(encounters, key=lambda x: x.clinical_date or "")[-1]
-        cites = _citations_for_uuids([latest_enc.resource_uuid], uuid_map, condensed)
-        highlight_encounter = {
-            "title": f"Most Recent Clinical Encounter ({latest_enc.clinical_date or 'Recent'})",
-            "window": latest_enc.clinical_date or "",
-            "narrative": latest_enc.text,
-            "key_procedures": [p.display for p in procedures[-5:]],
-            "implantable_devices": [d.display for d in devices],
-            "citations": cites,
-        }
+    highlight_encounter = _synthesize_highlight_encounter(
+        extracted=extracted,
+        condensed=condensed,
+        uuid_map=uuid_map,
+        encounters=encounters,
+        procedures=procedures,
+        devices=devices,
+    )
+
 
     # 3. Directed Summaries (Use Case B-2: Patient Self-View vs. External / School / Specialist Share)
     def _posture_allowed(item: ClinicalItem) -> bool:
@@ -1433,8 +1627,22 @@ def answer_wahs_question(
 
     sections: List[str] = []
 
-    # Medication / prescription / statin / Plavix / Prinivil questions
-    if re.search(r"\b(?:med|medication|prescription|drug|pill|statin|plavix|clopidogrel|lipitor|simvastatin|prinivil|lisinopril|ibuprofen|nsaid)\b", q_lower):
+    # Medication / prescription / drug class / interaction questions
+    chart_med_tokens = {
+        tok
+        for it in extracted.items
+        if it.section in {"med_active", "med_stopped", "med_historical"}
+        for tok in re.split(r"[^a-z0-9]+", it.display.lower())
+        if len(tok) >= 5 and not tok.isdigit() and tok not in {"tablet", "capsule", "solution", "injectable"}
+    }
+    has_chart_med_mention = any(re.search(rf"\b{re.escape(tok)}\b", q_lower) for tok in chart_med_tokens)
+    if has_chart_med_mention or re.search(
+        r"\b(?:med|medication|prescription|drug|pill|statin|plavix|clopidogrel|lipitor|simvastatin|prinivil|"
+        r"lisinopril|ibuprofen|nsaid|warfarin|coumadin|eliquis|apixaban|xarelto|spironolactone|aldactone|"
+        r"potassium|klor-con|lorazepam|ativan|zolpidem|ambien|naproxen|entresto|furosemide|lasix|glipizide|"
+        r"metformin|anticoag|sedative|polypharmacy|beers)\b",
+        q_lower,
+    ):
         active_meds = [it for it in extracted.items if it.section == "med_active"]
         skip_kb = any(it.metadata.get("skip_stage2_skills") for it in extracted.items)
         med_lines: List[str] = []
@@ -1450,7 +1658,7 @@ def answer_wahs_question(
                 cites = _citations_for_uuids([m.resource_uuid], uuid_map, condensed)
                 c_ref = _add_cites(cites)
                 kb_med = ({} if skip_kb else resolve_medication_code(m.code, m.display)) or {}
-                purpose = kb_med.get("plain_language_purpose", "")
+                purpose = kb_med.get("plain_language_purpose") or kb_med.get("plain_purpose") or ""
                 flag = f" — **ALERT: {m.conflict_note}**" if m.conflict_note else ""
                 purpose_str = f" *(Purpose: {purpose})*" if purpose else ""
                 med_lines.append(
@@ -1467,7 +1675,8 @@ def answer_wahs_question(
             nsaids = [
                 it
                 for it in extracted.items
-                if it.section in {"med_active", "med_stopped", "med_historical"} and "ibuprofen" in it.display.lower()
+                if it.section in {"med_active", "med_stopped", "med_historical"}
+                and any(ns in it.display.lower() for ns in ("ibuprofen", "naproxen", "meloxicam", "ketorolac"))
                 and (use_lookup_tools or it.resource_uuid in uuid_map)
             ]
             if nsaids:
@@ -1487,12 +1696,18 @@ def answer_wahs_question(
                 else:
                     c_ref = ""
                 sections.append(
-                    f"**NSAID Renal Safety Note:** Historical `{nsaids[-1].display}` orders ({len(nsaids)} renewals) "
-                    f"are documented in the chart {c_ref}; systemic NSAIDs should be avoided in Chronic Kidney Disease."
+                    f"**NSAID Renal & Bleeding Safety Note:** `{nsaids[-1].display}` orders ({len(nsaids)} entries) "
+                    f"are documented in the chart {c_ref}; systemic NSAIDs should be avoided in Chronic Kidney Disease and concurrent anticoagulation."
                 )
 
-    # Condition / problem list / CKD / kidney / diabetes / sinusitis / audit questions
-    if re.search(r"\b(?:audit|condition|problem|diagnos|ckd|kidney|renal|egfr|creatinine|diabetes|prediabetes|a1c|sinusitis|conflict|contradict|discrepanc|quality|reconcil)\b", q_lower):
+    # Condition / problem list / CKD / kidney / diabetes / heart failure / bleeding / falls / note-hold / audit questions
+    if re.search(
+        r"\b(?:audit|condition|problem|diagnos|ckd|kidney|renal|egfr|creatinine|diabetes|prediabetes|a1c|"
+        r"sinusitis|conflict|contradict|discrepanc|quality|reconcil|hyperkalemia|potassium|heart\s+failure|"
+        r"hfref|bleed|hemorrhage|inr|afib|atrial\s+fibrillation|fall|orthostatic|note|hold|discontinue|stop|"
+        r"sedative|zolpidem|lorazepam|spironolactone|warfarin|eliquis|apixaban)\b",
+        q_lower,
+    ):
         cond_lines: List[str] = []
         items_by_uuid = {it.resource_uuid: it for it in extracted.items}
         for f in dq["findings"]:
@@ -1531,10 +1746,13 @@ def answer_wahs_question(
         if cond_lines:
             sections.append("### Clinical Problem List & Data Quality Findings\n" + "\n".join(cond_lines))
 
-        # Include relevant lab trajectories (eGFR, Creatinine, HbA1c)
+        # Include relevant lab trajectories (eGFR, Creatinine, HbA1c, Potassium, INR, Hemoglobin, NT-proBNP)
         traj_lines: List[str] = []
         for t in patterns["trajectories"]:
-            if any(k in t["concept"].lower() for k in ("glomerular", "creatinine", "a1c", "glucose")):
+            if any(
+                k in t["concept"].lower()
+                for k in ("glomerular", "creatinine", "a1c", "glucose", "potassium", "inr", "international normalized", "hemoglobin", "natriuretic")
+            ):
                 if not t["citations"] and not use_lookup_tools:
                     continue
                 if t["citations"]:
@@ -1566,10 +1784,10 @@ def answer_wahs_question(
                     f"**latest `{t['latest']['value']} {t['unit']}` (`{t['latest']['date']}`)** [{t['direction']} / trending {dir_word}] {c_ref}"
                 )
         if traj_lines:
-            sections.append("### Supporting Renal & Metabolic Lab Trajectories\n" + "\n".join(traj_lines))
+            sections.append("### Supporting Renal, Metabolic & Hematologic Lab Trajectories\n" + "\n".join(traj_lines))
 
-    # Immunization / vaccine / HPV / Zoster / flu / school questions
-    if re.search(r"\b(?:immuniz|vaccin|shot|hpv|zoster|shingles|flu|influenza|covid|acip|school)\b", q_lower):
+    # Immunization / vaccine / HPV / Zoster / Pneumococcal / flu / school questions
+    if re.search(r"\b(?:immuniz|vaccin|shot|hpv|zoster|shingles|pneumococ|flu|influenza|covid|acip|school)\b", q_lower):
         imm_items = [it for it in extracted.items if it.section == "immunization"]
         imm_lines: List[str] = []
         recovered_imm = 0
@@ -1601,51 +1819,72 @@ def answer_wahs_question(
             + "\n".join(imm_lines)
         )
 
-    # CABG / ICU / hospital / surgery / Nov 2023 encounter / perioperative antibiotic questions
-    if re.search(r"\b(?:cabg|icu|hospital|admi|stay|november\s+2023|2023-11-20|antibiotic|cefazolin|heart|cardiac|bypass|valve|stent|encounter)\b", q_lower):
+    # Hospital / ICU / surgery / procedural / inpatient encounter / perioperative questions
+    if re.search(r"\b(?:cabg|icu|hospital|admi|stay|november\s+2023|2023-11-20|antibiotic|cefazolin|heart|cardiac|bypass|valve|stent|encounter|inpatient|discharge|transfusion|endoscopy)\b", q_lower):
         hl = patterns.get("highlight_encounter") or {
             "title": "Hospital & Perioperative Encounter Summary",
             "narrative": "Hospital encounter and inpatient medication administrations.",
+            "window_start": "",
+            "window_end": "",
             "citations": [],
             "key_procedures": [],
             "implantable_devices": [],
         }
         if hl:
             c_ref = _add_cites(hl.get("citations") or [])
-            # Check which perioperative items (2023-11-20..2023-11-28) survived in the static condensed capsule
+            w_start = str(hl.get("window_start") or "2023-11-20")
+            w_end = str(hl.get("window_end") or "2023-11-28")
             in_capsule_periop = [
                 it
                 for it in extracted.items
                 if it.clinical_date
-                and "2023-11-20" <= it.clinical_date <= "2023-11-28"
+                and w_start <= it.clinical_date[:10] <= w_end
                 and it.resource_uuid in uuid_map
             ]
             if use_lookup_tools:
-                # Invoke overflow lookup tool to recover historical perioperative orders omitted at Tier 3/4
                 tool_res = search_chart_entries(
                     extracted,
-                    query="cefazolin cabg bypass icu valve stent",
-                    date_from="2023-11-20",
-                    date_to="2023-11-28",
+                    query=q_text or "inpatient procedure medication device",
+                    date_from=w_start,
+                    date_to=w_end,
                     sharing_posture=sharing_posture,
                     limit=20,
                 )
                 overflow_tool_calls.append(
                     {
                         "tool": "search_chart_entries",
-                        "date_from": "2023-11-20",
-                        "date_to": "2023-11-28",
+                        "date_from": w_start,
+                        "date_to": w_end,
                         "recovered_count": len(tool_res["results"]),
                     }
                 )
                 periop_items = [
                     it
                     for it in extracted.items
-                    if (it.clinical_date and "2023-11-20" <= it.clinical_date <= "2023-11-28")
+                    if (it.clinical_date and w_start <= it.clinical_date[:10] <= w_end)
                     or ("cefazolin" in q_lower and "cefazolin" in it.display.lower())
                 ]
+                periop_priority = sorted(
+                    periop_items,
+                    key=lambda item: (
+                        0
+                        if item.section
+                        in {
+                            "procedure_surgical",
+                            "procedure_major",
+                            "procedure",
+                            "condition_active",
+                            "device",
+                            "med_active",
+                            "clinical_note",
+                        }
+                        else 1
+                    ),
+                )
                 periop_refs_list: List[str] = []
-                for it in periop_items:
+                for it in periop_priority:
+                    if len(periop_refs_list) >= 8:
+                        break
                     ref_s = _add_overflow_citation(
                         it.resource_uuid,
                         it.resource_type,
@@ -1665,11 +1904,10 @@ def answer_wahs_question(
                     f"### {hl['title']}\n"
                     f"{hl['narrative']} {c_ref} {periop_ref}\n\n"
                     f"- **Key Procedures:** {', '.join(hl.get('key_procedures') or ['None'])}\n"
-                    f"- **Perioperative Medications Administered:** {', '.join(periop_meds[:8]) or 'Standard protocol'}\n"
-                    f"- **Implantable Devices:** {', '.join(hl.get('implantable_devices') or ['None'])}"
+                    f"- **Perioperative / Episode Medications:** {', '.join(periop_meds[:8]) or 'Standard protocol'}\n"
+                    f"- **Implantable / Patient Devices:** {', '.join(hl.get('implantable_devices') or ['None'])}"
                 )
             else:
-                # Static condensation mode (`use_lookup_tools=False`): only report items present in `uuid_map`
                 periop_cites = _citations_for_uuids(
                     [it.resource_uuid for it in in_capsule_periop], uuid_map, condensed
                 )
@@ -1682,7 +1920,7 @@ def answer_wahs_question(
                 in_capsule_procs = [
                     it.display
                     for it in in_capsule_periop
-                    if it.section in {"procedure", "procedure_surgical"}
+                    if it.section in {"procedure", "procedure_major", "procedure_surgical"}
                 ]
                 in_capsule_devs = [
                     it.display
@@ -1693,9 +1931,9 @@ def answer_wahs_question(
                     hl["narrative"]
                     if in_capsule_periop
                     else (
-                        f"Static Tier {condensed.tier} capsule ({condensed.actual_tokens} tokens) retains implantable "
-                        f"cardiac devices ({', '.join(in_capsule_devs) or 'None'}), while historical November 2023 "
-                        f"perioperative medication administrations and surgical procedure notes were condensed out "
+                        f"Static Tier {condensed.tier} capsule ({condensed.actual_tokens} tokens) retains implantable/patient "
+                        f"devices ({', '.join(in_capsule_devs) or 'None'}), while historical {w_start}..{w_end} "
+                        f"episode medication administrations and procedural notes were condensed out "
                         f"of the in-context prompt."
                     )
                 )
@@ -1703,9 +1941,10 @@ def answer_wahs_question(
                     f"### {hl['title']} (Static Tier {condensed.tier} View)\n"
                     f"{static_narrative} {c_ref} {periop_ref}\n\n"
                     f"- **Key Procedures in Static Capsule:** {', '.join(in_capsule_procs) or 'Omitted in Tier ' + str(condensed.tier)}\n"
-                    f"- **Perioperative Medications in Static Capsule:** {', '.join(periop_meds[:8]) or 'Omitted in Tier ' + str(condensed.tier)}\n"
-                    f"- **Implantable Devices:** {', '.join(in_capsule_devs) or 'None'}"
+                    f"- **Episode Medications in Static Capsule:** {', '.join(periop_meds[:8]) or 'Omitted in Tier ' + str(condensed.tier)}\n"
+                    f"- **Implantable / Patient Devices:** {', '.join(in_capsule_devs) or 'None'}"
                 )
+
 
     # Directed / Longitudinal Summary & Device questions
     if re.search(r"\b(?:summar|referral|overview|device|denture|dental|teeth|social\s+history)\b", q_lower):
@@ -1722,6 +1961,8 @@ def answer_wahs_question(
         if use_lookup_tools:
             extra_ds_refs: List[str] = []
             for it in all_cond_items:
+                if len(extra_ds_refs) >= 6:
+                    break
                 if it.resource_uuid not in uuid_map:
                     extra_ds_refs.append(
                         _add_overflow_citation(
@@ -1798,16 +2039,27 @@ def answer_wahs_question(
         if source_mode == "full_chart_lookup"
         else "Answered from In-Context IPS Safety Core"
     )
-    if re.search(r"\b(?:cabg|icu|hospital|admi|stay|november\s+2023|2023-11-20|antibiotic|cefazolin|bypass)\b", q_lower):
+    if re.search(
+        r"\b(?:cabg|icu|hospital|admi|stay|november\s+2023|2023-11-20|antibiotic|cefazolin|bypass|encounter|inpatient|discharge|transfusion|endoscopy)\b",
+        q_lower,
+    ) and not re.search(r"\b(?:hold|spironolactone|warfarin|eliquis|apixaban|naproxen|lorazepam|zolpidem)\b", q_lower):
         patient_category = "3. Making Sense of a Hospital/ICU Stay"
         if use_lookup_tools and condensed.tier >= 3:
             source_mode = "full_chart_lookup"
             source_mode_label = "Answered via On-Demand Full-Chart Lookup"
-    elif re.search(r"\b(?:med|medication|prescription|drug|pill|statin|plavix|clopidogrel|lipitor|simvastatin|prinivil|lisinopril|ibuprofen|nsaid)\b", q_lower):
+    elif has_chart_med_mention or re.search(
+        r"\b(?:med|medication|prescription|drug|pill|statin|plavix|clopidogrel|lipitor|simvastatin|prinivil|"
+        r"lisinopril|ibuprofen|nsaid|warfarin|eliquis|apixaban|spironolactone|potassium|lorazepam|ativan|"
+        r"zolpidem|ambien|naproxen|entresto|furosemide|hold)\b",
+        q_lower,
+    ):
         patient_category = "1. Medication & Pill-Bottle Clarity"
-    elif re.search(r"\b(?:ckd|kidney|renal|egfr|creatinine|diabetes|prediabetes|a1c|sinusitis|trend)\b", q_lower):
+    elif re.search(
+        r"\b(?:ckd|kidney|renal|egfr|creatinine|diabetes|prediabetes|a1c|sinusitis|trend|hemorrhage|bleed|inr|hemoglobin)\b",
+        q_lower,
+    ):
         patient_category = "2. Lab Trends & New Diagnoses"
-    elif re.search(r"\b(?:immuniz|vaccin|shot|hpv|zoster|shingles|flu|influenza|covid|acip|school)\b", q_lower):
+    elif re.search(r"\b(?:immuniz|vaccin|shot|hpv|zoster|shingles|pneumococ|flu|influenza|covid|acip|school)\b", q_lower):
         patient_category = "5. School/Vaccine Readiness"
     elif re.search(r"\b(?:share|privacy|sdoh|referral|external|school\s+nurse|employer|duplicate|bloat|panel|repeat)\b", q_lower):
         patient_category = "6. Safe Sharing Preview"
@@ -1829,14 +2081,12 @@ def answer_wahs_question(
         hl = patterns["highlight_encounter"]
         plain_paragraphs.insert(
             0,
-            f"**Your Hospital & ICU Stay in Plain English ({hl.get('window', 'Recent')}):** "
-            f"You were cared for in the hospital and Intensive Care Unit for a serious heart blockage "
-            f"and had heart bypass surgery to restore healthy blood flow {cite_refs_str}. "
-            f"Your care team also recorded your heart valve and stent implants so every future doctor knows about them.",
+            f"**{hl.get('title', 'Highlighted Hospital / Care Episode')} ({hl.get('window', 'Recent')}):** "
+            f"{hl.get('narrative', '')} {cite_refs_str}",
         )
         ask_doctor_items.insert(
             0,
-            "After my heart hospitalization and bypass surgery, which blood-thinner and cholesterol pills do I need to stay on long-term?",
+            f"Following my care episode ({hl.get('window', 'recent visit')}), which medications, follow-up labs, or precautions do I need to stay on long-term?",
         )
 
     if not plain_paragraphs:

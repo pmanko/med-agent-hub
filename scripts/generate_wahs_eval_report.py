@@ -28,11 +28,19 @@ from server.fhir import (
     condense_bundle_to_budget,
     estimate_tokens_local,
     extract_bundle,
+    extract_bundle_lossless,
+    run_chart_hygiene_and_reconciliation_skills,
 )
 
 
 def evaluate_cohort(source_dir: Path, eval_dir: Path) -> Dict[str, Any]:
-    patients = ["Byron202_Emard19", "Lamar193_Beer512", "Maurice742_Auer97"]
+    synthea_patients = ["Byron202_Emard19", "Lamar193_Beer512", "Maurice742_Auer97"]
+    us_core_patients = [
+        "Elena_Rostova_Cardiorenal",
+        "Arthur_Pendelton_Anticoag",
+        "Margaret_Chen_Polypharmacy",
+    ]
+    patients = synthea_patients
     ground_truth_path = eval_dir / "ground_truth.json"
     eval_cases_path = eval_dir / "wahs_eval_cases.jsonl"
 
@@ -45,17 +53,31 @@ def evaluate_cohort(source_dir: Path, eval_dir: Path) -> Dict[str, Any]:
 
     bundles_set_a: Dict[str, Dict[str, Any]] = {}
     bundles_set_b: Dict[str, Dict[str, Any]] = {}
+    bundles_set_c: Dict[str, Dict[str, Any]] = {}
     raw_bytes_a: Dict[str, int] = {}
     raw_tokens_a: Dict[str, int] = {}
 
-    for p in patients:
+    for p in synthea_patients:
         p_a = source_dir / f"{p}.json"
         p_b = eval_dir / f"{p}_multisource.json"
+        p_c = eval_dir / f"{p}_messy.json"
         raw_text_a = p_a.read_text(encoding="utf-8")
         raw_bytes_a[p] = len(raw_text_a.encode("utf-8"))
         raw_tokens_a[p] = estimate_tokens_local(raw_text_a)
         bundles_set_a[p] = json.loads(raw_text_a)
         bundles_set_b[p] = json.loads(p_b.read_text(encoding="utf-8"))
+        bundles_set_c[p] = json.loads(p_c.read_text(encoding="utf-8")) if p_c.exists() else bundles_set_b[p]
+
+    for p in us_core_patients:
+        p_file = eval_dir / f"{p}.json"
+        raw_text = p_file.read_text(encoding="utf-8")
+        raw_bytes_a[p] = len(raw_text.encode("utf-8"))
+        raw_tokens_a[p] = estimate_tokens_local(raw_text)
+        b_obj = json.loads(raw_text)
+        bundles_set_a[p] = b_obj
+        bundles_set_b[p] = b_obj
+        bundles_set_c[p] = b_obj
+
 
     # 1. Code coverage audit across all 6 bundles
     all_six_bundles = list(bundles_set_a.values()) + list(bundles_set_b.values())
@@ -112,19 +134,24 @@ def evaluate_cohort(source_dir: Path, eval_dir: Path) -> Dict[str, Any]:
                 }
             )
 
-    # 3. Evaluate all 32 rubric cases in wahs_eval_cases.jsonl
+    # 3. Evaluate all rubric cases in wahs_eval_cases.jsonl across all 6 patients
     case_results: List[Dict[str, Any]] = []
     for case in eval_cases:
         pb = str(case.get("patient_bundle") or "")
         is_set_b = "multisource" in pb or "Set_B" in str(case.get("dataset") or "")
-        p = pb.replace("_multisource.json", "").replace(".json", "")
-        bundle = bundles_set_b[p] if is_set_b else bundles_set_a[p]
+        p = pb.replace("_multisource.json", "").replace("_messy.json", "").replace(".json", "")
+        bundle = bundles_set_b.get(p) if is_set_b else bundles_set_a.get(p)
+        if bundle is None:
+            bundle = json.loads((eval_dir / pb).read_text(encoding="utf-8"))
         posture = str(case.get("sharing_posture") or "patient_self")
         budget = int(case.get("target_tokens") or 8192)
         question_text = str(case.get("question") or case.get("prompt") or "")
-        extracted = extract_bundle(bundle)
+        extracted = extract_bundle_lossless(bundle)
         condensed = condense_bundle_to_budget(
-            extracted, target_tokens=budget, sharing_posture=posture
+            extracted,
+            target_tokens=budget,
+            sharing_posture=posture,
+            condense_mode="lossless_structural",
         )
         ans = answer_wahs_question(
             extracted,
@@ -142,10 +169,11 @@ def evaluate_cohort(source_dir: Path, eval_dir: Path) -> Dict[str, Any]:
         )
         abstain_correct = ans["abstained"] == expect_abstain
 
-        # Verify every citation [N] resolves to a valid FHIR resourceUuid in condensed.mappings
+        # Verify every citation [N] resolves to a valid FHIR resourceUuid in condensed.mappings or overflow lookup
         valid_indices = {int(m["index"]) for m in condensed.mappings}
         citations_valid = all(
-            int(c["index"]) in valid_indices and bool(c.get("resource_uuid"))
+            (int(c["index"]) in valid_indices or c.get("source_mode") == "full_chart_lookup")
+            and bool(c.get("resource_uuid"))
             for c in ans["citations"]
         )
 
@@ -180,32 +208,73 @@ def evaluate_cohort(source_dir: Path, eval_dir: Path) -> Dict[str, Any]:
             }
         )
 
-    # 4. Build precomputed interactive demo payload for all 3 patients (Set B & Set A)
+    # 4. Build precomputed interactive demo payload for all 6 patients (Set B, Set C Messy, & Set A)
     demo_patients: Dict[str, Any] = {}
-    default_questions = [
-        "What duplicate medications or dangerous drug conflicts are on my active list?",
-        "Why are there conflicting Chronic Kidney Disease stages and what is my eGFR trend?",
-        "Summarize the November 2023 hospital and ICU stay.",
-        "Are there any duplicate vaccines or ACIP immunization schedule anomalies?",
-        "What duplicate lab panels or repeated notes were consolidated in this chart?",
-        "Does this patient have a documented Penicillin allergy or recent colonoscopy?",
-    ]
+    all_demo_patients = synthea_patients + us_core_patients
+    questions_by_patient: Dict[str, List[str]] = {
+        "default": [
+            "What duplicate medications or dangerous drug conflicts are on my active list?",
+            "Why are there conflicting condition stages or clinical note hold contradictions, and what are my lab trends?",
+            "Summarize my most recent hospital, emergency, or high-acuity procedural encounter.",
+            "Are there any duplicate vaccines or ACIP immunization schedule anomalies?",
+            "What duplicate lab panels or repeated notes were consolidated in this chart?",
+            "Does this patient have a documented Penicillin allergy or recent colonoscopy?",
+        ],
+        "Elena_Rostova_Cardiorenal": [
+            "Why did the hospital discharge note say to hold spironolactone and potassium chloride, and what were Elena's potassium and eGFR levels?",
+            "What duplicate medications or dangerous drug conflicts are on my active list?",
+            "Why are there conflicting Chronic Kidney Disease stages and what is my eGFR trend?",
+            "Summarize my most recent hospital, emergency, or high-acuity procedural encounter.",
+            "What duplicate lab panels or repeated notes were consolidated in this chart?",
+            "Does this patient have a documented Penicillin allergy or recent colonoscopy?",
+        ],
+        "Arthur_Pendelton_Anticoag": [
+            "Why is Arthur prescribed both Eliquis and Warfarin alongside Naproxen, and what did the discharge note instruct?",
+            "Is Arthur's gastrointestinal hemorrhage still active or resolved across his clinic records?",
+            "Summarize Arthur's hospitalization for gastrointestinal hemorrhage, EGD procedure, mechanical valve, and hemoglobin/INR trends.",
+            "What duplicate medications or dangerous drug conflicts are on my active list?",
+            "What duplicate lab panels or repeated notes were consolidated in this chart?",
+            "What did Arthur Pendelton's colonoscopy polyp biopsy pathology report show?",
+        ],
+        "Margaret_Chen_Polypharmacy": [
+            "Why are Ativan and Ambien flagged on Margaret's medication list, and what did the geriatrics note say about her falls?",
+            "Why does Margaret's chart list both Prediabetes and Type 2 Diabetes as active, and what is her HbA1c?",
+            "Were any of Margaret's pneumococcal vaccines entered twice across the clinic and WA State IIS registry?",
+            "Provide a safe external sharing summary for physical therapy that protects sensitive abuse and social isolation records.",
+            "Summarize my most recent hospital, emergency, or high-acuity procedural encounter.",
+            "Does this patient have a documented Penicillin allergy or recent colonoscopy?",
+        ],
+    }
 
-    for p in patients:
-        for ds_key, ds_label, b_map in [
-            ("set_b", "Set B (Multi-Source HIE + WA IIS + Urgent Care)", bundles_set_b),
-            ("set_a", "Set A (Natural Synthea Baseline)", bundles_set_a),
-        ]:
+    for p in all_demo_patients:
+        is_us_core = p in us_core_patients
+        patient_questions = questions_by_patient.get(p, questions_by_patient["default"])
+        ds_variants = (
+            [("set_b", "US Core / IPS Multi-Clinic Transition", bundles_set_b)]
+            if is_us_core
+            else [
+                ("set_b", "Set B (Multi-Source HIE + WA IIS + Urgent Care)", bundles_set_b),
+                ("set_c", "Set C (Messy Uncoded + Note Contradictions)", bundles_set_c),
+                ("set_a", "Set A (Natural Synthea Baseline)", bundles_set_a),
+            ]
+        )
+        for ds_key, ds_label, b_map in ds_variants:
             combo_id = f"{p}_{ds_key}"
             bundle = b_map[p]
-            extracted = extract_bundle(bundle)
+            extracted = extract_bundle_lossless(bundle)
             postures_data: Dict[str, Any] = {}
             for posture in ("patient_self", "external_share"):
                 cond_8k = condense_bundle_to_budget(
-                    extracted, target_tokens=8192, sharing_posture=posture
+                    extracted,
+                    target_tokens=8192,
+                    sharing_posture=posture,
+                    condense_mode="lossless_structural",
                 )
                 cond_2k = condense_bundle_to_budget(
-                    extracted, target_tokens=2048, sharing_posture=posture
+                    extracted,
+                    target_tokens=2048,
+                    sharing_posture=posture,
+                    condense_mode="lossless_structural",
                 )
                 bloat = analyze_duplicates_and_bloat(
                     extracted, cond_8k, target_tokens=8192, sharing_posture=posture
@@ -216,16 +285,20 @@ def evaluate_cohort(source_dir: Path, eval_dir: Path) -> Dict[str, Any]:
                 patterns = analyze_patterns_and_summaries(
                     extracted, cond_8k, target_tokens=8192, sharing_posture=posture
                 )
+                skill_report = run_chart_hygiene_and_reconciliation_skills(
+                    extracted, mappings=cond_8k.mappings
+                )
                 qa_samples = [
                     answer_wahs_question(
                         extracted, q, cond_8k, target_tokens=8192, sharing_posture=posture
                     )
-                    for q in default_questions
+                    for q in patient_questions
                 ]
                 postures_data[posture] = {
                     "tier_8k": {
                         "tier": cond_8k.tier,
                         "tier_name": cond_8k.tier_name,
+                        "condense_mode": "lossless_structural",
                         "target_tokens": 8192,
                         "actual_tokens": cond_8k.actual_tokens,
                         "ledger_lines": len(cond_8k.records),
@@ -244,6 +317,7 @@ def evaluate_cohort(source_dir: Path, eval_dir: Path) -> Dict[str, Any]:
                     "tier_2k": {
                         "tier": cond_2k.tier,
                         "tier_name": cond_2k.tier_name,
+                        "condense_mode": "lossless_structural",
                         "target_tokens": 2048,
                         "actual_tokens": cond_2k.actual_tokens,
                         "ledger_lines": len(cond_2k.records),
@@ -252,6 +326,7 @@ def evaluate_cohort(source_dir: Path, eval_dir: Path) -> Dict[str, Any]:
                     "duplicates_and_bloat": bloat,
                     "data_quality_and_conflicts": dq,
                     "patterns_and_summaries": patterns,
+                    "skill_findings": skill_report,
                     "qa_samples": qa_samples,
                 }
 
@@ -261,13 +336,15 @@ def evaluate_cohort(source_dir: Path, eval_dir: Path) -> Dict[str, Any]:
                 "patient_name": extracted.patient_name,
                 "birth_date": extracted.birth_date,
                 "reference_date": extracted.reference_date,
+                "cohort_type": "us_core_archetype" if is_us_core else "ehignite_synthea",
                 "dataset_key": ds_key,
                 "dataset_label": ds_label,
-                "raw_mb": round(raw_bytes_a[p] / (1024 * 1024), 2),
+                "raw_mb": round(max(raw_bytes_a[p] / (1024 * 1024), 0.01), 2),
                 "raw_est_tokens": raw_tokens_a[p],
                 "total_bundle_entries": extracted.total_bundle_entries,
                 "postures": postures_data,
             }
+
 
     return {
         "code_coverage": code_coverage,
@@ -479,11 +556,13 @@ def main() -> int:
     if args.demo_data_out:
         args.demo_data_out.parent.mkdir(parents=True, exist_ok=True)
         payload = {
-            "generated_at": "2026-10-30",
+            "generated_at": "2026-10-31",
+            "cohort_size": 6,
             "code_coverage": results["code_coverage"],
             "ablation_rows": results["ablation_rows"],
             "patients": results["demo_patients"],
         }
+
         js_content = (
             "// Precomputed WAHS+ Phase 2 Evaluation & Interactive Demo Dataset\n"
             "window.WAHS_DEMO_DATA = "

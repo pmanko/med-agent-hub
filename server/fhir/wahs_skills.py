@@ -217,27 +217,28 @@ def run_medication_reconciliation_skill(
         )
 
     conflict_map = detect_medication_conflicts(raw_med_dicts)
-    by_ing: Dict[str, List[ClinicalItem]] = {}
+    by_conflict_msg: Dict[str, List[ClinicalItem]] = {}
     for m in active_meds:
         if m.resource_uuid in conflict_map:
-            ing = m.ingredient_key or normalize_drug_ingredient(m.display)
-            by_ing.setdefault(ing, []).append(m)
+            msg = conflict_map[m.resource_uuid]
+            by_conflict_msg.setdefault(msg, []).append(m)
 
-    for ing, med_group in sorted(by_ing.items()):
+    for idx, (note_text, med_group) in enumerate(sorted(by_conflict_msg.items()), start=1):
         uuids = tuple(dict.fromkeys(x.resource_uuid for x in med_group))
         orgs = [x.source_org or "Unattributed Source" for x in med_group]
+        ings = list(dict.fromkeys(x.ingredient_key or normalize_drug_ingredient(x.display) for x in med_group))
         kb_info = resolve_medication_code(med_group[0].code, med_group[0].display)
         t_class = str(kb_info.get("therapeutic_class") or "medication")
-        note_text = conflict_map.get(med_group[0].resource_uuid, "")
+        ing_label = " + ".join(i.title() for i in ings)
         findings.append(
             ChartFinding(
-                finding_id=f"reconcile-med-{ing}",
+                finding_id=f"reconcile-med-{idx}-{'-'.join(ings)[:24].replace(' ', '-')}",
                 skill_name="medication_reconciliation_skill",
                 category="ReconciliationFinding",
                 severity="high",
-                title=f"Active Medication Conflict ({ing.title()} / {t_class})",
+                title=f"Active Medication Conflict ({ing_label} / {t_class})",
                 summary=(
-                    f"Conflicting or overlapping active orders for ingredient '{ing}' ({t_class}): "
+                    f"Conflicting or overlapping active orders ({ing_label}): "
                     + "; ".join(
                         f"{x.display} (authored {x.date}, source: {x.source_org or 'unspecified'})"
                         for x in med_group
@@ -249,8 +250,8 @@ def run_medication_reconciliation_skill(
                 resource_uuids=uuids,
                 bracket_citations=_resolve_brackets_for_uuids(uuids, mappings),
                 recommended_action=(
-                    f"Reconcile active {ing} prescriptions across {', '.join(dict.fromkeys(orgs))} "
-                    "to prevent duplicate dosing or unintended dose discrepancy."
+                    f"Reconcile active {', '.join(ings)} prescriptions across {', '.join(dict.fromkeys(orgs))} "
+                    "to prevent duplicate dosing, therapeutic class overlap, or interaction toxicity."
                 ),
             )
         )
@@ -258,20 +259,27 @@ def run_medication_reconciliation_skill(
     # Free-text clinical note vs. structured active MedicationRequest contradiction
     note_items = [it for it in extracted.items if it.section in {"clinical_note", "note"}]
     hold_re = re.compile(
-        r"\b(?:hold|stop|discontinue|held|stopped|do\s+not\s+take)\s+([a-z][a-z0-9-]{2,25})\b",
+        r"\b(?:hold|stop|discontinue|held|stopped|do\s+not\s+take)\s+([^.;\n]{3,90})",
         re.IGNORECASE,
     )
+    seen_note_med_pairs: set[Tuple[str, str]] = set()
     for n_item in note_items:
         for match in hold_re.finditer(n_item.text or ""):
-            raw_drug = match.group(1)
-            norm_ing = normalize_drug_ingredient(raw_drug)
+            clause = match.group(1).lower()
             for m_item in active_meds:
-                m_ing = m_item.ingredient_key or normalize_drug_ingredient(m_item.display)
-                if m_ing == norm_ing or norm_ing in m_item.display.lower():
+                m_ing = (m_item.ingredient_key or normalize_drug_ingredient(m_item.display)).lower()
+                m_disp_tokens = [
+                    t for t in re.split(r"[^a-z0-9]+", m_item.display.lower()) if len(t) >= 4 and not t.isdigit()
+                ]
+                if (m_ing and m_ing in clause) or any(tok in clause for tok in m_disp_tokens[:2]):
+                    pair_key = (m_item.resource_uuid, n_item.resource_uuid)
+                    if pair_key in seen_note_med_pairs:
+                        continue
+                    seen_note_med_pairs.add(pair_key)
                     uuids = (m_item.resource_uuid, n_item.resource_uuid)
                     findings.append(
                         ChartFinding(
-                            finding_id=f"reconcile-note-med-{m_ing}-{n_item.resource_uuid[:8]}",
+                            finding_id=f"reconcile-note-med-{m_ing.replace(' ', '-')}-{n_item.resource_uuid[:8]}",
                             skill_name="medication_reconciliation_skill",
                             category="ReconciliationFinding",
                             severity="high",
@@ -292,6 +300,7 @@ def run_medication_reconciliation_skill(
                             ),
                         )
                     )
+
 
     return findings
 

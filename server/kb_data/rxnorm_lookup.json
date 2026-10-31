@@ -13,11 +13,43 @@
     "crestor": "rosuvastatin",
     "pravachol": "pravastatin",
     "toprol": "metoprolol",
+    "toprol-xl": "metoprolol",
     "lopressor": "metoprolol",
     "humulin": "insulin isophane/regular",
     "novolin": "insulin isophane/regular",
+    "lantus": "insulin glargine",
     "lasix": "furosemide",
     "microzide": "hydrochlorothiazide",
+    "aldactone": "spironolactone",
+    "klor-con": "potassium chloride",
+    "k-dur": "potassium chloride",
+    "micro-k": "potassium chloride",
+    "entresto": "sacubitril/valsartan",
+    "farxiga": "dapagliflozin",
+    "jardiance": "empagliflozin",
+    "eliquis": "apixaban",
+    "coumadin": "warfarin",
+    "jantoven": "warfarin",
+    "xarelto": "rivaroxaban",
+    "pradaxa": "dabigatran",
+    "ativan": "lorazepam",
+    "ambien": "zolpidem",
+    "xanax": "alprazolam",
+    "valium": "diazepam",
+    "klonopin": "clonazepam",
+    "lunesta": "eszopiclone",
+    "norvasc": "amlodipine",
+    "cozaar": "losartan",
+    "diovan": "valsartan",
+    "glucophage": "metformin",
+    "glucotrol": "glipizide",
+    "amaryl": "glimepiride",
+    "synthroid": "levothyroxine",
+    "protonix": "pantoprazole",
+    "prilosec": "omeprazole",
+    "ecotrin": "aspirin",
+    "mobic": "meloxicam",
+    "toradol": "ketorolac",
     "nitrostat": "nitroglycerin",
     "augmentin": "amoxicillin/clavulanate",
     "zofran": "ondansetron",
@@ -31,6 +63,81 @@
     "motrin": "ibuprofen",
     "tylenol": "acetaminophen"
   },
+  "therapeutic_class_rules": {
+    "statin_lipid_lowering": {
+      "rule_id": "wahs-kb-rx-duplicate-statin-01",
+      "class_label": "HMG-CoA Reductase Inhibitor (Statin)",
+      "plain_class_label": "cholesterol-lowering statin pill",
+      "ingredients": ["atorvastatin", "simvastatin", "rosuvastatin", "pravastatin", "lovastatin", "fluvastatin", "pitavastatin"],
+      "hazard_summary": "Taking two statin cholesterol medications at the same time increases the risk of severe muscle breakdown (rhabdomyolysis) and liver injury."
+    },
+    "oral_anticoagulant": {
+      "rule_id": "wahs-kb-rx-dual-anticoag-01",
+      "class_label": "Oral Anticoagulant (DOAC / Vitamin K Antagonist)",
+      "plain_class_label": "prescription blood thinner (anticoagulant)",
+      "ingredients": ["apixaban", "warfarin", "rivaroxaban", "dabigatran", "edoxaban"],
+      "hazard_summary": "Concurrent active oral anticoagulants (such as Eliquis/apixaban and Warfarin/Coumadin) carry a life-threatening risk of major gastrointestinal or intracranial bleeding during care transitions."
+    },
+    "raas_inhibitor": {
+      "rule_id": "wahs-kb-rx-dual-raas-01",
+      "class_label": "RAAS Inhibitor (ACE Inhibitor / ARB / ARNI)",
+      "plain_class_label": "blood-pressure and kidney-protective ACE/ARB medication",
+      "ingredients": ["lisinopril", "enalapril", "ramipril", "benazepril", "losartan", "valsartan", "irbesartan", "olmesartan", "sacubitril/valsartan"],
+      "hazard_summary": "Combining two RAAS blockers (ACE inhibitors, ARBs, or Entresto) increases the risk of dangerous drops in blood pressure, high blood potassium (hyperkalemia), and acute kidney injury."
+    },
+    "cns_sedative_hypnotic": {
+      "rule_id": "wahs-kb-rx-beers-cns-01",
+      "class_label": "CNS Sedative-Hypnotic (Benzodiazepine / Z-Drug — AGS Beers Criteria)",
+      "plain_class_label": "sedative or sleep medication",
+      "ingredients": ["lorazepam", "alprazolam", "diazepam", "clonazepam", "temazepam", "zolpidem", "eszopiclone", "zaleplon"],
+      "hazard_summary": "Concurrent benzodiazepine and Z-drug sleep/anxiety prescriptions (AGS Beers Criteria) cause additive central nervous system sedation, confusion, orthostatic syncope, and injurious falls."
+    },
+    "nsaid_anti_inflammatory": {
+      "rule_id": "wahs-kb-rx-duplicate-nsaid-01",
+      "class_label": "Systemic Nonsteroidal Anti-Inflammatory Drug (NSAID)",
+      "plain_class_label": "NSAID pain and inflammation medication",
+      "ingredients": ["ibuprofen", "naproxen", "meloxicam", "celecoxib", "diclofenac", "ketorolac", "indomethacin"],
+      "hazard_summary": "Concurrent systemic NSAIDs or NSAID use alongside anticoagulants or chronic kidney disease significantly increases gastrointestinal bleeding and acute kidney injury risk."
+    },
+    "p2y12_antiplatelet": {
+      "rule_id": "wahs-kb-rx-duplicate-antiplatelet-01",
+      "class_label": "P2Y12 Platelet Aggregation Inhibitor",
+      "plain_class_label": "P2Y12 antiplatelet blood-thinner pill",
+      "ingredients": ["clopidogrel", "prasugrel", "ticagrelor"],
+      "hazard_summary": "Concurrent P2Y12 antiplatelet orders risk accidental double-dosing and major hemorrhage."
+    },
+    "sulfonylurea_antidiabetic": {
+      "rule_id": "wahs-kb-rx-duplicate-sulfonylurea-01",
+      "class_label": "Sulfonylurea Insulin Secretagogue",
+      "plain_class_label": "sulfonylurea blood-sugar lowering pill",
+      "ingredients": ["glipizide", "glimepiride", "glyburide"],
+      "hazard_summary": "Duplicate or overlapping sulfonylurea prescriptions carry a high risk of severe hypoglycemia (dangerously low blood sugar), especially in older adults or patients with kidney disease."
+    }
+  },
+  "interaction_hazard_rules": [
+    {
+      "rule_id": "wahs-kb-rx-hyperkalemia-01",
+      "domain": "High-Risk Drug-Electrolyte Interaction (Hyperkalemia Hazard)",
+      "title_template": "Concurrent Potassium-Sparing Therapy and Potassium Supplementation ({meds})",
+      "group_a_ingredients": ["spironolactone", "eplerenone", "amiloride", "triamterene"],
+      "group_b_ingredients": ["potassium chloride", "potassium citrate", "potassium bicarbonate"],
+      "severity": "high",
+      "plain_summary": "Your medication list includes both a potassium-retaining water pill ({group_a}) and a potassium supplement ({group_b}). Taking these together—especially with reduced kidney function—can cause dangerously high blood potassium levels (hyperkalemia) that affect heart rhythm.",
+      "what_to_ask_doctor": "My chart shows both {group_a} and {group_b} as active—based on my latest potassium and kidney blood tests, should I stop one or both of these medications?",
+      "recommendation": "Reconcile potassium-sparing diuretic/RAAS therapy against active potassium supplementation and recent serum potassium/eGFR; discontinue potassium supplementation when hyperkalemia (K+ > 5.0 mmol/L) is present."
+    },
+    {
+      "rule_id": "wahs-kb-rx-anticoag-nsaid-01",
+      "domain": "High-Risk Bleeding Interaction (Anticoagulant + Systemic NSAID)",
+      "title_template": "Concurrent Oral Anticoagulant and Systemic NSAID Therapy ({meds})",
+      "group_a_ingredients": ["apixaban", "warfarin", "rivaroxaban", "dabigatran", "edoxaban"],
+      "group_b_ingredients": ["naproxen", "ibuprofen", "meloxicam", "ketorolac", "diclofenac"],
+      "severity": "high",
+      "plain_summary": "Your active medication list combines a prescription blood thinner ({group_a}) with an NSAID pain reliever ({group_b}). Taking an NSAID while on a blood thinner greatly increases the risk of stomach ulcers and severe internal bleeding.",
+      "what_to_ask_doctor": "Since I am taking {group_a} as a blood thinner, should I stop taking {group_b} and what safer option can I use for pain?",
+      "recommendation": "Discontinue systemic NSAID therapy in patients receiving oral anticoagulation, particularly after gastrointestinal hemorrhage, and ensure gastroprotection (PPI) if antiplatelet therapy is required."
+    }
+  ],
   "rxnorm_codes": {
     "834061": {
       "rxnorm": "834061",
@@ -245,6 +352,102 @@
       "therapeutic_class": "opioid_analgesic_anesthetic",
       "brand_names": ["Ultiva"],
       "plain_purpose": "Ultra-short-acting intravenous opioid analgesic administered during general anesthesia and cardiac surgery."
+    },
+    "1364430": {
+      "rxnorm": "1364430",
+      "display": "apixaban 5 MG Oral Tablet [Eliquis]",
+      "ingredient": "apixaban",
+      "therapeutic_class": "oral_anticoagulant",
+      "brand_names": ["Eliquis"],
+      "plain_purpose": "Direct oral anticoagulant (DOAC 'blood thinner') used to prevent stroke in atrial fibrillation and treat/prevent blood clots."
+    },
+    "855332": {
+      "rxnorm": "855332",
+      "display": "Warfarin Sodium 5 MG Oral Tablet",
+      "ingredient": "warfarin",
+      "therapeutic_class": "oral_anticoagulant",
+      "brand_names": ["Coumadin", "Jantoven"],
+      "plain_purpose": "Vitamin K antagonist oral anticoagulant ('blood thinner') used for mechanical heart valves, atrial fibrillation, and thromboembolism; requires regular INR blood test monitoring."
+    },
+    "313096": {
+      "rxnorm": "313096",
+      "display": "spironolactone 25 MG Oral Tablet [Aldactone]",
+      "ingredient": "spironolactone",
+      "therapeutic_class": "potassium_sparing_diuretic",
+      "brand_names": ["Aldactone"],
+      "plain_purpose": "Mineralocorticoid receptor antagonist (potassium-sparing diuretic) used in heart failure with reduced ejection fraction (HFrEF) and fluid overload; retains potassium in the blood."
+    },
+    "628958": {
+      "rxnorm": "628958",
+      "display": "Potassium Chloride 20 MEQ Extended Release Oral Tablet [Klor-Con]",
+      "ingredient": "potassium chloride",
+      "therapeutic_class": "potassium_supplement",
+      "brand_names": ["Klor-Con", "K-Dur"],
+      "plain_purpose": "Oral potassium electrolyte supplement prescribed to treat or prevent low blood potassium (hypokalemia); must be held if blood potassium becomes high."
+    },
+    "310429": {
+      "rxnorm": "310429",
+      "display": "Furosemide 40 MG Oral Tablet [Lasix]",
+      "ingredient": "furosemide",
+      "therapeutic_class": "loop_diuretic",
+      "brand_names": ["Lasix"],
+      "plain_purpose": "Loop diuretic ('water pill') used to remove excess fluid in heart failure and chronic kidney disease."
+    },
+    "1656340": {
+      "rxnorm": "1656340",
+      "display": "sacubitril 49 MG / valsartan 51 MG Oral Tablet [Entresto]",
+      "ingredient": "sacubitril/valsartan",
+      "therapeutic_class": "raas_inhibitor",
+      "brand_names": ["Entresto"],
+      "plain_purpose": "Combination heart-failure medication (ARNI) that relaxes blood vessels and improves heart pumping survival in HFrEF."
+    },
+    "197901": {
+      "rxnorm": "197901",
+      "display": "Lorazepam 1 MG Oral Tablet [Ativan]",
+      "ingredient": "lorazepam",
+      "therapeutic_class": "cns_sedative_hypnotic",
+      "brand_names": ["Ativan"],
+      "plain_purpose": "Benzodiazepine sedative/anxiolytic medication; listed on the AGS Beers Criteria for older adults due to fall, delirium, and sedation risk."
+    },
+    "854873": {
+      "rxnorm": "854873",
+      "display": "zolpidem tartrate 10 MG Oral Tablet [Ambien]",
+      "ingredient": "zolpidem",
+      "therapeutic_class": "cns_sedative_hypnotic",
+      "brand_names": ["Ambien"],
+      "plain_purpose": "Non-benzodiazepine 'Z-drug' sedative-hypnotic sleep medication; high risk of nighttime falls and confusion when combined with benzodiazepines in older adults."
+    },
+    "310490": {
+      "rxnorm": "310490",
+      "display": "Glipizide 5 MG Oral Tablet [Glucotrol]",
+      "ingredient": "glipizide",
+      "therapeutic_class": "sulfonylurea_antidiabetic",
+      "brand_names": ["Glucotrol"],
+      "plain_purpose": "Sulfonylurea oral diabetes medication that stimulates insulin release to lower blood sugar."
+    },
+    "860975": {
+      "rxnorm": "860975",
+      "display": "Metformin hydrochloride 500 MG Oral Tablet [Glucophage]",
+      "ingredient": "metformin",
+      "therapeutic_class": "biguanide_antidiabetic",
+      "brand_names": ["Glucophage"],
+      "plain_purpose": "First-line oral medication for Type 2 Diabetes that improves insulin sensitivity and lowers hepatic glucose production."
+    },
+    "197361": {
+      "rxnorm": "197361",
+      "display": "Amlodipine 5 MG Oral Tablet [Norvasc]",
+      "ingredient": "amlodipine",
+      "therapeutic_class": "calcium_channel_blocker",
+      "brand_names": ["Norvasc"],
+      "plain_purpose": "Calcium-channel blocker prescribed to relax blood vessels and lower high blood pressure."
+    },
+    "314153": {
+      "rxnorm": "314153",
+      "display": "Pantoprazole 40 MG Delayed Release Oral Tablet [Protonix]",
+      "ingredient": "pantoprazole",
+      "therapeutic_class": "proton_pump_inhibitor",
+      "brand_names": ["Protonix"],
+      "plain_purpose": "Proton pump inhibitor (PPI) that reduces stomach acid to heal peptic ulcers and protect against gastrointestinal bleeding."
     }
   }
 }
