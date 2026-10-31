@@ -1,0 +1,113 @@
+{
+  "schema_version": "wahs_kb_acip_rules.v1",
+  "source": "CDC Advisory Committee on Immunization Practices (ACIP) Recommended Child, Adolescent, and Adult Immunization Schedules",
+  "version": "2025",
+  "url": "https://www.cdc.gov/vaccines/hcp/imz-schedules/index.html",
+  "license": "US Public Domain (CDC)",
+  "cvx_groups": {
+    "140": {
+      "cvx": "140",
+      "vaccine_group": "Influenza",
+      "display": "Influenza, split virus, trivalent, preservative free",
+      "plain_purpose": "Annual seasonal flu vaccine to prevent influenza infection and severe respiratory complications.",
+      "series_rule": "1 dose annually each influenza season; doses recorded within 14 days across different sources (e.g., clinic EHR vs. state immunization registry) represent likely cross-source duplicate entries rather than separate clinical vaccinations.",
+      "duplicate_window_days": 14
+    },
+    "141": {
+      "cvx": "141",
+      "vaccine_group": "Influenza",
+      "display": "Influenza, seasonal, injectable",
+      "plain_purpose": "Annual seasonal flu vaccine to prevent influenza infection and complications.",
+      "series_rule": "1 dose annually each influenza season; doses recorded within 14 days across sources indicate a likely registry duplicate.",
+      "duplicate_window_days": 14
+    },
+    "88": {
+      "cvx": "88",
+      "vaccine_group": "Influenza",
+      "display": "Influenza virus vaccine, NOS",
+      "plain_purpose": "Annual seasonal flu vaccine.",
+      "series_rule": "1 dose annually each influenza season; doses within 14 days indicate a likely duplicate record.",
+      "duplicate_window_days": 14
+    },
+    "115": {
+      "cvx": "115",
+      "vaccine_group": "Tdap",
+      "display": "Tdap (Tetanus toxoid, reduced diphtheria toxoid, and acellular pertussis vaccine, adsorbed)",
+      "plain_purpose": "Protects adolescents and adults against tetanus (lockjaw), diphtheria, and pertussis (whooping cough).",
+      "series_rule": "1 adolescent booster dose at age 11–12 years, followed by a Td or Tdap booster every 10 years.",
+      "duplicate_window_days": 28
+    },
+    "113": {
+      "cvx": "113",
+      "vaccine_group": "Td",
+      "display": "Td (adult), 5 Lf tetanus toxoid, preservative free, adsorbed",
+      "plain_purpose": "Decennial adult booster vaccine protecting against tetanus and diphtheria.",
+      "series_rule": "1 booster dose every 10 years after initial Tdap series.",
+      "duplicate_window_days": 28
+    },
+    "62": {
+      "cvx": "62",
+      "vaccine_group": "HPV",
+      "display": "HPV, quadrivalent",
+      "plain_purpose": "Human papillomavirus (HPV) vaccine protecting against HPV-related cancers.",
+      "series_rule": "CDC ACIP recommends a 2-dose HPV schedule (0, 6–12 months) when initiated before age 15 (ages 9–14 years). A 3-dose schedule (0, 1–2, 6 months) is indicated only if initiated at age 15 years or older or in immunocompromised patients. A 3rd dose administered to a healthy adolescent who initiated the series before age 15 is an ACIP schedule over-immunization anomaly.",
+      "two_dose_max_initiation_age_years": 14,
+      "standard_doses_under_15": 2,
+      "standard_doses_15_and_older": 3,
+      "duplicate_window_days": 28
+    },
+    "165": {
+      "cvx": "165",
+      "vaccine_group": "HPV",
+      "display": "HPV9 (Human Papillomavirus 9-valent vaccine)",
+      "plain_purpose": "9-valent human papillomavirus (HPV) vaccine protecting against HPV-associated cancers.",
+      "series_rule": "2-dose schedule when initiated before age 15; 3-dose schedule when initiated at age 15 or older.",
+      "two_dose_max_initiation_age_years": 14,
+      "standard_doses_under_15": 2,
+      "standard_doses_15_and_older": 3,
+      "duplicate_window_days": 28
+    },
+    "114": {
+      "cvx": "114",
+      "vaccine_group": "Meningococcal",
+      "display": "Meningococcal polysaccharide (Groups A, C, Y and W-135) diphtheria toxoid conjugate vaccine (MCV4P)",
+      "plain_purpose": "MenACWY conjugate vaccine protecting against meningococcal meningitis and bloodstream infection.",
+      "series_rule": "2-dose adolescent series: primary dose at age 11–12 years with a booster dose at age 16 years.",
+      "duplicate_window_days": 28
+    },
+    "208": {
+      "cvx": "208",
+      "vaccine_group": "COVID-19",
+      "display": "COVID-19, mRNA, LNP-S, PF, 30 mcg/0.3 mL dose",
+      "plain_purpose": "mRNA COVID-19 vaccine protecting against severe SARS-CoV-2 illness and hospitalization.",
+      "series_rule": "Primary mRNA series doses are separated by at least 21 days (Pfizer-BioNTech) or 28 days (Moderna). Doses recorded within 14 days of each other across a clinic EHR and a retail pharmacy/state IIS feed represent a cross-source duplicate record.",
+      "duplicate_window_days": 14
+    },
+    "213": {
+      "cvx": "213",
+      "vaccine_group": "COVID-19",
+      "display": "SARS-COV-2 (COVID-19) vaccine, UNSPECIFIED",
+      "plain_purpose": "COVID-19 vaccine protecting against severe SARS-CoV-2 disease.",
+      "series_rule": "Doses recorded within 14 days across sources indicate a cross-source duplicate record.",
+      "duplicate_window_days": 14
+    },
+    "121": {
+      "cvx": "121",
+      "vaccine_group": "Zoster-Live",
+      "display": "Zoster vaccine, live (Zostavax)",
+      "plain_purpose": "Live attenuated shingles (herpes zoster) vaccine (Zostavax), historically given to older adults.",
+      "series_rule": "Live zoster vaccine (Zostavax, CVX 121) was licensed as a single-dose vaccine and was discontinued in the United States in November 2020 in favor of the 2-dose recombinant zoster vaccine (Shingrix, CVX 187, spaced 2–6 months apart). Recording 2 doses of live zoster vaccine (CVX 121) represents an ACIP schedule/coding anomaly.",
+      "max_recommended_doses": 1,
+      "duplicate_window_days": 28
+    },
+    "187": {
+      "cvx": "187",
+      "vaccine_group": "Zoster-Recombinant",
+      "display": "Zoster vaccine recombinant, adjuvanted (Shingrix)",
+      "plain_purpose": "Recombinant adjuvanted shingles vaccine (Shingrix) for adults aged 50 years and older.",
+      "series_rule": "2-dose series separated by 2 to 6 months for adults aged 50 years and older.",
+      "max_recommended_doses": 2,
+      "duplicate_window_days": 28
+    }
+  }
+}

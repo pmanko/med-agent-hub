@@ -423,7 +423,7 @@ def test_mock_alternate_patient_source_uses_the_same_contract():
 def test_requested_source_list_composes_patient_and_knowledge_evidence(monkeypatch):
     monkeypatch.setattr(
         "server.context_sources.kb.search",
-        lambda _query, k=3: [
+        lambda _query, k=3, *, corpus="default", codes=None: [
             {
                 "id": "who-1",
                 "title": "WHO guidance",
@@ -464,7 +464,7 @@ def test_requested_source_list_composes_patient_and_knowledge_evidence(monkeypat
 def test_supplemental_source_uses_the_same_normalized_ledger(monkeypatch):
     monkeypatch.setattr(
         "server.context_sources.kb.search",
-        lambda _query, k=3: [
+        lambda _query, k=3, *, corpus="default", codes=None: [
             {
                 "id": "kb-1",
                 "title": "Reference",
@@ -494,7 +494,9 @@ def test_supplemental_source_uses_the_same_normalized_ledger(monkeypatch):
 def test_knowledge_source_uses_latest_completed_answer_for_followup_recall(monkeypatch):
     captured = []
 
-    def fake_search(query, k=3):
+    def fake_search(query, k=3, *, corpus="default", codes=None):
+        assert corpus == "default"
+        assert codes is None
         captured.append(query)
         if "Prior answer context" in query:
             return [
@@ -532,7 +534,9 @@ def test_knowledge_source_uses_latest_completed_answer_for_followup_recall(monke
 def test_knowledge_source_protects_current_topic_from_prior_answer_pollution(
     monkeypatch,
 ):
-    def fake_search(query, k=3):
+    def fake_search(query, k=3, *, corpus="default", codes=None):
+        assert corpus == "default"
+        assert codes is None
         if "Prior answer context" in query:
             return [
                 {"id": "hiv-1", "title": "HIV 1", "text": "ART", "source": "WHO"},

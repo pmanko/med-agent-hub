@@ -1,0 +1,433 @@
+{
+  "schema_version": "wahs_kb_clinical_exclusivity_and_privacy.v1",
+  "source": "KDIGO 2024 CKD Guidelines / ADA 2025 Standards of Care / MedlinePlus / LOINC Consumer Reference",
+  "version": "2025",
+  "license": "US Public Domain (NLM / MedlinePlus) & Clinical Practice Summaries",
+  "snomed_conditions": {
+    "431855005": {
+      "snomed": "431855005",
+      "display": "Chronic kidney disease stage 1 (disorder)",
+      "exclusivity_group": "ckd_stage",
+      "stage_rank": 1,
+      "sensitivity": null,
+      "plain_description": "Early kidney damage with normal or high filtration rate (eGFR >= 90 mL/min/1.73m2). Superseded when kidney disease progresses to stage 2 or stage 3."
+    },
+    "431856006": {
+      "snomed": "431856006",
+      "display": "Chronic kidney disease stage 2 (disorder)",
+      "exclusivity_group": "ckd_stage",
+      "stage_rank": 2,
+      "sensitivity": null,
+      "plain_description": "Kidney damage with mildly decreased filtration rate (eGFR 60–89 mL/min/1.73m2). Mutually exclusive with active CKD stage 1 or stage 3."
+    },
+    "433144002": {
+      "snomed": "433144002",
+      "display": "Chronic kidney disease stage 3 (disorder)",
+      "exclusivity_group": "ckd_stage",
+      "stage_rank": 3,
+      "sensitivity": null,
+      "plain_description": "Moderate decrease in kidney filtration function (eGFR 30–59 mL/min/1.73m2). Earlier CKD stages (stage 1 and stage 2) should be marked resolved once stage 3 is established."
+    },
+    "431857002": {
+      "snomed": "431857002",
+      "display": "Chronic kidney disease stage 4 (disorder)",
+      "exclusivity_group": "ckd_stage",
+      "stage_rank": 4,
+      "sensitivity": null,
+      "plain_description": "Severe decrease in kidney filtration function (eGFR 15–29 mL/min/1.73m2)."
+    },
+    "433146000": {
+      "snomed": "433146000",
+      "display": "Chronic kidney disease stage 5 (disorder)",
+      "exclusivity_group": "ckd_stage",
+      "stage_rank": 5,
+      "sensitivity": null,
+      "plain_description": "Kidney failure (eGFR < 15 mL/min/1.73m2 or dialysis)."
+    },
+    "714628002": {
+      "snomed": "714628002",
+      "display": "Prediabetes (finding)",
+      "exclusivity_group": "glycemic_progression",
+      "stage_rank": 1,
+      "sensitivity": null,
+      "plain_description": "Blood sugar levels higher than normal (HbA1c 5.7%–6.4%) but below the threshold for overt type 2 diabetes. Once overt type 2 diabetes or diabetic kidney disease develops, prediabetes should be resolved."
+    },
+    "127013003": {
+      "snomed": "127013003",
+      "display": "Disorder of kidney due to diabetes mellitus (disorder)",
+      "exclusivity_group": "glycemic_progression",
+      "stage_rank": 2,
+      "sensitivity": null,
+      "plain_description": "Diabetic kidney disease (nephropathy) caused by long-standing diabetes damaging the small blood vessels and filters in the kidneys."
+    },
+    "90781000119102": {
+      "snomed": "90781000119102",
+      "display": "Microalbuminuria due to type 2 diabetes mellitus (disorder)",
+      "exclusivity_group": "glycemic_progression",
+      "stage_rank": 2,
+      "sensitivity": null,
+      "plain_description": "Early leakage of small amounts of albumin protein into the urine caused by type 2 diabetes mellitus."
+    },
+    "157141000119108": {
+      "snomed": "157141000119108",
+      "display": "Proteinuria due to type 2 diabetes mellitus (disorder)",
+      "exclusivity_group": "glycemic_progression",
+      "stage_rank": 3,
+      "sensitivity": null,
+      "plain_description": "Elevated protein in the urine due to diabetic kidney disease, indicating more advanced glomerular filter leakage than microalbuminuria."
+    },
+    "59621000": {
+      "snomed": "59621000",
+      "display": "Essential hypertension (disorder)",
+      "exclusivity_group": null,
+      "stage_rank": null,
+      "sensitivity": null,
+      "plain_description": "Chronic high blood pressure (typically >= 130/80 or >= 140/90 mmHg) that increases strain on the heart, arteries, and kidneys."
+    },
+    "237602007": {
+      "snomed": "237602007",
+      "display": "Metabolic syndrome X (disorder)",
+      "exclusivity_group": null,
+      "stage_rank": null,
+      "sensitivity": null,
+      "plain_description": "Cluster of metabolic risk factors including high blood pressure, elevated blood sugar, excess abdominal weight, and abnormal cholesterol/triglyceride levels."
+    },
+    "162864005": {
+      "snomed": "162864005",
+      "display": "Body mass index 30+ - obesity (finding)",
+      "exclusivity_group": null,
+      "stage_rank": null,
+      "sensitivity": null,
+      "plain_description": "Body mass index (BMI) of 30 kg/m2 or higher, which increases risk for hypertension, type 2 diabetes, sleep apnea, and heart disease."
+    },
+    "414545008": {
+      "snomed": "414545008",
+      "display": "Ischemic heart disease (disorder)",
+      "exclusivity_group": null,
+      "stage_rank": null,
+      "sensitivity": null,
+      "plain_description": "Coronary artery disease in which narrowed heart arteries reduce blood and oxygen supply to the heart muscle."
+    },
+    "274531002": {
+      "snomed": "274531002",
+      "display": "Abnormal findings diagnostic imaging heart+coronary circulat (finding)",
+      "exclusivity_group": null,
+      "stage_rank": null,
+      "sensitivity": null,
+      "plain_description": "Imaging finding showing significant narrowing or blockage in the coronary arteries supplying the heart."
+    },
+    "399261000": {
+      "snomed": "399261000",
+      "display": "History of coronary artery bypass grafting (situation)",
+      "exclusivity_group": null,
+      "stage_rank": null,
+      "sensitivity": null,
+      "plain_description": "Prior open-heart coronary artery bypass grafting (CABG) surgery performed to route blood around blocked coronary arteries."
+    },
+    "39898005": {
+      "snomed": "39898005",
+      "display": "Sleep disorder (disorder)",
+      "exclusivity_group": null,
+      "stage_rank": null,
+      "sensitivity": null,
+      "plain_description": "Chronic disruption of normal sleep quality, timing, or breathing."
+    },
+    "73430006": {
+      "snomed": "73430006",
+      "display": "Sleep apnea (disorder)",
+      "exclusivity_group": null,
+      "stage_rank": null,
+      "sensitivity": null,
+      "plain_description": "Breathing repeatedly stops and starts during sleep, often treated with a continuous positive airway pressure (CPAP) device."
+    },
+    "271737000": {
+      "snomed": "271737000",
+      "display": "Anemia (disorder)",
+      "exclusivity_group": null,
+      "stage_rank": null,
+      "sensitivity": null,
+      "plain_description": "Lower-than-normal red blood cell count or hemoglobin level, which can cause fatigue and reduced oxygen delivery to tissues."
+    },
+    "40055000": {
+      "snomed": "40055000",
+      "display": "Chronic sinusitis (disorder)",
+      "exclusivity_group": null,
+      "stage_rank": null,
+      "sensitivity": null,
+      "plain_description": "Long-lasting inflammation and swelling of the nasal and sinus passages lasting 12 weeks or longer."
+    },
+    "37320007": {
+      "snomed": "37320007",
+      "display": "Loss of teeth (disorder)",
+      "exclusivity_group": null,
+      "stage_rank": null,
+      "sensitivity": null,
+      "plain_description": "Partial or complete absence of natural teeth due to extraction, periodontal disease, or dental decay, often managed with partial or complete dentures."
+    },
+    "196416002": {
+      "snomed": "196416002",
+      "display": "Impacted molars (disorder)",
+      "exclusivity_group": null,
+      "stage_rank": null,
+      "sensitivity": null,
+      "plain_description": "Molar teeth (such as wisdom teeth) that are blocked from erupting normally through the gums."
+    },
+    "66383009": {
+      "snomed": "66383009",
+      "display": "Gingivitis (disorder)",
+      "exclusivity_group": null,
+      "stage_rank": null,
+      "sensitivity": null,
+      "plain_description": "Inflammation of the gums caused by dental plaque buildup, treated with professional dental cleaning and topical fluoride/oral hygiene."
+    },
+    "266948004": {
+      "snomed": "266948004",
+      "display": "Has a criminal record (finding)",
+      "exclusivity_group": null,
+      "stage_rank": null,
+      "sensitivity": "SDOH/PRIVACY-SENSITIVE",
+      "plain_description": "Social history finding recording a prior criminal record stored on the active clinical problem list; highly privacy-sensitive when sharing health summaries outside direct care.",
+      "sharing_guidance": "Highlight with a patient privacy notice in self-view ('patient_self') and redact automatically when exporting an external summary ('external_share')."
+    },
+    "706893006": {
+      "snomed": "706893006",
+      "display": "Victim of intimate partner abuse (finding)",
+      "exclusivity_group": null,
+      "stage_rank": null,
+      "sensitivity": "SDOH/PRIVACY-SENSITIVE",
+      "plain_description": "Confidential safety and social history finding documenting intimate partner violence/abuse; requires strict privacy protection to prevent unintended disclosure.",
+      "sharing_guidance": "Highlight with a confidential safety/privacy notice in self-view ('patient_self') and redact automatically when exporting an external summary ('external_share')."
+    },
+    "423315002": {
+      "snomed": "423315002",
+      "display": "Limited social contact (finding)",
+      "exclusivity_group": null,
+      "stage_rank": null,
+      "sensitivity": "SDOH/PRIVACY-SENSITIVE",
+      "plain_description": "Social determinant of health finding indicating social isolation or limited support network; sensitive personal social information.",
+      "sharing_guidance": "Tag as privacy-sensitive SDOH in self-view ('patient_self') and redact in external sharing mode ('external_share')."
+    },
+    "314529007": {
+      "snomed": "314529007",
+      "display": "Medication review due (situation)",
+      "exclusivity_group": null,
+      "stage_rank": null,
+      "sensitivity": "SDOH-SOCIAL",
+      "plain_description": "Administrative care-management flag indicating that a routine clinician review of the patient's medication list is due."
+    },
+    "224299000": {
+      "snomed": "224299000",
+      "display": "Received higher education (finding)",
+      "exclusivity_group": null,
+      "stage_rank": null,
+      "sensitivity": "SDOH-SOCIAL",
+      "plain_description": "Social history background entry documenting completion of college or post-secondary education."
+    },
+    "473461003": {
+      "snomed": "473461003",
+      "display": "Educated to high school level (finding)",
+      "exclusivity_group": null,
+      "stage_rank": null,
+      "sensitivity": "SDOH-SOCIAL",
+      "plain_description": "Social history background entry documenting high school education."
+    },
+    "160903007": {
+      "snomed": "160903007",
+      "display": "Full-time employment (finding)",
+      "exclusivity_group": null,
+      "stage_rank": null,
+      "sensitivity": "SDOH-SOCIAL",
+      "plain_description": "Social history entry indicating current full-time employment status."
+    },
+    "160904001": {
+      "snomed": "160904001",
+      "display": "Part-time employment (finding)",
+      "exclusivity_group": null,
+      "stage_rank": null,
+      "sensitivity": "SDOH-SOCIAL",
+      "plain_description": "Social history entry indicating current part-time employment status."
+    }
+  },
+  "loinc_labs_and_vitals": {
+    "58410-2": {
+      "loinc": "58410-2",
+      "display": "CBC panel - Blood by Automated count",
+      "plain_description": "Complete Blood Count (CBC) panel measuring red blood cells, hemoglobin, white blood cells, and platelets to screen for anemia, infection, and clotting status.",
+      "reference_range": "Hemoglobin: 13.5–17.5 g/dL (men), 12.0–15.5 g/dL (women); WBC: 4.5–11.0 10*3/uL; Platelets: 150–450 10*3/uL"
+    },
+    "51990-0": {
+      "loinc": "51990-0",
+      "display": "Basic metabolic panel - Blood",
+      "plain_description": "Basic Metabolic Panel (BMP) measuring blood glucose, kidney function (creatinine, BUN, eGFR), and key electrolytes (sodium, potassium, chloride, carbon dioxide, calcium).",
+      "reference_range": "Glucose (fasting): 70–99 mg/dL; Creatinine: 0.7–1.3 mg/dL; eGFR: >= 60 mL/min/1.73m2; Potassium: 3.5–5.0 mmol/L"
+    },
+    "24321-2": {
+      "loinc": "24321-2",
+      "display": "Basic metabolic 2000 panel - Serum or Plasma",
+      "plain_description": "Serum Basic Metabolic Panel (BMP) measuring blood sugar, kidney filtration markers (creatinine, BUN, eGFR), and electrolytes.",
+      "reference_range": "Glucose: 70–99 mg/dL; Creatinine: 0.7–1.3 mg/dL; eGFR: >= 60 mL/min/1.73m2; Sodium: 135–145 mmol/L; Potassium: 3.5–5.0 mmol/L"
+    },
+    "24323-8": {
+      "loinc": "24323-8",
+      "display": "Comprehensive metabolic 2000 panel - Serum or Plasma",
+      "plain_description": "Comprehensive Metabolic Panel (CMP) covering kidney function, blood sugar, electrolytes, blood proteins (albumin), and liver enzymes (ALT, AST, alkaline phosphatase, bilirubin).",
+      "reference_range": "eGFR: >= 60 mL/min/1.73m2; Albumin: 3.5–5.0 g/dL; Total Bilirubin: 0.1–1.2 mg/dL"
+    },
+    "57698-3": {
+      "loinc": "57698-3",
+      "display": "Lipid panel with direct LDL - Serum or Plasma",
+      "plain_description": "Cholesterol and lipid panel measuring total cholesterol, LDL ('bad') cholesterol, HDL ('good') cholesterol, and triglycerides to assess cardiovascular risk.",
+      "reference_range": "Total Cholesterol: < 200 mg/dL; LDL: < 100 mg/dL (< 70 mg/dL in ischemic heart disease); HDL: >= 40 mg/dL; Triglycerides: < 150 mg/dL"
+    },
+    "4548-4": {
+      "loinc": "4548-4",
+      "display": "Hemoglobin A1c/Hemoglobin.total in Blood",
+      "plain_description": "Hemoglobin A1c (HbA1c) test measuring average blood sugar levels over the past 2 to 3 months.",
+      "reference_range": "Normal: < 5.7%; Prediabetes: 5.7%–6.4%; Diabetes mellitus: >= 6.5%"
+    },
+    "33914-3": {
+      "loinc": "33914-3",
+      "display": "Glomerular filtration rate (eGFR)",
+      "plain_description": "Estimated glomerular filtration rate (eGFR), the primary measure of how well the kidneys filter waste from the blood.",
+      "reference_range": ">= 90 mL/min/1.73m2 (normal); 60–89 (CKD stage 2); 30–59 (CKD stage 3); 15–29 (CKD stage 4); < 15 (CKD stage 5)"
+    },
+    "2160-0": {
+      "loinc": "2160-0",
+      "display": "Creatinine",
+      "plain_description": "Serum creatinine waste product filtered by the kidneys; rising creatinine indicates declining kidney filtration.",
+      "reference_range": "0.7–1.3 mg/dL (adult men); 0.6–1.1 mg/dL (adult women)"
+    },
+    "38483-4": {
+      "loinc": "38483-4",
+      "display": "Creatinine",
+      "plain_description": "Blood creatinine level used to monitor kidney function.",
+      "reference_range": "0.7–1.3 mg/dL"
+    },
+    "24357-6": {
+      "loinc": "24357-6",
+      "display": "Urinalysis macro (dipstick) panel - Urine",
+      "plain_description": "Urine dipstick panel checking urine appearance, specific gravity, pH, protein, glucose, ketones, blood, and leukocyte esterase.",
+      "reference_range": "Urine protein: negative; Urine glucose: negative; Urine blood: negative"
+    },
+    "24356-8": {
+      "loinc": "24356-8",
+      "display": "Urinalysis complete panel - Urine",
+      "plain_description": "Complete urinalysis panel evaluating kidney protein leakage (albuminuria/proteinuria), glucose, and urinary tract findings.",
+      "reference_range": "Urine protein/albumin: negative to trace"
+    },
+    "34528-0": {
+      "loinc": "34528-0",
+      "display": "PT panel - Platelet poor plasma by Coagulation assay",
+      "plain_description": "Prothrombin Time (PT) and INR coagulation panel measuring how quickly blood clots during surgery or anticoagulant therapy.",
+      "reference_range": "PT: 11–13.5 seconds; INR: 0.8–1.1 (unanticoagulated)"
+    },
+    "24336-0": {
+      "loinc": "24336-0",
+      "display": "Gas panel - Arterial blood",
+      "plain_description": "Arterial Blood Gas (ABG) panel measuring blood pH, oxygen (pO2), carbon dioxide (pCO2), and bicarbonate during cardiac surgery or ICU care.",
+      "reference_range": "pH: 7.35–7.45; pO2: 75–100 mmHg; pCO2: 35–45 mmHg; HCO3: 22–26 mmol/L"
+    },
+    "24339-4": {
+      "loinc": "24339-4",
+      "display": "Gas panel - Venous blood",
+      "plain_description": "Venous Blood Gas (VBG) panel assessing acid-base balance, carbon dioxide, and venous oxygenation during inpatient/ICU care.",
+      "reference_range": "Venous pH: 7.31–7.41; pCO2: 41–51 mmHg"
+    },
+    "89577-1": {
+      "loinc": "89577-1",
+      "display": "Troponin I.cardiac panel - Serum or Plasma by High sensitivity method",
+      "plain_description": "High-sensitivity cardiac troponin I test used to detect heart muscle injury or heart attack (myocardial infarction).",
+      "reference_range": "< 0.04 ng/mL (or below sex-specific 99th percentile reference limit)"
+    },
+    "55405-5": {
+      "loinc": "55405-5",
+      "display": "Heart failure tracking panel",
+      "plain_description": "Cardiac monitoring panel (including natriuretic peptides / cardiopulmonary markers) used to track heart failure and perioperative cardiac recovery.",
+      "reference_range": "NT-proBNP < 125 pg/mL (< 75 years)"
+    },
+    "19123-9": {
+      "loinc": "19123-9",
+      "display": "Magnesium [Mass/volume] in Serum or Plasma",
+      "plain_description": "Serum magnesium electrolyte test monitored closely during cardiac surgery and ICU care to prevent heart rhythm disturbances.",
+      "reference_range": "1.7–2.2 mg/dL"
+    },
+    "2777-1": {
+      "loinc": "2777-1",
+      "display": "Phosphate [Mass/volume] in Serum or Plasma",
+      "plain_description": "Serum phosphorus/phosphate level monitored in chronic kidney disease and inpatient care.",
+      "reference_range": "2.5–4.5 mg/dL"
+    },
+    "3173-2": {
+      "loinc": "3173-2",
+      "display": "aPTT in Blood by Coagulation assay",
+      "plain_description": "Activated Partial Thromboplastin Time (aPTT) coagulation test used to monitor intravenous heparin anticoagulation.",
+      "reference_range": "25–35 seconds (baseline)"
+    },
+    "3016-3": {
+      "loinc": "3016-3",
+      "display": "Thyrotropin [Units/volume] in Serum or Plasma",
+      "plain_description": "Thyroid-Stimulating Hormone (TSH) blood test used to evaluate thyroid gland function.",
+      "reference_range": "0.4–4.5 mIU/L"
+    },
+    "3184-9": {
+      "loinc": "3184-9",
+      "display": "Activated clotting time (ACT) of Blood by Coagulation assay",
+      "plain_description": "Point-of-care clotting time test used in the operating room during coronary artery bypass grafting (CABG) to guide high-dose heparin and protamine reversal.",
+      "reference_range": "Baseline: 70–120 seconds; cardiopulmonary bypass target: > 400–480 seconds"
+    },
+    "85354-9": {
+      "loinc": "85354-9",
+      "display": "Blood pressure panel with all children optional",
+      "plain_description": "Systolic and diastolic arterial blood pressure measurement.",
+      "reference_range": "Normal: < 120/80 mmHg; Elevated: 120–129/< 80 mmHg; Hypertension: >= 130/80 or >= 140/90 mmHg"
+    },
+    "8310-5": {
+      "loinc": "8310-5",
+      "display": "Body temperature",
+      "plain_description": "Core body temperature measurement.",
+      "reference_range": "36.1–37.2 Cel (97.0–99.0 F); Fever: >= 38.0 Cel (100.4 F)"
+    },
+    "8302-2": {
+      "loinc": "8302-2",
+      "display": "Body Height",
+      "plain_description": "Standing body height measurement in centimeters.",
+      "reference_range": "Age- and sex-dependent"
+    },
+    "29463-7": {
+      "loinc": "29463-7",
+      "display": "Body Weight",
+      "plain_description": "Body weight measurement in kilograms, used to track nutritional status, BMI, and fluid balance.",
+      "reference_range": "Evaluated alongside height via BMI"
+    },
+    "39156-5": {
+      "loinc": "39156-5",
+      "display": "Body mass index (BMI) [Ratio]",
+      "plain_description": "Body Mass Index (BMI) ratio calculated from weight and height.",
+      "reference_range": "18.5–24.9 kg/m2 (normal); 25.0–29.9 kg/m2 (overweight); >= 30.0 kg/m2 (obesity)"
+    },
+    "59576-9": {
+      "loinc": "59576-9",
+      "display": "Body mass index (BMI) [Percentile] Per age and sex",
+      "plain_description": "Pediatric/adolescent BMI percentile compared against CDC age- and sex-specific growth charts.",
+      "reference_range": "5th to < 85th percentile (healthy weight); 85th to < 95th (overweight); >= 95th (obesity)"
+    },
+    "8867-4": {
+      "loinc": "8867-4",
+      "display": "Heart rate",
+      "plain_description": "Resting pulse / heart rate in beats per minute.",
+      "reference_range": "60–100 /min (resting adult)"
+    },
+    "9279-1": {
+      "loinc": "9279-1",
+      "display": "Respiratory rate",
+      "plain_description": "Breathing rate in breaths per minute.",
+      "reference_range": "12–20 /min (resting adult)"
+    },
+    "72514-3": {
+      "loinc": "72514-3",
+      "display": "Pain severity - 0-10 verbal numeric rating [Score] - Reported",
+      "plain_description": "Patient-reported pain intensity score on a 0 (no pain) to 10 (worst possible pain) scale.",
+      "reference_range": "0 (no pain); 1–3 (mild); 4–6 (moderate); 7–10 (severe)"
+    }
+  }
+}
