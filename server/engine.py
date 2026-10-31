@@ -8,6 +8,7 @@ import dataclasses
 import hashlib
 import json
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from typing import (
@@ -131,6 +132,23 @@ def _answer_response_format(request: ExecutionRequest) -> Optional[Dict[str, Any
     return request.response_format
 
 
+def _grounding_policy(profile: Profile) -> str:
+    """How the profile checks that cited records support their sentences (``review.grounding``)."""
+    review = profile.policies.get("review") or {}
+    return str(review.get("grounding") or "separate")
+
+
+def _decision_review_options(profile: Profile) -> Dict[str, Any]:
+    """Extract calibrated decision-model thresholds and temperature scaling from ``policies.review``."""
+    review = profile.policies.get("review") or {}
+    return {
+        "low_threshold": float(review.get("low_threshold", 0.35)),
+        "high_threshold": float(review.get("high_threshold", 0.75)),
+        "temperature_scale": float(review.get("temperature_scale", 1.0)),
+        "verify_review_errors": bool(review.get("verify_review_errors", True)),
+    }
+
+
 @dataclass
 class _State:
     messages: List[Dict[str, Any]]
@@ -167,6 +185,7 @@ class _State:
     review_draft_citations: List[int] = field(default_factory=list)
     review_draft_blocks: List[Any] = field(default_factory=list)
     review_edited: bool = False
+    review_citation_verdicts: Optional[Dict[int, bool]] = None
     references: List[Dict[str, Any]] = field(default_factory=list)
     claims: List[str] = field(default_factory=list)
     indepth_review_draft: str = ""
@@ -177,6 +196,8 @@ class _State:
     indepth_gate: Optional[Dict[str, Any]] = None
     # 1-based In-Depth claim index -> what each check marked on it; shown beside the claim.
     indepth_marks: Dict[int, List[str]] = field(default_factory=dict)
+    # Neutral tags: what a claim is, not a call to check it (uncited general guidance).
+    indepth_tags: Dict[int, str] = field(default_factory=dict)
     indepth_error: str = ""
     indepth_error_code: Optional[str] = None
     indepth_required_source_ids: List[str] = field(default_factory=list)
@@ -320,6 +341,8 @@ def _merge_reference_grounding(
         grounded, aggregate = None, "mixed"
     elif "unsupported" in statuses:
         grounded, aggregate = False, "unsupported"
+    elif "uncertain" in statuses:
+        grounded, aggregate = None, "uncertain"
     else:
         grounded, aggregate = True, "verified"
     existing["grounded"] = grounded
@@ -394,7 +417,7 @@ def _fixed_context_text(
         parts.append(f"{message.get('role', 'user')}: {content}")
     for role, fallback in (
         ("answer", "synthesis-answer"),
-        ("review", "validation-rewrite"),
+        ("review", "validation-label"),
         ("indepth", "synthesis-indepth"),
         ("orchestrator", "orchestrator"),
         ("expert", "medical_expert"),
@@ -403,7 +426,12 @@ def _fixed_context_text(
             if role == "review":
                 stem = str(request.profile.prompts.get(role) or fallback)
                 parts.append(load_prompt(stem + "-answer"))
+                folded = _grounding_policy(request.profile) == "folded"
+                if folded:
+                    parts.append(load_prompt(stages._CITATION_SUPPORT_PROMPT))
                 parts.append(load_prompt(stem + "-indepth"))
+                if folded:
+                    parts.append(load_prompt(stages._INDEPTH_CITATION_SUPPORT_PROMPT))
             else:
                 parts.append(_prompt(request.profile, role, fallback))
     if temporal_block:
@@ -640,6 +668,7 @@ async def _select_answer_review_context(
             source="llama-router",
         )
     reviewer_model = request.profile.models["review"]
+    folded = _grounding_policy(request.profile) == "folded"
     review_text = answer_text
     block_text, _block_refs = stages._block_temporal_text_and_refs(blocks)
     if block_text:
@@ -651,8 +680,9 @@ async def _select_answer_review_context(
             gathered=state.gathered,
             answer_text=review_text,
             validation_prompt=str(
-                request.profile.prompts.get("review") or "validation-rewrite"
+                request.profile.prompts.get("review") or "validation-label"
             ),
+            citation_support=folded,
         )
         count_chat = getattr(counter, "count_chat", None)
         if callable(count_chat):
@@ -660,7 +690,11 @@ async def _select_answer_review_context(
                 reviewer_model,
                 {
                     "messages": messages,
-                    "response_format": stages._REWRITE_VERDICT_RF,
+                    "response_format": (
+                        stages._LABEL_WITH_CITATIONS_VERDICT_RF
+                        if folded
+                        else stages._LABEL_VERDICT_RF
+                    ),
                 },
             )
         rendered = "\n".join(
@@ -715,6 +749,7 @@ async def _select_indepth_review_context(
             source="llama-router",
         )
     reviewer_model = request.profile.models["review"]
+    folded = _grounding_policy(request.profile) == "folded"
 
     async def measure(chart: str) -> int:
         messages = stages._indepth_validation_messages(
@@ -723,8 +758,9 @@ async def _select_indepth_review_context(
             answer_text=prior_answer,
             claims=claims,
             validation_prompt=str(
-                request.profile.prompts.get("review") or "validation-rewrite"
+                request.profile.prompts.get("review") or "validation-label"
             ),
+            citation_support=folded,
         )
         count_chat = getattr(counter, "count_chat", None)
         if callable(count_chat):
@@ -732,7 +768,11 @@ async def _select_indepth_review_context(
                 reviewer_model,
                 {
                     "messages": messages,
-                    "response_format": stages._INDEPTH_VERDICT_RF,
+                    "response_format": (
+                        stages._INDEPTH_WITH_CITATIONS_VERDICT_RF
+                        if folded
+                        else stages._INDEPTH_VERDICT_RF
+                    ),
                 },
             )
         rendered = "\n".join(
@@ -978,9 +1018,10 @@ def _initial_answer_changed(state: _State) -> bool:
         list(state.citations) + current_block_refs,
         state.answer_text,
     )
+    # Citation order is not a change: resolving references can reorder the same records.
     return (state.answer_check_edited or state.review_edited) and initial is not None and (
         initial.strip() != state.answer_text.strip()
-        or initial_sources != current_sources
+        or set(initial_sources) != set(current_sources)
         or state.initial_answer_blocks != state.blocks
     )
 
@@ -1185,10 +1226,36 @@ def _indepth_mark_note(marked: int, total: int, review: Mapping[str, Any]) -> st
     return note[0].upper() + note[1:] + ". Verify marked points against the chart."
 
 
-def _marked_claim(claim: str, labels: Sequence[str]) -> str:
-    if not labels:
-        return claim
-    return claim + " *(Check: " + "; ".join(labels) + ".)*"
+def _date_check_label(entry: Mapping[str, Any]) -> str:
+    """A short inline reason for a claim the date check failed, in the chart's terms."""
+    for check in (entry.get("gate") or {}).get("checks") or []:
+        if check.get("status") != "fail":
+            continue
+        reason = str(check.get("reason") or "")
+        found = re.match(r"(.+?) has fewer than two dated points", reason)
+        if check.get("id") == "single_point_trend" and found:
+            return f"the chart has one dated {found.group(1)} value, so no trend"
+        found = re.search(r"binds value ([\d.]+) to (\d{4}-\d{2}-\d{2})", reason)
+        if check.get("id") == "date_value_binding" and found:
+            value = found.group(1).removesuffix(".0")
+            return f"the chart does not give {value} on {found.group(2)}"
+        found = re.search(r"emits '([^']+)'", reason)
+        if check.get("id") == "date_format" and found:
+            return f"{found.group(1)} is not a date in the chart"
+        found = re.search(r"last clinical encounter (\d{4}-\d{2}-\d{2})", reason)
+        if check.get("id") == "last_visit" and found:
+            return f"the last visit in the chart is {found.group(1)}"
+        if check.get("id") == "trend_direction":
+            return "the chart's values move the other way"
+    return "the date check found a conflict"
+
+
+def _marked_claim(claim: str, labels: Sequence[str], tag: str = "") -> str:
+    if labels:
+        return claim + " *(Check: " + "; ".join(labels) + ".)*"
+    if tag:
+        return claim + " *(" + tag[0].upper() + tag[1:] + ".)*"
+    return claim
 
 
 def _in_depth_payload(state: _State) -> Dict[str, Any]:
@@ -1197,7 +1264,12 @@ def _in_depth_payload(state: _State) -> Dict[str, Any]:
         ""
         if state.indepth_error
         else "\n".join(
-            "- " + _marked_claim(claim, state.indepth_marks.get(index, ()))
+            "- "
+            + _marked_claim(
+                claim,
+                state.indepth_marks.get(index, ()),
+                state.indepth_tags.get(index, ""),
+            )
             for index, claim in enumerate(state.claims, 1)
         )
     )
@@ -1295,6 +1367,7 @@ async def _execute_stages(
     )
     sampling = _sampling(request)
     answer_response_format = _answer_response_format(request)
+    grounding = _grounding_policy(request.profile)
     temporal_enabled, temporal_mode = resolve_temporal_policy(
         request.profile, request.context
     )
@@ -1645,7 +1718,11 @@ async def _execute_stages(
                         state.mappings,
                         answer=state.answer_text,
                         blocks=state.blocks,
-                        grounding_status="checking" if state.mappings else None,
+                        grounding_status=(
+                            ("unchecked" if grounding == "off" else "checking")
+                            if state.mappings
+                            else None
+                        ),
                     )
                     has_review = "review" in request.profile.stages
                     has_final_grounding = "ground_verdicts" in request.profile.stages
@@ -1713,6 +1790,8 @@ async def _execute_stages(
                     continue
 
                 if stage == "review":
+                    if grounding == "folded":
+                        state.review_citation_verdicts = {}
                     reviews_current_answer = "answer" in request.profile.stages
                     payload_override = None
                     if reviews_current_answer:
@@ -1764,7 +1843,7 @@ async def _execute_stages(
                         reviewer_model=request.profile.models["review"],
                         reviewer_prompt=str(
                             request.profile.prompts.get("review")
-                            or "validation-rewrite"
+                            or "validation-label"
                         ),
                         validator_temperature=sampling["review_temperature"],
                         validator_repeat_penalty=sampling["review_repeat_penalty"],
@@ -1773,6 +1852,28 @@ async def _execute_stages(
                         steps=state.steps,
                         payload_override=payload_override,
                         review_chart_selector=review_chart_selector,
+                        citation_verdicts=state.review_citation_verdicts,
+                        **(
+                            {
+                                "decision_verifier_model": request.profile.models[
+                                    "grounding"
+                                ],
+                                "low_threshold": _decision_review_options(
+                                    request.profile
+                                )["low_threshold"],
+                                "high_threshold": _decision_review_options(
+                                    request.profile
+                                )["high_threshold"],
+                                "temperature_scale": _decision_review_options(
+                                    request.profile
+                                )["temperature_scale"],
+                            }
+                            if grounding == "decision"
+                            and _decision_review_options(request.profile)[
+                                "verify_review_errors"
+                            ]
+                            else {}
+                        ),
                     )
                     if reviewed_gate is not None:
                         state.answer_gate = reviewed_gate
@@ -1804,7 +1905,11 @@ async def _execute_stages(
                         state.mappings,
                         answer=state.answer_text,
                         blocks=state.blocks,
-                        grounding_status="checking" if state.mappings else None,
+                        grounding_status=(
+                            ("unchecked" if grounding == "off" else "checking")
+                            if state.mappings
+                            else None
+                        ),
                     )
                     if "review" in request.profile.stages:
                         prior_validation = state.answer_validation or {}
@@ -1869,40 +1974,68 @@ async def _execute_stages(
                     continue
 
                 if stage == "ground_verdicts":
-                    if state.mappings:
+                    if grounding == "off":
+                        # The profile checks no citation support: citations stay unchecked and no
+                        # label claims a check that was never meant to run.
+                        state.steps.append({"role": "grounding", "policy": "off"})
+                    elif state.mappings:
                         deterministic_checks = [
                             check
                             for check in (state.answer_gate or {}).get("checks", [])
                             if check.get("status") == "pass"
                             and check.get("source_indices")
                         ]
+                        folded = grounding == "folded"
+                        grounding_options: Dict[str, Any] = {}
                         if deterministic_checks:
-                            state.references = await stages._ground_references(
-                                client,
-                                request.profile.models["grounding"],
-                                state.answer_text,
-                                state.references,
-                                state.mappings,
-                                deterministic_checks=deterministic_checks,
+                            grounding_options["deterministic_checks"] = deterministic_checks
+                        if folded:
+                            grounding_options["index_verdicts"] = (
+                                state.review_citation_verdicts or {}
                             )
-                        else:
-                            state.references = await stages._ground_references(
-                                client,
-                                request.profile.models["grounding"],
-                                state.answer_text,
-                                state.references,
-                                state.mappings,
-                            )
+                        elif grounding == "decision":
+                            dec_opts = _decision_review_options(request.profile)
+                            grounding_options["decision_grounding"] = True
+                            grounding_options["low_threshold"] = dec_opts["low_threshold"]
+                            grounding_options["high_threshold"] = dec_opts["high_threshold"]
+                            grounding_options["temperature_scale"] = dec_opts[
+                                "temperature_scale"
+                            ]
+                        state.references = await stages._ground_references(
+                            client,
+                            None if folded else request.profile.models["grounding"],
+                            state.answer_text,
+                            state.references,
+                            state.mappings,
+                            **grounding_options,
+                        )
+                        state.steps.append(
+                            {
+                                "role": "grounding",
+                                "policy": grounding,
+                                "model": (
+                                    request.profile.models["review"]
+                                    if folded
+                                    else request.profile.models["grounding"]
+                                ),
+                            }
+                        )
                     unsupported = [
                         reference
                         for reference in state.references
                         if reference.get("groundingStatus")
                         in {"unsupported", "mixed"}
                     ]
+                    uncertain = [
+                        reference
+                        for reference in state.references
+                        if reference.get("groundingStatus") == "uncertain"
+                    ]
                     unchecked = [
                         reference
                         for reference in state.references
-                        if reference.get("resolutionStatus") == "resolved"
+                        if grounding != "off"
+                        and reference.get("resolutionStatus") == "resolved"
                         and reference.get("groundingStatus") == "unchecked"
                     ]
                     if unsupported:
@@ -1916,6 +2049,29 @@ async def _execute_stages(
                             summary="One or more cited sources do not support the associated claim.",
                             issues=list(prior.get("issues") or [])
                             + stages._grounding_failure_issues(unsupported),
+                            original_answer=prior.get("originalAnswer"),
+                        )
+                    elif uncertain:
+                        prior = state.answer_validation or {}
+                        if state.answer_conf.get("level") == "green":
+                            state.answer_conf = {
+                                "level": "yellow",
+                                "note": "One or more cited sources had uncertain support and are marked for review.",
+                            }
+                        state.answer_validation = stages._answer_validation_wire(
+                            "needs_review",
+                            summary="One or more cited sources had uncertain support and are marked for review.",
+                            issues=list(prior.get("issues") or [])
+                            + [
+                                {
+                                    "id": "citation_grounding_uncertain",
+                                    "status": "warn",
+                                    "severity": "warn",
+                                    "reason": "Citation support probability fell in the uncertain band.",
+                                    "source_indices": [reference.get("index")],
+                                }
+                                for reference in uncertain
+                            ],
                             original_answer=prior.get("originalAnswer"),
                         )
                     elif unchecked:
@@ -2062,7 +2218,7 @@ async def _execute_stages(
                                 validator_model=request.profile.models["review"],
                                 validator_prompt=str(
                                     request.profile.prompts.get("review")
-                                    or "validation-rewrite"
+                                    or "validation-label"
                                 ),
                                 chart=indepth_chart,
                                 synth_temperature=sampling["answer_temperature"],
@@ -2082,6 +2238,11 @@ async def _execute_stages(
                                     fit_review
                                     if product and request.profile.exact_tokenizer
                                     else None
+                                ),
+                                **(
+                                    {"citation_support": True}
+                                    if grounding == "folded"
+                                    else {}
                                 ),
                             )
                         else:
@@ -2135,7 +2296,6 @@ async def _execute_stages(
                     wrote_no_claims = not state.claims and not state.indepth_error
                     review = dict(state.indepth_conf or {})
                     state.indepth_gate = temporal.gate_indepth_claims(
-                        stages._latest_user_text(state.messages),
                         state.claims,
                         state.temporal_facts,
                         mode=temporal_mode,
@@ -2150,8 +2310,16 @@ async def _execute_stages(
                         if (level, label) not in marks.setdefault(claim_index, []):
                             marks[claim_index].append((level, label))
 
+                    gate_entries = {
+                        entry.get("claim_index"): entry
+                        for entry in state.indepth_gate.get("checks") or []
+                    }
                     for claim_index in state.indepth_gate.get("flagged") or []:
-                        mark(claim_index, "red", "the date check found a conflict")
+                        mark(
+                            claim_index,
+                            "red",
+                            _date_check_label(gate_entries.get(claim_index) or {}),
+                        )
                     if review.get("status") == "flagged":
                         state.indepth_gate["review_status"] = "flagged"
                         state.indepth_gate["review_flagged"] = list(
@@ -2169,16 +2337,17 @@ async def _execute_stages(
                     for claim_index, claim in enumerate(state.claims, 1):
                         claim_citations = stages._extract_citations(claim)
                         if not claim_citations:
+                            # General guidance cites no record. It is tagged, not marked for review.
+                            state.indepth_tags[claim_index] = "general guidance, not from the chart"
                             citation_checks.append(
                                 {
                                     "claim_index": claim_index,
                                     "claim": claim,
-                                    "status": "warn",
+                                    "status": "info",
                                     "reason": "In-Depth claim cites no record; it is general guidance.",
                                     "source_indices": [],
                                 }
                             )
-                            mark(claim_index, "yellow", "general guidance, not cited")
                             continue
                         claim_references = stages._resolve_references(
                             claim_citations,
@@ -2214,13 +2383,52 @@ async def _execute_stages(
                         for _claim_index, _claim, references in candidates
                         for reference in references
                     ]
-                    if flattened and state.mappings:
+                    if grounding == "folded" and flattened and state.mappings:
+                        # The In-Depth review judged each claim's citations in its own call.
+                        unsupported_claims = review.get("citation_unsupported")
+                        grounded: list[dict[str, Any]] = []
+                        for claim_index, claim, references in candidates:
+                            verdicts = (
+                                {
+                                    reference.get("index"): claim_index
+                                    not in unsupported_claims
+                                    for reference in references
+                                }
+                                if unsupported_claims is not None
+                                else {}
+                            )
+                            grounded.extend(
+                                await stages._ground_references(
+                                    client,
+                                    None,
+                                    claim,
+                                    references,
+                                    state.mappings,
+                                    index_verdicts=verdicts,
+                                )
+                            )
+                        flattened = grounded
+                    elif grounding in {"separate", "decision"} and flattened and state.mappings:
+                        indepth_ground_opts: Dict[str, Any] = {"attribution_only": True}
+                        if grounding == "decision":
+                            dec_opts = _decision_review_options(request.profile)
+                            indepth_ground_opts["decision_grounding"] = True
+                            indepth_ground_opts["low_threshold"] = dec_opts[
+                                "low_threshold"
+                            ]
+                            indepth_ground_opts["high_threshold"] = dec_opts[
+                                "high_threshold"
+                            ]
+                            indepth_ground_opts["temperature_scale"] = dec_opts[
+                                "temperature_scale"
+                            ]
                         flattened = await stages._ground_references(
                             client,
                             request.profile.models["grounding"],
                             "\n".join(claim for _index, claim, _refs in candidates),
                             flattened,
                             state.mappings,
+                            **indepth_ground_opts,
                         )
 
                     indepth_references: list[dict[str, Any]] = []
@@ -2238,24 +2446,66 @@ async def _execute_stages(
                             in {"unsupported", "mixed"}
                         ]
                         if unsupported:
+                            not_found = "; ".join(
+                                dict.fromkeys(
+                                    check["not_found"]
+                                    for reference in unsupported
+                                    for check in reference.get("groundingChecks") or []
+                                    if check.get("not_found")
+                                )
+                            )
+                            cited = ", ".join(
+                                f"[{reference.get('index')}]" for reference in unsupported
+                            )
                             citation_checks.append(
                                 {
                                     "claim_index": claim_index,
                                     "claim": claim,
                                     "status": "fail",
-                                    "reason": "In-Depth claim is not supported by its cited source.",
+                                    "reason": (
+                                        f"Its cited record {cited} does not state: {not_found}."
+                                        if not_found
+                                        else "In-Depth claim is not supported by its cited source."
+                                    ),
                                     "source_indices": [
                                         reference.get("index")
                                         for reference in unsupported
                                     ],
                                 }
                             )
-                            mark(claim_index, "red", "its cited record does not support it")
+                            mark(
+                                claim_index,
+                                "red",
+                                f"{cited} does not state {not_found}"
+                                if not_found
+                                else "its cited record does not support it",
+                            )
+                            continue
+                        uncertain = [
+                            reference
+                            for reference in grounded_references
+                            if reference.get("groundingStatus") == "uncertain"
+                        ]
+                        if uncertain:
+                            citation_checks.append(
+                                {
+                                    "claim_index": claim_index,
+                                    "claim": claim,
+                                    "status": "warn",
+                                    "reason": "In-Depth citation support probability fell in the uncertain band.",
+                                    "source_indices": [
+                                        reference.get("index")
+                                        for reference in uncertain
+                                    ],
+                                }
+                            )
+                            mark(claim_index, "yellow", "its citation support was uncertain")
                             continue
                         unchecked = [
                             reference
                             for reference in grounded_references
-                            if reference.get("groundingStatus") == "unchecked"
+                            if grounding != "off"
+                            and reference.get("groundingStatus") == "unchecked"
                         ]
                         if unchecked:
                             citation_checks.append(
@@ -2283,9 +2533,11 @@ async def _execute_stages(
                         state.indepth_gate["marked"] = sorted(marks)
                     levels = {level for labels in marks.values() for level, _label in labels}
                     if state.claims and not state.indepth_error:
+                        # The level grades the In-Depth as a whole: one marked point among
+                        # several is a point to check, not a low-confidence section.
                         level = (
                             "red"
-                            if "red" in levels
+                            if "red" in levels and len(marks) >= len(state.claims)
                             else "yellow"
                             if levels or review.get("status") == "unreviewed"
                             else str(review.get("level") or "green")

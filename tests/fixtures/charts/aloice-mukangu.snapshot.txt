@@ -1,0 +1,320 @@
+[1] (2026-05-20) Program: Tuberculosis treatment program. Status: Active. Current state: GROUP TB
+[2] (2026-01-07) Drug order: Trimethoprim and sulfamethoxazole. Action: NEW. Urgency: ROUTINE
+[3] (2026-01-07) Drug order: Lamivudine / zidovudine. Action: NEW. Urgency: ROUTINE
+[4] (2026-01-07) Drug order: Efavirenz. Action: NEW. Urgency: ROUTINE
+[5] (2026-01-07) Drug order: Rifampicin isoniazid pyrazinamide and ethambutol. Action: NEW. Urgency: ROUTINE
+[6] (2026-01-07) Encounter: Adult Visit at Unknown Location. Provider: Horatio L Hornblower (Unknown)
+[7] (2026-01-07) Scheduled visit: No
+[8] (2026-01-07) Discordant couple: No
+[9] (2026-01-07) Pregnancy status: No
+[10] (2026-01-07) Conception since last visit: No
+[11] (2026-01-07) New complaints: Yes
+[12] (2026-01-07) Antiretroviral use: Yes
+[13] (2026-01-07) Primary regimen: Yes
+[14] (2026-01-07) Antiretroviral adherence in past week: Half
+[15] (2026-01-07) Overall drug adherence in last month: No
+[16] (2026-01-07) Arterial blood oxygen saturation (pulse oximeter): 94 %
+[17] (2026-01-07) Diastolic blood pressure: 50 mmHg
+[18] (2026-01-07) Pulse: 157 beats/min
+[19] (2026-01-07) Systolic blood pressure: 90 mmHg
+[20] (2026-01-07) Temperature (C): 39.7 C
+[21] (2026-01-07) Weight (kg): 41 kg
+[22] (2026-01-07) Current WHO HIV stage: WHO stage 3 adult
+[23] (2026-01-07) New WHO/CDC staging criteria met: Yes
+[24] (2026-01-07) Patient hospitalized location: Moi teaching and referral hospital
+[25] (2026-01-07) Patient reported current cryptococcus treatment: None
+[26] (2026-01-07) Patient reported current tuberculosis prophylaxis: None
+[27] (2026-01-07) Antiretroviral plan: Continue regimen
+[28] (2026-01-07) Cryptococcal treatment plan: None
+[29] (2026-01-07) PCP prophylaxis plan: Continue regimen
+[30] (2026-01-07) Tuberculosis prophylaxis plan: None
+[31] (2026-01-07) Tuberculosis treatment plan: Continue regimen
+[32] (2026-01-07) Visit: OPD Visit at Unknown Location
+[33] (2025-12-31) Condition: Fever. Status: ACTIVE. Onset: 2025-12-31
+[34] (2025-12-31) Drug order: Efavirenz. Action: NEW. Urgency: ROUTINE
+[35] (2025-12-31) Drug order: Rifampicin isoniazid pyrazinamide and ethambutol. Action: NEW. Urgency: ROUTINE
+[36] (2025-12-31) Drug order: Lamivudine / zidovudine. Action: NEW. Urgency: ROUTINE
+[37] (2025-12-31) Drug order: Trimethoprim and sulfamethoxazole. Action: NEW. Urgency: ROUTINE
+[38] (2025-12-31) Encounter: Adult Visit at Unknown Location. Provider: Horatio L Hornblower (Unknown)
+[39] (2025-12-31) Scheduled visit: Yes
+[40] (2025-12-31) Pay category: Pilot
+[41] (2025-12-31) Discordant couple: No
+[42] (2025-12-31) Pregnancy status: No
+[43] (2025-12-31) Conception since last visit: No
+[44] (2025-12-31) New complaints: Yes
+[45] (2025-12-31) Antiretroviral use: Yes
+[46] (2025-12-31) Primary regimen: Yes
+[47] (2025-12-31) Antiretroviral adherence in past week: All
+[48] (2025-12-31) Overall drug adherence in last month: No
+[49] (2025-12-31) PCP prophylaxis adherence in past week: All
+[50] (2025-12-31) Tuberculosis treatment adherence in past week: All
+[51] (2025-12-31) Arterial blood oxygen saturation (pulse oximeter): 93 %
+[52] (2025-12-31) Diastolic blood pressure: 60 mmHg
+[53] (2025-12-31) Pulse: 145 beats/min
+[54] (2025-12-31) Systolic blood pressure: 90 mmHg
+[55] (2025-12-31) Temperature (C): 38.4 C
+[56] (2025-12-31) Weight (kg): 42 kg
+[57] (2025-12-31) Current WHO HIV stage: WHO stage 3 adult
+[58] (2025-12-31) New WHO/CDC staging criteria met: No
+[59] (2025-12-31) Return visit date: 2026-01-07
+[60] (2025-12-31) Patient reported current cryptococcus treatment: None
+[61] (2025-12-31) Patient reported current tuberculosis prophylaxis: None
+[62] (2025-12-31) Antiretroviral plan: Continue regimen
+[63] (2025-12-31) Cryptococcal treatment plan: None
+[64] (2025-12-31) PCP prophylaxis plan: Continue regimen
+[65] (2025-12-31) Tuberculosis prophylaxis plan: None
+[66] (2025-12-31) Tuberculosis treatment plan: Continue regimen
+[67] (2025-12-31) Referrals ordered: None
+[68] (2025-12-31) Visit: OPD Visit at Unknown Location
+[69] (2025-12-16) Drug order: Rifampicin isoniazid pyrazinamide and ethambutol. Action: NEW. Urgency: ROUTINE
+[70] (2025-12-16) Drug order: Lamivudine / zidovudine. Action: NEW. Urgency: ROUTINE
+[71] (2025-12-16) Drug order: Efavirenz. Action: NEW. Urgency: ROUTINE
+[72] (2025-12-16) Drug order: Trimethoprim and sulfamethoxazole. Action: NEW. Urgency: ROUTINE
+[73] (2025-12-16) Encounter: Adult Visit at Unknown Location. Provider: Horatio L Hornblower (Unknown)
+[74] (2025-12-16) Scheduled visit: No
+[75] (2025-12-16) Pay category: Pilot
+[76] (2025-12-16) Discordant couple: No
+[77] (2025-12-16) New complaints: Yes
+[78] (2025-12-16) Antiretroviral use: Yes
+[79] (2025-12-16) Primary regimen: Yes
+[80] (2025-12-16) Antiretroviral adherence in past week: All
+[81] (2025-12-16) Overall drug adherence in last month: No
+[82] (2025-12-16) PCP prophylaxis adherence in past week: All
+[83] (2025-12-16) Arterial blood oxygen saturation (pulse oximeter): 98 %
+[84] (2025-12-16) Diastolic blood pressure: 60 mmHg
+[85] (2025-12-16) General exam findings: Jaundice
+[86] (2025-12-16) Pulse: 111 beats/min
+[87] (2025-12-16) Systolic blood pressure: 90 mmHg
+[88] (2025-12-16) Temperature (C): 37.3 C
+[89] (2025-12-16) Weight (kg): 48 kg
+[90] (2025-12-16) Current WHO HIV stage: WHO stage 3 adult
+[91] (2025-12-16) New WHO/CDC staging criteria met: No
+[92] (2025-12-16) Return visit date: 2025-12-31
+[93] (2025-12-16) Patient reported current cryptococcus treatment: None
+[94] (2025-12-16) Patient reported current tuberculosis prophylaxis: None
+[95] (2025-12-16) Patient reported current tuberculosis treatment: None
+[96] (2025-12-16) Antiretroviral plan: Continue regimen
+[97] (2025-12-16) Cryptococcal treatment plan: None
+[98] (2025-12-16) PCP prophylaxis plan: Continue regimen
+[99] (2025-12-16) Tuberculosis prophylaxis plan: None
+[100] (2025-12-16) Tuberculosis treatment plan: Start drugs
+[101] (2025-12-16) Referrals ordered: None
+[102] (2025-12-16) Visit: OPD Visit at Unknown Location
+[103] (2025-12-14) Absolute lymphocyte count: 2150 10^3/uL
+[104] (2025-12-14) Haemoglobin: 3.9 g/dL
+[105] (2025-12-14) Mean corpuscular volume: 93 fL
+[106] (2025-12-14) Platelets: 224000 10^3/mL
+[107] (2025-12-14) Serum creatinine (umol/L): 72 umol/L
+[108] (2025-12-14) Serum glutamic-pyruvic transaminase: 26 IU/L
+[109] (2025-12-14) White blood cells: 20200 10^3/uL
+[110] (2025-12-14) Test order: X-ray, chest. Action: NEW. Urgency: ROUTINE
+[111] (2025-11-10) Condition: Vomiting. Status: ACTIVE. Onset: 2025-11-10
+[112] (2025-11-10) Drug order: Efavirenz. Action: NEW. Urgency: ROUTINE
+[113] (2025-11-10) Drug order: Lamivudine / zidovudine. Action: NEW. Urgency: ROUTINE
+[114] (2025-11-10) Drug order: Trimethoprim and sulfamethoxazole. Action: NEW. Urgency: ROUTINE
+[115] (2025-11-10) Encounter: Adult Visit at Unknown Location. Provider: Horatio L Hornblower (Unknown)
+[116] (2025-11-10) Scheduled visit: Yes
+[117] (2025-11-10) Pay category: Pilot
+[118] (2025-11-10) Discordant couple: No
+[119] (2025-11-10) Pregnancy status: No
+[120] (2025-11-10) Conception since last visit: No
+[121] (2025-11-10) New complaints: Yes
+[122] (2025-11-10) Antiretroviral use: Yes
+[123] (2025-11-10) Primary regimen: Yes
+[124] (2025-11-10) Antiretroviral adherence in past week: All
+[125] (2025-11-10) Overall drug adherence in last month: No
+[126] (2025-11-10) PCP prophylaxis adherence in past week: All
+[127] (2025-11-10) Arterial blood oxygen saturation (pulse oximeter): 99 %
+[128] (2025-11-10) Diastolic blood pressure: 60 mmHg
+[129] (2025-11-10) Pulse: 86 beats/min
+[130] (2025-11-10) Systolic blood pressure: 100 mmHg
+[131] (2025-11-10) Temperature (C): 34.8 C
+[132] (2025-11-10) Weight (kg): 47 kg
+[133] (2025-11-10) Current WHO HIV stage: WHO stage 3 adult
+[134] (2025-11-10) New WHO/CDC staging criteria met: No
+[135] (2025-11-10) Return visit date: 2025-11-26
+[136] (2025-11-10) Patient reported current cryptococcus treatment: None
+[137] (2025-11-10) Patient reported current tuberculosis prophylaxis: None
+[138] (2025-11-10) Patient reported current tuberculosis treatment: None
+[139] (2025-11-10) Antiretroviral plan: Continue regimen
+[140] (2025-11-10) Cryptococcal treatment plan: None
+[141] (2025-11-10) PCP prophylaxis plan: Continue regimen
+[142] (2025-11-10) Tuberculosis prophylaxis plan: None
+[143] (2025-11-10) Tuberculosis treatment plan: None
+[144] (2025-11-10) Referrals ordered: None
+[145] (2025-11-10) Visit: OPD Visit at Unknown Location
+[146] (2025-11-03) Drug order: Efavirenz. Action: NEW. Urgency: ROUTINE
+[147] (2025-11-03) Drug order: Trimethoprim and sulfamethoxazole. Action: NEW. Urgency: ROUTINE
+[148] (2025-11-03) Drug order: Lamivudine / zidovudine. Action: NEW. Urgency: ROUTINE
+[149] (2025-11-03) Encounter: Adult Visit at Unknown Location. Provider: Horatio L Hornblower (Unknown)
+[150] (2025-11-03) Scheduled visit: No
+[151] (2025-11-03) Pay category: Pilot
+[152] (2025-11-03) Pregnancy status: No
+[153] (2025-11-03) Conception since last visit: No
+[154] (2025-11-03) New complaints: No
+[155] (2025-11-03) Antiretroviral use: Yes
+[156] (2025-11-03) Primary regimen: Yes
+[157] (2025-11-03) Antiretroviral adherence in past week: All
+[158] (2025-11-03) Overall drug adherence in last month: No
+[159] (2025-11-03) Return visit date: 2025-11-10
+[160] (2025-11-03) Patient reported current cryptococcus treatment: None
+[161] (2025-11-03) Patient reported current PCP prophylaxis: None
+[162] (2025-11-03) Patient reported current tuberculosis prophylaxis: None
+[163] (2025-11-03) Patient reported current tuberculosis treatment: None
+[164] (2025-11-03) Antiretroviral plan: Continue regimen
+[165] (2025-11-03) Cryptococcal treatment plan: None
+[166] (2025-11-03) PCP prophylaxis plan: Start drugs
+[167] (2025-11-03) Tuberculosis prophylaxis plan: None
+[168] (2025-11-03) Tuberculosis treatment plan: None
+[169] (2025-11-03) Referrals ordered: None
+[170] (2025-11-03) Visit: OPD Visit at Unknown Location
+[171] (2025-10-26) Encounter: Adult Visit at Unknown Location. Provider: Horatio L Hornblower (Unknown)
+[172] (2025-10-26) Scheduled visit: Yes
+[173] (2025-10-26) Pay category: Pilot
+[174] (2025-10-26) Pregnancy status: No
+[175] (2025-10-26) Conception since last visit: No
+[176] (2025-10-26) New complaints: Yes
+[177] (2025-10-26) Antiretroviral use: No
+[178] (2025-10-26) Overall drug adherence in last month: No
+[179] (2025-10-26) Arterial blood oxygen saturation (pulse oximeter): 94 %
+[180] (2025-10-26) Diastolic blood pressure: 60 mmHg
+[181] (2025-10-26) Pulse: 96 beats/min
+[182] (2025-10-26) Systolic blood pressure: 90 mmHg
+[183] (2025-10-26) Temperature (C): 32.6 C
+[184] (2025-10-26) Weight (kg): 49.5 kg
+[185] (2025-10-26) Current WHO HIV stage: WHO stage 3 adult
+[186] (2025-10-26) New WHO/CDC staging criteria met: No
+[187] (2025-10-26) Patient hospitalized location: Moi teaching and referral hospital
+[188] (2025-10-26) Patient reported current cryptococcus treatment: None
+[189] (2025-10-26) Patient reported current PCP prophylaxis: None
+[190] (2025-10-26) Patient reported current tuberculosis prophylaxis: None
+[191] (2025-10-26) Patient reported current tuberculosis treatment: None
+[192] (2025-10-26) Antiretroviral plan: None
+[193] (2025-10-26) Cryptococcal treatment plan: None
+[194] (2025-10-26) PCP prophylaxis plan: None
+[195] (2025-10-26) Tuberculosis prophylaxis plan: None
+[196] (2025-10-26) Tuberculosis treatment plan: None
+[197] (2025-10-26) Absolute lymphocyte count: 1000 10^3/uL
+[198] (2025-10-26) Haemoglobin: 9.1 g/dL
+[199] (2025-10-26) Mean corpuscular volume: 72.9 fL
+[200] (2025-10-26) Platelets: 191000 10^3/mL
+[201] (2025-10-26) Serum creatinine (umol/L): 193.7 umol/L
+[202] (2025-10-26) Serum glutamic-pyruvic transaminase: 73.1 IU/L
+[203] (2025-10-26) White blood cells: 4800 10^3/uL
+[204] (2025-10-26) Visit: OPD Visit at Unknown Location
+[205] (2025-10-23) Condition: Fever. Status: ACTIVE. Onset: 2025-10-23
+[206] (2025-10-23) Encounter: Adult Visit at Unknown Location. Provider: Horatio L Hornblower (Unknown)
+[207] (2025-10-23) Scheduled visit: Yes
+[208] (2025-10-23) Pay category: Pilot
+[209] (2025-10-23) New complaints: Yes
+[210] (2025-10-23) Antiretroviral use: No
+[211] (2025-10-23) Overall drug adherence in last month: No
+[212] (2025-10-23) Arterial blood oxygen saturation (pulse oximeter): 91 %
+[213] (2025-10-23) Diastolic blood pressure: 60 mmHg
+[214] (2025-10-23) Pulse: 113 beats/min
+[215] (2025-10-23) Systolic blood pressure: 100 mmHg
+[216] (2025-10-23) Temperature (C): 39.7 C
+[217] (2025-10-23) Weight (kg): 52 kg
+[218] (2025-10-23) Current WHO HIV stage: WHO stage 3 adult
+[219] (2025-10-23) New WHO/CDC staging criteria met: No
+[220] (2025-10-23) Return visit date: 2025-10-26
+[221] (2025-10-23) Patient reported current cryptococcus treatment: None
+[222] (2025-10-23) Patient reported current PCP prophylaxis: None
+[223] (2025-10-23) Patient reported current tuberculosis prophylaxis: None
+[224] (2025-10-23) Patient reported current tuberculosis treatment: None
+[225] (2025-10-23) Antiretroviral plan: None
+[226] (2025-10-23) Cryptococcal treatment plan: None
+[227] (2025-10-23) PCP prophylaxis plan: None
+[228] (2025-10-23) Tuberculosis prophylaxis plan: None
+[229] (2025-10-23) Tuberculosis treatment plan: None
+[230] (2025-10-23) Referrals ordered: None
+[231] (2025-10-23) Test order: X-ray, chest. Action: NEW. Urgency: ROUTINE
+[232] (2025-10-23) Visit: OPD Visit at Unknown Location
+[233] (2025-10-22) Allergy: Penicillins (drug allergen)
+[234] (2025-10-22) Condition: Human immunodeficiency virus. Status: ACTIVE. Onset: 2025-10-22
+[235] (2025-10-22) Condition: Fever. Status: ACTIVE. Onset: 2025-10-22
+[236] (2025-10-22) Condition: Candidiasis, oral. Status: ACTIVE. Onset: 2025-10-22
+[237] (2025-10-22) Encounter: Attachment Upload at Unknown Location. Provider: Horatio L Hornblower (Unknown)
+[238] (2025-10-22) Pay category: Pilot
+[239] (2025-10-22) Return visit date: 2025-10-23
+[240] (2025-10-22) Clinic travel time (categorical): Less than 30 minutes
+[241] (2025-10-22) Attended school ever: Yes
+[242] (2025-10-22) Years of school completed: 12 years
+[243] (2025-10-22) Employed outside home: Yes
+[244] (2025-10-22) Home electricity: No
+[245] (2025-10-22) Home plumbing: Yes
+[246] (2025-10-22) Total people living in home: 5 # people
+[247] (2025-10-22) Total children under 5yo living in home: 0 # children
+[248] (2025-10-22) HIV disclosure to anyone: Yes
+[249] (2025-10-22) HIV disclosure to anyone, specific: Other family member
+[250] (2025-10-22) Gravida: 3
+[251] (2025-10-22) Parity: 3 # children
+[252] (2025-10-22) Total offspring living in home: 3 # children
+[253] (2025-10-22) Total offspring under 5yo living in home: 0 # children
+[254] (2025-10-22) Civil status: Widowed
+[255] (2025-10-22) Spouse expired from HIV: Yes
+[256] (2025-10-22) Partner multiple sexual partners: Yes
+[257] (2025-10-22) Patient had sex in last 6mo: No
+[258] (2025-10-22) Method of HIV exposure: Spouse's partner suspected HIV+
+[259] (2025-10-22) Pregnancy status: No
+[260] (2025-10-22) Currently using birth control: No
+[261] (2025-10-22) Chief complaint: Symptomatic
+[262] (2025-10-22) Review of systems, general: Weight loss
+[263] (2025-10-22) Review of systems, general: Chills
+[264] (2025-10-22) Review of systems, general: Fever
+[265] (2025-10-22) Review of systems, general: Fatigue
+[266] (2025-10-22) Review of systems, HEENT: Candidiasis, oral
+[267] (2025-10-22) Cough duration: Days
+[268] (2025-10-22) Productive cough quality: White color
+[269] (2025-10-22) Review of systems, cardiopulmonary: Cough
+[270] (2025-10-22) Review of systems, cardiopulmonary: Productive cough
+[271] (2025-10-22) Review of systems, gastrointestinal: Abdominal pain
+[272] (2025-10-22) Review of systems, genitourinary: Menstruating
+[273] (2025-10-22) Review of systems, musculoskeletal: Negative
+[274] (2025-10-22) Review of systems, central nervous system: Negative
+[275] (2025-10-22) Hospitalized previous year: Yes
+[276] (2025-10-22) Number of hospitalizations in past year: 27 # hospitalizations
+[277] (2025-10-22) Allergy to other medicine: No
+[278] (2025-10-22) Allergy to sulfa: No
+[279] (2025-10-22) History of exposure to antiretroviral drugs: No
+[280] (2025-10-22) Audit-3 overall frequency: Never
+[281] (2025-10-22) Arterial blood oxygen saturation (pulse oximeter): 98 %
+[282] (2025-10-22) Diastolic blood pressure: 60 mmHg
+[283] (2025-10-22) Karnofsky performance score: 90 %
+[284] (2025-10-22) Pulse: 113 beats/min
+[285] (2025-10-22) Systolic blood pressure: 100 mmHg
+[286] (2025-10-22) Temperature (C): 38.4 C
+[287] (2025-10-22) Weight (kg): 52 kg
+[288] (2025-10-22) Skin exam findings: Normal
+[289] (2025-10-22) Lymph node exam findings: Normal
+[290] (2025-10-22) HEENT exam findings: Abnormal
+[291] (2025-10-22) HEENT exam findings: Candidiasis, oral
+[292] (2025-10-22) Chest exam findings: Normal
+[293] (2025-10-22) Cardiac exam findings: Normal
+[294] (2025-10-22) Abdominal exam findings: Normal
+[295] (2025-10-22) Urogenital exam findings: Not done
+[296] (2025-10-22) Extremity exam findings: Normal
+[297] (2025-10-22) Musculoskeletal exam findings: Normal
+[298] (2025-10-22) Neurologic exam findings: Normal
+[299] (2025-10-22) Psychiatric exam findings: Normal
+[300] (2025-10-22) Adult WHO condition query: Candidiasis, oral
+[301] (2025-10-22) Patient reported current cryptococcus treatment: None
+[302] (2025-10-22) Patient reported current PCP prophylaxis: None
+[303] (2025-10-22) Patient reported current tuberculosis prophylaxis: None
+[304] (2025-10-22) Patient reported current tuberculosis treatment: None
+[305] (2025-10-22) Tests ordered: Complete blood count
+[306] (2025-10-22) Tests ordered: Serum glutamic-pyruvic transaminase
+[307] (2025-10-22) Tests ordered: CD4 panel
+[308] (2025-10-22) Tests ordered: Serum creatinine (umol/L)
+[309] (2025-10-22) Tests ordered: X-ray, chest
+[310] (2025-10-22) Referrals ordered: None
+[311] (2025-10-22) CD4 count: 72 cells/uL
+[312] (2025-10-22) CD4%: 5 %
+[313] (2025-10-22) CD8 count: 1180 cells/uL
+[314] (2025-10-22) Visit: Facility Visit at Unknown Location
+[315] (2025-10-06) Encounter: Adult Visit at Unknown Location. Provider: Horatio L Hornblower (Unknown)
+[316] (2025-10-06) Encounter: Attachment Upload at Unknown Location. Provider: Horatio L Hornblower (Unknown)
+[317] (2025-10-06) Encounter: Attachment Upload at Unknown Location. Provider: Horatio L Hornblower (Unknown)
+[318] (2025-10-06) Temperature (C): 39.5 C
+[319] (2025-10-06) Visit: OPD Visit at Unknown Location
+[320] (2025-09-09) Patient: Aloice Beiywa Mukangu. Female. Born 1984-04-09. Address: Sikhendu. Identifiers: OpenMRS Identification Number 38BF-4

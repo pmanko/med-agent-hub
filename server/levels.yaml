@@ -174,8 +174,8 @@ profiles:
     topology: single
     stages: *product
     models: {answer: gemma-e4b, review: gemma-e4b, grounding: gemma-e4b, indepth: gemma-e4b}
-    prompts: {answer: synthesis-answer, review: validation-rewrite, indepth: synthesis-indepth}
-    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true}
+    prompts: {answer: synthesis-answer, review: validation-label, indepth: synthesis-indepth}
+    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true, review: {action: label, grounding: separate}}
     visibility: product
     selection_priority: 10
     context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true, supplemental_sources: [knowledge-base]}
@@ -186,8 +186,8 @@ profiles:
     topology: single
     stages: *product
     models: {answer: gemma-e2b, review: gemma-e4b, grounding: gemma-e4b, indepth: gemma-e4b}
-    prompts: {answer: synthesis-answer, review: validation-rewrite, indepth: synthesis-indepth}
-    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true}
+    prompts: {answer: synthesis-answer, review: validation-label, indepth: synthesis-indepth}
+    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true, review: {action: label, grounding: separate}}
     visibility: product
     selection_priority: 15
     context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true, supplemental_sources: [knowledge-base]}
@@ -198,8 +198,8 @@ profiles:
     topology: single
     stages: *product
     models: {answer: gemma-26b, review: gemma-26b, grounding: gemma-26b, indepth: gemma-26b}
-    prompts: {answer: synthesis-answer, review: validation-rewrite, indepth: synthesis-indepth}
-    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true}
+    prompts: {answer: synthesis-answer, review: validation-label, indepth: synthesis-indepth}
+    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true, review: {action: label, grounding: separate}}
     visibility: product
     selection_priority: 20
     context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true, supplemental_sources: [knowledge-base]}
@@ -210,8 +210,8 @@ profiles:
     topology: single
     stages: *product
     models: {answer: gemma-4-12b, review: gemma-4-12b, grounding: gemma-4-12b, indepth: gemma-4-12b}
-    prompts: {answer: synthesis-answer, review: validation-rewrite, indepth: synthesis-indepth}
-    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true}
+    prompts: {answer: synthesis-answer, review: validation-label, indepth: synthesis-indepth}
+    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true, review: {action: label, grounding: separate}}
     visibility: product
     default: true
     selection_priority: 30
@@ -223,8 +223,8 @@ profiles:
     topology: single
     stages: *product_fast
     models: {answer: gemma-4-12b, review: gemma-4-12b, grounding: gemma-4-12b}
-    prompts: {answer: synthesis-answer, review: validation-rewrite}
-    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true}
+    prompts: {answer: synthesis-answer, review: validation-label}
+    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true, review: {action: label, grounding: separate}}
     visibility: product
     selection_priority: 35
     context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true, supplemental_sources: [knowledge-base]}
@@ -238,9 +238,87 @@ profiles:
     stages: *product_answer
     models: {answer: gemma-4-12b, grounding: gemma-4-12b}
     prompts: {answer: synthesis-answer}
-    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true}
+    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true, review: {action: label, grounding: separate}}
     visibility: product
     selection_priority: 40
+    context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true, supplemental_sources: [knowledge-base]}
+    knobs: {answer: {temperature: 0}}
+
+  # Checked-answer research arms: the default profile's stages, context and policies with one
+  # choice changed each. Offered in the app after the default; the harness runs them as arms.
+  single-12b-xcheck:
+    label: Checked answer (12B writer, Qwen3.6 35B-A3B checker)
+    topology: single
+    stages: *product
+    models: {answer: gemma-4-12b, review: qwen3.6-35b, grounding: qwen3.6-35b, indepth: gemma-4-12b}
+    prompts: {answer: synthesis-answer, review: validation-label, indepth: synthesis-indepth}
+    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true, review: {action: label, grounding: separate}}
+    visibility: product
+    selection_priority: 50
+    context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true, supplemental_sources: [knowledge-base]}
+    knobs: {answer: {temperature: 0}, review: {temperature: 0.7}}
+
+  single-31b-xcheck:
+    label: Checked answer (31B writer, Qwen3.5 9B checker)
+    topology: single
+    stages: *product
+    models: {answer: gemma-31b, review: qwen3.5-9b, grounding: qwen3.5-9b, indepth: gemma-31b}
+    prompts: {answer: synthesis-answer, review: validation-label, indepth: synthesis-indepth}
+    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true, review: {action: label, grounding: separate}}
+    visibility: product
+    selection_priority: 51
+    context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true, supplemental_sources: [knowledge-base]}
+    knobs: {answer: {temperature: 0}, review: {temperature: 0.7}}
+
+  single-12b-checked-folded:
+    label: Checked answer (12B, citation support judged in the review)
+    topology: single
+    stages: *product
+    models: {answer: gemma-4-12b, review: gemma-4-12b, grounding: gemma-4-12b, indepth: gemma-4-12b}
+    prompts: {answer: synthesis-answer, review: validation-label, indepth: synthesis-indepth}
+    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true, review: {action: label, grounding: folded}}
+    visibility: product
+    selection_priority: 52
+    context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true, supplemental_sources: [knowledge-base]}
+    knobs: {answer: {temperature: 0}}
+
+  single-12b-checked-noground:
+    label: Checked answer (12B, no citation support check)
+    topology: single
+    stages: *product
+    models: {answer: gemma-4-12b, review: gemma-4-12b, grounding: gemma-4-12b, indepth: gemma-4-12b}
+    prompts: {answer: synthesis-answer, review: validation-label, indepth: synthesis-indepth}
+    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true, review: {action: label, grounding: "off"}}
+    visibility: product
+    selection_priority: 53
+    context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true, supplemental_sources: [knowledge-base]}
+    knobs: {answer: {temperature: 0}}
+
+  # The default with the DRY repetition penalty off for the writer and the reviewer; DRY
+  # garbles dates copied from the chart (2026-01_26). Measured against single-12b-checked.
+  single-12b-checked-nodry:
+    label: Checked answer (12B, repetition penalty off)
+    topology: single
+    stages: *product
+    models: {answer: gemma-4-12b, review: gemma-4-12b, grounding: gemma-4-12b, indepth: gemma-4-12b}
+    prompts: {answer: synthesis-answer, review: validation-label, indepth: synthesis-indepth}
+    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true, review: {action: label, grounding: separate}}
+    visibility: product
+    selection_priority: 54
+    context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true, supplemental_sources: [knowledge-base]}
+    knobs: {answer: {temperature: 0, dry: 0}, review: {dry: 0}}
+
+  # Decision-layer verification arm (DECISION-LAYER-2026-10): replaces generative grounding
+  # and verifies Answer reviewer error pairs with calibrated Laya three-band probabilities.
+  single-12b-checked-laya:
+    label: Checked answer (12B writer, Laya decision verifier)
+    topology: single
+    stages: *product
+    models: {answer: gemma-4-12b, review: gemma-4-12b, grounding: laya, indepth: gemma-4-12b}
+    prompts: {answer: synthesis-answer, review: validation-label, indepth: synthesis-indepth}
+    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true, review: {action: label, grounding: decision, low_threshold: 0.35, high_threshold: 0.75, temperature_scale: 1.0, verify_review_errors: true}}
+    visibility: product
+    selection_priority: 55
     context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true, supplemental_sources: [knowledge-base]}
     knobs: {answer: {temperature: 0}}
 
@@ -249,8 +327,8 @@ profiles:
     topology: team
     stages: *team_product
     models: {orchestrator: gemma-e4b-q8, expert: medgemma-1.5-4b-q8, answer: qwen2.5-14b, review: gemma-4-12b, grounding: qwen2.5-14b, indepth: qwen2.5-14b}
-    prompts: {answer: synthesis-answer, review: validation-rewrite, indepth: synthesis-indepth, orchestrator: orchestrator, expert: medical_expert}
-    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true}
+    prompts: {answer: synthesis-answer, review: validation-label, indepth: synthesis-indepth, orchestrator: orchestrator, expert: medical_expert}
+    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true, review: {action: label, grounding: separate}}
     visibility: product
     selection_priority: 100
     context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true, supplemental_sources: [knowledge-base]}
@@ -263,8 +341,8 @@ profiles:
     topology: team
     stages: *team_product
     models: {orchestrator: gemma-31b, expert: medgemma-27b, answer: qwen3.6-35b-q6, review: gemma-31b, grounding: qwen3.6-35b-q6, indepth: qwen3.6-35b-q6}
-    prompts: {answer: synthesis-answer, review: validation-rewrite, indepth: synthesis-indepth, orchestrator: orchestrator, expert: medical_expert}
-    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true}
+    prompts: {answer: synthesis-answer, review: validation-label, indepth: synthesis-indepth, orchestrator: orchestrator, expert: medical_expert}
+    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true, review: {action: label, grounding: separate}}
     visibility: debug
     context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true, supplemental_sources: [knowledge-base]}
 

@@ -71,7 +71,7 @@ def test_answer_leg_compiles_prompt_gate_and_temperature():
 def test_review_leg_keeps_its_existing_wire_contract():
     profile = levels_loader.get_profile("answer-review:qwen2.5-14b")
     assert profile.models == {"review": "qwen2.5-14b"}
-    assert profile.prompts == {"review": "validation-rewrite"}
+    assert profile.prompts == {"review": "validation-label"}
     assert profile.output_mode == "review"
     assert profile.stages == ("context", "review")
 

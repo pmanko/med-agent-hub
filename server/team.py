@@ -13,7 +13,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Sequ
 
 import httpx
 
-from . import drug_safety, temporal
+from . import decision_model, drug_safety, temporal
 from .config import EXPERT_DRY_MULTIPLIER, llm_config, resolve_hub_build_revision
 from .context_sources import (
     CHART_MARKER,
@@ -534,6 +534,56 @@ _ENTAILMENT_SYSTEM_PROMPT = (
     'exactly one verdict per pair, in the same order, as JSON: {"verdicts": ["YES"|"NO", ...]}.'
 )
 
+# In-Depth claims join a chart fact to interpretation and advice. Their citations are checked for
+# the facts the claim attributes to each record; the reasoning is the reviewer's to judge. Asking
+# for the facts first keeps a checker from rejecting a sentence for its interpretation: told only
+# to ignore interpretation, the Qwen checkers answered NO to every pair.
+_ATTRIBUTION_SYSTEM_PROMPT = (
+    "You check what clinical statements attribute to patient records. For each PAIR, first copy "
+    "the patient facts the STATEMENT gives that could come from a record: values with units, dates, "
+    "drug names, results, diagnoses, statuses, stages. Leave out interpretation, advice, risks and "
+    "general medical knowledge. Then mark each fact found (the SOURCE states it, allowing different "
+    "wording or date format) or not found. The verdict is YES when every fact is found, NO when any "
+    "fact is not found or differs. When the statement gives no patient fact, the verdict is YES only "
+    "if the SOURCE states the guidance or knowledge the statement gives, otherwise NO. Use only "
+    "the SOURCE text. Return one entry per pair, in the same order, as JSON: "
+    '{"pairs": [{"facts": [{"fact": "...", "found": true|false}], "verdict": "YES"|"NO"}, ...]}.'
+)
+
+_ATTRIBUTION_RF = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "attribution_verdicts",
+        "schema": {
+            "type": "object",
+            "properties": {
+                "pairs": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "facts": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "fact": {"type": "string"},
+                                        "found": {"type": "boolean"},
+                                    },
+                                    "required": ["fact", "found"],
+                                },
+                            },
+                            "verdict": {"type": "string", "enum": ["YES", "NO"]},
+                        },
+                        "required": ["facts", "verdict"],
+                    },
+                },
+            },
+            "required": ["pairs"],
+        },
+    },
+}
+
 _ENTAILMENT_RF = {
     "type": "json_schema",
     "json_schema": {
@@ -556,29 +606,57 @@ async def _entailment_verdicts(
     client: httpx.AsyncClient,
     model: str,
     pairs: List[Tuple[str, str]],
+    *,
+    attribution_only: bool = False,
+    reasons: Optional[List[Optional[str]]] = None,
 ) -> List[Optional[bool]]:
     """Batched LLM entailment check for citation grounding — mirrors the validator call shape
     (fresh one-shot message list, dedicated json_schema response_format, one call for the whole
     batch since the hub's single-slot router makes per-pair fan-out no faster). ``pairs`` are
     ``(source_text, statement)``. FAIL-OPEN to ``None`` (unchecked) for every pair on any call or
     parse failure, or if the model returns fewer verdicts than pairs — a flaky grounding check must
-    never fabricate a verdict."""
+    never fabricate a verdict. With ``attribution_only``, ``reasons`` (when given) is filled with
+    one entry per pair: the facts the checker did not find in the source, or None."""
     if not pairs:
         return []
     body = "\n\n".join(
         f"PAIR {i + 1}:\nSOURCE: {source or '(none)'}\nSTATEMENT: {statement or '(none)'}"
         for i, (source, statement) in enumerate(pairs)
     )
-    user = _ENTAILMENT_SYSTEM_PROMPT + "\n\n" + body
+    instruction = (
+        _ATTRIBUTION_SYSTEM_PROMPT if attribution_only else _ENTAILMENT_SYSTEM_PROMPT
+    )
+    user = instruction + "\n\n" + body
     try:
         msg = await _chat(
             client,
             model,
             [{"role": "user", "content": user}],
-            response_format=_ENTAILMENT_RF,
+            response_format=_ATTRIBUTION_RF if attribution_only else _ENTAILMENT_RF,
         )
         obj = json.loads(_message_text(msg))
-        verdicts = obj.get("verdicts") if isinstance(obj, dict) else None
+        if attribution_only:
+            entries = obj.get("pairs") if isinstance(obj, dict) else None
+            if not isinstance(entries, list):
+                raise ValueError("attribution response missing a 'pairs' array")
+            verdicts = [
+                entry.get("verdict") if isinstance(entry, dict) else None
+                for entry in entries
+            ]
+            if reasons is not None:
+                for entry in entries[: len(pairs)]:
+                    facts = entry.get("facts") if isinstance(entry, dict) else None
+                    missing = [
+                        str(fact.get("fact")).strip()
+                        for fact in (facts if isinstance(facts, list) else [])
+                        if isinstance(fact, dict)
+                        and fact.get("found") is False
+                        and str(fact.get("fact") or "").strip()
+                    ]
+                    reasons.append("; ".join(missing) or None)
+                reasons.extend([None] * (len(pairs) - len(reasons)))
+        else:
+            verdicts = obj.get("verdicts") if isinstance(obj, dict) else None
         if not isinstance(verdicts, list):
             raise ValueError("entailment response missing a 'verdicts' array")
     except InsufficientContextError:
@@ -589,6 +667,8 @@ async def _entailment_verdicts(
             model,
             len(pairs),
         )
+        if reasons is not None:
+            reasons[:] = [None] * len(pairs)
         return [None] * len(pairs)
     out: List[Optional[bool]] = []
     for i in range(len(pairs)):
@@ -606,23 +686,116 @@ async def _bounded_entailment_verdicts(
     client: httpx.AsyncClient,
     model: str,
     pairs: List[Tuple[str, str]],
+    *,
+    attribution_only: bool = False,
+    reasons: Optional[List[Optional[str]]] = None,
 ) -> List[Optional[bool]]:
-    """Check all pairs together, splitting only when exact token measurement overflows."""
+    """Check all pairs together, splitting only when exact token measurement overflows.
 
-    async def check(items: List[Tuple[str, str]]) -> List[Optional[bool]]:
+    ``reasons``, when given, receives one entry per pair (see ``_entailment_verdicts``)."""
+    options = {"attribution_only": True} if attribution_only else {}
+
+    async def check(items: List[Tuple[str, str]]) -> Tuple[List[Optional[bool]], List[Optional[str]]]:
+        found: List[Optional[str]] = []
         try:
-            return await _entailment_verdicts(client, model, items)
+            verdicts = await _entailment_verdicts(
+                client, model, items, **options, **({"reasons": found} if attribution_only else {})
+            )
+            return verdicts, (found + [None] * len(items))[: len(items)]
         except InsufficientContextError:
             if len(items) == 1:
                 logger.warning(
                     "entailment grounding[%s] single pair exceeds context -> unchecked",
                     model,
                 )
-                return [None]
+                return [None], [None]
             midpoint = len(items) // 2
-            return await check(items[:midpoint]) + await check(items[midpoint:])
+            left, left_reasons = await check(items[:midpoint])
+            right, right_reasons = await check(items[midpoint:])
+            return left + right, left_reasons + right_reasons
 
-    return await check(pairs) if pairs else []
+    if not pairs:
+        return []
+    verdicts, pair_reasons = await check(pairs)
+    if reasons is not None:
+        reasons.extend(pair_reasons)
+    return verdicts
+
+
+async def _bounded_decision_verdicts(
+    client: httpx.AsyncClient,
+    model: str,
+    pairs: List[Tuple[str, str]],
+    *,
+    attribution_only: bool = False,
+    low_threshold: float = decision_model.DEFAULT_LOW_THRESHOLD,
+    high_threshold: float = decision_model.DEFAULT_HIGH_THRESHOLD,
+    temperature_scale: float = decision_model.DEFAULT_TEMPERATURE_SCALE,
+    reasons: Optional[List[Optional[str]]] = None,
+    probabilities: Optional[List[Optional[float]]] = None,
+    bands: Optional[List[Optional[str]]] = None,
+) -> List[Optional[bool]]:
+    """Score pairs with a calibrated decision model, splitting on context overflow."""
+
+    async def check(
+        items: List[Tuple[str, str]],
+    ) -> Tuple[
+        List[Optional[bool]],
+        List[Optional[str]],
+        List[Optional[float]],
+        List[Optional[str]],
+    ]:
+        found_reasons: List[Optional[str]] = []
+        found_probs: List[Optional[float]] = []
+        found_bands: List[Optional[str]] = []
+        try:
+            verdicts = await decision_model.decide_grounding_pairs(
+                client,
+                model,
+                items,
+                chat_fn=_chat,
+                message_text_fn=_message_text,
+                attribution_only=attribution_only,
+                low_threshold=low_threshold,
+                high_threshold=high_threshold,
+                temperature_scale=temperature_scale,
+                reasons=found_reasons,
+                probabilities=found_probs,
+                bands=found_bands,
+            )
+            return (
+                verdicts,
+                (found_reasons + [None] * len(items))[: len(items)],
+                (found_probs + [None] * len(items))[: len(items)],
+                (found_bands + [None] * len(items))[: len(items)],
+            )
+        except InsufficientContextError:
+            if len(items) == 1:
+                logger.warning(
+                    "decision grounding[%s] single pair exceeds context -> unchecked",
+                    model,
+                )
+                return [None], [None], [None], [None]
+            midpoint = len(items) // 2
+            left_v, left_r, left_p, left_b = await check(items[:midpoint])
+            right_v, right_r, right_p, right_b = await check(items[midpoint:])
+            return (
+                left_v + right_v,
+                left_r + right_r,
+                left_p + right_p,
+                left_b + right_b,
+            )
+
+    if not pairs:
+        return []
+    verdicts, pair_reasons, pair_probs, pair_bands = await check(pairs)
+    if reasons is not None:
+        reasons.extend(pair_reasons)
+    if probabilities is not None:
+        probabilities.extend(pair_probs)
+    if bands is not None:
+        bands.extend(pair_bands)
+    return verdicts
 
 
 async def _ground_references(
@@ -633,12 +806,23 @@ async def _ground_references(
     mappings: List[Dict[str, Any]],
     *,
     deterministic_checks: Optional[List[Dict[str, Any]]] = None,
+    index_verdicts: Optional[Mapping[int, bool]] = None,
+    attribution_only: bool = False,
+    decision_grounding: bool = False,
+    low_threshold: float = decision_model.DEFAULT_LOW_THRESHOLD,
+    high_threshold: float = decision_model.DEFAULT_HIGH_THRESHOLD,
+    temperature_scale: float = decision_model.DEFAULT_TEMPERATURE_SCALE,
 ) -> List[Dict[str, Any]]:
     """Ground final claims against their cited source sets in one bounded entailment call.
 
     A sentence may rely on multiple citations collectively (for example, two dated weights support
     a change claim). Grouping identical usage text prevents each source from being incorrectly asked
     to support the entire multi-source sentence by itself.
+
+    With ``index_verdicts`` (grounding folded into the review), no entailment call is made: a claim
+    is supported when the reviewer supported every record it cites, unsupported when it rejected
+    any, and unchecked when it judged none or only some of them. ``attribution_only`` checks only
+    what each claim attributes to its records (In-Depth claims), not its interpretation.
     """
     mapping_by_index = {
         mapping.get("index"): mapping
@@ -786,7 +970,58 @@ async def _ground_references(
         ("\n".join(groups[i]["sources"]), groups[i]["claim"])
         for i in checkable_positions
     ]
-    verdicts = await _bounded_entailment_verdicts(client, model, pairs) if pairs else []
+    pair_reasons: List[Optional[str]] = []
+    pair_probs: List[Optional[float]] = []
+    pair_bands: List[Optional[str]] = []
+    if index_verdicts is not None:
+        verdicts = []
+        for position in checkable_positions:
+            judged = [
+                index_verdicts.get(references[reference_position].get("index"))
+                for reference_position in groups[position]["references"]
+            ]
+            verdicts.append(
+                False
+                if any(value is False for value in judged)
+                else True
+                if judged and all(value is True for value in judged)
+                else None
+            )
+    elif decision_grounding:
+        verdicts = (
+            await _bounded_decision_verdicts(
+                client,
+                model,
+                pairs,
+                attribution_only=attribution_only,
+                low_threshold=low_threshold,
+                high_threshold=high_threshold,
+                temperature_scale=temperature_scale,
+                reasons=pair_reasons,
+                probabilities=pair_probs,
+                bands=pair_bands,
+            )
+            if pairs
+            else []
+        )
+    else:
+        verdicts = (
+            await _bounded_entailment_verdicts(
+                client,
+                model,
+                pairs,
+                **(
+                    {"attribution_only": True, "reasons": pair_reasons}
+                    if attribution_only
+                    else {}
+                ),
+            )
+            if pairs
+            else []
+        )
+    reason_by_position = dict(zip(checkable_positions, pair_reasons))
+    prob_by_position = dict(zip(checkable_positions, pair_probs))
+    band_by_position = dict(zip(checkable_positions, pair_bands))
     verdict_by_position = {
         **{position: True for position in deterministic_positions},
         **dict(zip(checkable_positions, verdicts)),
@@ -802,27 +1037,38 @@ async def _ground_references(
         for group_position in groups_by_reference[i]:
             group = groups[group_position]
             group_verdict = verdict_by_position.get(group_position)
+            group_band = band_by_position.get(group_position)
             grounding_check = {
-                    "status": (
-                        "verified"
-                        if group_verdict is True
-                        else "unsupported"
-                        if group_verdict is False
-                        else "unchecked"
-                    ),
-                    "claim": group["claim"],
-                    "location": group["location"],
-                    "path": group["path"],
-                    "source_indices": sorted(
-                        {
-                            references[position].get("index")
-                            for position in group["references"]
-                            if isinstance(references[position].get("index"), int)
-                        }
-                    ),
-                }
+                "status": (
+                    "verified"
+                    if group_verdict is True
+                    else "unsupported"
+                    if group_verdict is False
+                    else "uncertain"
+                    if group_band == "uncertain"
+                    else "unchecked"
+                ),
+                "claim": group["claim"],
+                "location": group["location"],
+                "path": group["path"],
+                "source_indices": sorted(
+                    {
+                        references[position].get("index")
+                        for position in group["references"]
+                        if isinstance(references[position].get("index"), int)
+                    }
+                ),
+            }
             if group_position in deterministic_positions:
                 grounding_check["method"] = deterministic_methods[group_position]
+            elif decision_grounding and group_position in prob_by_position:
+                grounding_check["method"] = "decision_model"
+                if prob_by_position[group_position] is not None:
+                    grounding_check["probability"] = prob_by_position[group_position]
+                if group_band is not None:
+                    grounding_check["band"] = group_band
+            if group_verdict is False and reason_by_position.get(group_position):
+                grounding_check["not_found"] = reason_by_position[group_position]
             grounding_checks.append(grounding_check)
         check_statuses = {check["status"] for check in grounding_checks}
         if not grounding_checks or "unchecked" in check_statuses:
@@ -834,6 +1080,9 @@ async def _ground_references(
         elif check_statuses == {"verified"}:
             verdict = True
             aggregate_status = "verified"
+        elif check_statuses <= {"verified", "uncertain"} and "uncertain" in check_statuses:
+            verdict = None
+            aggregate_status = "uncertain"
         else:
             verdict = None
             aggregate_status = "mixed"
@@ -1258,15 +1507,13 @@ _INDEPTH_RF = {
 }
 
 
-# Rewrite-validator verdict (the "suggest the fix" mode): the validator LOCALIZES each chart
-# contradiction (wrong phrase + grounding record + replacement) AND returns the surgically-corrected
-# answer, so the refine loop ADOPTS the validator's fix instead of asking the writer to regenerate. The
-# research basis: actionable, localized feedback beats a binary verdict, and a surgical edit avoids the
-# over-correction that a from-scratch regenerate inflicts on the already-correct parts of a strong answer.
-_REWRITE_VERDICT_RF = {
+# Label-mode reviewer verdict: the reviewer localizes each chart contradiction (the wrong phrase
+# and the record that contradicts it). The verdict labels the answer; it never replaces it, so the
+# reviewer is not asked for a fix or a corrected answer.
+_LABEL_VERDICT_RF = {
     "type": "json_schema",
     "json_schema": {
-        "name": "rewrite_verdict",
+        "name": "label_verdict",
         "schema": {
             "type": "object",
             "properties": {
@@ -1278,20 +1525,43 @@ _REWRITE_VERDICT_RF = {
                         "properties": {
                             "wrong": {"type": "string"},
                             "chart": {"type": "string"},
-                            "fix": {"type": "string"},
                         },
                     },
                 },
-                "corrected_answer": {"type": "string"},
             },
             "required": ["answer_ok"],
         },
     },
 }
 
-# A validator_prompt with this stem selects the rewrite path (loads <stem>-answer.txt + the rewrite
-# schema + the adopt-the-fix loop); the default "validation" keeps the regenerate path unchanged.
-_REWRITE_VALIDATOR_PROMPT = "validation-rewrite"
+_CITATION_SUPPORT_PROMPT = "review-citation-support"
+_LABEL_WITH_CITATIONS_VERDICT_RF = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "label_verdict",
+        "schema": {
+            "type": "object",
+            "properties": {
+                **_LABEL_VERDICT_RF["json_schema"]["schema"]["properties"],
+                "citations": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "index": {"type": "integer"},
+                            "supported": {"type": "boolean"},
+                        },
+                        "required": ["index", "supported"],
+                    },
+                },
+            },
+            "required": ["answer_ok", "citations"],
+        },
+    },
+}
+
+# The reviewer prompt stem: <stem>-answer.txt labels the Answer, <stem>-indepth.txt the In-Depth.
+_LABEL_VALIDATOR_PROMPT = "validation-label"
 
 
 _INDEPTH_VERDICT_RF = {
@@ -1305,6 +1575,22 @@ _INDEPTH_VERDICT_RF = {
                 "issues": {"type": "string"},
             },
             "required": ["flag"],
+        },
+    },
+}
+
+_INDEPTH_CITATION_SUPPORT_PROMPT = "review-indepth-citation-support"
+_INDEPTH_WITH_CITATIONS_VERDICT_RF = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "indepth_verdict",
+        "schema": {
+            "type": "object",
+            "properties": {
+                **_INDEPTH_VERDICT_RF["json_schema"]["schema"]["properties"],
+                "unsupported": {"type": "array", "items": {"type": "integer"}},
+            },
+            "required": ["flag", "unsupported"],
         },
     },
 }
@@ -1778,7 +2064,7 @@ def _indepth_messages(
     )
 
 
-async def _validate_answer_rewrite(
+async def _validate_answer_label(
     client: httpx.AsyncClient,
     validator_model: str,
     *,
@@ -1789,10 +2075,15 @@ async def _validate_answer_rewrite(
     temperature: float,
     repeat_penalty: Optional[float],
     dry: Optional[float],
-    validation_prompt: str = _REWRITE_VALIDATOR_PROMPT,
+    validation_prompt: str = _LABEL_VALIDATOR_PROMPT,
     verified: Sequence[Dict[str, Any]] = (),
+    citation_support: bool = False,
 ) -> Dict[str, Any]:
-    """Rewrite-mode audit: localize each chart contradiction and return a correction.
+    """Label-mode audit: localize each chart contradiction the answer contains.
+
+    With ``citation_support`` (grounding folded into the review) the reviewer also says, per
+    cited record, whether it supports its sentence; ``citations`` maps each judged index the
+    answer cites to that verdict.
 
     A malformed reviewer response is an unavailable check, never evidence that the
     answer passed review.
@@ -1803,12 +2094,15 @@ async def _validate_answer_rewrite(
         answer_text=answer_text,
         validation_prompt=validation_prompt,
         verified=verified,
+        citation_support=citation_support,
     )
     msg = await _chat(
         client,
         validator_model,
         messages,
-        response_format=_REWRITE_VERDICT_RF,
+        response_format=(
+            _LABEL_WITH_CITATIONS_VERDICT_RF if citation_support else _LABEL_VERDICT_RF
+        ),
         temperature=temperature,
         max_tokens=max_tokens,
         repeat_penalty=repeat_penalty,
@@ -1819,27 +2113,25 @@ async def _validate_answer_rewrite(
         verdict = json.loads(raw)
     except (json.JSONDecodeError, TypeError):
         logger.warning(
-            "rewrite-validator[%s] verdict UNPARSEABLE -> unavailable; raw=%r",
+            "answer-reviewer[%s] verdict UNPARSEABLE -> unavailable; raw=%r",
             validator_model,
             raw[:240],
         )
         return {
             "answer_ok": False,
             "errors": [],
-            "corrected_answer": "",
             "unavailable": True,
             "reason": "The answer reviewer returned malformed output.",
         }
     if not isinstance(verdict, dict):
         logger.warning(
-            "rewrite-validator[%s] verdict not an object -> unavailable; raw=%r",
+            "answer-reviewer[%s] verdict not an object -> unavailable; raw=%r",
             validator_model,
             raw[:240],
         )
         return {
             "answer_ok": False,
             "errors": [],
-            "corrected_answer": "",
             "unavailable": True,
             "reason": "The answer reviewer returned an invalid result.",
         }
@@ -1860,26 +2152,29 @@ async def _validate_answer_rewrite(
     discarded_errors = len(raw_errors) - len(errors)
     if discarded_errors:
         logger.warning(
-            "rewrite-validator[%s] discarded %d unlocalized error(s)",
+            "answer-reviewer[%s] discarded %d unlocalized error(s)",
             validator_model,
             discarded_errors,
         )
     answer_ok = not errors
     logger.info(
-        "rewrite-validator[%s] answer_ok=%s n_errors=%d",
+        "answer-reviewer[%s] answer_ok=%s n_errors=%d",
         validator_model,
         answer_ok,
         len(errors),
     )
-    return {
-        "answer_ok": answer_ok,
-        "errors": errors,
-        "corrected_answer": (
-            (verdict.get("corrected_answer") or "").strip()
-            if errors and not discarded_errors
-            else ""
-        ),
-    }
+    result: Dict[str, Any] = {"answer_ok": answer_ok, "errors": errors}
+    if citation_support:
+        cited = set(_extract_citations(answer_text))
+        result["citations"] = {
+            item["index"]: item["supported"]
+            for item in verdict.get("citations") or []
+            if isinstance(item, dict)
+            and isinstance(item.get("index"), int)
+            and isinstance(item.get("supported"), bool)
+            and item["index"] in cited
+        }
+    return result
 
 
 _LEDGER_NOTE = (
@@ -1923,10 +2218,13 @@ def _answer_validation_messages(
     chart: str,
     gathered: str,
     answer_text: str,
-    validation_prompt: str = _REWRITE_VALIDATOR_PROMPT,
+    validation_prompt: str = _LABEL_VALIDATOR_PROMPT,
     verified: Sequence[Dict[str, Any]] = (),
+    citation_support: bool = False,
 ) -> List[Dict[str, Any]]:
     instruction = load_prompt(validation_prompt + "-answer")
+    if citation_support:
+        instruction += "\n\n" + load_prompt(_CITATION_SUPPORT_PROMPT)
     audit_user = (
         instruction
         + "\n\n"
@@ -1957,8 +2255,12 @@ async def _validate_indepth_verdict(
     repeat_penalty: Optional[float],
     dry: Optional[float],
     validation_prompt: str = "validation",
+    citation_support: bool = False,
 ) -> Dict[str, Any]:
     """Audit the In-Depth claims claim-by-claim.
+
+    With ``citation_support`` (grounding folded into the review) the verdict also lists, under
+    ``unsupported``, the claims whose cited records do not state what the claim attributes to them.
 
     Returns ``{flag: [1-based claim numbers], issues: str}``, with flags clamped
     to the claim list. A malformed result marks review unavailable, so the claims
@@ -1970,12 +2272,17 @@ async def _validate_indepth_verdict(
         answer_text=answer_text,
         claims=claims,
         validation_prompt=validation_prompt,
+        citation_support=citation_support,
     )
     msg = await _chat(
         client,
         validator_model,
         messages,
-        response_format=_INDEPTH_VERDICT_RF,
+        response_format=(
+            _INDEPTH_WITH_CITATIONS_VERDICT_RF
+            if citation_support
+            else _INDEPTH_VERDICT_RF
+        ),
         temperature=temperature,
         max_tokens=max_tokens,
         repeat_penalty=repeat_penalty,
@@ -2020,7 +2327,16 @@ async def _validate_indepth_verdict(
         len(claims),
         (verdict.get("issues") or "")[:120],
     )
-    return {"flag": flag, "issues": verdict.get("issues", "")}
+    result: Dict[str, Any] = {"flag": flag, "issues": verdict.get("issues", "")}
+    if citation_support:
+        result["unsupported"] = sorted(
+            {
+                d
+                for d in (verdict.get("unsupported") or [])
+                if isinstance(d, int) and 1 <= d <= len(claims)
+            }
+        )
+    return result
 
 
 def _indepth_validation_messages(
@@ -2030,8 +2346,11 @@ def _indepth_validation_messages(
     answer_text: str,
     claims: List[str],
     validation_prompt: str = "validation",
+    citation_support: bool = False,
 ) -> List[Dict[str, Any]]:
     instruction = load_prompt(validation_prompt + "-indepth")
+    if citation_support:
+        instruction += "\n\n" + load_prompt(_INDEPTH_CITATION_SUPPORT_PROMPT)
     numbered = "\n".join(f"{i}. {c}" for i, c in enumerate(claims, start=1))
     audit_user = (
         instruction
@@ -2104,6 +2423,11 @@ async def _review_existing_answer(
     review_chart_selector: Optional[
         Callable[[str, List[Any], str], Awaitable[str]]
     ] = None,
+    citation_verdicts: Optional[Dict[int, bool]] = None,
+    decision_verifier_model: Optional[str] = None,
+    low_threshold: float = decision_model.DEFAULT_LOW_THRESHOLD,
+    high_threshold: float = decision_model.DEFAULT_HIGH_THRESHOLD,
+    temperature_scale: float = decision_model.DEFAULT_TEMPERATURE_SCALE,
 ) -> Tuple[
     str, Dict[str, Any], str, Dict[str, Any], Optional[Dict[str, Any]], Optional[str]
 ]:
@@ -2113,6 +2437,9 @@ async def _review_existing_answer(
     temporal/date failures from the chart's dated records. The LLM reviewer only labels: an error it
     reports leaves the answer as written, marked needs_review with a yellow note, and an error that
     targets a statement the date checks confirmed is set aside.
+
+    When ``citation_verdicts`` is given (grounding folded into the review), the reviewer also
+    judges each cited record and the dict is filled with its per-index verdicts.
     """
     payload = payload_override or _review_payload_from_messages(messages)
     original_answer = str(
@@ -2231,7 +2558,7 @@ async def _review_existing_answer(
         )
         verified = temporal.verified_series_endpoints(question, answer_text, temporal_facts)
         try:
-            verdict = await _validate_answer_rewrite(
+            verdict = await _validate_answer_label(
                 client,
                 reviewer_model,
                 chart=review_chart,
@@ -2241,15 +2568,15 @@ async def _review_existing_answer(
                 temperature=validator_temperature,
                 repeat_penalty=validator_repeat_penalty,
                 dry=validator_dry,
-                validation_prompt=reviewer_prompt or _REWRITE_VALIDATOR_PROMPT,
+                validation_prompt=reviewer_prompt or _LABEL_VALIDATOR_PROMPT,
                 verified=verified,
+                citation_support=citation_verdicts is not None,
             )
         except Exception as e:
             logger.warning("answer-review validator call failed: %s", e)
             verdict = {
                 "answer_ok": False,
                 "errors": [],
-                "corrected_answer": "",
                 "unavailable": True,
                 "reason": str(e),
             }
@@ -2291,14 +2618,32 @@ async def _review_existing_answer(
                 original_answer if original_answer != answer_text else None,
             )
 
+        if citation_verdicts is not None:
+            citation_verdicts.update(verdict.get("citations") or {})
         errs = (verdict or {}).get("errors") or []
         overruled = [err for err in errs if _overruled_by(err, verified)]
         errs = [err for err in errs if err not in overruled]
-        if overruled and not errs:
+        overruled_by_decision: List[Dict[str, Any]] = []
+        if decision_verifier_model and errs:
+            (
+                errs,
+                overruled_by_decision,
+                _decision_records,
+            ) = await decision_model.verify_review_error_pairs(
+                client,
+                decision_verifier_model,
+                errs,
+                chat_fn=_chat,
+                message_text_fn=_message_text,
+                low_threshold=low_threshold,
+                high_threshold=high_threshold,
+                temperature_scale=temperature_scale,
+            )
+        if (overruled or overruled_by_decision) and not errs:
             verdict = {**verdict, "answer_ok": True, "errors": []}
         review_step = {
             "role": "answer_review",
-            "mode": "rewrite",
+            "mode": "label",
             "model": reviewer_model,
             "answer_ok": (verdict or {}).get("answer_ok", True),
             "n_errors": len(errs),
@@ -2306,6 +2651,13 @@ async def _review_existing_answer(
         }
         if overruled:
             review_step["overruled_by_date_checks"] = overruled
+        if overruled_by_decision:
+            review_step["overruled_by_decision_model"] = overruled_by_decision
+            review_step["decision_verifier_model"] = decision_verifier_model
+        if citation_verdicts is not None:
+            review_step["citation_support"] = {
+                str(index): supported for index, supported in citation_verdicts.items()
+            }
         steps.append(review_step)
         if verdict and not verdict.get("answer_ok", True) and errs:
             # The reviewer is another pass of a model like the one that wrote the answer, so its
@@ -2368,6 +2720,7 @@ async def _gen_indepth(
     steps: List[Dict[str, Any]],
     canonicalize_citations: bool = False,
     review_context_fitter: Optional[Callable[[List[str]], Awaitable[str]]] = None,
+    citation_support: bool = False,
 ) -> Tuple[List[str], Dict[str, Any]]:
     """Synthesize the In-Depth claims once and label them with one review.
 
@@ -2418,6 +2771,7 @@ async def _gen_indepth(
             repeat_penalty=validator_repeat_penalty,
             dry=validator_dry,
             validation_prompt=validator_prompt or "validation",
+            **({"citation_support": True} if citation_support else {}),
         )
     except InsufficientContextError:
         raise
@@ -2441,8 +2795,14 @@ async def _gen_indepth(
             "note": "In-Depth review was unavailable; these points were not reviewed.",
         }
     flagged = list(verdict.get("flag") or [])
+    # Folded grounding: the review's citation verdicts travel with its labels to the In-Depth gate.
+    support = (
+        {"citation_unsupported": list(verdict.get("unsupported") or [])}
+        if citation_support
+        else {}
+    )
     if not flagged:
-        return claims, green
+        return claims, {**green, **support}
     issues = " ".join(str(verdict.get("issues") or "").split())
     return claims, {
         "level": "yellow",
@@ -2452,6 +2812,7 @@ async def _gen_indepth(
         "note": f"Review flagged {len(flagged)} of {len(claims)} points"
         + (f": {issues.rstrip('.')}" if issues else "")
         + ". Verify them against the chart.",
+        **support,
     }
 
 
