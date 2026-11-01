@@ -28,6 +28,22 @@
       "sensitivity": null,
       "plain_description": "Moderate decrease in kidney filtration function (eGFR 30–59 mL/min/1.73m2). Earlier CKD stages (stage 1 and stage 2) should be marked resolved once stage 3 is established."
     },
+    "700378005": {
+      "snomed": "700378005",
+      "display": "Chronic kidney disease stage 3A (disorder)",
+      "exclusivity_group": "ckd_stage",
+      "stage_rank": 3,
+      "sensitivity": null,
+      "plain_description": "Mild-to-moderate decrease in kidney filtration function (eGFR 45–59 mL/min/1.73m2)."
+    },
+    "700379002": {
+      "snomed": "700379002",
+      "display": "Chronic kidney disease stage 3B (disorder)",
+      "exclusivity_group": "ckd_stage",
+      "stage_rank": 3,
+      "sensitivity": null,
+      "plain_description": "Moderate-to-severe decrease in kidney filtration function (eGFR 30–44 mL/min/1.73m2)."
+    },
     "431857002": {
       "snomed": "431857002",
       "display": "Chronic kidney disease stage 4 (disorder)",
@@ -44,6 +60,14 @@
       "sensitivity": null,
       "plain_description": "Kidney failure (eGFR < 15 mL/min/1.73m2 or dialysis)."
     },
+    "46177005": {
+      "snomed": "46177005",
+      "display": "End-stage renal disease (disorder)",
+      "exclusivity_group": "ckd_stage",
+      "stage_rank": 5,
+      "sensitivity": null,
+      "plain_description": "End-stage kidney disease requiring dialysis or kidney transplantation."
+    },
     "714628002": {
       "snomed": "714628002",
       "display": "Prediabetes (finding)",
@@ -51,6 +75,30 @@
       "stage_rank": 1,
       "sensitivity": null,
       "plain_description": "Blood sugar levels higher than normal (HbA1c 5.7%–6.4%) but below the threshold for overt type 2 diabetes. Once overt type 2 diabetes or diabetic kidney disease develops, prediabetes should be resolved."
+    },
+    "15777000": {
+      "snomed": "15777000",
+      "display": "Prediabetes (disorder)",
+      "exclusivity_group": "glycemic_progression",
+      "stage_rank": 1,
+      "sensitivity": null,
+      "plain_description": "Impaired fasting glucose or elevated HbA1c (5.7%–6.4%) preceding overt diabetes mellitus."
+    },
+    "44054006": {
+      "snomed": "44054006",
+      "display": "Diabetes mellitus type 2 (disorder)",
+      "exclusivity_group": "glycemic_progression",
+      "stage_rank": 2,
+      "sensitivity": null,
+      "plain_description": "Chronic metabolic disorder characterized by insulin resistance and elevated blood glucose (HbA1c >= 6.5%)."
+    },
+    "46635009": {
+      "snomed": "46635009",
+      "display": "Diabetes mellitus type 1 (disorder)",
+      "exclusivity_group": "glycemic_progression",
+      "stage_rank": 2,
+      "sensitivity": null,
+      "plain_description": "Autoimmune destruction of pancreatic beta cells requiring lifelong insulin therapy."
     },
     "127013003": {
       "snomed": "127013003",
@@ -75,6 +123,22 @@
       "stage_rank": 3,
       "sensitivity": null,
       "plain_description": "Elevated protein in the urine due to diabetic kidney disease, indicating more advanced glomerular filter leakage than microalbuminuria."
+    },
+    "422034002": {
+      "snomed": "422034002",
+      "display": "Retinopathy due to diabetes mellitus (disorder)",
+      "exclusivity_group": "glycemic_progression",
+      "stage_rank": 2,
+      "sensitivity": null,
+      "plain_description": "Damage to the blood vessels of the retina caused by diabetes mellitus."
+    },
+    "230572002": {
+      "snomed": "230572002",
+      "display": "Neuropathy due to diabetes mellitus (disorder)",
+      "exclusivity_group": "glycemic_progression",
+      "stage_rank": 2,
+      "sensitivity": null,
+      "plain_description": "Peripheral or autonomic nerve damage caused by chronic diabetes mellitus."
     },
     "59621000": {
       "snomed": "59621000",
@@ -207,6 +271,33 @@
       "plain_description": "Social determinant of health finding indicating social isolation or limited support network; sensitive personal social information.",
       "sharing_guidance": "Tag as privacy-sensitive SDOH in self-view ('patient_self') and redact in external sharing mode ('external_share')."
     },
+    "160968000": {
+      "snomed": "160968000",
+      "display": "Reports of violence in the environment (finding)",
+      "exclusivity_group": null,
+      "stage_rank": null,
+      "sensitivity": "SDOH/PRIVACY-SENSITIVE",
+      "plain_description": "Confidential safety and social determinant of health finding documenting exposure to violence in the environment.",
+      "sharing_guidance": "Tag as privacy-sensitive SDOH in self-view ('patient_self') and redact in external sharing mode ('external_share')."
+    },
+    "228366006": {
+      "snomed": "228366006",
+      "display": "Unhealthy alcohol drinking behavior (finding)",
+      "exclusivity_group": null,
+      "stage_rank": null,
+      "sensitivity": "SDOH/PRIVACY-SENSITIVE",
+      "plain_description": "Confidential behavioral health finding documenting unhealthy alcohol use; subject to substance-use privacy protections.",
+      "sharing_guidance": "Tag as privacy-sensitive SDOH in self-view ('patient_self') and redact in external sharing mode ('external_share')."
+    },
+    "55600006": {
+      "snomed": "55600006",
+      "display": "Social isolation (finding)",
+      "exclusivity_group": null,
+      "stage_rank": null,
+      "sensitivity": "SDOH/PRIVACY-SENSITIVE",
+      "plain_description": "Social determinant of health finding indicating social isolation.",
+      "sharing_guidance": "Tag as privacy-sensitive SDOH in self-view ('patient_self') and redact in external sharing mode ('external_share')."
+    },
     "314529007": {
       "snomed": "314529007",
       "display": "Medication review due (situation)",
@@ -246,6 +337,30 @@
       "stage_rank": null,
       "sensitivity": "SDOH-SOCIAL",
       "plain_description": "Social history entry indicating current part-time employment status."
+    },
+    "73438004": {
+      "snomed": "73438004",
+      "display": "Unemployed (finding)",
+      "exclusivity_group": null,
+      "stage_rank": null,
+      "sensitivity": "SDOH-SOCIAL",
+      "plain_description": "Social history entry indicating current unemployment status."
+    },
+    "741062008": {
+      "snomed": "741062008",
+      "display": "Not in labor force (finding)",
+      "exclusivity_group": null,
+      "stage_rank": null,
+      "sensitivity": "SDOH-SOCIAL",
+      "plain_description": "Social history entry indicating the patient is not currently in the labor force."
+    },
+    "73595000": {
+      "snomed": "73595000",
+      "display": "Stress (finding)",
+      "exclusivity_group": null,
+      "stage_rank": null,
+      "sensitivity": "SDOH-SOCIAL",
+      "plain_description": "Social history entry documenting life or occupational stress."
     }
   },
   "loinc_labs_and_vitals": {
@@ -288,18 +403,30 @@
     "33914-3": {
       "loinc": "33914-3",
       "display": "Glomerular filtration rate (eGFR)",
+      "aliases": [
+        "glomerular filtration rate/1.73 sq m.predicted",
+        "glomerular filtration rate/1.73 sq m.predicted [volume rate/area] in serum, plasma or blood by creatinine-based formula (mdrd)",
+        "egfr"
+      ],
       "plain_description": "Estimated glomerular filtration rate (eGFR), the primary measure of how well the kidneys filter waste from the blood.",
       "reference_range": ">= 90 mL/min/1.73m2 (normal); 60–89 (CKD stage 2); 30–59 (CKD stage 3); 15–29 (CKD stage 4); < 15 (CKD stage 5)"
     },
     "2160-0": {
       "loinc": "2160-0",
-      "display": "Creatinine",
+      "display": "Creatinine [Mass/volume] in Serum or Plasma",
+      "aliases": [
+        "creatinine",
+        "serum creatinine"
+      ],
       "plain_description": "Serum creatinine waste product filtered by the kidneys; rising creatinine indicates declining kidney filtration.",
       "reference_range": "0.7–1.3 mg/dL (adult men); 0.6–1.1 mg/dL (adult women)"
     },
     "38483-4": {
       "loinc": "38483-4",
-      "display": "Creatinine",
+      "display": "Creatinine [Mass/volume] in Blood",
+      "aliases": [
+        "blood creatinine"
+      ],
       "plain_description": "Blood creatinine level used to monitor kidney function.",
       "reference_range": "0.7–1.3 mg/dL"
     },
@@ -378,6 +505,10 @@
     "85354-9": {
       "loinc": "85354-9",
       "display": "Blood pressure panel with all children optional",
+      "aliases": [
+        "blood pressure panel",
+        "blood pressure"
+      ],
       "plain_description": "Systolic and diastolic arterial blood pressure measurement.",
       "reference_range": "Normal: < 120/80 mmHg; Elevated: 120–129/< 80 mmHg; Hypertension: >= 130/80 or >= 140/90 mmHg"
     },

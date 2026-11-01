@@ -58,6 +58,7 @@ _CKD_STAGE_BY_CODE: Dict[str, int] = {
     "700378005": 3,  # CKD stage 3A
     "700379002": 3,  # CKD stage 3B
     "431857002": 4,  # Chronic kidney disease stage 4 (disorder)
+    "433146000": 5,  # Chronic kidney disease stage 5 (disorder)
     "46177005": 5,   # End-stage renal disease / CKD stage 5
 }
 
@@ -81,6 +82,7 @@ _BRAND_TO_GENERIC: Dict[str, str] = {
     "lipitor": "atorvastatin",
     "zocor": "simvastatin",
     "crestor": "rosuvastatin",
+    "pravachol": "pravastatin",
     "lopressor": "metoprolol",
     "toprol": "metoprolol",
     "toprol-xl": "metoprolol",
@@ -91,12 +93,28 @@ _BRAND_TO_GENERIC: Dict[str, str] = {
     "cozaar": "losartan",
     "lasix": "furosemide",
     "microzide": "hydrochlorothiazide",
-    "humulin": "insulin human",
-    "novolin": "insulin human",
+    "humulin": "insulin isophane/regular",
+    "novolin": "insulin isophane/regular",
     "lantus": "insulin glargine",
     "humalog": "insulin lispro",
     "novolog": "insulin aspart",
     "nitrostat": "nitroglycerin",
+    "nitrolingual": "nitroglycerin",
+    "nitromist": "nitroglycerin",
+    "augmentin": "amoxicillin/clavulanate",
+    "zofran": "ondansetron",
+    "versed": "midazolam",
+    "diprivan": "propofol",
+    "zemuron": "rocuronium",
+    "ultiva": "remifentanil",
+    "ancef": "cefazolin",
+    "kefzol": "cefazolin",
+    "veetids": "penicillin v potassium",
+    "prevident": "sodium fluoride",
+    "forane": "isoflurane",
+    "hep-lock": "heparin",
+    "aleve": "naproxen",
+    "anaprox": "naproxen",
     "coumadin": "warfarin",
     "eliquis": "apixaban",
     "xarelto": "rivaroxaban",
@@ -147,6 +165,17 @@ def is_clinic_room_equipment(display: str) -> bool:
 def normalize_drug_ingredient(display: str) -> str:
     """Normalize a medication display string to its canonical active-ingredient key."""
     text = (display or "").lower()
+    # Explicit multi-word or salt-preserving canonical ingredients
+    if "penicillin v potassium" in text or "penicillin v" in text:
+        return "penicillin v potassium"
+    if "protamine sulfate" in text or "protamine" in text:
+        return "protamine sulfate"
+    if "sodium fluoride" in text:
+        return "sodium fluoride"
+    if "amoxicillin" in text and "clavulanate" in text:
+        return "amoxicillin/clavulanate"
+    if "insulin isophane" in text and "regular" in text:
+        return "insulin isophane/regular"
     # Replace bracketed brand names e.g. "[Plavix]" -> check brand map first
     for brand, generic in _BRAND_TO_GENERIC.items():
         if re.search(rf"\b{re.escape(brand)}\b", text):
@@ -157,6 +186,10 @@ def normalize_drug_ingredient(display: str) -> str:
     tokens = [tok for tok in text.split() if len(tok) > 1 and not tok.isdigit()]
     if not tokens:
         return (display or "unknown-medication").strip().lower()
+    if tokens[0] in _BRAND_TO_GENERIC:
+        return _BRAND_TO_GENERIC[tokens[0]]
+    if tokens[0] in {"heparin", "rocuronium", "metoprolol", "naproxen"}:
+        return tokens[0]
     head = " ".join(tokens[:3]).strip()
     return _BRAND_TO_GENERIC.get(tokens[0], head)
 
@@ -321,16 +354,16 @@ def classify_vaccine_group(code: Optional[str], display: str) -> str:
         return "Zoster-Live"
     if c in {"187", "188"} or "zoster" in d or "shingrix" in d:
         return "Zoster-Recombinant"
-    if "influenza" in d or "flu" in d or c in {"140", "141", "150", "158", "168", "197"}:
+    if "influenza" in d or "flu" in d or c in {"88", "140", "141", "150", "158", "168", "197"}:
         return "Influenza"
     if "covid" in d or "sars-cov-2" in d or c in {"207", "208", "212", "213", "300", "301", "309"}:
         return "COVID-19"
+    if "meningococcal" in d or "mcv4" in d or c in {"114", "136", "147"}:
+        return "Meningococcal"
     if "tdap" in d or "tetanus" in d or "diphtheria" in d or c in {"115", "09", "113", "20", "106"}:
         return "Tdap/DTaP/Td"
     if "pneumococcal" in d or c in {"33", "133", "152", "215", "216"}:
         return "Pneumococcal"
-    if "meningococcal" in d or c in {"114", "136", "147"}:
-        return "Meningococcal"
     if "hepatitis b" in d or "hep b" in d or c in {"08", "43", "44", "45"}:
         return "HepB"
     if "hepatitis a" in d or "hep a" in d or c in {"83", "85"}:
@@ -384,17 +417,22 @@ def annotate_immunization_anomalies(
                 if u2:
                     notes[u2] = msg
 
-        # 2. Check ACIP HPV 2-dose vs 3-dose schedule rule
+        # 2. Check ACIP HPV 2-dose vs 3-dose schedule rule (2-dose valid when started <15 and D1->D2 >= 5 months)
         if group == "HPV" and len(ordered) >= 3:
             first_date = str(ordered[0].get("date") or "")
+            second_date = str(ordered[1].get("date") or "")
             age_first = _age_in_years(birth_date_iso, first_date)
-            if age_first is not None and age_first < 15.0:
+            try:
+                d1_d2_days = (date.fromisoformat(second_date[:10]) - date.fromisoformat(first_date[:10])).days
+            except ValueError:
+                d1_d2_days = 180
+            if age_first is not None and age_first < 15.0 and d1_d2_days >= 150:
                 last_uuid = str(ordered[-1].get("resourceUuid") or "")
                 dates_list = ", ".join(str(x.get("date") or "") for x in ordered)
                 if last_uuid and last_uuid not in notes:
                     notes[last_uuid] = (
                         f"acip_schedule_note: 3rd HPV dose recorded ({dates_list}) after series initiated at age "
-                        f"{int(age_first)} ({first_date}); CDC ACIP specifies 2-dose series when started before age 15"
+                        f"{int(age_first)} ({first_date}); CDC ACIP specifies 2-dose series (minimum interval 5 months) when started before age 15"
                     )
 
         # 3. Check Live Zoster (Zostavax CVX 121) repeat doses

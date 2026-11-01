@@ -628,12 +628,15 @@ def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
         onset = _iso_date(res.get("onsetDateTime") or res.get("recordedDate"))
         abatement = _iso_date(res.get("abatementDateTime"))
         cats = _categories(res)
-        sens = classify_sensitivity(code, disp, cats)
+        cond_kb = resolve_condition_code(code, disp)
+        sens = classify_sensitivity(code, disp, cats) or (
+            cond_kb.get("sensitivity") if cond_kb.get("resolved_by") != "heuristic_fallback" else None
+        )
         raw_conditions.append(
             {
                 "resourceUuid": rid,
                 "code": code,
-                "display": disp or code or "Condition",
+                "display": disp or str(cond_kb.get("display") or code or "Condition"),
                 "status": c_status,
                 "verification": v_status,
                 "onset": onset,
@@ -641,6 +644,7 @@ def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
                 "categories": cats,
                 "sensitivity": sens,
                 "source_org": resolve_source_org(res),
+                "kb_resolution": cond_kb,
             }
         )
 
@@ -671,7 +675,7 @@ def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
             suffix += f" [{conflict}]"
         if sens == "SDOH/PRIVACY-SENSITIVE":
             suffix += " [sensitivity: SDOH/PRIVACY-SENSITIVE]"
-        cond_kb = resolve_condition_code(c["code"], c["display"])
+        cond_kb = c["kb_resolution"]
         items.append(
             ClinicalItem(
                 resource_type="Condition",
@@ -754,7 +758,17 @@ def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
 
         setting = "inpatient/administered" if rtype == "MedicationAdministration" else "prescribed"
         is_active = status in {"active", "in-progress", "on-hold"}
-        ingredient = normalize_drug_ingredient(disp or code)
+        med_kb = resolve_medication_code(code, disp)
+        resolved_disp = disp or (
+            str(med_kb.get("display") or "")
+            if med_kb.get("resolved_by") != "heuristic_fallback"
+            else ""
+        )
+        ingredient = str(
+            med_kb.get("ingredient")
+            if med_kb.get("resolved_by") != "heuristic_fallback" and med_kb.get("ingredient")
+            else normalize_drug_ingredient(resolved_disp or code)
+        )
         linked_order_uuids: List[str] = []
         for link_field in ("basedOn", "partOf", "request", "prescription", "authorizingPrescription"):
             raw_link = res.get(link_field)
@@ -769,7 +783,7 @@ def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
                 "resourceType": rtype,
                 "resourceUuid": rid,
                 "code": code,
-                "display": disp or code or "Medication",
+                "display": resolved_disp or code or "Medication",
                 "status": status,
                 "is_active": is_active,
                 "date": m_date,
@@ -780,6 +794,7 @@ def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
                 "ingredient_key": ingredient,
                 "source_org": resolve_source_org(res),
                 "linked_order_uuids": tuple(dict.fromkeys(u for u in linked_order_uuids if u)),
+                "kb_resolution": med_kb,
             }
         )
 
@@ -787,7 +802,7 @@ def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
     for m in raw_meds:
         rid = m["resourceUuid"]
         m_conflict = med_conflicts.get(rid)
-        med_kb = resolve_medication_code(m["code"], m["display"])
+        med_kb = m["kb_resolution"]
         ing_grp = str(med_kb.get("ingredient") or m["ingredient_key"])
         t_class = str(med_kb.get("therapeutic_class") or "medication")
         quals = [f"status: {m['status']}", f"type: {m['setting']}"]
