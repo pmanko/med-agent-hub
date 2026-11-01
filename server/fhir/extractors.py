@@ -744,6 +744,15 @@ def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
         setting = "inpatient/administered" if rtype == "MedicationAdministration" else "prescribed"
         is_active = status in {"active", "in-progress", "on-hold"}
         ingredient = normalize_drug_ingredient(disp or code)
+        linked_order_uuids: List[str] = []
+        for link_field in ("basedOn", "partOf", "request", "prescription", "authorizingPrescription"):
+            raw_link = res.get(link_field)
+            if isinstance(raw_link, Mapping) and raw_link.get("reference"):
+                linked_order_uuids.append(_strip_urn(str(raw_link.get("reference"))))
+            elif isinstance(raw_link, list):
+                for entry_link in raw_link:
+                    if isinstance(entry_link, Mapping) and entry_link.get("reference"):
+                        linked_order_uuids.append(_strip_urn(str(entry_link.get("reference"))))
         raw_meds.append(
             {
                 "resourceType": rtype,
@@ -759,6 +768,7 @@ def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
                 "setting": setting,
                 "ingredient_key": ingredient,
                 "source_org": resolve_source_org(res),
+                "linked_order_uuids": tuple(dict.fromkeys(u for u in linked_order_uuids if u)),
             }
         )
 

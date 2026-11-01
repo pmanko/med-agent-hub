@@ -216,7 +216,9 @@ def detect_condition_conflicts(
     resolved_by_code: Dict[str, List[Mapping[str, Any]]] = {}
     for rc in resolved_conditions:
         rcode = str(rc.get("code") or "")
-        if rcode and rcode not in _SDOH_NON_MEDICAL_CODES:
+        rstatus = str(rc.get("status") or "").strip().lower()
+        rabatement = str(rc.get("abatement") or "").strip()
+        if rcode and rcode not in _SDOH_NON_MEDICAL_CODES and rstatus == "resolved" and rabatement:
             resolved_by_code.setdefault(rcode, []).append(rc)
 
     for ac in active_conditions:
@@ -226,9 +228,9 @@ def detect_condition_conflicts(
         if not acode or not auuid or acode not in resolved_by_code:
             continue
         for rc in resolved_by_code[acode]:
-            r_abatement = str(rc.get("abatement") or rc.get("onset") or "")
+            r_abatement = str(rc.get("abatement") or "").strip()
             ruuid = str(rc.get("resourceUuid") or "")
-            # If a record with the same SNOMED code was marked resolved on or after the active onset
+            # If a record with the same SNOMED code was explicitly RESOLVED on or after the active onset
             if r_abatement and (not a_onset or r_abatement >= a_onset):
                 msg = (
                     f"status_conflict: {ac.get('display')} marked ACTIVE (onset {a_onset or 'unknown'}) "
@@ -261,6 +263,20 @@ def detect_medication_conflicts(
     by_ingredient: Dict[str, List[Mapping[str, Any]]] = {}
     statins: List[Mapping[str, Any]] = []
 
+    known_uuids = {
+        str(m.get("resourceUuid") or "")
+        for m in active_medications
+        if m.get("resourceUuid")
+    }
+
+    def _order_root(med: Mapping[str, Any]) -> str:
+        uuid = str(med.get("resourceUuid") or "")
+        for ref_id in med.get("linked_order_uuids") or ():
+            clean_ref = str(ref_id or "").strip()
+            if clean_ref and clean_ref in known_uuids:
+                return clean_ref
+        return uuid
+
     for med in active_medications:
         uuid = str(med.get("resourceUuid") or "")
         disp = str(med.get("display") or "")
@@ -272,7 +288,8 @@ def detect_medication_conflicts(
             statins.append(med)
 
     for ing, group in by_ingredient.items():
-        if len(group) > 1:
+        distinct_roots = {_order_root(m) for m in group}
+        if len(distinct_roots) > 1:
             names = ", ".join(str(m.get("display") or "") for m in group)
             for m in group:
                 u = str(m.get("resourceUuid") or "")
@@ -281,7 +298,8 @@ def detect_medication_conflicts(
                         f"duplicate_therapy: multiple ACTIVE prescriptions for ingredient '{ing}' ({names})"
                     )
 
-    if len(statins) > 1:
+    statin_roots = {_order_root(m) for m in statins}
+    if len(statin_roots) > 1:
         names = ", ".join(str(m.get("display") or "") for m in statins)
         for m in statins:
             u = str(m.get("resourceUuid") or "")
@@ -372,9 +390,10 @@ def annotate_immunization_anomalies(
             age_first = _age_in_years(birth_date_iso, first_date)
             if age_first is not None and age_first < 15.0:
                 last_uuid = str(ordered[-1].get("resourceUuid") or "")
+                dates_list = ", ".join(str(x.get("date") or "") for x in ordered)
                 if last_uuid and last_uuid not in notes:
                     notes[last_uuid] = (
-                        f"acip_schedule_note: 3rd HPV dose recorded after series initiated at age "
+                        f"acip_schedule_note: 3rd HPV dose recorded ({dates_list}) after series initiated at age "
                         f"{int(age_first)} ({first_date}); CDC ACIP specifies 2-dose series when started before age 15"
                     )
 
