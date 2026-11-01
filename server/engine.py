@@ -147,14 +147,20 @@ _GENERAL_GUIDANCE_RE = re.compile(
 _PATIENT_FACT_ASSERTION_RE = re.compile(
     r"\b\d{4}-\d{2}-\d{2}\b|"
     r"\b(?:was|were|is|are|had|has|recorded|measured|documented|showed|shows)\b"
-    r"[^.]{0,30}\b\d+(?:\.\d+)?\s*(?:%|[a-zA-Z][a-zA-Z/^0-9\u00b2\u00b3]*)",
+    r"[^.]{0,30}\b\d+(?:\.\d+)?\s*(?:%|[a-zA-Z][a-zA-Z/^0-9\u00b2\u00b3]*)|"
+    r"\b(?:(?:the|this)\s+patient|patient|chart|record|records|visit|encounter|admission)\b"
+    r"[^.]{0,40}\b(?:was|were|is|are|had|has|have|shows|showed|demonstrates|demonstrated|"
+    r"confirms|confirmed|diagnosed|prescribed|started|stopped|received|receives|taking|"
+    r"takes|tested|reported|presented|enrolled)\b|"
+    r"\b(?:diagnosed\s+with|enrolled\s+in|admitted\s+for|started\s+on|"
+    r"tested\s+(?:positive|negative))\b",
     re.I,
 )
 
 
 def _is_uncited_patient_fact(claim: str) -> bool:
-    """True when an uncited In-Depth claim asserts a specific patient measurement or date
-    without general-guidance framing."""
+    """True when an uncited In-Depth claim asserts a specific patient fact, measurement,
+    or date without general-guidance framing."""
     if not claim or _GENERAL_GUIDANCE_RE.search(claim):
         return False
     return bool(_PATIENT_FACT_ASSERTION_RE.search(claim))
