@@ -792,9 +792,15 @@ def _profile_configuration_digest(profile: Profile) -> str:
 def _prompt_assets(profile: Profile, role: str, configured: str) -> Tuple[str, ...]:
     if role != "review":
         return (configured,)
+    review_policy = profile.policies.get("review") or {}
+    folded = review_policy.get("grounding") == "folded"
     assets = [configured + "-answer"]
+    if folded:
+        assets.append("review-citation-support")
     if "indepth" in profile.stages:
         assets.append(configured + "-indepth")
+        if folded:
+            assets.append("review-indepth-citation-support")
     return tuple(assets)
 
 

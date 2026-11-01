@@ -143,6 +143,7 @@ _ISSUE_CHECKS = (
     ("citation_grounding", "citation"),
     ("citation_not_addressed", "citation"),
     ("citation_grounding_unavailable", "citation"),
+    ("answer_review_unavailable", "review"),
     ("review_doubt", "review"),
     ("citation_", "record"),
 )
@@ -165,11 +166,15 @@ def _answer_findings(state: "_State") -> List[Dict[str, Any]]:
         if check == "review":
             wrong, chart = str(issue.get("wrong") or ""), str(issue.get("chart") or "")
             says = (f"questioned \"{wrong}\" against {chart}" if chart else wrong) or says
+        status = str(
+            issue.get("status")
+            or ("unavailable" if issue_id.endswith("_unavailable") else "fail")
+        )
         findings.append(
             {
                 "check": check,
                 "where": "answer",
-                "status": str(issue.get("status") or "fail"),
+                "status": status,
                 "says": says,
             }
         )
@@ -192,6 +197,28 @@ def _grounding_policy(profile: Profile) -> str:
     """How the profile checks that cited records support their sentences (``review.grounding``)."""
     review = profile.policies.get("review") or {}
     return str(review.get("grounding") or "separate")
+
+
+_GENERAL_GUIDANCE_RE = re.compile(
+    r"\b(?:guideline|guidelines|who\b|standard|typically|generally|should|recommended|"
+    r"requires|necessitates|warrants|monitoring|surveillance|patients\s+with|risk\s+for|"
+    r"range|threshold|below|above|interpretation|context)\b",
+    re.I,
+)
+_PATIENT_FACT_ASSERTION_RE = re.compile(
+    r"\b\d{4}-\d{2}-\d{2}\b|"
+    r"\b(?:was|were|is|are|had|has|recorded|measured|documented|showed|shows)\b"
+    r"[^.]{0,30}\b\d+(?:\.\d+)?\s*(?:%|[a-zA-Z][a-zA-Z/^0-9\u00b2\u00b3]*)",
+    re.I,
+)
+
+
+def _is_uncited_patient_fact(claim: str) -> bool:
+    """True when an uncited In-Depth claim asserts a specific patient measurement or date
+    without general-guidance framing."""
+    if not claim or _GENERAL_GUIDANCE_RE.search(claim):
+        return False
+    return bool(_PATIENT_FACT_ASSERTION_RE.search(claim))
 
 
 @dataclass
@@ -375,18 +402,21 @@ def _merge_reference_grounding(
         existing["groundingScope"] = "record"
         existing.pop("groundingGroup", None)
 
-    statuses = {check.get("status") for check in checks}
-    if not statuses:
-        statuses = {
-            existing.get("groundingStatus"),
-            incoming.get("groundingStatus"),
+    if checks:
+        supports = {stages._check_support(check) for check in checks}
+        legacy_statuses = {
+            check.get("status") for check in checks if not check.get("support")
         }
-    supports = {check.get("support") for check in checks if check.get("support")}
-    if not supports:
+    else:
         supports = {stages._support_of(existing), stages._support_of(incoming)}
-    if statuses & {"unchecked", "checking", None} or stages.UNCHECKED in supports:
+        legacy_statuses = {
+            reference.get("groundingStatus")
+            for reference in (existing, incoming)
+            if not reference.get("support")
+        }
+    if legacy_statuses & {"unchecked", "checking", None} or stages.UNCHECKED in supports:
         support = stages.UNCHECKED
-    elif stages.CONTRADICTED in supports or "unsupported" in statuses:
+    elif stages.CONTRADICTED in supports or "unsupported" in legacy_statuses:
         support = stages.CONTRADICTED
     elif stages.NOT_ADDRESSED in supports:
         support = stages.NOT_ADDRESSED
@@ -718,7 +748,9 @@ async def _select_answer_review_context(
     reviewer_model = request.profile.models["review"]
     folded = _grounding_policy(request.profile) == "folded"
     review_text = answer_text
-    block_text, _block_refs = stages._block_temporal_text_and_refs(blocks)
+    block_text, _block_refs = stages._block_temporal_text_and_refs(
+        blocks, include_refs=True
+    )
     if block_text:
         review_text += "\n\n=== STRUCTURED BLOCK TEXT ===\n" + block_text
 
@@ -1041,6 +1073,12 @@ def _sampling(request: ExecutionRequest) -> Dict[str, Any]:
         "review_repeat_penalty": stages._knob(knobs, "review", "repeat_penalty", None),
         # Checks copy dates and values from the chart; the repetition penalty garbles them.
         "review_dry": stages._knob(knobs, "review", "dry", 0.0),
+        "grounding_temperature": stages._knob(
+            knobs,
+            "grounding",
+            "temperature",
+            stages._knob(knobs, "review", "temperature", 0.0),
+        ),
     }
 
 
@@ -2025,6 +2063,10 @@ async def _execute_stages(
                             grounding_options["index_verdicts"] = (
                                 state.review_citation_verdicts or {}
                             )
+                        else:
+                            grounding_options["temperature"] = sampling[
+                                "grounding_temperature"
+                            ]
                         state.references = await stages._ground_references(
                             client,
                             None if folded else request.profile.models["grounding"],
@@ -2322,7 +2364,12 @@ async def _execute_stages(
                         if (level, label) not in marks.setdefault(claim_index, []):
                             marks[claim_index].append((level, label))
                             state.indepth_findings.append(
-                                {"check": check, "where": claim_index, "says": label}
+                                {
+                                    "check": check,
+                                    "where": claim_index,
+                                    "status": "fail" if level == "red" else "warn",
+                                    "says": label,
+                                }
                             )
 
                     gate_entries = {
@@ -2355,6 +2402,18 @@ async def _execute_stages(
                     for claim_index, claim in enumerate(state.claims, 1):
                         claim_citations = stages._extract_citations(claim)
                         if not claim_citations:
+                            if _is_uncited_patient_fact(claim):
+                                citation_checks.append(
+                                    {
+                                        "claim_index": claim_index,
+                                        "claim": claim,
+                                        "status": "warn",
+                                        "reason": "In-Depth claim states a patient-specific fact without citing a record.",
+                                        "source_indices": [],
+                                    }
+                                )
+                                mark(claim_index, "yellow", "patient fact, not cited", "citation")
+                                continue
                             # General guidance cites no record. It is tagged, not marked for review.
                             state.indepth_tags[claim_index] = "general guidance, not from the chart"
                             citation_checks.append(
@@ -2404,12 +2463,16 @@ async def _execute_stages(
                     if grounding == "folded" and flattened and state.mappings:
                         # The In-Depth review judged each claim's citations in its own call.
                         unsupported_claims = review.get("citation_unsupported")
+                        not_addressed_claims = set(review.get("citation_not_addressed") or [])
                         grounded: list[dict[str, Any]] = []
                         for claim_index, claim, references in candidates:
                             verdicts = (
                                 {
-                                    reference.get("index"): claim_index
-                                    not in unsupported_claims
+                                    reference.get("index"): (
+                                        stages.NOT_ADDRESSED
+                                        if claim_index in not_addressed_claims
+                                        else claim_index not in unsupported_claims
+                                    )
                                     for reference in references
                                 }
                                 if unsupported_claims is not None
@@ -2433,6 +2496,7 @@ async def _execute_stages(
                             "\n".join(claim for _index, claim, _refs in candidates),
                             flattened,
                             state.mappings,
+                            temperature=sampling["grounding_temperature"],
                         )
 
                     indepth_references: list[dict[str, Any]] = []
@@ -2503,19 +2567,28 @@ async def _execute_stages(
                             cited = ", ".join(
                                 f"[{reference.get('index')}]" for reference in not_addressed
                             )
+                            reason = (
+                                f"{cited} does not hold: {not_found}."
+                                if not_found
+                                else f"{cited} does not hold part of this claim."
+                            )
                             citation_checks.append(
                                 {
                                     "claim_index": claim_index,
                                     "claim": claim,
                                     "status": "not_addressed",
-                                    "reason": (
-                                        f"{cited} does not hold: {not_found}."
-                                        if not_found
-                                        else f"{cited} does not hold part of this claim."
-                                    ),
+                                    "reason": reason,
                                     "source_indices": [
                                         reference.get("index") for reference in not_addressed
                                     ],
+                                }
+                            )
+                            state.indepth_findings.append(
+                                {
+                                    "check": "citation",
+                                    "where": claim_index,
+                                    "status": "info",
+                                    "says": reason,
                                 }
                             )
                             continue

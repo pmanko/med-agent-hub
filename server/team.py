@@ -659,10 +659,17 @@ def _support_from_facts(facts: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+def _default_grounding_temperature(model: str) -> float:
+    """Default entailment-grounding temperature when no explicit profile knob is passed."""
+    return 0.7 if "qwen3" in (model or "").lower() else 0.0
+
+
 async def _entailment_verdicts(
     client: httpx.AsyncClient,
     model: str,
     pairs: List[Tuple[str, str]],
+    *,
+    temperature: Optional[float] = None,
 ) -> List[Dict[str, Any]]:
     """Batched citation check: one call for the whole batch (the single-slot router makes per-pair
     fan-out no faster), a fresh one-shot message list, a json_schema response_format. ``pairs``
@@ -678,11 +685,17 @@ async def _entailment_verdicts(
     )
     user = _ATTRIBUTION_SYSTEM_PROMPT + "\n\n" + body
     unchecked = {"support": UNCHECKED, "facts": [], "not_found": None, "chart_value": None}
+    effective_temperature = (
+        _default_grounding_temperature(model)
+        if temperature is None
+        else float(temperature)
+    )
     try:
         msg = await _chat(
             client,
             model,
             [{"role": "user", "content": user}],
+            temperature=effective_temperature,
             response_format=_ATTRIBUTION_RF,
             dry_multiplier=0.0,
         )
@@ -716,13 +729,18 @@ async def _bounded_entailment_verdicts(
     client: httpx.AsyncClient,
     model: str,
     pairs: List[Tuple[str, str]],
+    *,
+    temperature: Optional[float] = None,
 ) -> List[Dict[str, Any]]:
     """Check pairs in batches of ``_CITATION_BATCH`` (small models lose track of long batches),
     splitting a batch further only when exact token measurement overflows."""
+    options: Dict[str, Any] = {}
+    if temperature is not None:
+        options["temperature"] = temperature
 
     async def check(items: List[Tuple[str, str]]) -> List[Dict[str, Any]]:
         try:
-            return await _entailment_verdicts(client, model, items)
+            return await _entailment_verdicts(client, model, items, **options)
         except InsufficientContextError:
             if len(items) == 1:
                 logger.warning(
@@ -748,6 +766,104 @@ _GROUNDING_STATUS_FOR_SUPPORT = {
     UNCHECKED: "unchecked",
 }
 
+_FOLDED_OVERLAP_STOPWORDS = frozenset(
+    {
+        "the",
+        "and",
+        "for",
+        "with",
+        "from",
+        "that",
+        "this",
+        "was",
+        "were",
+        "has",
+        "had",
+        "have",
+        "are",
+        "is",
+        "not",
+        "patient",
+        "takes",
+        "taking",
+        "documented",
+        "recorded",
+        "noted",
+        "reported",
+        "measured",
+        "showed",
+        "shows",
+        "current",
+        "last",
+        "visit",
+        "date",
+        "status",
+        "result",
+        "value",
+        "level",
+        "count",
+    }
+)
+
+
+def _folded_negative_support(
+    group: Mapping[str, Any],
+    references: Sequence[Mapping[str, Any]],
+    mapping_by_index: Mapping[Any, Mapping[str, Any]],
+    normalize_fact: Callable[[str], str],
+) -> str:
+    """Distinguish a missing fact (not_addressed) from a contradiction when a folded check
+    supplies a boolean False without an explicit status."""
+    claim = str(group.get("claim") or "")
+    norm_claim = normalize_fact(claim)
+    if not norm_claim:
+        return NOT_ADDRESSED
+    source_texts: List[str] = []
+    source_dates: set[str] = set()
+    for ref_position in group.get("references") or []:
+        if not (0 <= ref_position < len(references)):
+            continue
+        idx = references[ref_position].get("index")
+        mapping = mapping_by_index.get(idx) or {}
+        text = str(mapping.get("text") or "").strip()
+        if text:
+            source_texts.append(text)
+        date = str(mapping.get("date") or "").strip()
+        if date:
+            source_dates.add(date)
+    claim_dates = set(re.findall(r"\b\d{4}-\d{2}-\d{2}\b", claim))
+    if claim_dates and source_dates and not (claim_dates <= source_dates):
+        return CONTRADICTED
+    has_negation = bool(
+        re.search(
+            r"\b(?:no|not|never|without|denies|denied|negative|absent)\b",
+            claim,
+            re.I,
+        )
+    )
+    value_parts = [
+        normalize_fact(text.split(":", 1)[1] if ":" in text else text)
+        for text in source_texts
+        if text
+    ]
+    value_parts = [vp for vp in value_parts if vp]
+    if value_parts and not has_negation and all(vp in norm_claim for vp in value_parts):
+        return NOT_ADDRESSED
+    claim_tokens = {
+        tok
+        for tok in re.findall(r"[a-z][a-z0-9]{1,}", norm_claim)
+        if tok not in _FOLDED_OVERLAP_STOPWORDS
+    }
+    source_tokens = {
+        tok
+        for text in source_texts
+        for tok in re.findall(r"[a-z][a-z0-9]{1,}", normalize_fact(text))
+        if tok not in _FOLDED_OVERLAP_STOPWORDS
+    }
+    if not (claim_tokens & source_tokens):
+        return NOT_ADDRESSED
+    return CONTRADICTED
+
 
 async def _ground_references(
     client: httpx.AsyncClient,
@@ -757,9 +873,10 @@ async def _ground_references(
     mappings: List[Dict[str, Any]],
     *,
     deterministic_checks: Optional[List[Dict[str, Any]]] = None,
-    index_verdicts: Optional[Mapping[int, bool]] = None,
+    index_verdicts: Optional[Mapping[Any, Any]] = None,
+    temperature: Optional[float] = None,
 ) -> List[Dict[str, Any]]:
-    """Ground final claims against their cited source sets in one bounded entailment call.
+    """Ground final claims against their cited source sets in context-bounded sequential batches.
 
     A sentence may rely on multiple citations collectively (for example, two dated weights support
     a change claim). Grouping identical usage text prevents each source from being incorrectly asked
@@ -927,25 +1044,72 @@ async def _ground_references(
     ]
     blank = {"facts": [], "not_found": None, "chart_value": None}
     if index_verdicts is not None:
-        # The reviewer judged each record with a yes or no, so a no reads as a contradiction.
+        usage_offsets: Dict[int, int] = {}
         verdicts = []
         for position in checkable_positions:
-            judged = [
-                index_verdicts.get(references[reference_position].get("index"))
-                for reference_position in groups[position]["references"]
-            ]
-            verdicts.append(
-                {**blank, "support": CONTRADICTED}
-                if any(value is False for value in judged)
-                else {**blank, "support": SUPPORTED}
-                if judged and all(value is True for value in judged)
-                else {**blank, "support": UNCHECKED}
-            )
+            group = groups[position]
+            judged = []
+            for reference_position in group["references"]:
+                idx = references[reference_position].get("index")
+                specific = None
+                if isinstance(idx, int):
+                    for key, val in index_verdicts.items():
+                        if (
+                            isinstance(key, tuple)
+                            and len(key) == 3
+                            and key[0] == idx
+                            and (
+                                (key[1] and key[1] == group["path"])
+                                or (
+                                    key[2]
+                                    and normalize_fact(key[2])
+                                    == normalize_fact(group["claim"])
+                                )
+                            )
+                        ):
+                            specific = val
+                            break
+                if specific is not None:
+                    judged.append(specific)
+                    continue
+                raw_val = index_verdicts.get(idx)
+                if isinstance(raw_val, list):
+                    offset = usage_offsets.get(idx, 0)
+                    judged.append(raw_val[offset] if offset < len(raw_val) else None)
+                    usage_offsets[idx] = offset + 1
+                else:
+                    judged.append(raw_val)
+            if not judged or any(value is None or value == UNCHECKED for value in judged):
+                verdicts.append({**blank, "support": UNCHECKED})
+            elif any(value == CONTRADICTED for value in judged):
+                verdicts.append({**blank, "support": CONTRADICTED})
+            elif any(value == NOT_ADDRESSED for value in judged):
+                verdicts.append({**blank, "support": NOT_ADDRESSED})
+            elif any(value is False for value in judged):
+                verdicts.append(
+                    {
+                        **blank,
+                        "support": _folded_negative_support(
+                            group, references, mapping_by_index, normalize_fact
+                        ),
+                    }
+                )
+            elif all(value is True or value == SUPPORTED for value in judged):
+                verdicts.append({**blank, "support": SUPPORTED})
+            else:
+                verdicts.append({**blank, "support": UNCHECKED})
     else:
+        entailment_options: Dict[str, Any] = {}
+        if temperature is not None:
+            entailment_options["temperature"] = temperature
         verdicts = [
             _as_verdict(value)
             for value in (
-                await _bounded_entailment_verdicts(client, model, pairs) if pairs else []
+                await _bounded_entailment_verdicts(
+                    client, model, pairs, **entailment_options
+                )
+                if pairs
+                else []
             )
         ]
     verdict_by_position = {
@@ -1479,6 +1643,10 @@ _LABEL_WITH_CITATIONS_VERDICT_RF = {
                         "properties": {
                             "index": {"type": "integer"},
                             "supported": {"type": "boolean"},
+                            "status": {
+                                "type": "string",
+                                "enum": [SUPPORTED, CONTRADICTED, NOT_ADDRESSED],
+                            },
                         },
                         "required": ["index", "supported"],
                     },
@@ -1518,6 +1686,7 @@ _INDEPTH_WITH_CITATIONS_VERDICT_RF = {
             "properties": {
                 **_INDEPTH_VERDICT_RF["json_schema"]["schema"]["properties"],
                 "unsupported": {"type": "array", "items": {"type": "integer"}},
+                "not_addressed": {"type": "array", "items": {"type": "integer"}},
             },
             "required": ["flag", "unsupported"],
         },
@@ -1700,7 +1869,9 @@ def _review_payload_from_messages(messages: List[Dict[str, Any]]) -> Dict[str, A
     return {}
 
 
-def _block_temporal_text_and_refs(blocks: List[Any]) -> Tuple[str, List[int]]:
+def _block_temporal_text_and_refs(
+    blocks: List[Any], *, include_refs: bool = False
+) -> Tuple[str, List[int]]:
     """Render structured rows as lines so dates stay bound to their row values."""
     texts: List[str] = []
     refs: List[int] = []
@@ -1708,11 +1879,19 @@ def _block_temporal_text_and_refs(blocks: List[Any]) -> Tuple[str, List[int]]:
     def collect_strings(value: Any) -> List[str]:
         found: List[str] = []
         if isinstance(value, dict):
+            local_refs: List[int] = []
             for key, child in value.items():
                 if key == "refs" and isinstance(child, list):
-                    refs.extend(i for i in child if isinstance(i, int))
+                    local_refs = [i for i in child if isinstance(i, int)]
+                    refs.extend(local_refs)
                 else:
                     found.extend(collect_strings(child))
+            if include_refs and local_refs:
+                markers = "".join(f"[{i}]" for i in local_refs)
+                if found:
+                    found[-1] = f"{found[-1]} {markers}".strip()
+                else:
+                    found.append(markers)
         elif isinstance(value, list):
             for child in value:
                 found.extend(collect_strings(child))
@@ -1733,7 +1912,10 @@ def _block_temporal_text_and_refs(blocks: List[Any]) -> Tuple[str, List[int]]:
                     if key not in {"rows", "refs"}:
                         walk(child)
                 if isinstance(value.get("refs"), list):
-                    refs.extend(i for i in value["refs"] if isinstance(i, int))
+                    block_refs = [i for i in value["refs"] if isinstance(i, int)]
+                    refs.extend(block_refs)
+                    if include_refs and block_refs:
+                        texts.append("".join(f"[{i}]" for i in block_refs))
                 return
             texts.extend(collect_strings(value))
         elif isinstance(value, list):
@@ -2101,13 +2283,30 @@ async def _validate_answer_label(
     result: Dict[str, Any] = {"answer_ok": answer_ok, "errors": errors}
     if citation_support:
         cited = set(_extract_citations(answer_text))
+        grouped_citations: Dict[Any, List[Any]] = {}
+        for item in verdict.get("citations") or []:
+            if (
+                isinstance(item, dict)
+                and isinstance(item.get("index"), int)
+                and item["index"] in cited
+            ):
+                raw_status = item.get("status") or item.get("support")
+                raw_supported = item.get("supported")
+                if raw_status in {SUPPORTED, CONTRADICTED, NOT_ADDRESSED}:
+                    verdict_val: Any = True if raw_status == SUPPORTED else str(raw_status)
+                elif isinstance(raw_supported, bool):
+                    verdict_val = raw_supported
+                else:
+                    continue
+                idx = item["index"]
+                claim_key = str(item.get("claim") or "").strip()
+                path_key = str(item.get("path") or "").strip()
+                if path_key or claim_key:
+                    grouped_citations[(idx, path_key, claim_key)] = [verdict_val]
+                grouped_citations.setdefault(idx, []).append(verdict_val)
         result["citations"] = {
-            item["index"]: item["supported"]
-            for item in verdict.get("citations") or []
-            if isinstance(item, dict)
-            and isinstance(item.get("index"), int)
-            and isinstance(item.get("supported"), bool)
-            and item["index"] in cited
+            key: values[0] if len(set(values)) == 1 else values
+            for key, values in grouped_citations.items()
         }
     return result
 
@@ -2264,13 +2463,18 @@ async def _validate_indepth_verdict(
     )
     result: Dict[str, Any] = {"flag": flag, "issues": verdict.get("issues", "")}
     if citation_support:
-        result["unsupported"] = sorted(
-            {
-                d
-                for d in (verdict.get("unsupported") or [])
-                if isinstance(d, int) and 1 <= d <= len(claims)
-            }
-        )
+        raw_unsupported = verdict.get("unsupported")
+        if isinstance(raw_unsupported, list) and all(
+            isinstance(d, int) and not isinstance(d, bool) and 1 <= d <= len(claims)
+            for d in raw_unsupported
+        ):
+            result["unsupported"] = sorted(set(raw_unsupported))
+        raw_not_addressed = verdict.get("not_addressed")
+        if isinstance(raw_not_addressed, list) and all(
+            isinstance(d, int) and not isinstance(d, bool) and 1 <= d <= len(claims)
+            for d in raw_not_addressed
+        ):
+            result["not_addressed"] = sorted(set(raw_not_addressed))
     return result
 
 
@@ -2503,7 +2707,9 @@ async def _review_existing_answer(
 
     if status in {"checked", "edited"} and _is_substantive_answer(answer_text):
         review_text = answer_text
-        block_text, _block_refs = _block_temporal_text_and_refs(blocks)
+        block_text, _block_refs = _block_temporal_text_and_refs(
+            blocks, include_refs=True
+        )
         if block_text:
             review_text += "\n\n=== STRUCTURED BLOCK TEXT ===\n" + block_text
         review_chart = (
@@ -2592,7 +2798,9 @@ async def _review_existing_answer(
             review_step["overruled_by_date_checks"] = overruled
         if citation_verdicts is not None:
             review_step["citation_support"] = {
-                str(index): supported for index, supported in citation_verdicts.items()
+                str(index): supported
+                for index, supported in citation_verdicts.items()
+                if not isinstance(index, tuple)
             }
         quoted = [err for err in errs if _quoted_in_chart(err, review_chart)]
         unquoted = [err for err in errs if err not in quoted]
@@ -2607,7 +2815,7 @@ async def _review_existing_answer(
             status = "needs_review"
             summary = "Review flagged a possible error; the answer is shown as written."
             answer_conf = {"level": "yellow", "note": _review_flag_note(quoted)}
-        elif unquoted:
+        if unquoted:
             # The reviewer doubted a statement but quoted nothing the chart holds.
             issues.extend(
                 {
@@ -2750,11 +2958,11 @@ async def _gen_indepth(
         }
     flagged = list(verdict.get("flag") or [])
     # Folded grounding: the review's citation verdicts travel with its labels to the In-Depth gate.
-    support = (
-        {"citation_unsupported": list(verdict.get("unsupported") or [])}
-        if citation_support
-        else {}
-    )
+    support: Dict[str, Any] = {}
+    if citation_support and isinstance(verdict.get("unsupported"), list):
+        support["citation_unsupported"] = list(verdict["unsupported"])
+        if isinstance(verdict.get("not_addressed"), list):
+            support["citation_not_addressed"] = list(verdict["not_addressed"])
     if not flagged:
         return claims, {**green, **support}
     issues = " ".join(str(verdict.get("issues") or "").split())
