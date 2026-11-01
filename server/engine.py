@@ -145,6 +145,7 @@ _ISSUE_CHECKS = (
     ("citation_grounding", "citation"),
     ("citation_not_addressed", "citation"),
     ("citation_grounding_unavailable", "citation"),
+    ("answer_review_unavailable", "review"),
     ("review_doubt", "review"),
     ("citation_", "record"),
 )
@@ -167,11 +168,15 @@ def _answer_findings(state: "_State") -> List[Dict[str, Any]]:
         if check == "review":
             wrong, chart = str(issue.get("wrong") or ""), str(issue.get("chart") or "")
             says = (f"questioned \"{wrong}\" against {chart}" if chart else wrong) or says
+        status = str(
+            issue.get("status")
+            or ("unavailable" if issue_id.endswith("_unavailable") else "fail")
+        )
         findings.append(
             {
                 "check": check,
                 "where": "answer",
-                "status": str(issue.get("status") or "fail"),
+                "status": status,
                 "says": says,
             }
         )
@@ -196,6 +201,28 @@ def _grounding_policy(profile: Profile) -> str:
         return "off"
     review = profile.policies.get("review") or {}
     return str(review.get("grounding") or "separate")
+
+
+_GENERAL_GUIDANCE_RE = re.compile(
+    r"\b(?:guideline|guidelines|who\b|standard|typically|generally|should|recommended|"
+    r"requires|necessitates|warrants|monitoring|surveillance|patients\s+with|risk\s+for|"
+    r"range|threshold|below|above|interpretation|context)\b",
+    re.I,
+)
+_PATIENT_FACT_ASSERTION_RE = re.compile(
+    r"\b\d{4}-\d{2}-\d{2}\b|"
+    r"\b(?:was|were|is|are|had|has|recorded|measured|documented|showed|shows)\b"
+    r"[^.]{0,30}\b\d+(?:\.\d+)?\s*(?:%|[a-zA-Z][a-zA-Z/^0-9\u00b2\u00b3]*)",
+    re.I,
+)
+
+
+def _is_uncited_patient_fact(claim: str) -> bool:
+    """True when an uncited In-Depth claim asserts a specific patient measurement or date
+    without general-guidance framing."""
+    if not claim or _GENERAL_GUIDANCE_RE.search(claim):
+        return False
+    return bool(_PATIENT_FACT_ASSERTION_RE.search(claim))
 
 
 @dataclass
@@ -380,18 +407,21 @@ def _merge_reference_grounding(
         existing["groundingScope"] = "record"
         existing.pop("groundingGroup", None)
 
-    statuses = {check.get("status") for check in checks}
-    if not statuses:
-        statuses = {
-            existing.get("groundingStatus"),
-            incoming.get("groundingStatus"),
+    if checks:
+        supports = {stages._check_support(check) for check in checks}
+        legacy_statuses = {
+            check.get("status") for check in checks if not check.get("support")
         }
-    supports = {check.get("support") for check in checks if check.get("support")}
-    if not supports:
+    else:
         supports = {stages._support_of(existing), stages._support_of(incoming)}
-    if statuses & {"unchecked", "checking", None} or stages.UNCHECKED in supports:
+        legacy_statuses = {
+            reference.get("groundingStatus")
+            for reference in (existing, incoming)
+            if not reference.get("support")
+        }
+    if legacy_statuses & {"unchecked", "checking", None} or stages.UNCHECKED in supports:
         support = stages.UNCHECKED
-    elif stages.CONTRADICTED in supports or "unsupported" in statuses:
+    elif stages.CONTRADICTED in supports or "unsupported" in legacy_statuses:
         support = stages.CONTRADICTED
     elif stages.NOT_ADDRESSED in supports:
         support = stages.NOT_ADDRESSED
@@ -561,6 +591,8 @@ async def _count_answer_input(
     chart: str,
     *,
     messages: Optional[Sequence[Mapping[str, Any]]] = None,
+    model: Optional[str] = None,
+    prompt_role: str = "answer",
 ) -> int:
     counter = state.token_counter
     if counter is None:
@@ -569,10 +601,16 @@ async def _count_answer_input(
             "The profile requires an exact token counter.",
             source="llama-router",
         )
+    target_model = model or request.profile.models["answer"]
+    default_prompt = (
+        str(request.profile.prompts.get("answer") or "synthesis-answer")
+        if prompt_role == "second"
+        else "synthesis-answer"
+    )
     base_messages = [dict(message) for message in (messages or state.messages)]
     actual_messages = _replace_chart_message(base_messages, chart, requester_line(request.context), state.gathered)
     user = stages.with_gathered(
-        _prompt(request.profile, "answer", "synthesis-answer"), state.gathered, actual_messages
+        _prompt(request.profile, prompt_role, default_prompt), state.gathered, actual_messages
     )
     actual_messages.append({"role": "user", "content": user})
     count_chat = getattr(counter, "count_chat", None)
@@ -581,7 +619,7 @@ async def _count_answer_input(
         response_format = _answer_response_format(request)
         if response_format is not None:
             payload["response_format"] = response_format
-        return await count_chat(request.profile.models["answer"], payload)
+        return await count_chat(target_model, payload)
     # Unit-test counters can implement the simpler text protocol. Production
     # profiles instantiate RouterTokenCounter and therefore always take the exact
     # chat-template path above.
@@ -589,7 +627,7 @@ async def _count_answer_input(
         f"{message.get('role', 'user')}: {message.get('content', '')}"
         for message in actual_messages
     )
-    return await counter.count(request.profile.models["answer"], rendered)
+    return await counter.count(target_model, rendered)
 
 
 async def _select_answer_context(
@@ -613,6 +651,64 @@ async def _select_answer_context(
     )
     state.chart = state.view.render()
     state.messages = _replace_chart_message(state.messages, state.chart, requester_line(request.context), state.gathered)
+
+
+async def _select_second_answer_context(
+    request: ExecutionRequest,
+    state: _State,
+) -> List[Dict[str, Any]]:
+    if state.token_counter is None or state.context_budget is None:
+        raise ContextSourceError(
+            "tokenization_unavailable",
+            "The profile requires exact context selection.",
+            source="llama-router",
+        )
+    second_model = request.profile.models["second"]
+
+    def measure(chart: str) -> Awaitable[int]:
+        return _count_answer_input(
+            request,
+            state,
+            chart,
+            model=second_model,
+            prompt_role="second",
+        )
+
+    if state.view is not None and await _reuse_answer_chart(state, measure, "agree"):
+        return _replace_chart_message(
+            state.messages, state.chart, requester_line(request.context), state.gathered
+        )
+    selector = request.context_selector or select_context
+    view = await selector(
+        state.ledger,
+        question=stages._latest_user_text(state.messages),
+        model=second_model,
+        budget=state.context_budget,
+        counter=state.token_counter,
+        input_measure=measure,
+    )
+    chart = view.render()
+    messages = _replace_chart_message(
+        state.messages, chart, requester_line(request.context), state.gathered
+    )
+    state.steps.append(
+        {
+            "role": "context_selection",
+            "stage": "agree",
+            "mode": view.mode,
+            "input_tokens": view.input_tokens,
+            "input_limit": view.input_limit,
+            "included": [
+                {"stable_id": item.stable_id, "reason": item.reason}
+                for item in view.included
+            ],
+            "excluded": [
+                {"stable_id": item.stable_id, "reason": item.reason}
+                for item in view.excluded
+            ],
+        }
+    )
+    return messages
 
 
 async def _count_indepth_input(
@@ -723,7 +819,9 @@ async def _select_answer_review_context(
     reviewer_model = request.profile.models["review"]
     folded = _grounding_policy(request.profile) == "folded"
     review_text = answer_text
-    block_text, _block_refs = stages._block_temporal_text_and_refs(blocks)
+    block_text, _block_refs = stages._block_temporal_text_and_refs(
+        blocks, include_refs=True
+    )
     if block_text:
         review_text += "\n\n=== STRUCTURED BLOCK TEXT ===\n" + block_text
 
@@ -1046,6 +1144,12 @@ def _sampling(request: ExecutionRequest) -> Dict[str, Any]:
         "review_repeat_penalty": stages._knob(knobs, "review", "repeat_penalty", None),
         # Checks copy dates and values from the chart; the repetition penalty garbles them.
         "review_dry": stages._knob(knobs, "review", "dry", 0.0),
+        "grounding_temperature": stages._knob(
+            knobs,
+            "grounding",
+            "temperature",
+            stages._knob(knobs, "review", "temperature", 0.0),
+        ),
     }
 
 
@@ -1691,8 +1795,13 @@ async def _execute_stages(
                         state.answer_conf = stages._merge_temporal_gate_conf(
                             state.answer_conf, state.answer_gate
                         )
-                        state.answer_check_edited = state.answer_check_edited or (
-                            state.answer_gate.get("applied") in {"patch", "fallback"}
+                        state.answer_check_edited = (
+                            state.answer_check_edited
+                            or state.answer_text != before_gate_answer
+                            or (
+                                state.answer_gate.get("applied")
+                                in {"patch", "fallback", "repair"}
+                            )
                         )
                     elif state.review_edited:
                         (
@@ -1715,8 +1824,13 @@ async def _execute_stages(
                             answer_conf=state.answer_conf,
                             prior_original_answer=state.original_answer,
                         )
-                        state.answer_check_edited = state.answer_check_edited or (
-                            state.answer_gate.get("applied") in {"patch", "fallback"}
+                        state.answer_check_edited = (
+                            state.answer_check_edited
+                            or state.answer_text != before_gate_answer
+                            or (
+                                state.answer_gate.get("applied")
+                                in {"patch", "fallback", "repair"}
+                            )
                         )
                     else:
                         state.answer_conf = stages._merge_temporal_gate_conf(
@@ -1786,6 +1900,10 @@ async def _execute_stages(
                     )
                     has_review = "review" in request.profile.stages
                     has_final_grounding = "ground_verdicts" in request.profile.stages
+                    has_agree = "agree" in request.profile.stages
+                    has_later_answer_check = (
+                        has_review or has_final_grounding or has_agree
+                    )
                     gate_issues = [
                         check
                         for check in (state.answer_gate or {}).get("checks", [])
@@ -1813,18 +1931,26 @@ async def _execute_stages(
                             "One or more citations do not resolve to the current evidence ledger.",
                         )
                     fast_status = (
-                        "checking" if has_review or has_final_grounding else "checked"
+                        "checking"
+                        if has_later_answer_check
+                        else ("edited" if _initial_answer_changed(state) else "checked")
                     )
                     if (
                         state.answer_conf.get("level") == "red"
                         or (state.answer_gate or {}).get("applied") == "fallback"
                         or unresolved
-                    ) and not (has_review or has_final_grounding):
+                        or state.citation_issues
+                    ) and not has_later_answer_check:
                         fast_status = "needs_review"
                     fast_validation = stages._answer_validation_wire(
                         fast_status,
                         summary=state.answer_conf.get("note", ""),
                         issues=gate_issues,
+                        original_answer=(
+                            state.initial_answer_text
+                            if _initial_answer_changed(state)
+                            else state.original_answer
+                        ),
                     )
                     prior_validation = state.answer_validation
                     state.answer_validation = fast_validation
@@ -2041,7 +2167,14 @@ async def _execute_stages(
                             status,
                             summary=prior.get("summary") or state.answer_conf.get("note", ""),
                             issues=list(prior.get("issues") or []) + list(state.citation_issues),
-                            original_answer=prior.get("originalAnswer"),
+                            original_answer=(
+                                prior.get("originalAnswer")
+                                or (
+                                    state.initial_answer_text
+                                    if _initial_answer_changed(state)
+                                    else state.original_answer
+                                )
+                            ),
                         )
                     record_stage_timing()
                     continue
@@ -2052,11 +2185,23 @@ async def _execute_stages(
                     # of it is then checked against the second answer as a source: a fact the
                     # second writer states differently is a disagreement the clinician sees.
                     second_model = request.profile.models["second"]
-                    second_text, _second_citations, _second_blocks = await stages._synthesize_answer(
+                    second_messages = (
+                        await _select_second_answer_context(request, state)
+                        if product and request.profile.exact_tokenizer
+                        else state.messages
+                    )
+                    second_text, _second_citations, second_blocks = await stages._synthesize_answer(
                         client,
                         second_model,
-                        state.messages,
-                        _prompt(request.profile, "answer", "synthesis-answer"),
+                        second_messages,
+                        _prompt(
+                            request.profile,
+                            "second",
+                            str(
+                                request.profile.prompts.get("answer")
+                                or "synthesis-answer"
+                            ),
+                        ),
                         state.gathered,
                         response_format=answer_response_format,
                         temperature=sampling["answer_temperature"],
@@ -2064,18 +2209,30 @@ async def _execute_stages(
                         repeat_penalty=sampling["answer_repeat_penalty"],
                         dry=0.0,
                     )
+                    second_block_text, _ = stages._block_temporal_text_and_refs(
+                        list(second_blocks or [])
+                    )
+                    second_source = "\n".join(
+                        part
+                        for part in (second_text.strip(), second_block_text.strip())
+                        if part
+                    )
                     claims = stages._answer_claims(state.answer_text, state.blocks)
                     verdicts = (
                         await stages._bounded_entailment_verdicts(
                             client,
                             second_model,
-                            [(second_text, claim) for claim in claims],
+                            [(second_source, claim) for claim in claims],
                         )
-                        if claims and second_text.strip()
+                        if claims and second_source
                         else []
                     )
                     state.agreement = stages._agreement_record(
-                        second_model, second_text, claims, verdicts
+                        second_model,
+                        second_text,
+                        claims,
+                        verdicts,
+                        second_blocks=second_blocks,
                     )
                     state.steps.append(
                         {
@@ -2087,26 +2244,76 @@ async def _execute_stages(
                         }
                     )
                     issues = stages._agreement_issues(state.agreement)
-                    if issues:
-                        prior = state.answer_validation or {}
-                        differs = [issue for issue in issues if issue["status"] == "fail"]
-                        if differs:
-                            _mark_answer_low_confidence(
-                                state,
-                                "The two writers differ on " + "; ".join(
-                                    issue["claim"] for issue in differs
-                                ) + ".",
-                            )
-                        state.answer_validation = stages._answer_validation_wire(
-                            "needs_review" if differs else str(prior.get("status") or "checked"),
-                            summary=(
-                                "A second writer from another model family stated something different."
-                                if differs
-                                else str(prior.get("summary") or "")
-                            ),
-                            issues=list(prior.get("issues") or []) + issues,
-                            original_answer=prior.get("originalAnswer"),
+                    prior = state.answer_validation or {}
+                    prior_status = prior.get("status")
+                    unresolved = any(
+                        reference.get("resolutionStatus") == "unresolved"
+                        for reference in state.references
+                    )
+                    if unresolved:
+                        _mark_answer_low_confidence(
+                            state,
+                            "One or more citations do not resolve to the current evidence ledger.",
                         )
+                    if state.citation_issues:
+                        _mark_answer_low_confidence(
+                            state,
+                            "The answer has a blocking citation-format or citation-scope issue.",
+                        )
+                    differs = [issue for issue in issues if issue["status"] == "fail"]
+                    if differs:
+                        _mark_answer_low_confidence(
+                            state,
+                            "The two writers differ on " + "; ".join(
+                                issue["claim"] for issue in differs
+                            ) + ".",
+                        )
+                        status = "needs_review"
+                        summary = "A second writer from another model family stated something different."
+                    elif state.agreement["status"] == "unchecked":
+                        if state.answer_conf.get("level") == "green":
+                            state.answer_conf = {
+                                "level": "yellow",
+                                "note": "The second-writer agreement check could not be completed.",
+                            }
+                        status = (
+                            "needs_review"
+                            if (
+                                prior_status == "needs_review"
+                                or unresolved
+                                or state.citation_issues
+                                or state.answer_conf.get("level") == "red"
+                            )
+                            else "unavailable"
+                        )
+                        summary = (
+                            str(prior.get("summary") or "")
+                            or "The second-writer agreement check could not be completed."
+                        )
+                    else:
+                        if (
+                            prior_status == "needs_review"
+                            or unresolved
+                            or state.citation_issues
+                            or state.answer_conf.get("level") == "red"
+                        ):
+                            status = "needs_review"
+                        elif prior_status == "unavailable":
+                            status = "unavailable"
+                        elif state.review_edited or _initial_answer_changed(state):
+                            status = "edited"
+                        else:
+                            status = "checked"
+                        summary = str(prior.get("summary") or state.answer_conf.get("note", ""))
+                    state.answer_validation = stages._answer_validation_wire(
+                        status,
+                        summary=summary,
+                        issues=list(prior.get("issues") or [])
+                        + list(state.citation_issues)
+                        + issues,
+                        original_answer=prior.get("originalAnswer"),
+                    )
+                    state.stable_answer_snapshot = _snapshot_stable_answer(state)
                     record_stage_timing()
                     continue
 
@@ -2126,10 +2333,11 @@ async def _execute_stages(
                         grounding_options: Dict[str, Any] = {}
                         if deterministic_checks:
                             grounding_options["deterministic_checks"] = deterministic_checks
-                        # A folded review that judged no cited record (the 9B returned an empty
-                        # list in 5 of 7 verify turns on 28 October) falls back to the separate
-                        # check with the review model, so citations are never left unchecked
-                        # by an omission.
+                        # A folded review that judged no cited record at all (the 9B returned an
+                        # empty list in 5 of 7 verify turns on 28 October) falls back to the
+                        # separate check with the review model; partial omissions keep their
+                        # unjudged citations unchecked so an incomplete verdict stays visible
+                        # as unavailable.
                         cited_now = {
                             reference.get("index")
                             for reference in state.references
@@ -2142,6 +2350,10 @@ async def _execute_stages(
                             grounding_options["index_verdicts"] = (
                                 state.review_citation_verdicts or {}
                             )
+                        else:
+                            grounding_options["temperature"] = sampling[
+                                "grounding_temperature"
+                            ]
                         state.references = await stages._ground_references(
                             client,
                             None
@@ -2159,8 +2371,11 @@ async def _execute_stages(
                                 "policy": "folded-fallback" if fold_missed else grounding,
                                 "model": (
                                     request.profile.models["review"]
-                                    if folded
-                                    else request.profile.models["grounding"]
+                                    if folded and not fold_missed
+                                    else (
+                                        request.profile.models.get("grounding")
+                                        or request.profile.models["review"]
+                                    )
                                 ),
                             }
                         )
@@ -2442,7 +2657,12 @@ async def _execute_stages(
                         if (level, label) not in marks.setdefault(claim_index, []):
                             marks[claim_index].append((level, label))
                             state.indepth_findings.append(
-                                {"check": check, "where": claim_index, "says": label}
+                                {
+                                    "check": check,
+                                    "where": claim_index,
+                                    "status": "fail" if level == "red" else "warn",
+                                    "says": label,
+                                }
                             )
 
                     gate_entries = {
@@ -2456,6 +2676,24 @@ async def _execute_stages(
                             _date_check_label(gate_entries.get(claim_index) or {}),
                             "date",
                         )
+                    for entry in state.indepth_gate.get("checks") or []:
+                        claim_index = entry.get("claim_index")
+                        if not isinstance(claim_index, int):
+                            continue
+                        for gate_check in (entry.get("gate") or {}).get("checks") or []:
+                            if (
+                                isinstance(gate_check, dict)
+                                and gate_check.get("status") == "info"
+                                and str(gate_check.get("reason") or "").strip()
+                            ):
+                                state.indepth_findings.append(
+                                    {
+                                        "check": "date",
+                                        "where": claim_index,
+                                        "status": "info",
+                                        "says": str(gate_check.get("reason") or "").strip(),
+                                    }
+                                )
                     if review.get("status") == "flagged":
                         state.indepth_gate["review_status"] = "flagged"
                         state.indepth_gate["review_flagged"] = list(
@@ -2475,6 +2713,18 @@ async def _execute_stages(
                     for claim_index, claim in enumerate(state.claims, 1):
                         claim_citations = stages._extract_citations(claim)
                         if not claim_citations:
+                            if _is_uncited_patient_fact(claim):
+                                citation_checks.append(
+                                    {
+                                        "claim_index": claim_index,
+                                        "claim": claim,
+                                        "status": "warn",
+                                        "reason": "In-Depth claim states a patient-specific fact without citing a record.",
+                                        "source_indices": [],
+                                    }
+                                )
+                                mark(claim_index, "yellow", "patient fact, not cited", "citation")
+                                continue
                             # General guidance cites no record. It is tagged, not marked for review.
                             state.indepth_tags[claim_index] = "general guidance, not from the chart"
                             citation_checks.append(
@@ -2529,12 +2779,16 @@ async def _execute_stages(
                     ):
                         # The In-Depth review judged each claim's citations in its own call.
                         unsupported_claims = review.get("citation_unsupported")
+                        not_addressed_claims = set(review.get("citation_not_addressed") or [])
                         grounded: list[dict[str, Any]] = []
                         for claim_index, claim, references in candidates:
                             verdicts = (
                                 {
-                                    reference.get("index"): claim_index
-                                    not in unsupported_claims
+                                    reference.get("index"): (
+                                        stages.NOT_ADDRESSED
+                                        if claim_index in not_addressed_claims
+                                        else claim_index not in unsupported_claims
+                                    )
                                     for reference in references
                                 }
                                 if unsupported_claims is not None
@@ -2560,6 +2814,7 @@ async def _execute_stages(
                             "\n".join(claim for _index, claim, _refs in candidates),
                             flattened,
                             state.mappings,
+                            temperature=sampling["grounding_temperature"],
                         )
 
                     indepth_references: list[dict[str, Any]] = []
@@ -2630,19 +2885,28 @@ async def _execute_stages(
                             cited = ", ".join(
                                 f"[{reference.get('index')}]" for reference in not_addressed
                             )
+                            reason = (
+                                f"{cited} does not hold: {not_found}."
+                                if not_found
+                                else f"{cited} does not hold part of this claim."
+                            )
                             citation_checks.append(
                                 {
                                     "claim_index": claim_index,
                                     "claim": claim,
                                     "status": "not_addressed",
-                                    "reason": (
-                                        f"{cited} does not hold: {not_found}."
-                                        if not_found
-                                        else f"{cited} does not hold part of this claim."
-                                    ),
+                                    "reason": reason,
                                     "source_indices": [
                                         reference.get("index") for reference in not_addressed
                                     ],
+                                }
+                            )
+                            state.indepth_findings.append(
+                                {
+                                    "check": "citation",
+                                    "where": claim_index,
+                                    "status": "info",
+                                    "says": reason,
                                 }
                             )
                             continue
@@ -2937,6 +3201,7 @@ class StageEngine:
         for key in (
             "confidence",
             "answerValidation",
+            "agreement",
             "inDepth",
             "model",
             "safetyStatus",

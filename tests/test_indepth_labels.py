@@ -143,3 +143,170 @@ def test_a_reviewer_flag_counts_only_when_it_quotes_the_chart():
     assert team._quoted_in_chart({"chart": "Current WHO HIV stage: WHO stage 3 adult"}, chart) is True
     assert team._quoted_in_chart({"chart": "the nevirapine order [1]"}, chart) is True
     assert team._quoted_in_chart({"chart": "No record supports a safety claim"}, chart) is False
+
+
+def test_stream_displays_missing_fact_and_source_number_in_indepth_answer(monkeypatch):
+    from dataclasses import replace
+    from server.levels_loader import get_profile
+    from tests.factories import patient_source_registry
+
+    chart = "[1] (2026-05-20) Program — Tuberculosis treatment program\n"
+    claim = "A productive cough was reported on 2025-10-22 [1]."
+
+    async def fake_answer(*_args, **_kwargs):
+        return "Enrolled in the tuberculosis treatment program [1].", [1], []
+
+    async def fake_substantive(*_args, **kwargs):
+        return (
+            kwargs["answer_text"],
+            kwargs["citations"],
+            kwargs["blocks"],
+            {"level": "green", "note": ""},
+        )
+
+    async def fake_indepth(*_args, **_kwargs):
+        return [claim], {"level": "green", "note": ""}
+
+    async def fake_chat(_client, _model, _messages, **kwargs):
+        rf_name = ((kwargs.get("response_format") or {}).get("json_schema") or {}).get("name")
+        if rf_name == "attribution_verdicts":
+            return {
+                "content": json.dumps(
+                    {
+                        "pairs": [
+                            {
+                                "facts": [
+                                    {"fact": "productive cough on 2025-10-22", "status": "not_found"}
+                                ]
+                            }
+                        ]
+                    }
+                )
+            }
+        return {"content": json.dumps({"verdicts": ["YES"]})}
+
+    monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
+    monkeypatch.setattr(team, "_ensure_substantive_answer", fake_substantive)
+    monkeypatch.setattr(team, "_gen_indepth", fake_indepth)
+    monkeypatch.setattr(team, "_chat", fake_chat)
+    monkeypatch.setattr(team, "_write_trace", lambda *_a, **_k: None)
+
+    class _Counter:
+        async def count(self, *_args):
+            return 1
+
+        async def count_chat(self, *_args):
+            return 1
+
+    registry = patient_source_registry(
+        chart,
+        [
+            {
+                "resourceType": "obs",
+                "resourceUuid": "tb-prog",
+                "date": "2026-05-20",
+                "text": "(2026-05-20) Program: Tuberculosis treatment program",
+            }
+        ],
+    )
+    profile = get_profile("single-12b-checked")
+    profile = replace(
+        profile,
+        stages=tuple(stage for stage in profile.stages if stage != "review"),
+        policies={**profile.policies, "anchor": "2026-06-20", "drug_safety": False},
+    )
+    request = engine.ExecutionRequest(
+        profile=profile,
+        messages=[{"role": "user", "content": "What programs is the patient in?"}],
+        patient="synthetic",
+        source_registry=registry,
+        token_counter=_Counter(),
+    )
+
+    payload = json.loads(asyncio.run(engine.drain_profile(request)))
+    assert (
+        payload["inDepth"]["validation"]["citation_checks"][0]["reason"]
+        == "[1] does not hold: productive cough on 2025-10-22."
+    )
+    assert {
+        "check": "citation",
+        "where": 1,
+        "status": "info",
+        "says": "[1] does not hold: productive cough on 2025-10-22.",
+    } in payload["confidence"]["in_depth"]["findings"]
+
+
+def test_indepth_citation_support_probe_fixture_exercises_separate_and_folded_contracts(
+    monkeypatch,
+):
+    from pathlib import Path
+
+    fixture_path = (
+        Path(__file__).resolve().parent / "fixtures" / "indepth-citation-support-probes.json"
+    )
+    fixture = json.loads(fixture_path.read_text())
+    probes = fixture["probes"]
+    assert len(probes) == 10
+
+    monkeypatch.setattr(
+        team,
+        "_chat",
+        _attribution_reply([{"facts": probe["facts"]} for probe in probes]),
+    )
+    pairs = [(probe["source"], probe["statement"]) for probe in probes]
+    verdicts = asyncio.run(team._entailment_verdicts(None, "gemma-4-12b", pairs))
+    assert [v["support"] for v in verdicts] == [probe["expected"] for probe in probes]
+    assert sum(v["support"] == "supported" for v in verdicts) == 5
+    assert sum(v["support"] == "not_addressed" for v in verdicts) == 4
+    assert sum(v["support"] == "contradicted" for v in verdicts) == 1
+
+    claims = [
+        f"{probe['statement']} " + "".join(f"[{idx}]" for idx in probe["source_indices"])
+        for probe in probes
+    ]
+    folded_messages = team._indepth_validation_messages(
+        chart="\n".join(probe["source"] for probe in probes),
+        gathered="",
+        answer_text="Summary answer.",
+        claims=claims,
+        validation_prompt="validation-label",
+        citation_support=True,
+    )
+    assert "=== CITATION SUPPORT ===" in folded_messages[-1]["content"]
+    unsupported_indices = [
+        index for index, probe in enumerate(probes, 1) if probe["expected"] == "contradicted"
+    ]
+    not_addressed_indices = [
+        index for index, probe in enumerate(probes, 1) if probe["expected"] == "not_addressed"
+    ]
+
+    async def fake_folded_chat(_client, _model, _messages, **_kwargs):
+        return {
+            "content": json.dumps(
+                {
+                    "flag": [],
+                    "issues": "",
+                    "unsupported": unsupported_indices,
+                    "not_addressed": not_addressed_indices,
+                }
+            )
+        }
+
+    monkeypatch.setattr(team, "_chat", fake_folded_chat)
+    folded_verdict = asyncio.run(
+        team._validate_indepth_verdict(
+            None,
+            "gemma-4-12b",
+            chart="\n".join(probe["source"] for probe in probes),
+            gathered="",
+            answer_text="Summary answer.",
+            claims=claims,
+            max_tokens=256,
+            temperature=0.0,
+            repeat_penalty=None,
+            dry=None,
+            citation_support=True,
+        )
+    )
+    assert folded_verdict["unsupported"] == [8]
+    assert folded_verdict["not_addressed"] == [5, 6, 7, 10]

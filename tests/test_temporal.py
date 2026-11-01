@@ -1491,6 +1491,26 @@ def test_gate_passes_a_single_point_answer_that_says_no_trend_can_be_drawn():
     check = next(c for c in gate["checks"] if c["id"] == "single_point_trend")
     assert (check["status"], check["severity"]) == ("pass", "info")
 
+    positive_single = temporal.run_temporal_gate(
+        "Has the CD4 count changed over time?",
+        "The single CD4 count of 72 cells/uL [218] shows a decreasing trend.",
+        [218],
+        facts,
+        "enforce",
+    )
+    assert positive_single["status"] == "fail"
+
+    wbc_facts = temporal.build_temporal_facts(_CD4_WITH_WBC_CHART, "2006-06-01")
+    unrelated_refusal = temporal.run_temporal_gate(
+        "Review trends",
+        "The CD4 count is decreasing [218]. There is only one White blood cells measurement, "
+        "so no trend can be drawn [190].",
+        [218, 190],
+        wbc_facts,
+        "enforce",
+    )
+    assert unrelated_refusal["status"] == "fail"
+
 
 def test_trend_checks_apply_only_to_the_measurement_the_answer_names():
     """Run D3: "cells" in a CD4 answer selected the White blood cells series too, and its single
@@ -1505,6 +1525,32 @@ def test_trend_checks_apply_only_to_the_measurement_the_answer_names():
     )
     trend_checks = [c for c in gate["checks"] if c["id"] == "single_point_trend"]
     assert [c["reason"].split(" has ")[0] for c in trend_checks] == ["CD4 count"]
+
+    alias_chart = (
+        _CHART
+        + "\n[10] (2006-03-03) Test — Haemoglobin: 9 g/dL"
+        + "\n[11] (2006-05-18) Test — Haemoglobin: 4 g/dL\n"
+    )
+    alias_facts = temporal.build_temporal_facts(alias_chart, "2006-06-01")
+    hgb_gate = temporal.run_temporal_gate(
+        "Review trends",
+        "Weight decreased [202][15]. Hemoglobin increased [10][11].",
+        [202, 15, 10, 11],
+        alias_facts,
+        "enforce",
+    )
+    assert hgb_gate["status"] == "fail"
+    assert any(c["id"] == "trend_direction" and c["status"] == "fail" for c in hgb_gate["checks"])
+
+    cd4_alias_gate = temporal.run_temporal_gate(
+        "Review trends",
+        "Weight decreased [202][15]. CD4 is decreasing [218].",
+        [202, 15, 218],
+        alias_facts,
+        "enforce",
+    )
+    assert cd4_alias_gate["status"] == "fail"
+    assert any(c["id"] == "single_point_trend" and c["status"] == "fail" for c in cd4_alias_gate["checks"])
 
 
 def test_a_shorter_documented_window_is_a_note_not_a_mark():
@@ -1531,6 +1577,10 @@ def test_value_binding_skips_unit_digits_and_change_amounts():
         (
             "What was the last CD4 count?",
             "The CD4 count of 72 cells/uL on 2006-03-02 [218] is below the 200 cells/mm3 threshold.",
+        ),
+        (
+            "What was the last CD4 count?",
+            "On 2006-03-02 [218], CD4 (cells/mm3) was 72 cells/uL.",
         ),
         (
             "How has the weight changed?",
