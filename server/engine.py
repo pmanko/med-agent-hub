@@ -1013,7 +1013,7 @@ def _sampling(request: ExecutionRequest) -> Dict[str, Any]:
             knobs,
             "grounding",
             "temperature",
-            stages._knob(knobs, "review", "temperature", 0.0),
+            stages._knob(knobs, "review", "temperature", None),
         ),
     }
 
@@ -1970,7 +1970,7 @@ async def _execute_stages(
                             grounding_options["index_verdicts"] = (
                                 state.review_citation_verdicts or {}
                             )
-                        else:
+                        elif sampling["grounding_temperature"] is not None:
                             grounding_options["temperature"] = sampling[
                                 "grounding_temperature"
                             ]
@@ -2365,7 +2365,11 @@ async def _execute_stages(
                             flattened,
                             state.mappings,
                             attribution_only=True,
-                            temperature=sampling["grounding_temperature"],
+                            **(
+                                {"temperature": sampling["grounding_temperature"]}
+                                if sampling["grounding_temperature"] is not None
+                                else {}
+                            ),
                         )
 
                     indepth_references: list[dict[str, Any]] = []

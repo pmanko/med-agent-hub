@@ -565,9 +565,9 @@ _ENTAILMENT_RF = {
 }
 
 
-def _default_grounding_temperature(model: str) -> float:
+def _default_grounding_temperature(model: str) -> Optional[float]:
     """Default entailment-grounding temperature when no explicit profile knob is passed."""
-    return 0.7 if "qwen3" in (model or "").lower() else 0.0
+    return 0.7 if "qwen3" in (model or "").lower() else None
 
 
 async def _entailment_verdicts(
@@ -599,13 +599,15 @@ async def _entailment_verdicts(
         if temperature is None
         else float(temperature)
     )
+    chat_kwargs: Dict[str, Any] = {"response_format": _ENTAILMENT_RF}
+    if effective_temperature is not None:
+        chat_kwargs["temperature"] = effective_temperature
     try:
         msg = await _chat(
             client,
             model,
             [{"role": "user", "content": user}],
-            temperature=effective_temperature,
-            response_format=_ENTAILMENT_RF,
+            **chat_kwargs,
         )
         obj = json.loads(_message_text(msg))
         verdicts = obj.get("verdicts") if isinstance(obj, dict) else None
