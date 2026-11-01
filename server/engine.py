@@ -1003,6 +1003,12 @@ def _sampling(request: ExecutionRequest) -> Dict[str, Any]:
         "review_temperature": stages._knob(knobs, "review", "temperature", 0.0),
         "review_repeat_penalty": stages._knob(knobs, "review", "repeat_penalty", None),
         "review_dry": stages._knob(knobs, "review", "dry", None),
+        "grounding_temperature": stages._knob(
+            knobs,
+            "grounding",
+            "temperature",
+            stages._knob(knobs, "review", "temperature", 0.0),
+        ),
     }
 
 
@@ -1958,6 +1964,10 @@ async def _execute_stages(
                             grounding_options["index_verdicts"] = (
                                 state.review_citation_verdicts or {}
                             )
+                        else:
+                            grounding_options["temperature"] = sampling[
+                                "grounding_temperature"
+                            ]
                         state.references = await stages._ground_references(
                             client,
                             None if folded else request.profile.models["grounding"],
@@ -2349,6 +2359,7 @@ async def _execute_stages(
                             flattened,
                             state.mappings,
                             attribution_only=True,
+                            temperature=sampling["grounding_temperature"],
                         )
 
                     indepth_references: list[dict[str, Any]] = []

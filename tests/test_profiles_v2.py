@@ -541,4 +541,54 @@ def test_checked_answer_arms_change_only_their_declared_choice(
     assert {k: v for k, v in arm.policies.items() if k != "review"} == {
         k: v for k, v in default.policies.items() if k != "review"
     }
-    assert arm.knobs.get("review", {}).get("temperature") == review_temperature
+    expected_knobs = {
+        role: dict(role_knobs) for role, role_knobs in default.knobs.items()
+    }
+    if review_temperature is not None:
+        expected_knobs["review"] = {"temperature": review_temperature}
+    assert {
+        role: dict(role_knobs) for role, role_knobs in arm.knobs.items()
+    } == expected_knobs
+
+
+@pytest.mark.parametrize(
+    ("profile_id", "expected_model"),
+    [
+        ("single-12b-xcheck", "qwen3.6-35b"),
+        ("single-31b-xcheck", "qwen3.5-9b"),
+    ],
+)
+def test_cross_family_checked_answer_arms_pass_checker_temperature_to_grounding(
+    profile_id: str, expected_model: str, monkeypatch: pytest.MonkeyPatch
+):
+    import asyncio
+    from server import engine, team
+
+    profile = get_profile(profile_id)
+    sampling = engine._sampling(
+        engine.ExecutionRequest(
+            profile=profile,
+            messages=[{"role": "user", "content": "What was the weight?"}],
+        )
+    )
+    assert sampling["review_temperature"] == 0.7
+    assert sampling["grounding_temperature"] == 0.7
+
+    captured: list[dict] = []
+
+    async def fake_chat(_client, model, _messages, **kwargs):
+        captured.append({"model": model, **kwargs})
+        return {"content": '{"verdicts": ["YES"]}'}
+
+    monkeypatch.setattr(team, "_chat", fake_chat)
+
+    verdicts = asyncio.run(
+        team._entailment_verdicts(
+            None,
+            profile.models["grounding"],
+            [("2026-01-01 Weight: 71 kg", "Weight was 71 kg.")],
+        )
+    )
+    assert verdicts == [True]
+    assert captured[-1]["model"] == expected_model
+    assert captured[-1]["temperature"] == 0.7
