@@ -1,6 +1,6 @@
 === CITATION SUPPORT ===
-Also judge every [N] citation in the Answer. For each one, say whether chart record N states what the sentence citing it claims: the value, date, drug or status that sentence attaches to [N]. A sentence citing several records is supported by them together; judge each record by the part of the sentence it carries. Do not report an unsupported citation in "errors"; report it here.
+Also judge every [N] citation in the Answer. For each one, say whether chart record N states what the sentence citing it claims: the value, date, drug or status that sentence attaches to [N]. A sentence citing several records is supported by them together; judge each record by the part of the sentence it carries. Distinguish a contradiction ("contradicted": record N states a different value, date, drug or status) from a missing fact ("not_addressed": record N does not hold a stated fact without stating a different one). Do not report an unsupported citation in "errors"; report it here.
 
 Add to the JSON object:
-  "citations": [{"index": <N>, "supported": <true|false>}]
+  "citations": [{"index": <N>, "supported": <true|false>, "status": <"supported"|"contradicted"|"not_addressed">}]
 with one entry per distinct [N] in the Answer.

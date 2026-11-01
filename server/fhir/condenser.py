@@ -21,6 +21,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, 
 
 from ..chart_serializer import render_chart
 from .extractors import ClinicalItem, ExtractedChart, NumericPoint, extract_bundle
+from .normalizers import classify_sensitivity
 
 # Priority analytes surfaced first in Tier 3 / Tier 4 LabTrajectory rollups.
 _PRIORITY_ANALYTE_PATTERNS = (
@@ -120,13 +121,13 @@ def _span_phrase(dates: Sequence[Optional[str]]) -> Tuple[Optional[str], str]:
 
 
 def _fold_devices(devices: Sequence[ClinicalItem]) -> List[ClinicalItem]:
-    """Fold repeated identical patient devices (e.g. annual CPAP appliance replacements) by code/display."""
-    by_code: Dict[str, List[ClinicalItem]] = {}
+    """Fold repeated identical patient devices (e.g. annual CPAP appliance replacements) by (code/display, status)."""
+    by_code: Dict[Tuple[str, str], List[ClinicalItem]] = {}
     for d in devices:
-        by_code.setdefault(d.code or d.display, []).append(d)
+        by_code.setdefault((d.code or d.display, d.status), []).append(d)
 
     folded: List[ClinicalItem] = []
-    for _code, group in by_code.items():
+    for (_code, _status), group in by_code.items():
         ordered = sorted(group, key=lambda x: _date_sort_key(x.date))
         latest = ordered[-1]
         if len(ordered) == 1:
@@ -144,7 +145,7 @@ def _fold_devices(devices: Sequence[ClinicalItem]) -> List[ClinicalItem]:
                 code=latest.code,
                 display=latest.display,
                 text=f"Device: {latest.display} (status: {latest.status}, {len(ordered)} records, {span_str})",
-                mandatory=latest.mandatory,
+                mandatory=any(x.mandatory for x in ordered),
                 status=latest.status,
                 source_org=latest.source_org,
                 member_uuids=_merge_uuids(ordered),
@@ -466,16 +467,19 @@ def _group_vitals_by_date(vitals: Sequence[ClinicalItem]) -> List[ClinicalItem]:
         if len(items_on_date) == 1:
             grouped.append(items_on_date[0])
             continue
-        parts: List[str] = []
-        seen_disp: Set[str] = set()
+        values_by_label: Dict[str, List[str]] = {}
         for it in items_on_date:
             val = str(it.metadata.get("value") or "").strip()
             label = it.display
-            if label in seen_disp:
+            if not val:
                 continue
-            seen_disp.add(label)
-            if val:
-                parts.append(f"{label}: {val}")
+            bucket = values_by_label.setdefault(label, [])
+            if val not in bucket:
+                bucket.append(val)
+        parts = [
+            f"{label}: {' -> '.join(vals)}"
+            for label, vals in values_by_label.items()
+        ]
         lead = items_on_date[0]
         grouped.append(
             ClinicalItem(
@@ -527,47 +531,61 @@ def _build_lab_trajectories(
     *,
     max_analytes: Optional[int] = None,
 ) -> List[ClinicalItem]:
-    """Collapse numeric Observation series into 1 longitudinal LabTrajectory record per analyte.
+    """Collapse numeric Observation series into 1 longitudinal LabTrajectory record per (analyte, unit).
 
     Includes `(initial <val> on <date> -> latest <val> on <date>; ...)` so `temporal.py`
-    extracts both endpoints (`first` and `latest`), computes `trend_supported = True`,
-    and validates trend claims deterministically.
+    extracts both endpoints (`first` and `latest`), intermediate min/max extrema, computes
+    `trend_supported = True`, and validates trend claims deterministically.
     """
-    by_concept: Dict[str, List[NumericPoint]] = {}
+    by_concept_unit: Dict[Tuple[str, str], List[NumericPoint]] = {}
+    units_per_concept: Dict[str, Set[str]] = {}
     for pt in numeric_points:
         clean_name = _canonical_analyte_name(pt.concept)
-        by_concept.setdefault(clean_name, []).append(pt)
+        norm_unit = (pt.unit or "").strip()
+        by_concept_unit.setdefault((clean_name, norm_unit), []).append(pt)
+        units_per_concept.setdefault(clean_name, set()).add(norm_unit)
 
-    def analyte_priority(name: str) -> Tuple[int, int, str]:
+    def analyte_priority(key: Tuple[str, str]) -> Tuple[int, int, str, str]:
+        name, unit_key = key
         lower = name.lower()
         for idx, pat in enumerate(_PRIORITY_ANALYTE_PATTERNS):
             if re.search(pat, lower):
-                return (0, idx, lower)
-        return (1, 999, lower)
+                return (0, idx, lower, unit_key.lower())
+        return (1, 999, lower, unit_key.lower())
 
     trajectories: List[ClinicalItem] = []
-    sorted_concepts = sorted(by_concept.keys(), key=analyte_priority)
+    sorted_keys = sorted(by_concept_unit.keys(), key=analyte_priority)
     if max_analytes is not None:
-        sorted_concepts = sorted_concepts[:max_analytes]
+        sorted_keys = sorted_keys[:max_analytes]
 
-    for concept in sorted_concepts:
-        pts = sorted(by_concept[concept], key=lambda p: p.date)
+    def fmt(v: float) -> str:
+        if v.is_integer():
+            return str(int(v))
+        s = f"{v:.6f}".rstrip("0").rstrip(".")
+        return s if s not in {"", "-0"} else "0"
+
+    for clean_name, norm_unit in sorted_keys:
+        pts = sorted(by_concept_unit[(clean_name, norm_unit)], key=lambda p: p.date)
         dedup_pts: List[NumericPoint] = []
-        seen_dates: Set[str] = set()
+        seen_date_vals: Set[Tuple[str, float]] = set()
         for p in pts:
-            if p.date not in seen_dates:
-                seen_dates.add(p.date)
+            dv_key = (p.date, p.value)
+            if dv_key not in seen_date_vals:
+                seen_date_vals.add(dv_key)
                 dedup_pts.append(p)
         if not dedup_pts:
             continue
         latest = dedup_pts[-1]
         first = dedup_pts[0]
-        vals = [p.value for p in dedup_pts]
-        v_min, v_max = min(vals), max(vals)
-        unit = latest.unit
+        p_min = min(dedup_pts, key=lambda p: p.value)
+        p_max = max(dedup_pts, key=lambda p: p.value)
+        unit = norm_unit
 
-        def fmt(v: float) -> str:
-            return str(int(v)) if v.is_integer() else f"{v:.2f}".rstrip("0").rstrip(".")
+        concept = (
+            f"{clean_name} [{unit or 'unitless'}]"
+            if len(units_per_concept.get(clean_name, set())) > 1
+            else clean_name
+        )
 
         unit_sp = f" {unit}" if unit else ""
         if len(dedup_pts) == 1:
@@ -582,11 +600,12 @@ def _build_lab_trajectories(
             text = (
                 f"Finding — {concept}: {fmt(latest.value)}{unit_sp} "
                 f"(initial {fmt(first.value)} on {first.date} -> latest {fmt(latest.value)} on {latest.date}; "
-                f"range {fmt(v_min)} to {fmt(v_max)}{unit_sp} over n={len(dedup_pts)} measurements, "
+                f"range {fmt(p_min.value)} on {p_min.date} to {fmt(p_max.value)} on {p_max.date}{unit_sp} "
+                f"over n={len(dedup_pts)} measurements, "
                 f"first recorded {first.date} through {latest.date}, trend: {direction})"
             )
         member_uuids = tuple(dict.fromkeys(p.resource_uuid for p in pts if p.resource_uuid))
-        p_group, p_idx, _ = analyte_priority(concept)
+        p_group, p_idx, _, _ = analyte_priority((clean_name, norm_unit))
         trajectories.append(
             ClinicalItem(
                 resource_type="Observation",
@@ -625,8 +644,33 @@ def _build_completeness_manifest(
         else ""
     )
 
-    if tier == 0:
+    covered_uuids: Set[str] = set()
+    for it in included_items:
+        if it.resource_uuid:
+            covered_uuids.add(it.resource_uuid)
+        for m in it.member_uuids:
+            if m:
+                covered_uuids.add(m)
+
+    omitted_by_section: Dict[str, int] = {}
+    for src_it in extracted.items:
+        item_uuids = {src_it.resource_uuid} | set(src_it.member_uuids)
+        if not (item_uuids & covered_uuids):
+            omitted_by_section[src_it.section] = omitted_by_section.get(src_it.section, 0) + 1
+    omitted_clinical_count = max(0, sum(omitted_by_section.values()) - redacted_count)
+    omitted_str = (
+        f"; omitted_clinical_items={omitted_clinical_count}"
+        if omitted_clinical_count > 0
+        else ""
+    )
+
+    if tier == 0 and omitted_clinical_count == 0:
         coverage = "ALL clinical sections COMPLETE (lossless 1-line projection)"
+    elif tier == 0:
+        coverage = (
+            "IPS Safety Core and structured clinical ledger COMPLETE; "
+            f"{omitted_clinical_count} clinical item(s) omitted by mode/budget filter"
+        )
     elif tier == 1:
         coverage = (
             "IPS Safety Core (Allergies, Active Conditions, Active Medications, Anomalous Immunizations, "
@@ -652,13 +696,13 @@ def _build_completeness_manifest(
     manifest_text = (
         f"Completeness Manifest: Tier {tier} ({tier_name}) | {coverage} | "
         f"bundle_entries={extracted.total_bundle_entries}, rendered_lines={len(included_items) + 1}"
-        f"{dedup_str}{redacted_str}"
+        f"{dedup_str}{redacted_str}{omitted_str}"
         + (f" | non_clinical_excluded: {ex_str}" if ex_str else "")
     )
     if tier == 4 and "Ultra-Compact" in tier_name:
         manifest_text = (
             f"Completeness Manifest: Tier 4 ({tier_name}) | IPS Safety Core COMPLETE | "
-            f"entries={extracted.total_bundle_entries}, lines={len(included_items) + 1}{redacted_str}"
+            f"entries={extracted.total_bundle_entries}, lines={len(included_items) + 1}{redacted_str}{omitted_str}"
         )
 
     manifest_item = ClinicalItem(
@@ -683,8 +727,52 @@ def _build_completeness_manifest(
         "deduplicated_note_count": extracted.deduplicated_note_count,
         "excluded_non_clinical": dict(extracted.excluded_resource_counts),
         "redacted_for_privacy_count": redacted_count,
+        "omitted_clinical_items_count": omitted_clinical_count,
+        "omitted_by_section": omitted_by_section,
     }
     return manifest_item, manifest_dict
+
+
+def _excerpt_notes(notes: Sequence[ClinicalItem], max_chars: int = 400) -> List[ClinicalItem]:
+    """Excerpt clinical notes to `max_chars` for condensed Tiers 1..4 while keeping Tier 0 lossless."""
+    out: List[ClinicalItem] = []
+    for n in notes:
+        full_norm = str(n.metadata.get("full_text") or "")
+        title = str(n.metadata.get("title") or n.display or "Clinical Note")
+        if full_norm and len(full_norm) > max_chars:
+            excerpt = full_norm[:max_chars] + "..."
+            sens_suffix = (
+                f" [sensitivity: {n.sensitivity}]"
+                if n.sensitivity == "SDOH/PRIVACY-SENSITIVE"
+                else ""
+            )
+            txt = f"Note ({title}): {excerpt}{sens_suffix}"
+        else:
+            txt = n.text
+        out.append(
+            ClinicalItem(
+                resource_type=n.resource_type,
+                resource_uuid=n.resource_uuid,
+                date=n.date,
+                clinical_date=n.clinical_date,
+                date_kind=n.date_kind,
+                section=n.section,
+                code=n.code,
+                display=n.display,
+                text=txt,
+                mandatory=n.mandatory,
+                status=n.status,
+                end_date=n.end_date,
+                source_org=n.source_org,
+                sensitivity=n.sensitivity,
+                conflict_note=n.conflict_note,
+                ingredient_key=n.ingredient_key,
+                is_routine=n.is_routine,
+                member_uuids=n.member_uuids,
+                metadata=n.metadata,
+            )
+        )
+    return out
 
 
 def _compact_item_for_micro_tier(item: ClinicalItem) -> ClinicalItem:
@@ -730,6 +818,7 @@ def build_tier_items(
         raise ValueError(f"Unsupported condensation tier: {tier}")
 
     redacted: List[Dict[str, Any]] = []
+    redacted_uuids: Set[str] = set()
     source_items: List[ClinicalItem] = []
     for it in extracted.items:
         if sharing_posture == "external_share" and it.sensitivity == "SDOH/PRIVACY-SENSITIVE":
@@ -742,10 +831,25 @@ def build_tier_items(
                     "sensitivity": it.sensitivity,
                 }
             )
+            if it.resource_uuid:
+                redacted_uuids.add(it.resource_uuid)
+            for m_uuid in it.member_uuids:
+                if m_uuid:
+                    redacted_uuids.add(m_uuid)
             continue
         if mode == "reconcile" and it.section == "clinical_note":
             continue
         source_items.append(it)
+
+    allowed_numeric_points = [
+        pt
+        for pt in extracted.numeric_points
+        if pt.resource_uuid not in redacted_uuids
+        and not (
+            sharing_posture == "external_share"
+            and classify_sensitivity(pt.code, pt.concept, [pt.category]) == "SDOH/PRIVACY-SENSITIVE"
+        )
+    ]
 
     patient_items = [x for x in source_items if x.section == "patient"]
     allergies = [x for x in source_items if x.section == "allergy"]
@@ -764,12 +868,29 @@ def build_tier_items(
     lab_panels = [x for x in source_items if x.section == "lab_panel"]
     survey_panels = [x for x in source_items if x.section == "survey_panel"]
     vitals = [x for x in source_items if x.section == "vital_sign"]
-    labs_standalone = [x for x in source_items if x.section == "lab_observation"]
+    labs_standalone = sorted(
+        [x for x in source_items if x.section == "lab_observation"],
+        key=lambda x: _date_sort_key(x.date),
+        reverse=True,
+    )
     social_obs = [x for x in source_items if x.section == "social_history"]
-    survey_obs = [x for x in source_items if x.section == "survey_observation"]
+    survey_obs = sorted(
+        [x for x in source_items if x.section == "survey_observation"],
+        key=lambda x: _date_sort_key(x.date),
+        reverse=True,
+    )
     other_obs = [x for x in source_items if x.section == "observation"]
-    imaging = [x for x in source_items if x.section == "imaging"]
-    notes = [x for x in source_items if x.section == "clinical_note"]
+    imaging = sorted(
+        [x for x in source_items if x.section == "imaging"],
+        key=lambda x: _date_sort_key(x.date),
+        reverse=True,
+    )
+    notes = sorted(
+        [x for x in source_items if x.section == "clinical_note"],
+        key=lambda x: _date_sort_key(x.date),
+        reverse=True,
+    )
+    excerpted_notes = _excerpt_notes(notes, max_chars=400)
 
     tier_names = {
         0: "Full Normalized Ledger",
@@ -817,7 +938,7 @@ def build_tier_items(
         folded_social = _fold_social_history(social_obs)
         folded_labs = _fold_lab_panels_by_type(lab_panels, keep_latest_per_type=3)
         folded_surveys = _fold_lab_panels_by_type(survey_panels, keep_latest_per_type=2)
-        trajectories = _build_lab_trajectories(extracted.numeric_points, max_analytes=24)
+        trajectories = _build_lab_trajectories(allowed_numeric_points, max_analytes=24)
 
         core = patient_items + allergies + cond_active + med_active + folded_devices
         rest = (
@@ -833,9 +954,10 @@ def build_tier_items(
             + grouped_vitals
             + folded_social
             + other_obs
-            + notes[:20]
+            + excerpted_notes[:20]
             + imaging
             + folded_surveys
+            + survey_obs[:16]
             + folded_procs_routine
             + careplans_hist
             + folded_enc_routine
@@ -844,7 +966,7 @@ def build_tier_items(
         body_items = core + rest
 
     elif tier == 2:
-        cutoff_12m = _cutoff_iso(extracted.reference_date, 365)
+        cutoff_24m = _cutoff_iso(extracted.reference_date, 730)
 
         folded_devices = _fold_devices(devices)
         folded_med_hist = _fold_stopped_medications(med_hist)
@@ -858,15 +980,15 @@ def build_tier_items(
         folded_social = _fold_social_history(social_obs)
         folded_labs = _fold_lab_panels_by_type(lab_panels, keep_latest_per_type=1)
         folded_surveys = _fold_lab_panels_by_type(survey_panels, keep_latest_per_type=1)
-        trajectories = _build_lab_trajectories(extracted.numeric_points, max_analytes=24)
+        trajectories = _build_lab_trajectories(allowed_numeric_points, max_analytes=24)
 
         recent_notes = sorted(
-            [n for n in notes if _date_sort_key(n.date) >= cutoff_12m],
+            [n for n in excerpted_notes if _date_sort_key(n.date) >= cutoff_24m],
             key=lambda x: _date_sort_key(x.date),
             reverse=True,
         )[:6]
-        if not recent_notes and notes:
-            recent_notes = sorted(notes, key=lambda x: _date_sort_key(x.date), reverse=True)[:3]
+        if not recent_notes and excerpted_notes:
+            recent_notes = excerpted_notes[:3]
 
         core = patient_items + allergies + cond_active + med_active + folded_devices
         rest = (
@@ -883,6 +1005,7 @@ def build_tier_items(
             + folded_social
             + other_obs
             + folded_surveys
+            + survey_obs[:8]
             + recent_notes
             + imaging[:6]
             + folded_procs_routine[:8]
@@ -899,7 +1022,7 @@ def build_tier_items(
         folded_procs_major = _fold_procedures(procs_major, section="procedure_major")
         folded_enc_acuity = _fold_encounters(enc_acuity, keep_latest_individual=2)
         folded_social = _fold_social_history(social_obs)
-        trajectories = _build_lab_trajectories(extracted.numeric_points, max_analytes=22)
+        trajectories = _build_lab_trajectories(allowed_numeric_points, max_analytes=22)
 
         med_cond_res = [c for c in folded_cond_res if not c.is_routine]
         sdoh_cond_res = [c for c in folded_cond_res if c.is_routine]
@@ -933,7 +1056,7 @@ def build_tier_items(
             + med_cond_res
             + folded_med_hist[:12]
             + folded_social[:4]
-            + notes[:1]
+            + excerpted_notes[:1]
         )
         rest.sort(key=lambda x: _date_sort_key(x.date), reverse=True)
         body_items = core + rest
@@ -1031,7 +1154,7 @@ def build_tier_items(
                 )
             )
 
-        trajectories = _build_lab_trajectories(extracted.numeric_points, max_analytes=12)
+        trajectories = _build_lab_trajectories(allowed_numeric_points, max_analytes=12)
         folded_procs_major = _fold_procedures(procs_major, section="procedure_major")
         folded_enc_acuity = _fold_encounters(enc_acuity, keep_latest_individual=1)
 
@@ -1259,8 +1382,21 @@ def _pack_items_to_token_budget(
                 )
             )
         if other_meds:
-            l_date, _ = _span_phrase([m.date for m in other_meds])
-            m_names = "; ".join(f"{m.display} ({m.date})" for m in other_meds)
+            l_date, span_str = _span_phrase([m.date for m in other_meds])
+            m_parts: List[str] = []
+            for m in other_meds:
+                dm = re.search(r"dosage:\s*([^,\)\]]+)", m.text)
+                dosage_str = dm.group(1).strip() if dm else ""
+                quals: List[str] = []
+                if m.date:
+                    quals.append(m.date)
+                if m.status and m.status != "active":
+                    quals.append(f"status: {m.status}")
+                if dosage_str:
+                    quals.append(f"dosage: {dosage_str}")
+                q_str = f" ({', '.join(quals)})" if quals else ""
+                c_str = f" [{m.conflict_note}]" if m.conflict_note else ""
+                m_parts.append(f"{m.display}{q_str}{c_str}")
             compressed_mandatory.append(
                 ClinicalItem(
                     resource_type=other_meds[0].resource_type,
@@ -1271,7 +1407,7 @@ def _pack_items_to_token_budget(
                     section="med_active",
                     code="active-meds-folded",
                     display="Active Medications",
-                    text=f"Medication (status: active): {m_names}",
+                    text=f"Medication (status: active): {'; '.join(m_parts)}",
                     mandatory=True,
                     member_uuids=_merge_uuids(other_meds),
                 )
@@ -1299,12 +1435,12 @@ def _pack_items_to_token_budget(
             tier_label = "IPS Ultra-Compact Micro-Capsule"
             raw_all_conds = conflict_conds + other_conds
             all_imms = [it for it in compressed_mandatory if it.section == "immunization"]
-            non_cond_imm = [
+            non_cond_imm_med = [
                 it
                 for it in compressed_mandatory
-                if it.section not in {"condition_active", "immunization"}
+                if it.section not in {"condition_active", "immunization", "med_active"}
             ]
-            ultra: List[ClinicalItem] = list(non_cond_imm)
+            ultra: List[ClinicalItem] = list(non_cond_imm_med)
             if raw_all_conds:
                 l_date, _ = _span_phrase([c.date for c in raw_all_conds])
                 c_parts = []
@@ -1327,6 +1463,60 @@ def _pack_items_to_token_budget(
                         member_uuids=_merge_uuids(raw_all_conds),
                     )
                 )
+            if other_meds:
+                l_date, _ = _span_phrase([m.date for m in other_meds])
+                by_med_qual: Dict[Tuple[str, str, str], List[ClinicalItem]] = {}
+                for m in other_meds:
+                    dm = re.search(r"dosage:\s*([^,\)\]]+)", m.text)
+                    dosage_str = dm.group(1).strip() if dm else ""
+                    key_q = (m.status or "active", dosage_str, m.conflict_note or "")
+                    by_med_qual.setdefault(key_q, []).append(m)
+
+                def _build_ultra_med_text(include_dosage: bool, max_med_names: Optional[int] = None) -> str:
+                    group_strs: List[str] = []
+                    for (st, dos, conf), mgroup in by_med_qual.items():
+                        _, g_span = _span_phrase([x.date for x in mgroup])
+                        short_names = [
+                            re.sub(
+                                r"\s+Oral\s+(?:Tablet|Capsule|Solution)s?\b",
+                                "",
+                                x.display,
+                                flags=re.IGNORECASE,
+                            ).strip()
+                            for x in mgroup
+                        ]
+                        if max_med_names is not None and len(short_names) > max_med_names:
+                            omitted_n = len(short_names) - max_med_names
+                            names_joined = f"{', '.join(short_names[:max_med_names])} (+{omitted_n} more)"
+                        else:
+                            names_joined = ", ".join(short_names)
+                        quals: List[str] = []
+                        if g_span:
+                            quals.append(g_span)
+                        if st and st != "active":
+                            quals.append(f"status: {st}")
+                        if include_dosage and dos:
+                            quals.append(f"dosage: {dos}")
+                        q_str = f" ({', '.join(quals)})" if quals else ""
+                        c_str = f" [{conf}]" if conf else ""
+                        group_strs.append(f"{names_joined}{q_str}{c_str}")
+                    return f"Medication (status: active): {'; '.join(group_strs)}"
+
+                med_ultra_text = _build_ultra_med_text(include_dosage=True)
+                med_ultra_item = ClinicalItem(
+                    resource_type=other_meds[0].resource_type,
+                    resource_uuid=other_meds[0].resource_uuid,
+                    date=l_date or extracted.reference_date,
+                    clinical_date=l_date or extracted.reference_date,
+                    date_kind="clinical_event",
+                    section="med_active",
+                    code="active-meds-ultra",
+                    display="Active Medications",
+                    text=med_ultra_text,
+                    mandatory=True,
+                    member_uuids=_merge_uuids(other_meds),
+                )
+                ultra.append(med_ultra_item)
             if all_imms:
                 l_date, _ = _span_phrase([i.date for i in all_imms])
                 i_parts = [f"{i.display} ({i.date})" for i in all_imms]
@@ -1357,7 +1547,14 @@ def _pack_items_to_token_budget(
             accepted_optional.append(opt)
 
     accepted_optional.sort(key=lambda x: _date_sort_key(x.date), reverse=True)
-    return render_candidate(mandatory_items + accepted_optional)
+    ordered, manifest_dict, c_text, c_maps, final_toks = render_candidate(
+        mandatory_items + accepted_optional
+    )
+    if final_toks > target_tokens:
+        raise ValueError(
+            f"target_tokens ({target_tokens}) is too small to fit mandatory clinical safety core ({final_toks} tokens required)"
+        )
+    return ordered, manifest_dict, c_text, c_maps, final_toks
 
 
 def condense_bundle_to_budget(
@@ -1381,8 +1578,12 @@ def condense_bundle_to_budget(
     - If even `Tier 4` exceeds `target_tokens` (e.g. `1,024` tokens on a 7,096-resource chart),
       packs `Tier 4` deterministically into `target_tokens`.
     """
-    if target_tokens <= 0:
-        raise ValueError("target_tokens must be positive")
+    if not isinstance(target_tokens, int) or isinstance(target_tokens, bool) or target_tokens <= 0:
+        raise ValueError("target_tokens must be a positive integer")
+    if mode not in {"full", "reconcile"}:
+        raise ValueError(f"Unsupported condensation mode: {mode!r}")
+    if sharing_posture not in {"patient_self", "external_share"}:
+        raise ValueError(f"Unsupported sharing_posture: {sharing_posture!r}")
 
     counter = token_counter or estimate_tokens_local
     extracted = bundle if isinstance(bundle, ExtractedChart) else extract_bundle(bundle)

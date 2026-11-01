@@ -79,7 +79,7 @@ def test_findings_policy_ships_no_grade_and_lists_what_the_checks_found(monkeypa
     assert done["confidence"]["answer"]["level"] is None
     assert done["confidence"]["in_depth"]["level"] is None
     assert done["confidence"]["in_depth"]["findings"] == [
-        {"check": "record", "where": 2, "says": "it cites a record not in this chart"}
+        {"check": "record", "where": 2, "status": "fail", "says": "it cites a record not in this chart"}
     ]
     assert done["inDepth"]["validation"]["review_status"] == "clean"
     assert done["inDepth"]["validation"]["marked"] == [2]
@@ -184,3 +184,73 @@ def test_product_profiles_ship_findings():
     for profile_id in ("single-12b-checked", "single-12b-answer", "single-31b-xcheck",
                        "single-12b-bare", "single-12b-verify", "single-12b-agree"):
         assert get_profile(profile_id).policies["confidence"] == "findings", profile_id
+
+
+def test_indepth_pass_entry_and_multirecord_literal_verification(monkeypatch):
+    import asyncio
+    import pytest
+    from tests.test_review_policy import _final, _full_profile, _stub_indepth
+
+    _stub_indepth(monkeypatch, ["CD4 was 341 cells/uL [2]."], {"flag": [], "issues": ""})
+    _, final = _final(_full_profile("separate"))
+    assert final["inDepth"]["validation"]["citation_checks"][0]["status"] == "pass"
+
+    async def forbidden(*_args, **_kwargs):
+        pytest.fail("literal facts unexpectedly dispatched to a model")
+
+    monkeypatch.setattr(team, "_bounded_entailment_verdicts", forbidden)
+    mappings = [{"index": i, "date": "2026-01-26", "text": "Weight: 71 kg"} for i in (1, 2)]
+    blocks = [
+        {
+            "kind": "table",
+            "columns": [{"key": "w", "label": "Weight"}],
+            "rows": [{"cells": {"w": {"text": "71 kg", "refs": [1, 2]}}}],
+        }
+    ]
+    refs = team._resolve_references([1, 2], mappings, blocks=blocks, grounding_status="checking")
+    result = asyncio.run(team._ground_references(None, "G", "", refs, mappings))
+    assert all(r["groundingChecks"][0]["method"] == "deterministic_exact" for r in result)
+
+
+def test_findings_policy_retains_unavailable_review_and_mixed_review_doubt(monkeypatch):
+    import server.engine as engine
+
+    unavailable_findings = engine._answer_findings(
+        engine._State(
+            messages=[],
+            answer_validation={
+                "status": "unavailable",
+                "issues": [{"id": "answer_review_unavailable", "reason": "offline"}],
+            },
+        )
+    )
+    assert unavailable_findings == [
+        {"check": "review", "where": "answer", "status": "unavailable", "says": "offline"}
+    ]
+
+    _stub_common(monkeypatch)
+
+    async def fake_answer(*_args, **_kwargs):
+        return "Useful answer [1].", [1], []
+
+    async def unchanged(_client, **kwargs):
+        return kwargs["answer_text"], kwargs["citations"], kwargs["blocks"], {"level": "green", "note": ""}
+
+    async def mixed_review(*_args, **_kwargs):
+        return {
+            "answer_ok": False,
+            "errors": [
+                {"wrong": "first", "chart": "See [1]"},
+                {"wrong": "second", "chart": "No chart record states this"},
+            ],
+        }
+
+    monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
+    monkeypatch.setattr(team, "_ensure_substantive_answer", unchanged)
+    monkeypatch.setattr(team, "_validate_answer_label", mixed_review)
+
+    done = dict(_collect(_findings_profile(review_model="V")))["done"]
+    issues = done["answerValidation"]["issues"]
+    assert len(issues) == 2
+    assert issues[0]["wrong"] == "first"
+    assert issues[1]["id"] == "review_doubt" and issues[1]["wrong"] == "second"
