@@ -307,6 +307,12 @@ def test_label_reviewer_is_not_asked_for_a_fix_or_a_corrected_answer(monkeypatch
     assert "corrected_answer" not in properties and "fix" not in properties
     assert set(properties["errors"]["items"]["properties"]) == {"wrong", "chart"}
     assert "CITATION SUPPORT" not in seen["prompt"]
+    assert (
+        "Your verdict is shown to the clinician as a label beside the answer"
+        in seen["prompt"]
+    )
+    assert "corrected_answer" not in seen["prompt"]
+    assert "fix" not in seen["prompt"].lower()
 
 
 _FULL_STAGES = _FAST_STAGES + ["indepth", "indepth_gate"]
@@ -425,3 +431,130 @@ def test_every_citation_check_lists_the_facts_first(monkeypatch):
     assert verdicts[0]["support"] == "supported"
 
 
+@pytest.mark.parametrize("bad_unsupported", [None, "", {}, [999], ["bad"], False])
+def test_folded_indepth_missing_or_malformed_unsupported_leaves_citations_unchecked(
+    monkeypatch, bad_unsupported
+):
+    real_indepth_review = team._validate_indepth_verdict
+    real_entailment = team._bounded_entailment_verdicts
+    _stub_indepth(monkeypatch, ["CD4 was 500 cells/uL [2]."], {})
+    monkeypatch.setattr(team, "_validate_indepth_verdict", real_indepth_review)
+    monkeypatch.setattr(team, "_bounded_entailment_verdicts", real_entailment)
+
+    async def fake_chat(*_args, **_kwargs):
+        verdict = {"flag": [], "issues": ""}
+        if bad_unsupported is not None:
+            verdict["unsupported"] = bad_unsupported
+        return {"content": json.dumps(verdict)}
+
+    monkeypatch.setattr(team, "_chat", fake_chat)
+
+    _names, final = _final(_full_profile("folded"))
+
+    assert _indepth_statuses(final) == {2: "unchecked"}
+    assert final["inDepth"]["validation"]["status"] == "needs_review"
+
+
+def test_folded_grounding_preserves_structured_cell_citations_and_reused_source_verdicts(
+    monkeypatch,
+):
+    from server.levels_loader import profile_metadata
+
+    real_answer_review = team._validate_answer_label
+    _stub(monkeypatch, "Recorded medication is tabulated below.", {})
+    blocks = [
+        {
+            "kind": "table",
+            "title": "Medication",
+            "columns": [{"key": "drug", "label": "Drug"}],
+            "rows": [{"cells": {"drug": {"text": "ibuprofen", "refs": [1]}}}],
+        }
+    ]
+    seen_prompt = {}
+
+    async def fake_answer(*_args, **_kwargs):
+        return "Recorded medication is tabulated below.", [1], blocks
+
+    async def fake_chat(*args, **_kwargs):
+        seen_prompt["content"] = args[2][-1]["content"]
+        return {
+            "content": json.dumps(
+                {
+                    "answer_ok": True,
+                    "errors": [],
+                    "citations": [{"index": 1, "supported": True}],
+                }
+            )
+        }
+
+    monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
+    monkeypatch.setattr(team, "_validate_answer_label", real_answer_review)
+    monkeypatch.setattr(team, "_chat", fake_chat)
+
+    _names, final = _final(_profile("folded"))
+    assert "ibuprofen [1]" in seen_prompt["content"]
+    assert [(r["index"], r["groundingStatus"]) for r in final["references"]] == [
+        (1, "verified")
+    ]
+    assert final["answerValidation"]["status"] == "checked"
+
+    async def fake_reused_answer(*_args, **_kwargs):
+        return "CD4 was 341 cells/uL [2]. CD4 was 500 cells/uL [2].", [2], []
+
+    async def fake_reused_chat(*_args, **_kwargs):
+        return {
+            "content": json.dumps(
+                {
+                    "answer_ok": True,
+                    "errors": [],
+                    "citations": [
+                        {"index": 2, "supported": True},
+                        {"index": 2, "supported": False},
+                    ],
+                }
+            )
+        }
+
+    monkeypatch.setattr(team, "_synthesize_answer", fake_reused_answer)
+    monkeypatch.setattr(team, "_chat", fake_reused_chat)
+
+    _names, reused_final = _final(_profile("folded"))
+    checks = reused_final["references"][0]["groundingChecks"]
+    assert [check["status"] for check in checks] == ["verified", "unsupported"]
+    assert reused_final["references"][0]["groundingStatus"] == "unsupported"
+
+    metadata = profile_metadata(_full_profile("folded"), available=True)
+    assert set(metadata["role_prompt_digests"]["review"]["system_prompt_sha256"]) >= {
+        "validation-label-answer",
+        "review-citation-support",
+        "validation-label-indepth",
+        "review-indepth-citation-support",
+    }
+
+
+def test_uncited_indepth_patient_fact_remains_marked_while_general_guidance_is_tagged(
+    monkeypatch,
+):
+    _stub_indepth(monkeypatch, ["CD4 was 500 cells/uL."], {"flag": [], "issues": ""})
+
+    _names, final = _final(_full_profile("separate"))
+
+    assert final["inDepth"]["validation"]["status"] == "needs_review"
+    assert final["inDepth"]["validation"]["marked"] == [1]
+    assert final["confidence"]["in_depth"]["level"] == "yellow"
+    assert "patient fact, not cited" in final["inDepth"]["answer"]
+
+
+def test_folded_grounding_distinguishes_absent_medication_from_contradiction(monkeypatch):
+    _stub(
+        monkeypatch,
+        "The patient takes aspirin [1].",
+        {"answer_ok": True, "errors": [], "citations": {1: False}},
+    )
+
+    _names, final = _final(_profile("folded"))
+
+    assert final["references"][0]["support"] == "not_addressed"
+    assert final["references"][0]["groundingStatus"] == "unchecked"
+    assert final["answerValidation"]["status"] == "checked"
+    assert final["answerValidation"]["issues"][0]["id"] == "citation_not_addressed"

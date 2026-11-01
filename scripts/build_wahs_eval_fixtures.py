@@ -7,11 +7,14 @@ Generates:
      Lipitor vs Simvastatin, Prinivil vs Lisinopril)
    - Injects cross-clinic active vs resolved condition status conflicts (Chronic sinusitis)
 2. `ground_truth.json`: Machine-checkable anomaly and provenance ledger for all 6 bundles.
-3. `wahs_eval_cases.jsonl`: 31 structured evaluation cases covering:
-   - Use Case A (Reconciliation & Anomaly Detection: 12 cases)
+3. `wahs_eval_cases.jsonl`: 32 structured evaluation cases covering:
+   - Use Case A (Reconciliation & Anomaly Detection: 13 cases)
    - Use Case B-1 (Encounter & Longitudinal Summarization: 4 cases, including Maurice CABG ICU stay)
    - Use Case B-2 (Directed / Purpose-Driven Summaries: 3 cases)
    - Use Case B-3 (Patient Q&A + Unanswerable Abstention Probes: 12 cases)
+
+Supported CLI invocation from repo root:
+    python -m scripts.build_wahs_eval_fixtures --source-dir <dir> --output-dir <dir>
 """
 
 from __future__ import annotations
@@ -19,8 +22,14 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import sys
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from server.fhir import condense_bundle_to_budget, extract_bundle
 
@@ -167,6 +176,8 @@ def inject_lamar_multisource_perturbations(bundle: Mapping[str, Any]) -> Tuple[D
                     "subject": {"reference": f"urn:uuid:{patient_id}"},
                     "onsetDateTime": "2008-02-29T00:00:00+00:00",
                     "abatementDateTime": "2024-09-10T00:00:00+00:00",
+                    "recorder": {"display": "UW Medicine Otolaryngology Clinic"},
+                    "asserter": {"display": "UW Medicine Otolaryngology Clinic"},
                 },
             },
             {
@@ -188,7 +199,8 @@ def inject_lamar_multisource_perturbations(bundle: Mapping[str, Any]) -> Tuple[D
                     },
                     "subject": {"reference": f"urn:uuid:{patient_id}"},
                     "authoredOn": "2026-03-17T09:00:00+00:00",
-                    "performer": [{"actor": {"display": "SeaMar Community Health Primary Care"}}],
+                    "requester": {"display": "SeaMar Community Health Primary Care"},
+                    "performer": {"display": "SeaMar Community Health Primary Care"},
                 },
             },
             {
@@ -210,7 +222,8 @@ def inject_lamar_multisource_perturbations(bundle: Mapping[str, Any]) -> Tuple[D
                     },
                     "subject": {"reference": f"urn:uuid:{patient_id}"},
                     "authoredOn": "2026-05-12T14:00:00+00:00",
-                    "performer": [{"actor": {"display": "UW Medicine Cardiology Clinic"}}],
+                    "requester": {"display": "UW Medicine Cardiology Clinic"},
+                    "performer": {"display": "UW Medicine Cardiology Clinic"},
                 },
             },
         ]
@@ -279,7 +292,8 @@ def inject_maurice_multisource_perturbations(bundle: Mapping[str, Any]) -> Tuple
                     },
                     "subject": {"reference": f"urn:uuid:{patient_id}"},
                     "authoredOn": "2026-06-07T11:20:00+00:00",
-                    "performer": [{"actor": {"display": "MultiCare Pulse Heart Institute"}}],
+                    "requester": {"display": "MultiCare Pulse Heart Institute"},
+                    "performer": {"display": "MultiCare Pulse Heart Institute"},
                 },
             },
             {
@@ -301,7 +315,8 @@ def inject_maurice_multisource_perturbations(bundle: Mapping[str, Any]) -> Tuple
                     },
                     "subject": {"reference": f"urn:uuid:{patient_id}"},
                     "authoredOn": "2026-06-07T11:25:00+00:00",
-                    "performer": [{"actor": {"display": "MultiCare Pulse Heart Institute"}}],
+                    "requester": {"display": "MultiCare Pulse Heart Institute"},
+                    "performer": {"display": "MultiCare Pulse Heart Institute"},
                 },
             },
             {
@@ -447,24 +462,78 @@ NATURAL_ANOMALIES_BY_PATIENT: Dict[str, List[Dict[str, Any]]] = {
 
 
 def build_eval_cases() -> List[Dict[str, Any]]:
-    """Return the 31 structured evaluation cases covering Use Cases A, B-1, B-2, and B-3."""
+    """Return the 32 structured evaluation cases covering Use Cases A, B-1, B-2, and B-3."""
     cases: List[Dict[str, Any]] = []
 
-    # --- USE CASE A: Reconciliation & Anomaly Detection (12 cases across Set A and Set B) ---
+    reconcile_facts_by_anomaly: Dict[str, List[str]] = {
+        "byron-seta-hpv-3dose-age11": ["HPV", "2020-12-28", "2022-05-02", "2-dose"],
+        "lamar-seta-live-zoster-repeat": ["zoster", "2021-02-16", "2022-02-22"],
+        "lamar-seta-sdoh-ipv-privacy": ["intimate partner abuse", "SDOH/PRIVACY-SENSITIVE"],
+        "maurice-seta-ckd-stage-conflict": ["stage 1", "stage 2", "stage 3"],
+        "maurice-seta-prediabetes-diabetes-conflict": ["Prediabetes", "diabetes"],
+        "maurice-seta-live-zoster-repeat": ["zoster", "2023-05-28", "2024-04-28"],
+        "maurice-seta-sdoh-criminal-record-privacy": ["criminal record", "SDOH/PRIVACY-SENSITIVE"],
+        "byron-setb-flu-iis-dup": ["Influenza", "2026-01-26", "2026-01-28"],
+        "byron-setb-covid-pharmacy-dup": ["COVID-19", "2022-01-17", "2022-01-18"],
+        "lamar-setb-sinusitis-status-conflict": ["Chronic sinusitis", "2008-02-29", "2024-09-10", "resolved"],
+        "lamar-setb-lisinopril-prinivil-dup": ["lisinopril", "Prinivil"],
+        "maurice-setb-clopidogrel-plavix-dup": ["Clopidogrel", "Plavix"],
+        "maurice-setb-simvastatin-lipitor-dup": ["Simvastatin", "Lipitor"],
+        "maurice-setb-flu-iis-dup": ["Influenza", "2025-09-28", "2025-09-30"],
+    }
+
+    def _reconcile_rubric_fields(anom_id: str, desc: str) -> Dict[str, Any]:
+        facts = list(reconcile_facts_by_anomaly.get(anom_id) or [anom_id])
+        pos_items = [
+            {
+                "id": f"{anom_id}_fact_{idx + 1}",
+                "criterion": f"Identifies {fact!r} for reconciliation anomaly {anom_id}",
+                "required_any": [fact],
+                "weight": 1.0,
+                "strict": True,
+            }
+            for idx, fact in enumerate(facts)
+        ]
+        neg_items = [
+            {
+                "id": f"{anom_id}_false_clean",
+                "criterion": "Falsely claims no problems, conflicts, or anomalies were found",
+                "forbidden_any": [
+                    "no problems found",
+                    "no anomalies found",
+                    "no contradictions found",
+                    "no conflicts found",
+                ],
+                "penalty": 1.0,
+                "strict": True,
+            }
+        ]
+        return {
+            "expected_answer_type": "grounded_reconciliation",
+            "expected_facts": facts,
+            "positive_rubric_items": pos_items,
+            "negative_penalty_items": neg_items,
+            "rubric_criteria": [desc],
+        }
+
+    # --- USE CASE A: Reconciliation & Anomaly Detection (13 cases across Set A and Set B) ---
     for patient_key, anomalies in NATURAL_ANOMALIES_BY_PATIENT.items():
         for anom in anomalies:
+            anom_id = anom["anomaly_id"]
+            desc = anom["description"]
             cases.append(
                 {
-                    "case_id": f"uc_a_{anom['anomaly_id']}",
+                    "case_id": f"uc_a_{anom_id}",
                     "use_case": "A_reconcile",
                     "mode": "reconcile",
                     "dataset": "Set_A_Natural",
                     "patient_bundle": f"{patient_key}.json",
                     "question": "Audit this patient chart for clinical contradictions, duplicate medications or immunizations, outdated active problem list stages, and privacy-sensitive SDOH findings.",
-                    "anomaly_id": anom["anomaly_id"],
+                    "anomaly_id": anom_id,
                     "category": anom["category"],
                     "expected_resource_uuids": anom["expected_resource_uuids"],
-                    "expected_description": anom["description"],
+                    "expected_description": desc,
+                    **_reconcile_rubric_fields(anom_id, desc),
                 }
             )
 
@@ -511,6 +580,13 @@ def build_eval_cases() -> List[Dict[str, Any]]:
             ["5693c080-f485-91e7-aca9-a1fd06a66487", "med-cardio-maurice-lipitor"],
             "Detect concurrent active statin prescriptions (Simvastatin 20 MG vs Lipitor 40 MG [atorvastatin]).",
         ),
+        (
+            "Maurice742_Auer97_multisource.json",
+            "maurice-setb-flu-iis-dup",
+            "cross_source_immunization_duplicate",
+            ["5693c080-f485-91e7-cdb1-e0bfb73e6655", "imm-iis-maurice-flu-2025"],
+            "Detect duplicate Influenza immunization recorded 2 days apart (2025-09-28 primary clinic vs 2025-09-30 WA State IIS registry).",
+        ),
     ]
     for bundle_name, anom_id, cat, uuids, desc in set_b_specs:
         cases.append(
@@ -525,6 +601,7 @@ def build_eval_cases() -> List[Dict[str, Any]]:
                 "category": cat,
                 "expected_resource_uuids": uuids,
                 "expected_description": desc,
+                **_reconcile_rubric_fields(anom_id, desc),
             }
         )
 
@@ -813,8 +890,13 @@ def build_eval_cases() -> List[Dict[str, Any]]:
 
 
 def generate_wahs_eval_suite(source_dir: Path, output_dir: Path) -> Dict[str, Any]:
-    """Generate Set B multi-source FHIR Bundles, `ground_truth.json`, and `wahs_eval_cases.jsonl`."""
-    output_dir.mkdir(parents=True, exist_ok=True)
+    """Generate Set B multi-source FHIR Bundles, `ground_truth.json`, and `wahs_eval_cases.jsonl`.
+
+    Validates all bundles and budgets into a staging directory first before writing to `output_dir`
+    so a failed or interrupted run never leaves partially written outputs.
+    """
+    if not source_dir.exists() or not source_dir.is_dir():
+        raise FileNotFoundError(f"Source directory does not exist: {source_dir}")
 
     perturb_fns = {
         "Byron202_Emard19": inject_byron_multisource_perturbations,
@@ -822,21 +904,22 @@ def generate_wahs_eval_suite(source_dir: Path, output_dir: Path) -> Dict[str, An
         "Maurice742_Auer97": inject_maurice_multisource_perturbations,
     }
 
+    staged_files: Dict[str, str] = {}
     bundles_manifest: Dict[str, Any] = {}
     for patient_stem, perturb_fn in perturb_fns.items():
         src_path = source_dir / f"{patient_stem}.json"
         if not src_path.exists():
             raise FileNotFoundError(f"Missing source bundle: {src_path}")
         natural_bundle = json.loads(src_path.read_text(encoding="utf-8"))
+        if not isinstance(natural_bundle, Mapping) or natural_bundle.get("resourceType") != "Bundle":
+            raise ValueError(f"Source file is not a valid FHIR Bundle: {src_path}")
         perturbed_bundle, injected_anomalies = perturb_fn(natural_bundle)
 
-        out_bundle_path = output_dir / f"{patient_stem}_multisource.json"
-        out_bundle_path.write_text(
-            json.dumps(perturbed_bundle, indent=2, sort_keys=False) + "\n",
-            encoding="utf-8",
+        staged_files[f"{patient_stem}_multisource.json"] = (
+            json.dumps(perturbed_bundle, indent=2, sort_keys=False) + "\n"
         )
 
-        # Verify that both Set A and Set B preserve 100% of ground-truth anomaly UUIDs across condensation budgets
+        # Verify that both Set A and Set B preserve 100% of ground-truth anomaly UUIDs and token budgets
         nat_anomalies = NATURAL_ANOMALIES_BY_PATIENT[patient_stem]
         all_set_b_anomalies = nat_anomalies + injected_anomalies
 
@@ -851,6 +934,10 @@ def generate_wahs_eval_suite(source_dir: Path, output_dir: Path) -> Dict[str, An
             budget_checks: Dict[str, Any] = {}
             for budget in (16384, 8192, 4096, 2048):
                 res = condense_bundle_to_budget(ext, target_tokens=budget)
+                if res.actual_tokens > budget:
+                    raise AssertionError(
+                        f"Bundle {label} at budget {budget} exceeded token limit: {res.actual_tokens}"
+                    )
                 present = {
                     u
                     for m in res.mappings
@@ -866,6 +953,7 @@ def generate_wahs_eval_suite(source_dir: Path, output_dir: Path) -> Dict[str, An
                     "tier": res.tier,
                     "actual_tokens": res.actual_tokens,
                     "rendered_lines": len(res.records),
+                    "token_budget_ok": res.actual_tokens <= budget,
                     "all_ground_truth_uuids_present": True,
                 }
             bundles_manifest[label] = {
@@ -876,10 +964,9 @@ def generate_wahs_eval_suite(source_dir: Path, output_dir: Path) -> Dict[str, An
             }
 
     eval_cases = build_eval_cases()
-    cases_path = output_dir / "wahs_eval_cases.jsonl"
-    with cases_path.open("w", encoding="utf-8") as fh:
-        for case in eval_cases:
-            fh.write(json.dumps(case, sort_keys=False) + "\n")
+    staged_files["wahs_eval_cases.jsonl"] = "".join(
+        json.dumps(case, sort_keys=False) + "\n" for case in eval_cases
+    )
 
     ground_truth = {
         "schema_version": "wahs_eval_suite.v1",
@@ -894,8 +981,16 @@ def generate_wahs_eval_suite(source_dir: Path, output_dir: Path) -> Dict[str, An
         },
         "bundles": bundles_manifest,
     }
-    gt_path = output_dir / "ground_truth.json"
-    gt_path.write_text(json.dumps(ground_truth, indent=2) + "\n", encoding="utf-8")
+    staged_files["ground_truth.json"] = json.dumps(ground_truth, indent=2) + "\n"
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=str(output_dir)) as tmp_dir:
+        tmp_root = Path(tmp_dir)
+        for fname, content in staged_files.items():
+            tmp_file = tmp_root / fname
+            tmp_file.write_text(content, encoding="utf-8")
+            tmp_file.replace(output_dir / fname)
+
     return ground_truth
 
 

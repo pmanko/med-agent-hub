@@ -10,7 +10,8 @@ Usage, inside the Hub's runtime (which holds the QueryStore configuration)::
     python -m server.querystore_export --patient <uuid> [--patient <uuid> ...]
 
 Prints one JSON object per patient and line: ``patient``, ``hub_revision``, ``snapshot_id``,
-``total``, ``records`` (the raw QueryStore records), ``chart_snapshot`` and ``mappings``.
+``projection_complete``, ``total``, ``records`` (the raw QueryStore records), ``chart_snapshot``
+and ``mappings``.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import sys
 from typing import Any, Dict, List, Optional
 
@@ -26,14 +28,35 @@ from .config import querystore_config, resolve_hub_build_revision
 from .querystore_client import QueryStoreClient
 
 
+def _nonblank_patient(value: str) -> str:
+    cleaned = (value or "").strip()
+    if not cleaned:
+        raise argparse.ArgumentTypeError("patient identifier must not be blank")
+    return cleaned
+
+
+def _positive_finite_timeout(value: str) -> float:
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"invalid float value: {value!r}") from exc
+    if not math.isfinite(parsed) or parsed <= 0:
+        raise argparse.ArgumentTypeError("timeout must be a finite number greater than 0")
+    return parsed
+
+
 async def export_ledger(client: QueryStoreClient, patient: str) -> Dict[str, Any]:
-    fetch = await client.fetch_patient_ledger(patient)
+    cleaned_patient = (patient or "").strip()
+    if not cleaned_patient:
+        raise ValueError("patient identifier must not be blank")
+    fetch = await client.fetch_patient_ledger(cleaned_patient)
     records = list(fetch.records or [])
     chart_snapshot, mappings = render_chart(records)
     return {
-        "patient": patient,
+        "patient": cleaned_patient,
         "hub_revision": resolve_hub_build_revision(),
         "snapshot_id": fetch.snapshot_id,
+        "projection_complete": bool(fetch.projection_complete),
         "total": len(records),
         "records": records,
         "chart_snapshot": chart_snapshot,
@@ -43,8 +66,14 @@ async def export_ledger(client: QueryStoreClient, patient: str) -> Dict[str, Any
 
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--patient", action="append", required=True, help="patient uuid (repeatable)")
-    parser.add_argument("--timeout", type=float, default=60.0)
+    parser.add_argument(
+        "--patient",
+        type=_nonblank_patient,
+        action="append",
+        required=True,
+        help="patient uuid (repeatable)",
+    )
+    parser.add_argument("--timeout", type=_positive_finite_timeout, default=60.0)
     args = parser.parse_args(argv)
     if not querystore_config.enabled:
         print("ERROR: QueryStore is not configured in this Hub (QUERYSTORE_BASE_URL, _USERNAME, _PASSWORD)", file=sys.stderr)

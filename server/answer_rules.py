@@ -38,6 +38,8 @@ _SPAN_RE = re.compile(
 )
 
 _DRUG_STOP_TOKENS = {"and", "with", "tablet", "tablets", "oral", "plus", "fixed", "dose", "vaccine", "vaccination"}
+# An item the answer itself frames as older ("previous orders", "remain active since").
+_PRIOR_RE = re.compile(r"\b(?:previous(?:ly)?|prior|earlier|before|older|remains?|since)\b", re.I)
 # An answer that already says nothing falls inside the asked window, or places a record before it.
 _WINDOW_STATED_RE = re.compile(
     r"\bno (?:records?|data|measurements?|entries|orders?|visits?|encounters?|changes?)\b.{0,80}"
@@ -92,15 +94,27 @@ def _cites(text: str) -> List[int]:
     return [int(m) for m in _MARKER_RE.findall(text or "")]
 
 
-def _span_start(match: re.Match, reference: _dt.date) -> _dt.date:
+def _span_start(match: re.Match, reference: _dt.date) -> Optional[_dt.date]:
     raw = (match.group("n") or "one").lower()
     n = int(raw) if raw.isdigit() else _NUMBER_WORDS.get(raw, 1)
+    if n <= 0:
+        return None
     unit = match.group("unit").lower()
-    if unit == "day":
-        return reference - _dt.timedelta(days=n)
-    if unit == "week":
-        return reference - _dt.timedelta(weeks=n)
-    return temporal._shift_months(reference, -n * (12 if unit == "year" else 1))
+    if (
+        (unit == "day" and n > 73000)
+        or (unit == "week" and n > 10400)
+        or (unit == "month" and n > 2400)
+        or (unit == "year" and n > 200)
+    ):
+        return None
+    try:
+        if unit == "day":
+            return reference - _dt.timedelta(days=n)
+        if unit == "week":
+            return reference - _dt.timedelta(weeks=n)
+        return temporal._shift_months(reference, -n * (12 if unit == "year" else 1))
+    except (OverflowError, ValueError):
+        return None
 
 
 def _span_words(match: re.Match) -> str:
@@ -108,12 +122,19 @@ def _span_words(match: re.Match) -> str:
 
 
 def asked_window(question: str, facts: Optional[Dict[str, Any]]) -> Optional[Tuple[_dt.date, str]]:
-    """The first date the question's "past N months/year/weeks" window admits, and its words."""
+    """The first date the question's "past N months/year/weeks" window admits, and its words.
+
+    Per umbrella spec ANSWER-RULES-2026-10 (confidence-labels.md), window pruning applies only
+    to explicit relative-span questions validated against the reference date and requested subject.
+    """
     reference = _date((facts or {}).get("reference_date"))
     match = _SPAN_RE.search(question or "")
     if not reference or not match:
         return None
-    return _span_start(match, reference), _span_words(match)
+    start = _span_start(match, reference)
+    if not start:
+        return None
+    return start, _span_words(match)
 
 
 def _drug_name(record: Dict[str, Any]) -> Optional[str]:
@@ -151,12 +172,16 @@ def _clusters(text: str) -> List[Tuple[int, int, str, List[Tuple[int, int, int]]
             group.append((int(match.group(1)), match.start(), match.end()))
             continue
         if group:
-            out.append((group_text_start, group[-1][2], text[group_text_start : group[0][1]], group))
+            raw_item = text[group_text_start : group[0][1]]
+            sentence_item = re.split(r"(?<=[.!?])\s+|\n+", raw_item)[-1]
+            out.append((group_text_start, group[-1][2], sentence_item, group))
             previous_end = group[-1][2]
         group = [(int(match.group(1)), match.start(), match.end())]
         group_text_start = previous_end
     if group:
-        out.append((group_text_start, group[-1][2], text[group_text_start : group[0][1]], group))
+        raw_item = text[group_text_start : group[0][1]]
+        sentence_item = re.split(r"(?<=[.!?])\s+|\n+", raw_item)[-1]
+        out.append((group_text_start, group[-1][2], sentence_item, group))
     return out
 
 
@@ -164,7 +189,7 @@ def _clusters(text: str) -> List[Tuple[int, int, str, List[Tuple[int, int, int]]
 
 
 def _relative_time_marks(claim: str, records: Dict[int, Dict[str, Any]], reference: Optional[_dt.date]) -> List[Dict[str, Any]]:
-    if not reference:
+    if not reference or _WINDOW_STATED_RE.search(claim or ""):
         return []
     cited = [i for i in _cites(claim) if i in records]
     dates = sorted(d for d in (_date(records[i].get("date")) for i in cited) if d)
@@ -172,6 +197,8 @@ def _relative_time_marks(claim: str, records: Dict[int, Dict[str, Any]], referen
         return []
     bodies = " ".join(str(records[i].get("body") or "") for i in cited).lower()
     for match in _SPAN_RE.finditer(claim):
+        if re.search(r"\b(?:no|not|none|never|without)\b[^.;!?]*$", claim[: match.start()], re.I):
+            continue
         # "the past week on 2026-01-17" anchors the span to a stated date, not the reference date.
         near = claim[max(0, match.start() - 25) : match.end() + 40]
         if re.search(r"\d{4}-\d{2}-\d{2}|\bas of\b", near):
@@ -185,6 +212,8 @@ def _relative_time_marks(claim: str, records: Dict[int, Dict[str, Any]], referen
         ) and not match.group("n"):
             continue
         start = _span_start(match, reference)
+        if not start:
+            continue
         if dates[-1] < start:
             span = _span_words(match)
             return [
@@ -245,13 +274,38 @@ def _demographics_marks(claim: str, records: Dict[int, Dict[str, Any]]) -> List[
 def _diagnosis_marks(claim: str, records: Dict[int, Dict[str, Any]]) -> List[Dict[str, Any]]:
     if not _DIAGNOSIS_DENIAL_RE.search(claim):
         return []
-    named = [
-        r
-        for r in records.values()
-        if (r.get("cls") == "Program" and "status: active" in str(r.get("body")).lower())
-        or "diagnos" in str(r.get("cls") or "").lower()
-        or "problem" in str(r.get("cls") or "").lower()
-    ]
+    specific_match = re.search(
+        r"\bdiagnos[ie]s\s+of\s+([a-z][a-z0-9\s-]{2,}?)(?:\s+(?:is|are|was|were|has|have|in|on)\b|[.,;:\[]|$)",
+        claim,
+        re.I,
+    )
+    specific_tokens = (
+        {
+            w
+            for w in re.split(r"[^a-z0-9]+", specific_match.group(1).lower())
+            if len(w) >= 4 and w not in {"documented", "recorded", "stated", "noted", "explicit"}
+        }
+        if specific_match
+        else set()
+    )
+    named = []
+    for r in records.values():
+        cls_lower = str(r.get("cls") or "").lower()
+        body_str = str(r.get("body") or "")
+        if not (
+            (r.get("cls") == "Program" and "status: active" in body_str.lower())
+            or "diagnos" in cls_lower
+            or "problem" in cls_lower
+        ):
+            continue
+        condition = body_str.split(":", 1)[-1].split(". ", 1)[0].strip()
+        if re.search(r"^\s*(?:no|not|none|negative|without|absent|ruled out)\b", condition, re.I):
+            continue
+        if specific_tokens:
+            cond_tokens = set(re.split(r"[^a-z0-9]+", condition.lower()))
+            if not (cond_tokens & specific_tokens):
+                continue
+        named.append(r)
     if not named:
         return []
     first = min(named, key=lambda r: r["index"])
@@ -316,14 +370,40 @@ def _window_edits(
         return text, blocks, []
     start, words = window
     dropped: List[int] = []
+    listed_old: List[int] = []
     findings: List[Dict[str, Any]] = []
     cited_anywhere = [i for i in _cites(text) + _row_refs(blocks) if i in records]
+    reference = _date(facts.get("reference_date")) or start
+    future_cited = [
+        i
+        for i in cited_anywhere
+        if (_date(records[i].get("date")) or _dt.date.min) > reference
+    ]
+    if future_cited:
+        findings.append(
+            _finding(
+                "window",
+                "fail",
+                text,
+                "the answer cites records dated after the reference date "
+                f"{reference.isoformat()} as within the {words}: "
+                + ", ".join(f"[{i}] ({records[i]['date']})" for i in sorted(set(future_cited))),
+                future_cited,
+            )
+        )
+        return text, blocks, findings
     if cited_anywhere and _all_before(cited_anywhere, records, start):
         # Nothing the answer cites falls inside the window: leaving it out would leave no answer.
-        # Does the chart hold records of the kinds the answer cites inside the window (up to the
-        # reference date)? Then the answer missed them; otherwise the chart has nothing newer.
-        reference = _date(facts.get("reference_date")) or start
+        # Does the chart hold records of the kinds (and requested drug/subject) the answer cites
+        # inside the window (up to the reference date)? Then the answer missed them; otherwise the
+        # chart has nothing newer.
         kinds = {records[i].get("cls") for i in cited_anywhere}
+        chart_drug_tokens = (
+            set().union(*(_drug_tokens(_drug_name(r) or "") for r in records.values() if _drug_name(r)))
+            if records
+            else set()
+        )
+        subject_drugs = (_words(question) | _words(text)) & chart_drug_tokens
         in_window = sorted(
             (
                 r
@@ -331,6 +411,11 @@ def _window_edits(
                 if r.get("cls") in kinds
                 and r.get("clinical", True)
                 and start <= (_date(r.get("date")) or _dt.date.min) <= reference
+                and (
+                    r.get("cls") != "Drug order"
+                    or not subject_drugs
+                    or bool(_drug_tokens(_drug_name(r) or "") & subject_drugs)
+                )
             ),
             key=lambda r: (str(r.get("date") or ""), -r["index"]),
         )
@@ -386,14 +471,28 @@ def _window_edits(
         kept_sentences = []
         for sentence in sentences:
             cited = _cites(sentence)
-            if cited and _all_before(cited, records, start) and not _WINDOW_STATED_RE.search(sentence):
-                dropped.extend(cited)
+            if cited and _all_before(cited, records, start):
+                if _WINDOW_STATED_RE.search(sentence) or _PRIOR_RE.search(sentence):
+                    kept_sentences.append(sentence)
+                else:
+                    dropped.extend(cited)
                 continue
-            # Within a sentence with in-window records, a citation group keeps only its in-window
-            # records; a group with none left keeps its item text and loses its citations.
-            for _gs, _ge, _item, group in reversed(_clusters(sentence)):
+            # Within a sentence with in-window records, a citation group with both in-window and
+            # older citations keeps only its in-window records; a group citing only older records
+            # (and not framed as prior/outside the window) is retained in prose and flagged in listed_old.
+            for _gs, _ge, item, group in reversed(_clusters(sentence)):
                 indices = [i for i, _s, _e in group]
                 late = [i for i in indices if not _all_before([i], records, start)]
+                trailing = sentence[group[-1][2] : group[-1][2] + 60]
+                framed_old = (
+                    _PRIOR_RE.search(item)
+                    or _PRIOR_RE.search(trailing)
+                    or _WINDOW_STATED_RE.search(item + " " + trailing)
+                )
+                if not late and any(i in records for i in indices) and not framed_old:
+                    # An item citing only older records inside a sentence about the window: the
+                    # rule cannot cut the item's words, so it names it instead of claiming it.
+                    listed_old.extend(i for i in indices if i in records)
                 if late and len(late) < len(indices):
                     dropped.extend(i for i in indices if i not in late)
                     sentence = (
@@ -407,6 +506,18 @@ def _window_edits(
             pieces.append(joined)
     new_text = "\n".join(pieces).strip("\n")
 
+    if listed_old:
+        findings.append(
+            _finding(
+                "window",
+                "fail",
+                text,
+                "the answer presents records dated before "
+                f"{start.isoformat()} as within the {words}: "
+                + ", ".join(f"[{i}] ({records[i]['date']})" for i in sorted(set(listed_old))),
+                listed_old,
+            )
+        )
     if dropped:
         n = len(set(dropped))
         note = (
@@ -434,7 +545,38 @@ def _drug_citation_edits(text: str, records: Dict[int, Dict[str, Any]], answer_c
             continue
         right = [i for i in indices if i not in wrong]
         if not right:
-            candidates = [i for i, n in names.items() if n and _drug_tokens(n) & named]
+            claimed_dates = set(re.findall(r"\b\d{4}-\d{2}-\d{2}\b", item))
+            claims_stop = bool(
+                re.search(r"\b(?:stop(?:ped)?|discontinu(?:e|ed)|held|cancel(?:led|ed)?)\b", item, re.I)
+            )
+            claims_start = (
+                bool(
+                    re.search(
+                        r"\b(?:start(?:ed)?|initiat(?:e|ed)|prescrib(?:e|ed)|order(?:ed)?|began|commenc(?:e|ed))\b",
+                        item,
+                        re.I,
+                    )
+                )
+                and not claims_stop
+            )
+
+            def _supports_claim(idx: int) -> bool:
+                rec = records.get(idx) or {}
+                if claimed_dates and str(rec.get("date") or "") not in claimed_dates:
+                    return False
+                body_lower = str(rec.get("body") or "").lower()
+                is_discontinue = "action: discontinue" in body_lower
+                if claims_start and is_discontinue:
+                    return False
+                if claims_stop and not is_discontinue:
+                    return False
+                return True
+
+            candidates = [
+                i
+                for i, n in names.items()
+                if n and (_drug_tokens(n) & named) and _supports_claim(i)
+            ]
             if not candidates:
                 continue
             preferred = [i for i in candidates if i in answer_cites] or candidates
@@ -493,9 +635,16 @@ def _overdue(series: Dict[str, Any], reference: _dt.date) -> bool:
     return (reference - dates[-1]).days > max(longest, 1)
 
 
-def _points_in_window(series: Dict[str, Any], start: Optional[_dt.date]) -> List[Dict[str, Any]]:
+def _points_in_window(
+    series: Dict[str, Any], start: Optional[_dt.date], reference: Optional[_dt.date] = None
+) -> List[Dict[str, Any]]:
     points = [p for p in series.get("points") or [] if _date(p.get("date"))]
-    return [p for p in points if not start or _date(p["date"]) >= start]
+    return [
+        p
+        for p in points
+        if (not start or _date(p["date"]) >= start)
+        and (not reference or _date(p["date"]) <= reference)
+    ]
 
 
 def _reading(point: Dict[str, Any]) -> str:
@@ -503,12 +652,43 @@ def _reading(point: Dict[str, Any]) -> str:
     return f"{temporal._format_value(point.get('value'))}{unit} ({point.get('date')}) [{point.get('index')}]"
 
 
+def _asserts_steady_for_series(
+    text: str, series: Dict[str, Any], series_list: Sequence[Dict[str, Any]], shared: set
+) -> bool:
+    for clause in re.split(r"[.;!?]+|\n+", text or ""):
+        if not clause.strip():
+            continue
+        for match in _STEADY_RE.finditer(clause):
+            prefix = clause[max(0, match.start() - 30) : match.start()]
+            if re.search(
+                r"\b(?:not|no|never|neither|didn't|did not|does not|doesn't|wasn't|was not|weren't|were not|without)\b",
+                prefix,
+                re.I,
+            ):
+                continue
+            names_other = any(
+                _names_series(clause, other, shared)
+                for other in series_list
+                if other is not series
+            )
+            if names_other and not _names_series(clause, series, shared):
+                continue
+            return True
+    return False
+
+
 def _series_edits(question: str, text: str, facts: Dict[str, Any]) -> Tuple[str, List[int], List[Dict[str, Any]]]:
-    """R3 stale latest value and R4 readings and shape, for the series the answer is about."""
+    """R3 stale latest value and R4 readings and shape, for the series the answer is about.
+
+    When a trend series has more than eight in-window readings and the answer states two or fewer
+    points, the appended summary samples the chronological first, lowest, highest, and last points
+    (deduplicated by record index in chronological order).
+    """
     reference = _date(facts.get("reference_date"))
     series_list = _series_in_answer(question, text, facts) if reference else []
     if not series_list:
         return text, [], []
+    shared = _shared_series_words(facts)
     window = asked_window(question, facts)
     start = window[0] if window else None
     trend_question = bool(temporal._TREND_RE.search(question or ""))
@@ -516,19 +696,29 @@ def _series_edits(question: str, text: str, facts: Dict[str, Any]) -> Tuple[str,
     added: List[int] = []
     findings: List[Dict[str, Any]] = []
     stale_by_date: Dict[str, List[Dict[str, Any]]] = {}
+    cites_in_text = set(_cites(text))
     for series in series_list:
         concept = str(series.get("concept") or "").split(" (")[0]
-        points = _points_in_window(series, start)
+        points = _points_in_window(series, start, reference)
         if trend_question and len(points) >= 3:
-            values = {round(float(p["value"]), 3) for p in points if isinstance(p.get("value"), (int, float))}
             stated = {
                 round(float(m.group()), 3)
                 for m in re.finditer(r"(?<![\d.\[])\d+(?:\.\d+)?(?![\d\]])", re.sub(r"\d{4}-\d{2}-\d{2}", " ", text))
             }
+            stated_points = [
+                p
+                for p in points
+                if isinstance(p.get("value"), (int, float))
+                and round(float(p["value"]), 3) in stated
+                and (
+                    p.get("index") in cites_in_text
+                    or (str(p.get("date") or "") and str(p.get("date")) in text)
+                )
+            ]
             ordered = [float(p["value"]) for p in points]
             steps = [b - a for a, b in zip(ordered, ordered[1:]) if b != a]
             changes_direction = any(x * y < 0 for x, y in zip(steps, steps[1:]))
-            if changes_direction and _STEADY_RE.search(text):
+            if changes_direction and _asserts_steady_for_series(text, series, series_list, shared):
                 findings.append(
                     _finding(
                         "series_shape",
@@ -539,8 +729,17 @@ def _series_edits(question: str, text: str, facts: Dict[str, Any]) -> Tuple[str,
                         [p["index"] for p in points],
                     )
                 )
-            if len(values & stated) <= 2:
-                shown = points if len(points) <= 8 else [points[0], min(points, key=lambda p: p["value"]), max(points, key=lambda p: p["value"]), points[-1]]
+            if len(stated_points) <= 2 and len(stated_points) < len(points):
+                if len(points) <= 8:
+                    shown = points
+                else:
+                    key_indices = {
+                        points[0]["index"],
+                        min(points, key=lambda p: p["value"])["index"],
+                        max(points, key=lambda p: p["value"])["index"],
+                        points[-1]["index"],
+                    }
+                    shown = [p for p in points if p.get("index") in key_indices]
                 lead = (
                     f"Recorded {concept.lower()} readings: "
                     if len(points) <= 8
@@ -574,6 +773,44 @@ def _series_edits(question: str, text: str, facts: Dict[str, Any]) -> Tuple[str,
     return text, added, findings
 
 
+def _apply_table_cell_rules(
+    blocks: List[Any],
+    records: Dict[int, Dict[str, Any]],
+    facts: Optional[Dict[str, Any]],
+    answer_cites: set,
+    *,
+    edit: bool,
+) -> Tuple[List[Any], List[Dict[str, Any]]]:
+    new_blocks = copy.deepcopy(blocks)
+    findings: List[Dict[str, Any]] = []
+    for block in new_blocks if isinstance(new_blocks, list) else []:
+        rows = block.get("rows") if isinstance(block, dict) else None
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            cells = row.get("cells") if isinstance(row, dict) else None
+            if not isinstance(cells, dict):
+                continue
+            for cell in cells.values():
+                if not isinstance(cell, dict):
+                    continue
+                cell_text = str(cell.get("text") or "").strip()
+                cell_refs = [r for r in (cell.get("refs") or []) if isinstance(r, int)]
+                if not cell_text or not cell_refs:
+                    continue
+                synthetic = f"{cell_text} " + "".join(f"[{r}]" for r in cell_refs)
+                if edit:
+                    edited_synthetic, drug_findings = _drug_citation_edits(
+                        synthetic, records, answer_cites
+                    )
+                    if drug_findings:
+                        cell["refs"] = _cites(edited_synthetic)
+                        findings.extend(drug_findings)
+                        synthetic = edited_synthetic
+                findings.extend(claim_marks(synthetic, facts))
+    return new_blocks, findings
+
+
 def apply_answer_rules(
     question: str,
     answer_text: str,
@@ -588,21 +825,39 @@ def apply_answer_rules(
     records = _records(facts)
     if not records or not (answer_text or blocks):
         return answer_text, citations, blocks, []
+    answer_cites = set(citations or []) | set(_cites(answer_text)) | set(_row_refs(blocks))
+    if not edit:
+        _wt, _wb, window_findings = _window_edits(
+            question, answer_text or "", blocks or [], records, facts or {}
+        )
+        _st, _sa, series_findings = _series_edits(question, answer_text or "", facts or {})
+        findings = [
+            f for f in (window_findings + series_findings) if f.get("status") == "fail"
+        ]
+        for sentence in _SENTENCE_RE.split(answer_text or ""):
+            findings.extend(claim_marks(sentence, facts))
+        _tb, table_findings = _apply_table_cell_rules(
+            blocks or [], records, facts, answer_cites, edit=False
+        )
+        findings.extend(f for f in table_findings if f.get("status") == "fail")
+        return answer_text, citations, blocks, findings
+
     text, new_blocks, findings = _window_edits(question, answer_text or "", blocks or [], records, facts or {})
-    text, drug_findings = _drug_citation_edits(text, records, set(citations or []) | set(_cites(answer_text)))
+    text, drug_findings = _drug_citation_edits(text, records, answer_cites)
     findings += drug_findings
+    new_blocks, table_findings = _apply_table_cell_rules(
+        new_blocks, records, facts, answer_cites, edit=True
+    )
+    findings += table_findings
     text, added, series_findings = _series_edits(question, text, facts or {})
     findings += series_findings
     for sentence in _SENTENCE_RE.split(text):
-        findings += [
-            f
-            for f in claim_marks(sentence, facts)
-            if f["id"] not in {"rule_drug_citation"}
-        ]
-    if not edit:
-        return answer_text, citations, blocks, [f for f in findings if f["status"] == "fail"]
+        findings += claim_marks(sentence, facts)
     kept = set(_cites(text))
     new_citations = [c for c in (citations or []) if c in kept or c in set(_row_refs(new_blocks))]
     new_citations += [c for c in sorted(kept) if c not in new_citations]
     new_citations += [c for c in added if c not in new_citations]
+    for c in _row_refs(new_blocks):
+        if c not in new_citations:
+            new_citations.append(c)
     return text, new_citations, new_blocks, findings

@@ -604,6 +604,19 @@ def compile_profile(profile: Profile) -> Profile:
         or stages.index("indepth_gate") < stages.index("indepth")
     ):
         raise ValueError(f"profile {profile.id!r} indepth_gate must follow indepth")
+    if "agree" in stages:
+        agree = stages.index("agree")
+        if (
+            "final_resolve_refs" not in stages
+            or stages.index("final_resolve_refs") > agree
+        ):
+            raise ValueError(
+                f"profile {profile.id!r} agree must run after final_resolve_refs"
+            )
+        if "indepth" in stages and agree > stages.index("indepth"):
+            raise ValueError(
+                f"profile {profile.id!r} agree must run before indepth"
+            )
     if profile.output_mode == "product":
         # In-Depth is optional for a product profile (a fast checked answer), but never
         # without its gate; every answer check stays mandatory.
@@ -714,6 +727,8 @@ def validate_profiles() -> Tuple[Profile, ...]:
     for profile in profiles:
         for role in profile.models:
             prompt = profile.prompts.get(role)
+            if not prompt and role == "second":
+                prompt = profile.prompts.get("answer") or "synthesis-answer"
             if not prompt:
                 continue
             names = [str(prompt)]
@@ -807,16 +822,29 @@ def _profile_configuration_digest(profile: Profile) -> str:
 def _prompt_assets(profile: Profile, role: str, configured: str) -> Tuple[str, ...]:
     if role != "review":
         return (configured,)
+    review_policy = profile.policies.get("review") or {}
+    folded = review_policy.get("grounding") == "folded"
     assets = [configured + "-answer"]
+    if folded:
+        assets.append("review-citation-support")
     if "indepth" in profile.stages:
         assets.append(configured + "-indepth")
+        if folded:
+            assets.append("review-indepth-citation-support")
     return tuple(assets)
 
 
 def _role_prompt_digests(profile: Profile) -> Dict[str, Any]:
     digests: Dict[str, Any] = {}
-    for role, configured_value in sorted(profile.prompts.items()):
-        configured = str(configured_value)
+    prompt_roles: Dict[str, str] = {
+        str(role): str(configured_value)
+        for role, configured_value in profile.prompts.items()
+    }
+    if "second" in profile.models and "second" not in prompt_roles:
+        prompt_roles["second"] = str(
+            profile.prompts.get("answer") or "synthesis-answer"
+        )
+    for role, configured in sorted(prompt_roles.items()):
         system_prompts = {}
         for name in _prompt_assets(profile, role, configured):
             content = (
