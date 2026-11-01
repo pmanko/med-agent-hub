@@ -31,7 +31,7 @@
     },
     "115": {
       "cvx": "115",
-      "vaccine_group": "Tdap",
+      "vaccine_group": "Tdap/DTaP/Td",
       "display": "Tdap (Tetanus toxoid, reduced diphtheria toxoid, and acellular pertussis vaccine, adsorbed)",
       "plain_purpose": "Protects adolescents and adults against tetanus (lockjaw), diphtheria, and pertussis (whooping cough).",
       "series_rule": "1 adolescent booster dose at age 11–12 years, followed by a Td or Tdap booster every 10 years.",
@@ -39,7 +39,7 @@
     },
     "113": {
       "cvx": "113",
-      "vaccine_group": "Td",
+      "vaccine_group": "Tdap/DTaP/Td",
       "display": "Td (adult), 5 Lf tetanus toxoid, preservative free, adsorbed",
       "plain_purpose": "Decennial adult booster vaccine protecting against tetanus and diphtheria.",
       "series_rule": "1 booster dose every 10 years after initial Tdap series.",
@@ -50,8 +50,9 @@
       "vaccine_group": "HPV",
       "display": "HPV, quadrivalent",
       "plain_purpose": "Human papillomavirus (HPV) vaccine protecting against HPV-related cancers.",
-      "series_rule": "CDC ACIP recommends a 2-dose HPV schedule (0, 6–12 months) when initiated before age 15 (ages 9–14 years). A 3-dose schedule (0, 1–2, 6 months) is indicated only if initiated at age 15 years or older or in immunocompromised patients. A 3rd dose administered to a healthy adolescent who initiated the series before age 15 is an ACIP schedule over-immunization anomaly.",
+      "series_rule": "CDC ACIP recommends a 2-dose HPV schedule (0, 6–12 months; minimum interval 5 months) when initiated before age 15 (ages 9–14 years). A 3-dose schedule (0, 1–2, 6 months) is required if initiated at age 15 years or older, in immunocompromised patients, or if the first two doses in a younger starter were administered less than 5 months apart. A 3rd dose administered to a healthy adolescent who initiated the series before age 15 with at least 5 months between Dose 1 and Dose 2 is an ACIP schedule over-immunization anomaly.",
       "two_dose_max_initiation_age_years": 14,
+      "min_two_dose_interval_months": 5,
       "standard_doses_under_15": 2,
       "standard_doses_15_and_older": 3,
       "duplicate_window_days": 28
@@ -61,8 +62,9 @@
       "vaccine_group": "HPV",
       "display": "HPV9 (Human Papillomavirus 9-valent vaccine)",
       "plain_purpose": "9-valent human papillomavirus (HPV) vaccine protecting against HPV-associated cancers.",
-      "series_rule": "2-dose schedule when initiated before age 15; 3-dose schedule when initiated at age 15 or older.",
+      "series_rule": "2-dose schedule (minimum interval 5 months) when initiated before age 15; 3-dose schedule when initiated at age 15 or older, in immunocompromised individuals, or when the first two doses are given less than 5 months apart.",
       "two_dose_max_initiation_age_years": 14,
+      "min_two_dose_interval_months": 5,
       "standard_doses_under_15": 2,
       "standard_doses_15_and_older": 3,
       "duplicate_window_days": 28

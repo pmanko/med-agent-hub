@@ -245,8 +245,8 @@ profiles:
     context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true, supplemental_sources: [knowledge-base]}
     knobs: {answer: {temperature: 0}}
 
-  # Checked-answer research arms: the default profile's stages, context and policies with one
-  # choice changed each. Offered in the app after the default; the harness runs them as arms.
+  # Checked-answer research arms: single-12b-checked's stages, context and policies with one
+  # choice changed each. Offered in the app after the default (single-12b-bare); the harness runs them as arms.
 
   single-31b-xcheck:
     label: Checked answer (31B writer, Qwen3.5 9B verifier)
@@ -277,9 +277,10 @@ profiles:
     context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true, supplemental_sources: [knowledge-base]}
     knobs: {answer: {temperature: 0}}
 
-  # The verifier reads the chart once per section: its verification questions carry the citation
-  # verdicts (grounding folded), so no separate citation call; Qwen3.5-9B keeps 10 GB free for
-  # the writer's prompt cache (run D on 28 October: the 12B ran twice as slow beside the 35B).
+  # The verifier performs one review call per section with citation verdicts folded in
+  # (falling back to separate citation checks when the review omits citation verdicts);
+  # Qwen3.5-9B keeps 10 GB free for the writer's prompt cache (run D on 28 October: the
+  # 12B ran twice as slow beside the 35B).
   single-12b-verify:
     label: Checked answer (12B writer, Qwen3.5 9B verifier)
     topology: single
@@ -303,11 +304,6 @@ profiles:
     selection_priority: 56
     context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true, supplemental_sources: [knowledge-base]}
     knobs: {answer: {temperature: 0}}
-
-
-
-  # The default with the DRY repetition penalty off for the writer and the reviewer; DRY
-  # garbles dates copied from the chart (2026-01_26). Measured against single-12b-checked.
 
   team-med-checked:
     label: Checked medical team

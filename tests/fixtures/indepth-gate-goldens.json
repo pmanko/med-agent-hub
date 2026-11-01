@@ -122,6 +122,7 @@
       "chart": "zabella-halambe",
       "question": "Does the chart record her oxygen saturation?",
       "claim": "The patient's pulse oximetry reading of 93% on 2026-01_26 [14] is within a range that typically indicates adequate oxygenation, though it represents a downward trend from the peak of 98% recorded in December 2025.",
+      "expected_claim": "The patient's pulse oximetry reading of 93% on 2026-01-26 [14] is within a range that typically indicates adequate oxygenation, though it represents a downward trend from the peak of 98% recorded in December 2025.",
       "flagged_with_question": [
         "date_format:fail"
       ],

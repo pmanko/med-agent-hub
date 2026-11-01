@@ -595,9 +595,13 @@ class AnalyzeRequest(BaseModel):
         default=None,
         description="Patient identifier from /wahs/api/patients (optional if fhir_bundle is supplied).",
     )
-    fhir_bundle: Optional[Dict[str, Any]] = Field(
+    fhir_bundle: Optional[Any] = Field(
         default=None,
         description="Raw FHIR R4 Bundle JSON object (overrides patient_id if provided).",
+    )
+    bundle: Optional[Any] = Field(
+        default=None,
+        description="Alias for fhir_bundle.",
     )
     target_tokens: int = Field(
         default=8192,
@@ -627,12 +631,46 @@ class ChatRequest(AnalyzeRequest):
 
 
 def _resolve_bundle(req: AnalyzeRequest) -> Dict[str, Any]:
-    if req.fhir_bundle and isinstance(req.fhir_bundle, dict):
-        if req.fhir_bundle.get("resourceType") != "Bundle":
+    supplied = req.fhir_bundle if req.fhir_bundle is not None else req.bundle
+    if supplied is not None:
+        if not isinstance(supplied, dict) or not supplied:
+            raise HTTPException(
+                status_code=400,
+                detail="fhir_bundle must be a non-empty JSON object with resourceType='Bundle'",
+            )
+        if supplied.get("resourceType") != "Bundle":
             raise HTTPException(status_code=400, detail="fhir_bundle must have resourceType='Bundle'")
-        return req.fhir_bundle
+        entries = supplied.get("entry")
+        if not isinstance(entries, list) or not entries:
+            raise HTTPException(
+                status_code=400,
+                detail="fhir_bundle.entry must be a non-empty list of FHIR Bundle entry objects",
+            )
+        valid_resources = 0
+        for idx, item in enumerate(entries):
+            if not isinstance(item, dict):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"fhir_bundle.entry[{idx}] must be a JSON object",
+                )
+            res = item.get("resource")
+            if res is not None:
+                if not isinstance(res, dict) or not isinstance(res.get("resourceType"), str):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"fhir_bundle.entry[{idx}].resource must be a FHIR resource object with resourceType",
+                    )
+                valid_resources += 1
+        if valid_resources == 0:
+            raise HTTPException(
+                status_code=400,
+                detail="fhir_bundle.entry contains no valid FHIR resource objects",
+            )
+        return supplied
 
     catalog = _load_patient_catalog()
+    if req.patient_id is not None and not str(req.patient_id).strip():
+        raise HTTPException(status_code=400, detail="patient_id must not be empty")
     pid = req.patient_id or next(iter(catalog.keys()))
     if pid not in catalog:
         raise HTTPException(
@@ -724,17 +762,20 @@ def run_wahs_chat(req: ChatRequest) -> Dict[str, Any]:
     bundle = _resolve_bundle(req)
     extracted = extract_bundle(bundle)
     condensed = condense_bundle_to_budget(
-        extracted,
+        bundle if req.condense_mode == "lossless_structural" else extracted,
         target_tokens=req.target_tokens,
+        condense_mode=req.condense_mode,
         sharing_posture=req.sharing_posture,
     )
-    return answer_wahs_question(
+    res = answer_wahs_question(
         extracted,
         req.question,
         condensed,
         target_tokens=req.target_tokens,
         sharing_posture=req.sharing_posture,
     )
+    res.setdefault("tier_info", {})["condense_mode"] = req.condense_mode
+    return res
 
 
 @router.get("/demo", response_class=HTMLResponse)

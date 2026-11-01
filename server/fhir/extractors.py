@@ -226,7 +226,8 @@ def _format_num(val: Any) -> str:
     if isinstance(val, float):
         if val.is_integer():
             return str(int(val))
-        return f"{val:.2f}".rstrip("0").rstrip(".")
+        formatted = f"{val:.6f}".rstrip("0").rstrip(".")
+        return formatted if formatted and formatted != "-0" else "0"
     return str(val)
 
 
@@ -246,13 +247,15 @@ def _format_obs_value(obs: Mapping[str, Any]) -> Tuple[str, Optional[float], str
             if isinstance(vq, Mapping) and vq.get("value") is not None:
                 v = vq.get("value")
                 u = str(vq.get("unit") or vq.get("code") or "").strip()
-                if c_code == "8480-6" or "systolic" in c_disp.lower():
-                    sbp = float(v)
-                    bp_unit = u or bp_unit
-                elif c_code == "8462-4" or "diastolic" in c_disp.lower():
-                    dbp = float(v)
-                    bp_unit = u or bp_unit
-                comp_parts.append(f"{c_disp or c_code}: {_format_num(v)} {u}".strip())
+                comp_cmp = str(vq.get("comparator") or "").strip()
+                if not comp_cmp:
+                    if c_code == "8480-6" or "systolic" in c_disp.lower():
+                        sbp = float(v)
+                        bp_unit = u or bp_unit
+                    elif c_code == "8462-4" or "diastolic" in c_disp.lower():
+                        dbp = float(v)
+                        bp_unit = u or bp_unit
+                comp_parts.append(f"{c_disp or c_code}: {comp_cmp}{_format_num(v)} {u}".strip())
             else:
                 _, vc_disp = _coding_pair(comp.get("valueCodeableConcept"))
                 if vc_disp:
@@ -266,12 +269,14 @@ def _format_obs_value(obs: Mapping[str, Any]) -> Tuple[str, Optional[float], str
     if isinstance(vq, Mapping) and vq.get("value") is not None:
         raw_val = vq.get("value")
         unit = str(vq.get("unit") or vq.get("code") or "").strip()
+        comparator = str(vq.get("comparator") or "").strip()
         try:
             num_val = float(raw_val)
         except (TypeError, ValueError):
             num_val = None
-        val_str = _format_num(num_val if num_val is not None else raw_val)
-        return (f"{val_str} {unit}".strip() if unit else val_str), num_val, unit
+        val_str = f"{comparator}{_format_num(num_val if num_val is not None else raw_val)}"
+        exact_num = None if comparator else num_val
+        return (f"{val_str} {unit}".strip() if unit else val_str), exact_num, unit
 
     if "valueCodeableConcept" in obs:
         _, disp = _coding_pair(obs.get("valueCodeableConcept"))
@@ -286,11 +291,64 @@ def _format_obs_value(obs: Mapping[str, Any]) -> Tuple[str, Optional[float], str
     return "", None, ""
 
 
+def _format_structured_dosage(d_inst: Mapping[str, Any]) -> str:
+    """Format narrative and/or structured FHIR Dosage fields (doseAndRate, timing, route, asNeeded)."""
+    d_txt = str(d_inst.get("text") or "").strip()
+    struct_parts: List[str] = []
+    for dr in d_inst.get("doseAndRate") or []:
+        if not isinstance(dr, Mapping):
+            continue
+        dq = dr.get("doseQuantity")
+        if isinstance(dq, Mapping) and dq.get("value") is not None:
+            dv = _format_num(float(dq["value"]) if isinstance(dq["value"], (int, float)) else dq["value"])
+            du = str(dq.get("unit") or dq.get("code") or "").strip()
+            struct_parts.append(f"{dv} {du}".strip())
+        drange = dr.get("doseRange")
+        if isinstance(drange, Mapping):
+            low = drange.get("low") or {}
+            high = drange.get("high") or {}
+            if low.get("value") is not None and high.get("value") is not None:
+                u = str(high.get("unit") or low.get("unit") or "").strip()
+                struct_parts.append(f"{_format_num(low['value'])}-{_format_num(high['value'])} {u}".strip())
+    _, route_disp = _coding_pair(d_inst.get("route"))
+    if route_disp:
+        struct_parts.append(route_disp)
+    timing = d_inst.get("timing")
+    if isinstance(timing, Mapping):
+        rep = timing.get("repeat")
+        if isinstance(rep, Mapping):
+            freq = rep.get("frequency")
+            period = rep.get("period")
+            p_unit = str(rep.get("periodUnit") or "").strip().lower()
+            unit_names = {"d": "daily", "wk": "weekly", "mo": "monthly", "h": "h"}
+            if freq == 1 and period == 1 and p_unit == "d":
+                struct_parts.append("once daily")
+            elif freq and period and p_unit:
+                if period == 1 and p_unit in {"d", "wk", "mo"}:
+                    struct_parts.append(f"{freq}x {unit_names[p_unit]}")
+                else:
+                    struct_parts.append(f"{freq}x per {period}{p_unit}")
+        _, t_code_disp = _coding_pair(timing.get("code"))
+        if t_code_disp:
+            struct_parts.append(t_code_disp)
+    if d_inst.get("asNeededBoolean") is True:
+        struct_parts.append("PRN")
+    for add_inst in d_inst.get("additionalInstruction") or []:
+        _, a_disp = _coding_pair(add_inst)
+        if a_disp:
+            struct_parts.append(a_disp)
+    structured_str = " ".join(struct_parts).strip()
+    if d_txt and structured_str and structured_str.lower() not in d_txt.lower():
+        return f"{d_txt} ({structured_str})"
+    return d_txt or structured_str
+
+
 def _extract_unique_note_narrative(decoded_text: str, *, preserve_all_sections: bool = False) -> str:
     """Extract unique encounter narrative (`# Chief Complaint`, `# Assessment and Plan`, etc.)
-    from a clinical note. When `preserve_all_sections=True` (non-destructive W12 mode), retains
-    all non-empty sections (including `# Medications`, `# Allergies`, `# HPI`) unless they are
-    literal empty placeholders (`no active allergies.`, `none`, `n/a`)."""
+    from a clinical note while stripping repeated Synthea template header/table dumps.
+
+    Preserves full normalized note content at extraction time (Tier 0); later tiers perform
+    explicitly reported excerpting when needed."""
     lines = [line.strip() for line in (decoded_text or "").splitlines()]
     if not lines:
         return ""
@@ -320,20 +378,17 @@ def _extract_unique_note_narrative(decoded_text: str, *, preserve_all_sections: 
                 continue
             kept_parts.append(f"{header.title()}: {compact_body}")
         if kept_parts:
-            summary = " | ".join(kept_parts)
-            limit = 520 if preserve_all_sections else 360
-            return summary[:limit] + ("..." if len(summary) > limit else "")
+            return " | ".join(kept_parts)
         # If every section was boilerplate (e.g. "No complaints."), check chief complaint fallback
         cc = " ".join(sections.get("chief complaint") or []).strip()
         ap = " ".join(sections.get("assessment and plan") or []).strip()
         fallback = " | ".join(p for p in (cc, ap) if p)
         if fallback:
-            return fallback[:280]
+            return fallback
 
-    # Plain-text non-Synthea note fallback: keep first non-empty lines up to 280 chars
+    # Plain-text non-Synthea note fallback: keep all non-header content
     non_empty = [l for l in lines if l and not l.lower().startswith(("patient:", "date:", "provider:"))]
-    joined = " ".join(non_empty[:6]).strip()
-    return joined[:280] + ("..." if len(joined) > 280 else "")
+    return " ".join(non_empty).strip()
 
 
 def extract_bundle_lossless(
@@ -371,13 +426,20 @@ def extract_bundle(
     """Parse a FHIR R4 Bundle dict into normalized `ClinicalItem` objects and numeric series points."""
     entries = bundle.get("entry") or []
     resources: List[Mapping[str, Any]] = []
-    for entry in entries:
+    for idx, entry in enumerate(entries, start=1):
         if isinstance(entry, Mapping):
             res = entry.get("resource")
             if isinstance(res, Mapping) and res.get("resourceType"):
+                if not str(res.get("id") or "").strip():
+                    rtype_slug = str(res.get("resourceType") or "resource").lower()
+                    res = {**res, "id": f"anon-{rtype_slug}-{idx}"}
                 resources.append(res)
     if not resources and bundle.get("resourceType") and bundle.get("resourceType") != "Bundle":
-        resources = [bundle]
+        res = bundle
+        if not str(res.get("id") or "").strip():
+            rtype_slug = str(res.get("resourceType") or "resource").lower()
+            res = {**res, "id": f"anon-{rtype_slug}-1"}
+        resources = [res]
 
     excluded_counts: Dict[str, int] = {}
     orgs_by_id: Dict[str, str] = {}
@@ -610,12 +672,22 @@ def extract_bundle(
         onset = _iso_date(res.get("onsetDateTime") or res.get("recordedDate"))
         abatement = _iso_date(res.get("abatementDateTime"))
         cats = _categories(res)
-        sens = classify_sensitivity(code, disp, cats) if enable_privacy_classification else None
+        cond_kb = resolve_condition_code(code, disp)
+        sens = (
+            classify_sensitivity(code, disp, cats)
+            or (
+                cond_kb.get("sensitivity")
+                if cond_kb.get("resolved_by") != "heuristic_fallback"
+                else None
+            )
+            if enable_privacy_classification
+            else None
+        )
         raw_conditions.append(
             {
                 "resourceUuid": rid,
                 "code": code,
-                "display": disp or code or "Condition",
+                "display": disp or str(cond_kb.get("display") or code or "Condition"),
                 "status": c_status,
                 "verification": v_status,
                 "onset": onset,
@@ -623,6 +695,7 @@ def extract_bundle(
                 "categories": cats,
                 "sensitivity": sens,
                 "source_org": resolve_source_org(res),
+                "kb_resolution": cond_kb,
             }
         )
 
@@ -657,7 +730,7 @@ def extract_bundle(
             suffix += f" [{conflict}]"
         if sens == "SDOH/PRIVACY-SENSITIVE":
             suffix += " [sensitivity: SDOH/PRIVACY-SENSITIVE]"
-        cond_kb = resolve_condition_code(c["code"], c["display"])
+        cond_kb = c["kb_resolution"]
         items.append(
             ClinicalItem(
                 resource_type="Condition",
@@ -713,15 +786,15 @@ def extract_bundle(
         ) or reference_date
         end_date = _iso_date((res.get("effectivePeriod") or {}).get("end"))
 
-        # Extract dosage text if available
+        # Extract dosage text and/or structured dosage instructions if available
         dose_strs: List[str] = []
         for d_inst in res.get("dosageInstruction") or []:
             if isinstance(d_inst, Mapping):
-                d_txt = str(d_inst.get("text") or "").strip()
+                d_txt = _format_structured_dosage(d_inst)
                 if d_txt:
                     dose_strs.append(d_txt)
         if not dose_strs and isinstance(res.get("dosage"), Mapping):
-            d_txt = str(res["dosage"].get("text") or "").strip()
+            d_txt = _format_structured_dosage(res["dosage"])
             if d_txt:
                 dose_strs.append(d_txt)
 
@@ -740,13 +813,32 @@ def extract_bundle(
 
         setting = "inpatient/administered" if rtype == "MedicationAdministration" else "prescribed"
         is_active = status in {"active", "in-progress", "on-hold"}
-        ingredient = normalize_drug_ingredient(disp or code)
+        med_kb = resolve_medication_code(code, disp)
+        resolved_disp = disp or (
+            str(med_kb.get("display") or "")
+            if med_kb.get("resolved_by") != "heuristic_fallback"
+            else ""
+        )
+        ingredient = str(
+            med_kb.get("ingredient")
+            if med_kb.get("resolved_by") != "heuristic_fallback" and med_kb.get("ingredient")
+            else normalize_drug_ingredient(resolved_disp or code)
+        )
+        linked_order_uuids: List[str] = []
+        for link_field in ("basedOn", "partOf", "request", "prescription", "authorizingPrescription"):
+            raw_link = res.get(link_field)
+            if isinstance(raw_link, Mapping) and raw_link.get("reference"):
+                linked_order_uuids.append(_strip_urn(str(raw_link.get("reference"))))
+            elif isinstance(raw_link, list):
+                for entry_link in raw_link:
+                    if isinstance(entry_link, Mapping) and entry_link.get("reference"):
+                        linked_order_uuids.append(_strip_urn(str(entry_link.get("reference"))))
         raw_meds.append(
             {
                 "resourceType": rtype,
                 "resourceUuid": rid,
                 "code": code,
-                "display": disp or code or "Medication",
+                "display": resolved_disp or code or "Medication",
                 "status": status,
                 "is_active": is_active,
                 "date": m_date,
@@ -756,6 +848,8 @@ def extract_bundle(
                 "setting": setting,
                 "ingredient_key": ingredient,
                 "source_org": resolve_source_org(res),
+                "linked_order_uuids": tuple(dict.fromkeys(u for u in linked_order_uuids if u)),
+                "kb_resolution": med_kb,
             }
         )
 
@@ -767,7 +861,7 @@ def extract_bundle(
     for m in raw_meds:
         rid = m["resourceUuid"]
         m_conflict = med_conflicts.get(rid)
-        med_kb = resolve_medication_code(m["code"], m["display"])
+        med_kb = m["kb_resolution"]
         ing_grp = str(med_kb.get("ingredient") or m["ingredient_key"])
         t_class = str(med_kb.get("therapeutic_class") or "medication")
         quals = [f"status: {m['status']}", f"type: {m['setting']}"]
@@ -900,6 +994,8 @@ def extract_bundle(
                     digest = hashlib.sha256(b64_data.strip().encode("ascii", errors="ignore")).hexdigest()
                     if digest in notes_by_hash:
                         notes_by_hash[digest]["member_uuids"].append(rid)
+                        if n_date:
+                            notes_by_hash[digest]["dates"].append(n_date)
                         dedup_note_count += 1
                     else:
                         try:
@@ -910,6 +1006,7 @@ def extract_bundle(
                             "primary_type": "DocumentReference",
                             "primary_uuid": rid,
                             "date": n_date or reference_date,
+                            "dates": [n_date] if n_date else ([reference_date] if reference_date else []),
                             "title": n_type or "Clinical Note",
                             "decoded": decoded,
                             "source_org": resolve_source_org(res),
@@ -925,6 +1022,8 @@ def extract_bundle(
                     digest = hashlib.sha256(b64_data.strip().encode("ascii", errors="ignore")).hexdigest()
                     if digest in notes_by_hash:
                         notes_by_hash[digest]["member_uuids"].append(rid)
+                        if n_date:
+                            notes_by_hash[digest]["dates"].append(n_date)
                         dedup_note_count += 1
                     else:
                         try:
@@ -935,6 +1034,7 @@ def extract_bundle(
                             "primary_type": "DiagnosticReport",
                             "primary_uuid": rid,
                             "date": n_date or reference_date,
+                            "dates": [n_date] if n_date else ([reference_date] if reference_date else []),
                             "title": n_type or "Clinical Note",
                             "decoded": decoded,
                             "source_org": resolve_source_org(res),
@@ -949,24 +1049,37 @@ def extract_bundle(
         if not snippet:
             continue
         members = tuple(dict.fromkeys(note_info["member_uuids"]))
+        distinct_dates = sorted({d for d in (note_info.get("dates") or []) if d})
+        primary_date = distinct_dates[-1] if distinct_dates else note_info["date"]
+        extra_dates_str = (
+            f" (recorded across dates: {', '.join(distinct_dates)})"
+            if len(distinct_dates) > 1
+            else ""
+        )
+        note_sens = classify_sensitivity("", f"{note_info['title']} {note_info['decoded']} {snippet}")
+        sens_suffix = " [sensitivity: SDOH/PRIVACY-SENSITIVE]" if note_sens == "SDOH/PRIVACY-SENSITIVE" else ""
         items.append(
             ClinicalItem(
                 resource_type=note_info["primary_type"],
                 resource_uuid=note_info["primary_uuid"],
-                date=note_info["date"],
-                clinical_date=note_info["date"],
+                date=primary_date,
+                clinical_date=primary_date,
                 date_kind="clinical_event",
                 section="clinical_note",
                 code="clinical-note",
                 display=note_info["title"],
-                text=f"Clinical Note — {note_info['title']}: {snippet}",
+                text=f"Clinical Note — {note_info['title']}: {snippet}{extra_dates_str}{sens_suffix}",
                 mandatory=False,
                 status="current",
                 source_org=note_info["source_org"],
+                sensitivity=note_sens,
                 member_uuids=members,
                 metadata={
-                    "full_text": note_info["decoded"],
+                    "full_text": snippet,
+                    "raw_decoded_text": note_info["decoded"],
+                    "title": note_info["title"],
                     "duplicate_wrapper_count": len(members),
+                    **({"dates": distinct_dates} if distinct_dates else {}),
                 },
             )
         )
@@ -1094,7 +1207,7 @@ def extract_bundle(
                 if isinstance(comp, Mapping):
                     c_code, c_disp = _coding_pair(comp.get("code"))
                     vq = comp.get("valueQuantity")
-                    if isinstance(vq, Mapping) and vq.get("value") is not None:
+                    if isinstance(vq, Mapping) and vq.get("value") is not None and not str(vq.get("comparator") or "").strip():
                         try:
                             c_num = float(vq["value"])
                             c_unit = str(vq.get("unit") or vq.get("code") or "").strip()
@@ -1376,27 +1489,58 @@ def extract_bundle(
         active_med_items = [it for it in items if it.section == "med_active"]
         note_items = [it for it in items if it.section in {"clinical_note", "note"}]
         hold_re = re.compile(
-            r"\b(?:hold|stop|discontinue|held|stopped|do\s+not\s+take)\s+([a-z][a-z0-9-]{2,25})\b",
+            r"\b(hold|stop|discontinue|held|stopped|discontinued|do\s+not\s+take)\s+([a-z][a-z0-9-]{2,25})\b",
+            re.IGNORECASE,
+        )
+        negation_prefix_re = re.compile(
+            r"\b(?:do\s+not|don't|never|not\s+to|not|without|no\s+need\s+to|avoid)\s+$",
+            re.IGNORECASE,
+        )
+        conditional_clause_re = re.compile(
+            r"\b(?:if|unless|when|should|in\s+case|for\s+sbp|for\s+bp|for\s+hr|parameters?\s*:)\b",
             re.IGNORECASE,
         )
         for n_item in note_items:
-            for match in hold_re.finditer(n_item.text or ""):
-                raw_drug = match.group(1)
-                norm_ing = normalize_drug_ingredient(raw_drug)
-                for m_item in active_med_items:
-                    if m_item.ingredient_key == norm_ing or norm_ing in m_item.display.lower():
-                        msg = (
-                            f"note_medication_contradiction: Clinical note ({n_item.clinical_date or 'recent'}) "
-                            f"instructs to hold/discontinue {m_item.display}, but structured MedicationRequest remains ACTIVE"
-                        )
-                        if not m_item.conflict_note:
-                            m_item.conflict_note = msg
-                            m_item.text += f" [{msg}]"
-                        if n_item.resource_uuid not in m_item.member_uuids:
-                            m_item.member_uuids = tuple(list(m_item.member_uuids) + [n_item.resource_uuid])
-                        if not n_item.conflict_note:
-                            n_item.conflict_note = msg
-                            n_item.mandatory = True
+            note_txt = n_item.text or ""
+            for clause in re.split(r"[.;|\n]+", note_txt):
+                if conditional_clause_re.search(clause):
+                    continue
+                for match in hold_re.finditer(clause):
+                    prefix = clause[: match.start()]
+                    if negation_prefix_re.search(prefix):
+                        continue
+                    raw_drug = match.group(2)
+                    norm_ing = normalize_drug_ingredient(raw_drug)
+                    if not norm_ing or norm_ing in {"on", "the", "all", "any", "medication", "medications", "therapy"}:
+                        continue
+                    for m_item in active_med_items:
+                        if m_item.ingredient_key == norm_ing or norm_ing in m_item.display.lower():
+                            msg = (
+                                f"note_medication_contradiction: Clinical note ({n_item.clinical_date or 'recent'}) "
+                                f"instructs to hold/discontinue {m_item.display}, but structured MedicationRequest remains ACTIVE"
+                            )
+                            if not m_item.conflict_note:
+                                m_item.conflict_note = msg
+                                m_item.text += f" [{msg}]"
+                            elif msg not in m_item.conflict_note:
+                                m_item.conflict_note = f"{m_item.conflict_note}; {msg}"
+                                m_item.text += f" [{msg}]"
+                            if n_item.resource_uuid not in m_item.member_uuids:
+                                m_item.member_uuids = tuple(list(m_item.member_uuids) + [n_item.resource_uuid])
+                            c_notes = list(m_item.metadata.get("contradicting_note_uuids") or [])
+                            if n_item.resource_uuid not in c_notes:
+                                c_notes.append(n_item.resource_uuid)
+                                m_item.metadata["contradicting_note_uuids"] = c_notes
+                            c_meds = list(n_item.metadata.get("contradicted_med_uuids") or [])
+                            if m_item.resource_uuid not in c_meds:
+                                c_meds.append(m_item.resource_uuid)
+                                n_item.metadata["contradicted_med_uuids"] = c_meds
+                            if not n_item.conflict_note:
+                                n_item.conflict_note = msg
+                                n_item.mandatory = True
+                            elif msg not in n_item.conflict_note:
+                                n_item.conflict_note = f"{n_item.conflict_note}; {msg}"
+                                n_item.mandatory = True
 
     return ExtractedChart(
         patient_id=patient_id,

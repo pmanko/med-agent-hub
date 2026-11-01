@@ -1,6 +1,6 @@
-"""US Core / IPS De-Identified Multi-Clinic Transition Archetype Builders for WAHS+.
+"""Synthetic US Core / IPS Multi-Clinic Transition Archetype Builders for WAHS+.
 
-Defines three non-Synthea US Core / IPS clinical transition patient bundles:
+Defines three synthetic non-Synthea US Core / IPS clinical-summary transition patient bundles:
 - `Elena_Rostova_Cardiorenal.json`: Decompensated HFrEF, cardiorenal syndrome, hyperkalemia,
   and discharge note hold mismatch (`Aldactone` + `Potassium Chloride` + `Lisinopril`).
 - `Arthur_Pendelton_Anticoag.json`: Mechanical aortic valve, atrial fibrillation, upper GI
@@ -19,10 +19,10 @@ from typing import Any, Dict, List, Tuple
 
 
 def build_deidentified_real_clinical_summaries() -> Dict[str, Tuple[Dict[str, Any], List[Dict[str, Any]]]]:
-    """Pathway B: Three multi-domain US Core / IPS clinical transition patient bundles
+    """Pathway B: Three synthetic multi-domain US Core / IPS clinical-summary transition patient bundles
     (Elena Rostova — Cardiorenal HFrEF & Hyperkalemia; Arthur Pendelton — AFib + Mechanical Valve
     Dual-Anticoagulation & Upper GI Bleed; Margaret Chen — Geriatric Polypharmacy, Beers Criteria
-    CNS Sedation & Falls), plus backward-compatible MIMIC-IV / SMART IPS aliases."""
+    CNS Sedation & Falls), plus backward-compatible MIMIC-IV / SMART IPS alias fixture filenames."""
     elena_note = (
         "# Chief Complaint\nDecompensated HFrEF, cardiorenal syndrome & hyperkalemia (peak K+ 5.7 mmol/L)\n"
         "# Assessment and Plan\nHold spironolactone and potassium chloride at hospital discharge due to "

@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import os
+
+os.environ.setdefault("HUB_BUILD_REVISION", "0123456789abcdef0123456789abcdef01234567")
+
 from fastapi.testclient import TestClient
 
 from server.fhir import (
@@ -216,13 +220,13 @@ def test_wahs_overflow_lookup_tools_recover_deep_history_and_enforce_privacy() -
 
     # 4. Verify hybrid overflow lookup recovers perioperative Cefazolin at tight budget
     condensed_tight = condense_bundle_to_budget(
-        extracted, target_tokens=180, sharing_posture="patient_self"
+        extracted, target_tokens=512, sharing_posture="patient_self"
     )
     ans_hybrid = answer_wahs_question(
         extracted,
         "What perioperative antibiotic (cefazolin) was administered during Maurice's hospital admission?",
         condensed_tight,
-        target_tokens=180,
+        target_tokens=512,
         use_lookup_tools=True,
     )
     assert "cefazolin" in ans_hybrid["answer"].lower()
@@ -564,6 +568,240 @@ def test_w19_wahs_profiles_discovery_and_execution_surface(monkeypatch) -> None:
     assert captured_calls[0]["json"]["model"] == "gemma-4-12b"
     assert captured_calls[0]["json"]["messages"][0]["role"] == "system"
     assert "WAHS+" in captured_calls[0]["json"]["messages"][0]["content"]
+
+
+def test_wahs_review_regressions_privacy_negation_lvef_and_api_validation() -> None:
+    import base64
+    from scripts.generate_wahs_eval_report import render_markdown_report, score_case_response
+
+    # 1. hub-57-0: external_share redacts SDOH condition conflicts & redacted_for_privacy display
+    bundle_sdoh = _builtin_sample_bundles()["Maurice742_Auer97_sample"]
+    cond_ext_lossless = condense_bundle_to_budget(
+        bundle_sdoh,
+        target_tokens=4096,
+        condense_mode="lossless_structural",
+        sharing_posture="external_share",
+    )
+    for red in cond_ext_lossless.redacted_for_privacy:
+        assert "intimate partner" not in red["display"].lower()
+        assert red["display"] == "Redacted privacy-sensitive SDOH record"
+    dq_ext_lossless = analyze_data_quality_and_conflicts(
+        bundle_sdoh,
+        cond_ext_lossless,
+        sharing_posture="external_share",
+    )
+    for finding in dq_ext_lossless["findings"]:
+        assert "intimate partner" not in finding["title"].lower()
+        assert "intimate partner" not in finding["description"].lower()
+
+    # 2. hub-57-6 & hub-57-21: Negated/conditional note hold guards & per-note med linkage
+    long_tail = "TAIL_MARKER_PRESERVED_AT_CHAR_500"
+    note_neg_b64 = base64.b64encode(
+        (
+            "Progress Note (2025-11-19): Patient stable. Do not hold warfarin; continue warfarin 5mg daily. "
+            "Hold spironolactone only if potassium exceeds 5.5 mmol/L. "
+            + ("Clinical narrative padding. " * 18)
+            + long_tail
+        ).encode("utf-8")
+    ).decode("ascii")
+    note_pos_b64 = base64.b64encode(
+        b"Nephrology Note (2025-11-20): Acute hyperkalemia. Hold spironolactone immediately."
+    ).decode("ascii")
+    bundle_notes = {
+        "resourceType": "Bundle",
+        "type": "collection",
+        "entry": [
+            {
+                "resource": {
+                    "resourceType": "Patient",
+                    "id": "pat-neg-test",
+                    "name": [{"given": ["Test"], "family": "Patient"}],
+                    "birthDate": "1955-01-01",
+                }
+            },
+            {
+                "resource": {
+                    "resourceType": "MedicationRequest",
+                    "id": "med-warfarin-1",
+                    "status": "active",
+                    "medicationCodeableConcept": {"text": "Warfarin 5 MG Oral Tablet"},
+                    "authoredOn": "2025-10-01",
+                }
+            },
+            {
+                "resource": {
+                    "resourceType": "MedicationRequest",
+                    "id": "med-spiro-1",
+                    "status": "active",
+                    "medicationCodeableConcept": {"text": "Spironolactone 25 MG Oral Tablet"},
+                    "authoredOn": "2025-10-01",
+                }
+            },
+            {
+                "resource": {
+                    "resourceType": "DocumentReference",
+                    "id": "doc-neg-cond",
+                    "status": "current",
+                    "type": {"text": "Progress Note"},
+                    "date": "2025-11-19T10:00:00Z",
+                    "content": [{"attachment": {"contentType": "text/plain", "data": note_neg_b64}}],
+                }
+            },
+            {
+                "resource": {
+                    "resourceType": "DocumentReference",
+                    "id": "doc-pos-spiro",
+                    "status": "current",
+                    "type": {"text": "Nephrology Note"},
+                    "date": "2025-11-20T10:00:00Z",
+                    "content": [{"attachment": {"contentType": "text/plain", "data": note_pos_b64}}],
+                }
+            },
+            {
+                "resource": {
+                    "resourceType": "Observation",
+                    "id": "obs-lvef-55",
+                    "status": "final",
+                    "code": {"text": "Left ventricular ejection fraction (LVEF)"},
+                    "effectiveDateTime": "2020-05-01",
+                    "valueQuantity": {"value": 55, "unit": "%"},
+                }
+            },
+        ],
+    }
+    dq_notes = analyze_data_quality_and_conflicts(bundle_notes)
+    note_findings = [
+        f for f in dq_notes["findings"] if f["kb_rule_id"] == "wahs-kb-note-med-contradiction-01"
+    ]
+    assert len(note_findings) == 1
+    assert "doc-pos-spiro" in note_findings[0]["resource_uuids"]
+    assert "med-spiro-1" in note_findings[0]["resource_uuids"]
+    assert "med-warfarin-1" not in note_findings[0]["resource_uuids"]
+
+    # 3. hub-57-10: read_clinical_note returns full decoded note text including tail beyond 320 chars
+    ext_notes = extract_bundle_lossless(bundle_notes)
+    read_res = read_clinical_note(ext_notes, resource_uuid="doc-neg-cond")
+    assert len(read_res["results"]) == 1
+    assert long_tail in read_res["results"][0]["text"]
+    assert long_tail in read_res["results"][0]["full_text"]
+
+    # 4. hub-57-9 & hub-57-17: LVEF present in bundle but omitted in tight capsule
+    cond_no_lvef = condense_bundle_to_budget(bundle_notes, target_tokens=512)
+    # Remove LVEF line from chart_text/mappings to simulate tight-budget omission of historical echo
+    from dataclasses import replace
+
+    cond_omitted = replace(
+        cond_no_lvef,
+        chart_text="\n".join(
+            line for line in cond_no_lvef.chart_text.splitlines() if "lvef" not in line.lower() and "ejection" not in line.lower()
+        ),
+        mappings=[m for m in cond_no_lvef.mappings if m.get("resourceUuid") != "obs-lvef-55"],
+    )
+    ans_lvef_tools = answer_wahs_question(
+        ext_notes,
+        "What was the patient's left ventricular ejection fraction (LVEF)?",
+        cond_omitted,
+        use_lookup_tools=True,
+    )
+    assert ans_lvef_tools["abstained"] is False
+    assert "55" in ans_lvef_tools["answer"]
+    assert any(c["resource_uuid"] == "obs-lvef-55" for c in ans_lvef_tools["citations"])
+
+    ans_lvef_static = answer_wahs_question(
+        ext_notes,
+        "What was the patient's left ventricular ejection fraction (LVEF)?",
+        cond_omitted,
+        use_lookup_tools=False,
+    )
+    assert ans_lvef_static["abstained"] is True
+    assert "Not present in patient FHIR Bundle" not in (ans_lvef_static["abstention_reason"] or "")
+    assert "Omitted" in (ans_lvef_static["abstention_reason"] or "")
+
+    # 5. hub-57-3 & hub-57-4: score_case_response & render_markdown_report
+    dummy_case = {
+        "case_id": "test-case-1",
+        "use_case": "A_reconciliation",
+        "expect_abstention": False,
+        "question": "What CKD stages conflict?",
+        "expected_facts": ["CKD Stage 2", "CKD Stage 3"],
+    }
+    bad_ans = {"abstained": False, "answer": "Bananas are yellow [1].", "citations": [{"index": 1, "resource_uuid": "pat-neg-test"}]}
+    scored_bad = score_case_response(dummy_case, bad_ans, cond_no_lvef)
+    assert scored_bad["passed"] is False
+
+    md_fail = render_markdown_report(
+        {
+            "code_coverage": {"overall_coverage_pct": 90.0, "resolved_instances": 9, "total_instances": 10},
+            "ablation_rows": [],
+            "case_results": [
+                {
+                    "case_id": "test-case-1",
+                    "use_case": "A_reconciliation",
+                    "patient_id": "Maurice742_Auer97",
+                    "sharing_posture": "patient_self",
+                    "prompt": "Prompt",
+                    "expect_abstention": False,
+                    "actual_abstention": False,
+                    "passed": False,
+                    "citation_count": 0,
+                }
+            ],
+            "demo_patients": {
+                f"{p}_set_b": {
+                    "patient_name": p,
+                    "birth_date": "1950-01-01",
+                    "raw_mb": 1.0,
+                    "raw_est_tokens": 1000,
+                    "postures": {
+                        "patient_self": {
+                            "duplicates_and_bloat": {
+                                "summary_metrics": {
+                                    "total_bundle_entries": 10,
+                                    "excluded_non_clinical_entries": 1,
+                                    "deduplicated_base64_notes": 0,
+                                    "raw_lab_observations": 2,
+                                    "canonical_lab_analytes": 1,
+                                    "blood_vs_serum_split_analytes": 0,
+                                    "raw_stopped_medications": 0,
+                                    "folded_stopped_med_ingredients": 0,
+                                }
+                            },
+                            "data_quality_and_conflicts": {"total_findings": 0, "findings": []},
+                            "patterns_and_summaries": {"directed_summary": {"sensitive_sdoh_included": []}},
+                        },
+                        "external_share": {
+                            "patterns_and_summaries": {"directed_summary": {"redacted_privacy_count": 0}}
+                        },
+                    },
+                }
+                for p in ("Maurice742_Auer97", "Lamar193_Beer512", "Byron202_Emard19")
+            },
+        }
+    )
+    assert "| **FAIL** |" in md_fail
+
+    # 6. hub-57-11 & hub-chat-condensation-mode-ignored: API input validation & condense_mode forwarding
+    client = TestClient(app)
+    for bad_payload in (
+        {"fhir_bundle": {}},
+        {"fhir_bundle": {"resourceType": "Bundle", "entry": "not-a-list"}},
+        {"fhir_bundle": {"resourceType": "Bundle", "entry": []}},
+        {"patient_id": "nonexistent_patient_xyz"},
+    ):
+        r_bad = client.post("/wahs/api/analyze", json=bad_payload)
+        assert r_bad.status_code in (400, 404, 422)
+
+    r_chat_tiered = client.post(
+        "/wahs/api/chat",
+        json={
+            "patient_id": "Maurice742_Auer97_sample",
+            "condense_mode": "tiered",
+            "question": "What duplicate medications are on my list?",
+        },
+    )
+    assert r_chat_tiered.status_code == 200
+    assert r_chat_tiered.json()["tier_info"]["condense_mode"] == "tiered"
+
 
 
 

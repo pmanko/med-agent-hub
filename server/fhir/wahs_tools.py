@@ -14,6 +14,7 @@ import re
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Union
 
 from .extractors import ClinicalItem, ExtractedChart, extract_bundle
+from .normalizers import classify_sensitivity
 
 
 def _ensure_extracted(
@@ -108,6 +109,8 @@ def search_chart_entries(
         "date_to": date_to,
         "sharing_posture": sharing_posture,
         "total_matches": len(matches),
+        "returned_count": len(top_matches),
+        "truncated": len(matches) > len(top_matches),
         "redacted_for_privacy_count": redacted_count,
         "results": top_matches,
     }
@@ -125,8 +128,22 @@ def get_lab_history(
     q_norm = (analyte_or_loinc or "").strip().lower()
     q_tokens = [t for t in re.findall(r"[a-z0-9.\-]+", q_norm) if len(t) >= 2]
 
+    redacted_uuids = {
+        u
+        for it in extracted.items
+        if _is_privacy_redacted(it, sharing_posture)
+        for u in ([it.resource_uuid] + list(it.member_uuids))
+        if u
+    }
     pts = []
+    redacted_count = 0
     for p in extracted.numeric_points:
+        if p.resource_uuid in redacted_uuids or (
+            sharing_posture == "external_share"
+            and classify_sensitivity(p.code, p.concept, [p.category]) == "SDOH/PRIVACY-SENSITIVE"
+        ):
+            redacted_count += 1
+            continue
         hay = f"{p.concept} {p.code} {p.category}".lower()
         if q_norm in hay or (q_tokens and any(t in hay for t in q_tokens)):
             pts.append(p)
@@ -162,6 +179,10 @@ def get_lab_history(
         "tool": "get_lab_history",
         "analyte_or_loinc": analyte_or_loinc,
         "sharing_posture": sharing_posture,
+        "total_matches": len(pts),
+        "returned_count": len(series),
+        "truncated": len(pts) > len(series),
+        "redacted_for_privacy_count": redacted_count,
         "summary": summary,
         "results": series,
     }
@@ -195,8 +216,15 @@ def read_clinical_note(
         all_uuids = {item.resource_uuid} | set(item.member_uuids)
         if target_uuid and target_uuid not in all_uuids:
             continue
-        if q_norm and q_norm not in f"{item.display} {item.text}".lower():
+        raw_decoded = str(
+            item.metadata.get("raw_decoded_text")
+            or item.metadata.get("full_text")
+            or item.text
+            or ""
+        ).strip()
+        if q_norm and q_norm not in f"{item.display} {item.text} {raw_decoded}".lower():
             continue
+        full_note_text = raw_decoded or item.text
         notes.append(
             {
                 "resource_type": item.resource_type,
@@ -206,7 +234,9 @@ def read_clinical_note(
                 "display": item.display,
                 "source_org": item.source_org or "",
                 "conflict_note": item.conflict_note or "",
-                "text": item.text,
+                "text": full_note_text,
+                "full_text": full_note_text,
+                "summary_text": item.text,
             }
         )
 
@@ -215,6 +245,7 @@ def read_clinical_note(
         "resource_uuid": target_uuid,
         "query": query,
         "sharing_posture": sharing_posture,
+        "total_matches": len(notes),
         "redacted_for_privacy_count": redacted_count,
         "results": notes,
     }

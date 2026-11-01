@@ -1,12 +1,26 @@
-# Clinical knowledge-base seed
+# Clinical knowledge-base seeds & WAHS+ structured reference packs
 
-`corpus.jsonl` is a small, hand-curated seed used by the optional
-`StaticKnowledgeSource` context adapter. Matching rows enter the common evidence ledger as
-numbered `KnowledgeReference` records. It is **demo-grade**:
-enough well-established facts to prove the retrieve-and-ground path, not a
-comprehensive corpus.
+`server/kb_data/` contains two provenance-bearing JSONL corpora searched via `server.kb`
+(`StaticKnowledgeSource`) and three deterministic reference packs loaded by `server.fhir.kb_lookup`:
 
-## Domains (24 snippets)
+1. **`corpus.jsonl` (`corpus="default"`)** — Stream 1 OpenMRS / global-health HIV, TB, malaria,
+   pediatric IMCI, CIEL/OCL, and OpenMRS data-model seed (24 snippets).
+2. **`wahs_corpus.jsonl` (`corpus="wahs"`)** — Stream 6 Washington Health Summary (WAHS+)
+   clinical reconciliation, ACIP immunization schedule rules, medication brand↔generic and
+   therapeutic-class duplication guidance, KDIGO/ADA stage progression, LOINC lab trajectory
+   interpretation, and SDOH privacy segmentation reference (14 snippets), indexed with
+   clinical `codes` (SNOMED CT, RxNorm, CVX, LOINC) for hybrid code-first + FTS5 BM25 retrieval.
+3. **`acip_rules.json` (WAHS Layer 1)** — CDC ACIP CVX vaccine group mappings, duplicate window
+   thresholds, and series rules (including the HPV under-15 2-dose rule and 5-month minimum interval exception).
+4. **`rxnorm_lookup.json` (WAHS Layer 2)** — NLM RxNorm active ingredient, brand↔generic alias,
+   and therapeutic class lookup table.
+5. **`clinical_exclusivity_and_privacy.json` (WAHS Layer 3)** — SNOMED CT condition stage
+   exclusivity (`ckd_stage`, `glycemic_progression`), SDOH sensitivity classifications
+   (`SDOH/PRIVACY-SENSITIVE`, `SDOH-SOCIAL`), and LOINC lab/vital reference ranges with specimen-preserving aliases.
+
+Matching JSONL rows enter the common evidence ledger as numbered `KnowledgeReference` records.
+
+## Stream 1 Default Corpus Domains (`corpus.jsonl`, 24 snippets)
 
 The clinical coverage is curated to the **demo-data profile** (see
 `specs/artifacts/canvases/demo-data-profile.canvas.tsx` + `specs/artifacts/planning/kb-scope.md`):

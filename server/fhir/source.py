@@ -46,10 +46,27 @@ class ResilientTokenCounter:
                 return await self.router_counter.count_chat(model, payload)
             except Exception:
                 pass
+        parts: list[str] = []
+        if payload.get("system"):
+            parts.append(str(payload.get("system")))
         messages = payload.get("messages") or []
-        combined = "\n".join(
-            str(m.get("content") or "") for m in messages if isinstance(m, Mapping)
-        )
+        for m in messages:
+            if not isinstance(m, Mapping):
+                continue
+            content = m.get("content")
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, Mapping):
+                        parts.append(str(block.get("text") or block.get("content") or json.dumps(block)))
+                    else:
+                        parts.append(str(block))
+            elif content is not None:
+                parts.append(str(content))
+            if m.get("tool_calls"):
+                parts.append(json.dumps(m.get("tool_calls")))
+        if payload.get("tools"):
+            parts.append(json.dumps(payload.get("tools")))
+        combined = "\n".join(parts)
         # Add 24-token chat-template framing allowance
         return estimate_tokens_local(combined) + 24
 
@@ -71,6 +88,12 @@ class FhirBundleContextSource:
         sharing_posture: str = "patient_self",
         token_counter: Optional[Callable[[str], int]] = None,
     ) -> None:
+        if not isinstance(target_tokens, int) or isinstance(target_tokens, bool) or target_tokens <= 0:
+            raise ValueError("target_tokens must be a positive integer")
+        if mode not in {"full", "reconcile"}:
+            raise ValueError(f"Unsupported condensation mode: {mode!r}")
+        if sharing_posture not in {"patient_self", "external_share"}:
+            raise ValueError(f"Unsupported sharing_posture: {sharing_posture!r}")
         self.bundles_by_patient: Dict[str, Mapping[str, Any]] = dict(bundles_by_patient or {})
         self.bundle_dir = Path(bundle_dir) if bundle_dir else None
         self.target_tokens = target_tokens
@@ -81,7 +104,14 @@ class FhirBundleContextSource:
     def _resolve_bundle(self, request: ContextRequest) -> Mapping[str, Any]:
         if request.patient:
             if request.patient in self.bundles_by_patient:
-                return self.bundles_by_patient[request.patient]
+                bundle = self.bundles_by_patient[request.patient]
+                if not isinstance(bundle, Mapping) or bundle.get("resourceType") != "Bundle":
+                    raise ContextSourceError(
+                        "invalid_context_bundle",
+                        f"Configured FHIR resource for patient {request.patient!r} is not a FHIR Bundle.",
+                        source=self.name,
+                    )
+                return bundle
             if self.bundle_dir and self.bundle_dir.is_dir():
                 candidate = self.bundle_dir / f"{request.patient}.json"
                 if not candidate.exists():
@@ -89,7 +119,21 @@ class FhirBundleContextSource:
                     if matches:
                         candidate = matches[0]
                 if candidate.exists():
-                    return json.loads(candidate.read_text(encoding="utf-8"))
+                    try:
+                        parsed_file = json.loads(candidate.read_text(encoding="utf-8"))
+                    except Exception as exc:
+                        raise ContextSourceError(
+                            "invalid_context_bundle",
+                            f"Failed to parse FHIR Bundle JSON for patient {request.patient!r}: {exc}",
+                            source=self.name,
+                        ) from exc
+                    if not isinstance(parsed_file, Mapping) or parsed_file.get("resourceType") != "Bundle":
+                        raise ContextSourceError(
+                            "invalid_context_bundle",
+                            f"File {candidate.name} for patient {request.patient!r} is not a FHIR Bundle.",
+                            source=self.name,
+                        )
+                    return parsed_file
 
         # Check if an inline JSON FHIR Bundle was passed in request.messages
         for msg in request.messages:
@@ -122,9 +166,19 @@ class FhirBundleContextSource:
         )
         records: list[EvidenceRecord] = []
         seen_ids: Dict[str, int] = {}
-        for rec, mapping in zip(condensed.records, condensed.mappings):
+        recs_by_key: Dict[Tuple[str, str], list[Dict[str, Any]]] = {}
+        for rec in condensed.records:
+            r_key = (
+                str(rec.get("resourceType") or "Record"),
+                str(rec.get("resourceUuid") or ""),
+            )
+            recs_by_key.setdefault(r_key, []).append(rec)
+
+        for mapping in condensed.mappings:
             rtype = str(mapping.get("resourceType") or "Record")
             ruuid = str(mapping.get("resourceUuid") or "")
+            bucket = recs_by_key.get((rtype, ruuid)) or []
+            rec = bucket.pop(0) if bucket else {}
             base_id = f"fhir:{rtype}:{ruuid}"
             count = seen_ids.get(base_id, 0) + 1
             seen_ids[base_id] = count

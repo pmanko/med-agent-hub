@@ -32,11 +32,19 @@ from .kb_lookup import (
     resolve_lab_code,
     resolve_medication_code,
 )
+from .normalizers import classify_sensitivity
 from .wahs_tools import (
     get_lab_history,
     read_clinical_note,
     search_chart_entries,
 )
+
+
+def _is_sdoh_privacy_sensitive(item: ClinicalItem) -> bool:
+    return (
+        item.sensitivity == "SDOH/PRIVACY-SENSITIVE"
+        or classify_sensitivity(item.code, f"{item.display} {item.text}") == "SDOH/PRIVACY-SENSITIVE"
+    )
 
 
 def _ensure_extracted_and_condensed(
@@ -470,25 +478,40 @@ def _apply_stage2_conflict_skills_on_chart(extracted: ExtractedChart) -> Extract
 
     note_conflicts: Dict[str, str] = {}
     note_med_links: Dict[str, List[str]] = defaultdict(list)
+    note_contradicted_meds: Dict[str, List[str]] = defaultdict(list)
     if not skip_multi_source:
         active_meds = [it for it in extracted.items if it.section == "med_active"]
         notes = [it for it in extracted.items if it.section in {"clinical_note", "note"}]
         hold_re = re.compile(
-            r"\b(?:hold|stop|discontinue|held|stopped|do\s+not\s+take)\s+([^.;\n]{3,90})",
+            r"\b(?:hold|stop|discontinue|held|stopped|discontinued|do\s+not\s+take)\s+([^.;\n]{3,90})",
+            re.IGNORECASE,
+        )
+        negation_prefix_re = re.compile(
+            r"\b(?:do\s+not|don't|never|not\s+to|not|without|no\s+need\s+to|avoid)\s+$",
+            re.IGNORECASE,
+        )
+        conditional_clause_re = re.compile(
+            r"\b(?:if|unless|when|should|in\s+case|for\s+sbp|for\s+bp|for\s+hr|parameters?\s*:)\b",
             re.IGNORECASE,
         )
         for n_item in notes:
             matched_meds_for_note: List[ClinicalItem] = []
-            for match in hold_re.finditer(n_item.text or ""):
-                clause = match.group(1).lower()
-                for m_item in active_meds:
-                    m_ing = (m_item.ingredient_key or normalize_drug_ingredient(m_item.display)).lower()
-                    m_disp_tokens = [
-                        t for t in re.split(r"[^a-z0-9]+", m_item.display.lower()) if len(t) >= 4 and not t.isdigit()
-                    ]
-                    if (m_ing and m_ing in clause) or any(tok in clause for tok in m_disp_tokens[:2]):
-                        if m_item not in matched_meds_for_note:
-                            matched_meds_for_note.append(m_item)
+            for raw_clause in re.split(r"[.;|\n]+", n_item.text or ""):
+                if conditional_clause_re.search(raw_clause):
+                    continue
+                for match in hold_re.finditer(raw_clause):
+                    prefix = raw_clause[: match.start()]
+                    if negation_prefix_re.search(prefix):
+                        continue
+                    clause = match.group(1).lower()
+                    for m_item in active_meds:
+                        m_ing = (m_item.ingredient_key or normalize_drug_ingredient(m_item.display)).lower()
+                        m_disp_tokens = [
+                            t for t in re.split(r"[^a-z0-9]+", m_item.display.lower()) if len(t) >= 4 and not t.isdigit()
+                        ]
+                        if (m_ing and m_ing in clause) or any(tok in clause for tok in m_disp_tokens[:2]):
+                            if m_item not in matched_meds_for_note:
+                                matched_meds_for_note.append(m_item)
             if matched_meds_for_note:
                 med_names_str = ", ".join(m.display for m in matched_meds_for_note)
                 msg = (
@@ -501,10 +524,13 @@ def _apply_stage2_conflict_skills_on_chart(extracted: ExtractedChart) -> Extract
                         med_conflicts[m_item.resource_uuid] = msg
                     note_med_links[m_item.resource_uuid].append(n_item.resource_uuid)
                     note_med_links[n_item.resource_uuid].append(m_item.resource_uuid)
+                    if m_item.resource_uuid not in note_contradicted_meds[n_item.resource_uuid]:
+                        note_contradicted_meds[n_item.resource_uuid].append(m_item.resource_uuid)
 
 
     updated_items: List[ClinicalItem] = []
     for it in extracted.items:
+        eff_sens = it.sensitivity or classify_sensitivity(it.code, f"{it.display} {it.text}")
         c_note = (
             cond_conflicts.get(it.resource_uuid)
             or med_conflicts.get(it.resource_uuid)
@@ -515,9 +541,20 @@ def _apply_stage2_conflict_skills_on_chart(extracted: ExtractedChart) -> Extract
         if c_note and c_note.startswith("acip_schedule_note:"):
             v_grp = str(it.metadata.get("vaccine_group") or it.ingredient_key or it.display)
             extra_members.extend(imms_by_group.get(v_grp, []))
-        if c_note or extra_members:
+        new_meta = dict(it.metadata)
+        if it.resource_uuid in note_contradicted_meds:
+            new_meta["contradicted_med_uuids"] = list(note_contradicted_meds[it.resource_uuid])
+        if c_note or extra_members or eff_sens != it.sensitivity or new_meta != it.metadata:
             new_members = tuple(dict.fromkeys(list(it.member_uuids) + extra_members))
-            updated_items.append(replace(it, conflict_note=c_note or it.conflict_note, member_uuids=new_members))
+            updated_items.append(
+                replace(
+                    it,
+                    sensitivity=eff_sens,
+                    conflict_note=c_note or it.conflict_note,
+                    member_uuids=new_members,
+                    metadata=new_meta,
+                )
+            )
         else:
             updated_items.append(it)
     return replace(extracted, items=updated_items)
@@ -546,7 +583,9 @@ def analyze_data_quality_and_conflicts(
     cond_conflicts = [
         it
         for it in extracted.items
-        if it.section in {"condition_active", "condition_resolved"} and it.conflict_note
+        if it.section in {"condition_active", "condition_resolved"}
+        and it.conflict_note
+        and not (sharing_posture == "external_share" and _is_sdoh_privacy_sensitive(it))
     ]
     # Group related condition conflicts so we present coherent cards
     ckd_items = [
@@ -987,16 +1026,19 @@ def analyze_data_quality_and_conflicts(
         for it in extracted.items
         if it.section in {"clinical_note", "note"}
         and "note_medication_contradiction" in (it.conflict_note or "")
+        and not (sharing_posture == "external_share" and _is_sdoh_privacy_sensitive(it))
     ]
     for n_it in note_med_conflicts:
+        contradicted_uuids = set(n_it.metadata.get("contradicted_med_uuids") or ())
         n_members = set(n_it.member_uuids or ())
         linked_meds = [
             it
             for it in extracted.items
             if it.section == "med_active"
             and (
-                it.resource_uuid in n_members
-                or "note_medication_contradiction" in (it.conflict_note or "")
+                it.resource_uuid in contradicted_uuids
+                if contradicted_uuids
+                else it.resource_uuid in n_members
             )
         ]
 
@@ -1329,14 +1371,21 @@ def analyze_patterns_and_summaries(
 
     # 3. Directed Summaries (Use Case B-2: Patient Self-View vs. External / School / Specialist Share)
     def _posture_allowed(item: ClinicalItem) -> bool:
-        return not (sharing_posture == "external_share" and item.sensitivity == "SDOH/PRIVACY-SENSITIVE")
+        return not (
+            sharing_posture == "external_share"
+            and (item.sensitivity == "SDOH/PRIVACY-SENSITIVE" or _is_sdoh_privacy_sensitive(item))
+        )
 
     active_conds = [it for it in extracted.items if it.section == "condition_active" and _posture_allowed(it)]
     active_meds = [it for it in extracted.items if it.section == "med_active" and _posture_allowed(it)]
     allergies = [it for it in extracted.items if it.section == "allergy" and _posture_allowed(it)]
     immunizations = [it for it in extracted.items if it.section == "immunization" and _posture_allowed(it)]
     sdoh_safe = [it for it in extracted.items if it.sensitivity == "SDOH-SOCIAL"]
-    sdoh_sensitive = [it for it in extracted.items if it.sensitivity == "SDOH/PRIVACY-SENSITIVE"]
+    sdoh_sensitive = [
+        it
+        for it in extracted.items
+        if it.sensitivity == "SDOH/PRIVACY-SENSITIVE" or _is_sdoh_privacy_sensitive(it)
+    ]
 
     directed_summary = {
         "posture": sharing_posture,
@@ -1466,7 +1515,7 @@ def answer_wahs_question(
     q_lower = q_text.lower()
 
     # Retrieve relevant KB entries using code-first + BM25 hybrid search
-    chart_codes = extract_chart_kb_codes(extracted.items)
+    chart_codes = extract_chart_kb_codes(extracted)
     kb_hits = search_kb(
         q_text or "clinical summary reconciliation",
         k=3,
@@ -1475,11 +1524,26 @@ def answer_wahs_question(
     )
 
     # 1. Check if the question asks about a topic absent from the chart (Abstention Probe)
+    matched_topic_items: List[ClinicalItem] = []
+    matched_topic_pts: List[Any] = []
     for pattern, topic_desc in _UNANSWERABLE_TOPIC_PATTERNS:
         if pattern.search(q_text):
-            # Verify it truly does not appear in chart_text
             matched_token = pattern.search(condensed.chart_text)
-            if not matched_token:
+            matching_full_items = [
+                it
+                for it in extracted.items
+                if not (
+                    sharing_posture == "external_share"
+                    and (it.sensitivity == "SDOH/PRIVACY-SENSITIVE" or _is_sdoh_privacy_sensitive(it))
+                )
+                and (pattern.search(it.display) or pattern.search(it.text) or pattern.search(it.code))
+            ]
+            matching_numeric_pts = [
+                pt
+                for pt in extracted.numeric_points
+                if pattern.search(pt.concept) or pattern.search(pt.code)
+            ]
+            if not matched_token and not matching_full_items and not matching_numeric_pts:
                 # Cite the patient header [1] and completeness manifest context
                 header_cites = _citations_for_uuids(
                     [extracted.items[0].resource_uuid] if extracted.items else [],
@@ -1527,6 +1591,52 @@ def answer_wahs_question(
                         "sharing_posture": sharing_posture,
                     },
                 }
+            if not matched_token and not use_lookup_tools:
+                header_cites = _citations_for_uuids(
+                    [extracted.items[0].resource_uuid] if extracted.items else [],
+                    uuid_map,
+                    condensed,
+                )
+                cite_str = _format_citation_refs(header_cites) or "[1]"
+                return {
+                    "question": q_text,
+                    "patient_category": "4. Next-Visit Checklist",
+                    "abstained": True,
+                    "abstains": True,
+                    "abstention_reason": (
+                        f"Omitted from condensed Tier {condensed.tier} capsule under target_tokens={condensed.target_tokens} "
+                        f"budget (full-chart lookup tools disabled): {topic_desc}"
+                    ),
+                    "answer": (
+                        f"**Omitted Under Static Budget (`use_lookup_tools=False`):** {topic_desc} is not included in "
+                        f"the condensed Tier {condensed.tier} capsule ({condensed.actual_tokens} tokens {cite_str}), "
+                        f"and on-demand full-chart lookup tools are disabled for this static evaluation arm."
+                    ),
+                    "patient_plain_summary": (
+                        f"This compact summary view (Tier {condensed.tier}, {condensed.actual_tokens} tokens {cite_str}) "
+                        f"did not include {topic_desc} within the token budget, and full-chart lookup tools are turned off."
+                    ),
+                    "what_to_ask_doctor": [
+                        f"Can we check my full chart or enable full-chart lookup to review {topic_desc}?"
+                    ],
+                    "clinician_technical_note": (
+                        f"Static budget omission: '{topic_desc}' omitted in Tier {condensed.tier} ({condensed.actual_tokens} tokens) "
+                        f"with use_lookup_tools=False {cite_str}."
+                    ),
+                    "source_mode": "ips_safety_core",
+                    "source_mode_label": "Answered from In-Context IPS Safety Core",
+                    "citations": header_cites,
+                    "kb_references": kb_hits,
+                    "tier_info": {
+                        "tier": condensed.tier,
+                        "tier_name": condensed.tier_name,
+                        "target_tokens": condensed.target_tokens,
+                        "actual_tokens": condensed.actual_tokens,
+                        "sharing_posture": sharing_posture,
+                    },
+                }
+            matched_topic_items.extend(matching_full_items)
+            matched_topic_pts.extend(matching_numeric_pts)
 
     # 2. Check if the question asks about sensitive SDOH while in `external_share` mode
     if sharing_posture == "external_share" and re.search(
@@ -1633,6 +1743,51 @@ def answer_wahs_question(
 
     sections: List[str] = []
 
+    if matched_topic_items or matched_topic_pts:
+        topic_lines: List[str] = []
+        recovered_topic = 0
+        for it in matched_topic_items:
+            cites = _citations_for_uuids([it.resource_uuid], uuid_map, condensed)
+            if cites:
+                c_ref = _add_cites(cites)
+            elif use_lookup_tools:
+                recovered_topic += 1
+                c_ref = _add_overflow_citation(
+                    it.resource_uuid,
+                    it.resource_type,
+                    it.clinical_date or "",
+                    it.text,
+                    it.member_uuids,
+                )
+            else:
+                continue
+            topic_lines.append(
+                f"- **{it.display}** (`{it.clinical_date or 'recorded'}`): {it.text} {c_ref}"
+            )
+        for pt in matched_topic_pts:
+            cites = _citations_for_uuids([pt.resource_uuid], uuid_map, condensed)
+            if cites:
+                c_ref = _add_cites(cites)
+            elif use_lookup_tools:
+                recovered_topic += 1
+                c_ref = _add_overflow_citation(
+                    pt.resource_uuid,
+                    "Observation",
+                    pt.date or "",
+                    f"Observation: {pt.concept} {pt.value} {pt.unit}",
+                )
+            else:
+                continue
+            topic_lines.append(
+                f"- **{pt.concept}** (`{pt.date}`): `{pt.value} {pt.unit}` {c_ref}"
+            )
+        if recovered_topic:
+            overflow_tool_calls.append(
+                {"tool": "search_chart_entries", "query": q_text, "recovered_count": recovered_topic}
+            )
+        if topic_lines:
+            sections.append("### Matched Clinical Observations & Records\n" + "\n".join(topic_lines))
+
     # Medication / prescription / drug class / interaction questions
     chart_med_tokens = {
         tok
@@ -1649,7 +1804,13 @@ def answer_wahs_question(
         r"metformin|anticoag|sedative|polypharmacy|beers)\b",
         q_lower,
     ):
-        active_meds = [it for it in extracted.items if it.section == "med_active"]
+        active_meds = [
+            it
+            for it in extracted.items
+            if it.section == "med_active"
+            and (use_lookup_tools or it.resource_uuid in uuid_map)
+            and not (sharing_posture == "external_share" and _is_sdoh_privacy_sensitive(it))
+        ]
         skip_kb = any(it.metadata.get("skip_stage2_skills") for it in extracted.items)
         med_lines: List[str] = []
         if skip_kb and re.search(r"\b(?:duplicate|same|conflict|overlap|double|reconcil|audit|statin|plavix|prinivil)\b", q_lower):
@@ -1717,6 +1878,8 @@ def answer_wahs_question(
         cond_lines: List[str] = []
         items_by_uuid = {it.resource_uuid: it for it in extracted.items}
         for f in dq["findings"]:
+            if not use_lookup_tools and not f["citations"] and f.get("resource_uuids"):
+                continue
             c_ref = _add_cites(f["citations"])
             if use_lookup_tools:
                 all_f_uuids: List[str] = []
@@ -1959,7 +2122,11 @@ def answer_wahs_question(
             it
             for it in extracted.items
             if it.section in {"condition_active", "med_active", "device", "immunization"}
-            and not (sharing_posture == "external_share" and it.sensitivity == "SDOH/PRIVACY-SENSITIVE")
+            and (use_lookup_tools or it.resource_uuid in uuid_map)
+            and not (
+                sharing_posture == "external_share"
+                and (it.sensitivity == "SDOH/PRIVACY-SENSITIVE" or _is_sdoh_privacy_sensitive(it))
+            )
         ]
         all_cond_uuids = [it.resource_uuid for it in all_cond_items]
         ds_cites = _citations_for_uuids(all_cond_uuids, uuid_map, condensed)
@@ -1984,9 +2151,23 @@ def answer_wahs_question(
                     {"tool": "search_chart_entries", "query": "directed_summary_overflow", "recovered_count": len(extra_ds_refs)}
                 )
                 c_ref = f"{c_ref} {' '.join(extra_ds_refs[:6])}".strip()
-        devices_list = [it.display for it in extracted.items if it.section == "device"]
-        active_c_str = ", ".join(c["display"] for c in ds["active_conditions"]) or "None active"
-        active_m_str = ", ".join(m["display"] for m in ds["active_medications"]) or "None active"
+        devices_list = [
+            it.display
+            for it in extracted.items
+            if it.section == "device" and (use_lookup_tools or it.resource_uuid in uuid_map)
+        ]
+        visible_conds = [
+            c["display"]
+            for c in ds["active_conditions"]
+            if use_lookup_tools or c.get("citations")
+        ]
+        visible_meds = [
+            m["display"]
+            for m in ds["active_medications"]
+            if use_lookup_tools or m.get("citations")
+        ]
+        active_c_str = ", ".join(visible_conds) or "None active"
+        active_m_str = ", ".join(visible_meds) or "None active"
         sections.append(
             f"### Directed Clinical Summary ({ds['posture_label']})\n"
             f"- **Active Conditions:** {active_c_str} {c_ref}\n"
@@ -2075,7 +2256,16 @@ def answer_wahs_question(
     ask_doctor_items: List[str] = []
     clinician_notes: List[str] = []
 
+    for it in matched_topic_items:
+        if use_lookup_tools or it.resource_uuid in uuid_map:
+            plain_paragraphs.append(f"- **{it.display}:** {it.text}")
+    for pt in matched_topic_pts:
+        if use_lookup_tools or pt.resource_uuid in uuid_map:
+            plain_paragraphs.append(f"- **{pt.concept}:** {pt.value} {pt.unit} (recorded {pt.date})")
+
     for f in dq["findings"]:
+        if not use_lookup_tools and not f["citations"] and f.get("resource_uuids"):
+            continue
         if f.get("patient_plain_summary"):
             plain_paragraphs.append(f"- **{f['title']}:** {f['patient_plain_summary']}")
         if f.get("what_to_ask_doctor") and f["what_to_ask_doctor"] not in ask_doctor_items:

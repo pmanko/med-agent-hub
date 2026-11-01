@@ -11,9 +11,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Mapping, Set
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -44,6 +45,150 @@ except ImportError:  # pragma: no cover
         build_demo_patients_payload,
         write_wahs_demo_data_js,
     )
+
+
+_RUBRIC_STOPWORDS: Set[str] = {
+    "identifies",
+    "explains",
+    "recommends",
+    "cites",
+    "citing",
+    "citation",
+    "indices",
+    "both",
+    "with",
+    "from",
+    "that",
+    "this",
+    "patient",
+    "chart",
+    "summary",
+    "active",
+    "clinical",
+    "record",
+    "records",
+    "using",
+    "plain",
+    "language",
+    "without",
+    "medical",
+    "entry",
+    "entries",
+    "resource",
+    "resources",
+    "list",
+    "status",
+    "history",
+    "documented",
+    "retains",
+    "flags",
+    "notes",
+    "note",
+    "shows",
+    "under",
+    "across",
+    "between",
+    "while",
+    "when",
+    "where",
+    "which",
+    "should",
+    "would",
+    "could",
+    "their",
+    "there",
+    "these",
+    "those",
+}
+
+
+def score_case_response(
+    case: Mapping[str, Any],
+    ans: Mapping[str, Any],
+    condensed: Any,
+) -> Dict[str, Any]:
+    """Validate abstention, `[N] -> resourceUuid` citations, privacy redaction, and case rubric."""
+    expect_abstain = (
+        bool(case.get("expect_abstention", False))
+        or case.get("expected_answer_type") == "abstain_not_in_chart"
+        or case.get("use_case") == "B3_qa_abstention"
+    )
+    actual_abstain = bool(ans.get("abstained", False))
+    abstain_correct = actual_abstain == expect_abstain
+
+    citations = list(ans.get("citations") or [])
+    valid_indices = {int(m["index"]) for m in (getattr(condensed, "mappings", None) or []) if "index" in m}
+    answer_text = str(ans.get("answer") or "")
+    inline_indices = {int(m) for m in re.findall(r"\[(\d+)\]", answer_text)}
+    cited_indices = {int(c["index"]) for c in citations if "index" in c and str(c["index"]).isdigit()}
+
+    citations_valid = (
+        len(citations) > 0
+        and bool(inline_indices & cited_indices)
+        and all(
+            (int(c["index"]) in valid_indices or c.get("source_mode") == "full_chart_lookup")
+            and bool(c.get("resource_uuid"))
+            for c in citations
+        )
+    )
+
+    posture = str(case.get("sharing_posture") or "patient_self")
+    privacy_leak = False
+    if posture == "external_share":
+        forbidden_uuids = set(case.get("forbidden_resource_uuids") or [])
+        present_uuids = {
+            str(m.get("resourceUuid") or "") for m in (getattr(condensed, "mappings", None) or [])
+        } | {str(c.get("resource_uuid") or "") for c in citations}
+        if forbidden_uuids & present_uuids:
+            privacy_leak = True
+
+    combined_text = (
+        f"{ans.get('answer', '')} {ans.get('patient_plain_summary', '')} "
+        f"{ans.get('clinician_technical_note', '')} "
+        f"{' '.join(str(x) for x in (ans.get('what_to_ask_doctor') or []))}"
+    ).lower()
+
+    rubric = case.get("rubric") or {}
+    pos_items = list(rubric.get("positive_rubric_items") or []) + list(case.get("expected_facts") or [])
+    expected_tokens: Set[str] = set()
+    for item_str in pos_items:
+        for tok in re.findall(r"[a-z0-9]{4,}", str(item_str).lower()):
+            if tok not in _RUBRIC_STOPWORDS and not tok.isdigit():
+                expected_tokens.add(tok)
+
+    if expect_abstain:
+        rubric_passed = bool(
+            actual_abstain
+            and re.search(
+                r"\b(?:not\s+recorded|no\s+record|no\s+documentation|abstain|not\s+present|redacted|excluded|withheld|omitted)\b",
+                combined_text,
+            )
+        )
+    elif expected_tokens:
+        matched_tokens = {tok for tok in expected_tokens if tok in combined_text}
+        required_min = min(2, len(expected_tokens))
+        rubric_passed = len(matched_tokens) >= required_min
+    else:
+        q_tokens = {
+            tok
+            for tok in re.findall(r"[a-z0-9]{4,}", str(case.get("question") or case.get("prompt") or "").lower())
+            if tok not in _RUBRIC_STOPWORDS
+        }
+        rubric_passed = bool(answer_text.strip()) and (
+            not q_tokens or bool(q_tokens & set(re.findall(r"[a-z0-9]{4,}", combined_text)))
+        )
+
+    passed = bool(abstain_correct and citations_valid and rubric_passed and not privacy_leak)
+    return {
+        "expect_abstention": expect_abstain,
+        "actual_abstention": actual_abstain,
+        "abstain_correct": abstain_correct,
+        "citation_count": len(citations),
+        "citations_valid": citations_valid,
+        "rubric_passed": rubric_passed,
+        "privacy_leak": privacy_leak,
+        "passed": passed,
+    }
 
 
 def evaluate_cohort(source_dir: Path, eval_dir: Path) -> Dict[str, Any]:
@@ -151,9 +296,15 @@ def evaluate_cohort(source_dir: Path, eval_dir: Path) -> Dict[str, Any]:
     case_results: List[Dict[str, Any]] = []
     for case in eval_cases:
         pb = str(case.get("patient_bundle") or "")
+        is_set_c = "_messy.json" in pb
         is_set_b = "multisource" in pb or "Set_B" in str(case.get("dataset") or "")
         p = pb.replace("_multisource.json", "").replace("_messy.json", "").replace(".json", "")
-        bundle = bundles_set_b.get(p) if is_set_b else bundles_set_a.get(p)
+        if is_set_c:
+            bundle = bundles_set_c.get(p)
+        elif is_set_b:
+            bundle = bundles_set_b.get(p)
+        else:
+            bundle = bundles_set_a.get(p)
         if bundle is None:
             bundle = json.loads((eval_dir / pb).read_text(encoding="utf-8"))
         posture = str(case.get("sharing_posture") or "patient_self")
@@ -174,48 +325,25 @@ def evaluate_cohort(source_dir: Path, eval_dir: Path) -> Dict[str, Any]:
             sharing_posture=posture,
         )
 
-        # Check abstention accuracy
-        expect_abstain = (
-            bool(case.get("expect_abstention", False))
-            or case.get("expected_answer_type") == "abstain_not_in_chart"
-            or case.get("use_case") == "B3_qa_abstention"
-        )
-        abstain_correct = ans["abstained"] == expect_abstain
-
-        # Verify every citation [N] resolves to a valid FHIR resourceUuid in condensed.mappings or overflow lookup
-        valid_indices = {int(m["index"]) for m in condensed.mappings}
-        citations_valid = all(
-            (int(c["index"]) in valid_indices or c.get("source_mode") == "full_chart_lookup")
-            and bool(c.get("resource_uuid"))
-            for c in ans["citations"]
-        )
-
-        # Verify privacy redaction when posture == external_share
-        privacy_leak = False
-        if posture == "external_share":
-            forbidden_uuids = set(case.get("forbidden_resource_uuids") or [])
-            present_uuids = {
-                str(m.get("resourceUuid") or "") for m in condensed.mappings
-            }
-            if forbidden_uuids & present_uuids:
-                privacy_leak = True
+        scored = score_case_response(case, ans, condensed)
 
         case_results.append(
             {
                 "case_id": case["case_id"],
                 "use_case": case["use_case"],
                 "patient_id": p,
-                "dataset": "set_b" if is_set_b else "set_a",
+                "dataset": "set_c" if is_set_c else ("set_b" if is_set_b else "set_a"),
                 "sharing_posture": posture,
                 "target_tokens": budget,
                 "prompt": question_text,
-                "expect_abstention": expect_abstain,
-                "actual_abstention": ans["abstained"],
-                "abstain_correct": abstain_correct,
-                "citation_count": len(ans["citations"]),
-                "citations_valid": citations_valid,
-                "privacy_leak": privacy_leak,
-                "passed": abstain_correct and citations_valid and not privacy_leak,
+                "expect_abstention": scored["expect_abstention"],
+                "actual_abstention": scored["actual_abstention"],
+                "abstain_correct": scored["abstain_correct"],
+                "citation_count": scored["citation_count"],
+                "citations_valid": scored["citations_valid"],
+                "rubric_passed": scored["rubric_passed"],
+                "privacy_leak": scored["privacy_leak"],
+                "passed": scored["passed"],
                 "sample_answer": ans["answer"],
                 "citations": ans["citations"][:6],
             }
@@ -249,11 +377,37 @@ def render_markdown_report(results: Dict[str, Any]) -> str:
     demos = results["demo_patients"]
 
     total_cases = len(cases)
-    passed_cases = sum(1 for c in cases if c["passed"])
-    abstain_cases = [c for c in cases if c["expect_abstention"]]
-    abstain_passed = sum(1 for c in abstain_cases if c["abstain_correct"])
-    answerable_cases = [c for c in cases if not c["expect_abstention"]]
-    answerable_passed = sum(1 for c in answerable_cases if c["abstain_correct"] and c["citations_valid"])
+    passed_cases = sum(1 for c in cases if c.get("passed"))
+    abstain_cases = [c for c in cases if c.get("expect_abstention")]
+    abstain_passed = sum(1 for c in abstain_cases if c.get("passed"))
+    answerable_cases = [c for c in cases if not c.get("expect_abstention")]
+    answerable_passed = sum(1 for c in answerable_cases if c.get("passed"))
+    leak_count = sum(1 for c in cases if c.get("privacy_leak"))
+
+    gt_retained_total = sum(int(r.get("gt_anomalies_retained", 0)) for r in ablation)
+    gt_expected_total = sum(int(r.get("gt_anomalies_total", 0)) for r in ablation)
+    condense_status = (
+        "PASS"
+        if ablation and all(int(r.get("actual_tokens", 0)) <= int(r.get("target_tokens", 0)) for r in ablation)
+        else ("UNAVAILABLE" if not ablation else "FAIL")
+    )
+    anomaly_status = (
+        "PASS"
+        if gt_expected_total > 0 and gt_retained_total == gt_expected_total
+        else ("UNAVAILABLE" if gt_expected_total == 0 else "FAIL")
+    )
+    cov_status = "PASS" if float(cov.get("overall_coverage_pct", 0.0)) >= 95.0 else "FAIL"
+    rubric_status = (
+        "PASS"
+        if total_cases > 0 and passed_cases == total_cases
+        else ("UNAVAILABLE" if total_cases == 0 else "FAIL")
+    )
+    abstain_status = (
+        "PASS"
+        if total_cases > 0 and abstain_passed == len(abstain_cases) and answerable_passed == len(answerable_cases)
+        else ("UNAVAILABLE" if total_cases == 0 else "FAIL")
+    )
+    privacy_status = "PASS" if leak_count == 0 else "FAIL"
 
     lines: List[str] = [
         "# Washington Health Summary (WAHS+) Phase 2 Evaluation Report",
@@ -269,12 +423,12 @@ def render_markdown_report(results: Dict[str, Any]) -> str:
         "",
         "| Evaluation Dimension | Target Acceptance Criterion | Observed Result | Status |",
         "| :--- | :--- | :--- | :--- |",
-        f"| **FHIR Context Condensation (`18.8 MB` Maurice Chart)** | Fit within `16k`, `8k`, `4k`, `2k`, and `1k` token budgets | **`99.58% – 99.95%` token reduction** (`1,981,429` raw est. tokens $\\to$ `1,012 – 8,324` tokens) | **PASS** |",
-        f"| **IPS Safety Core & Ground-Truth Anomaly Recall** | `100%` retention of active meds, allergies, conflicts & anomalies across budgets | **`100.0%` (`195 / 195` anomaly-budget checks across `16k -> 1k`)** | **PASS** |",
-        f"| **4-Layer Clinical Knowledge Base Code Coverage** | $\\ge 95\\%$ deterministic resolution of SNOMED, RxNorm, CVX & LOINC codes | **`{cov['overall_coverage_pct']}%` (`{cov['resolved_instances']:,} / {cov['total_instances']:,}` instances across 6 bundles)** | **PASS** |",
-        f"| **Evaluation Rubric Pass Rate (`wahs_eval_cases.jsonl`)** | Grounded answers with valid `[N] -> resourceUuid` provenance | **`{passed_cases} / {total_cases}` (`{(passed_cases / max(total_cases, 1)) * 100:.1f}%`)** across Use Cases A, B-1, B-2, B-3 | **PASS** |",
-        f"| **Unanswerable Probe Abstention (Use Case B-3)** | `100%` abstention on unrecorded facts; `0%` false abstention | **`{abstain_passed} / {len(abstain_cases)}` (`100.0%`)** true abstentions; **`{answerable_passed} / {len(answerable_cases)}`** grounded answers | **PASS** |",
-        "| **SDOH Privacy Segmentation (`external_share` mode)** | `0.0%` leakage of `42 CFR Part 2` / WA MHMDA sensitive items | **`0` leaks across all external-share summaries & Q&A responses** | **PASS** |",
+        f"| **FHIR Context Condensation (`18.8 MB` Maurice Chart)** | Fit within `16k`, `8k`, `4k`, `2k`, and `1k` token budgets | **`99.58% – 99.95%` token reduction** (`1,981,429` raw est. tokens $\\to$ `1,012 – 8,324` tokens) | **{condense_status}** |",
+        f"| **IPS Safety Core & Ground-Truth Anomaly Recall** | `100%` retention of active meds, allergies, conflicts & anomalies across budgets | **`{(gt_retained_total / max(gt_expected_total, 1)) * 100:.1f}%` (`{gt_retained_total} / {gt_expected_total}` anomaly-budget checks across `16k -> 1k`)** | **{anomaly_status}** |",
+        f"| **4-Layer Clinical Knowledge Base Code Coverage** | $\\ge 95\\%$ deterministic resolution of SNOMED, RxNorm, CVX & LOINC codes | **`{cov['overall_coverage_pct']}%` (`{cov['resolved_instances']:,} / {cov['total_instances']:,}` instances across 6 bundles)** | **{cov_status}** |",
+        f"| **Evaluation Rubric Pass Rate (`wahs_eval_cases.jsonl`)** | Grounded answers with valid `[N] -> resourceUuid` provenance | **`{passed_cases} / {total_cases}` (`{(passed_cases / max(total_cases, 1)) * 100:.1f}%`)** across Use Cases A, B-1, B-2, B-3 | **{rubric_status}** |",
+        f"| **Unanswerable Probe Abstention (Use Case B-3)** | `100%` abstention on unrecorded facts; `0%` false abstention | **`{abstain_passed} / {len(abstain_cases)}` (`{(abstain_passed / max(len(abstain_cases), 1)) * 100:.1f}%`)** true abstentions; **`{answerable_passed} / {len(answerable_cases)}`** grounded answers | **{abstain_status}** |",
+        f"| **SDOH Privacy Segmentation (`external_share` mode)** | `0.0%` leakage of `42 CFR Part 2` / WA MHMDA sensitive items | **`{leak_count}` leaks across all external-share summaries & Q&A responses** | **{privacy_status}** |",
         "",
         "---",
         "",
@@ -374,9 +528,9 @@ def render_markdown_report(results: Dict[str, Any]) -> str:
 
     for c in cases:
         outcome = (
-            "PASS (Grounded Abstention)"
-            if c["expect_abstention"] and c["actual_abstention"]
-            else ("PASS (Grounded Answer)" if c["passed"] else "FAIL")
+            ("PASS (Grounded Abstention)" if c.get("expect_abstention") else "PASS (Grounded Answer)")
+            if c.get("passed")
+            else "FAIL"
         )
         lines.append(
             f"| `{c['case_id']}` | `{c['use_case']}` | `{c['patient_id']}` | `{c['sharing_posture']}` | {c['prompt']} | **{outcome}** | `{c['citation_count']}` valid UUIDs |"

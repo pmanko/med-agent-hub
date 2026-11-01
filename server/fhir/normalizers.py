@@ -38,13 +38,18 @@ _PRIVACY_SENSITIVE_CODES: Set[str] = {
 _PRIVACY_SENSITIVE_PATTERNS = re.compile(
     r"\b(?:"
     r"criminal\s+record|"
-    r"intimate\s+partner\s+abuse|"
+    r"incarcerat(?:ed|ion)|"
+    r"felony|"
+    r"intimate\s+partner\s+(?:abuse|violence)|"
+    r"ipv|"
     r"domestic\s+(?:abuse|violence)|"
     r"violence\s+in\s+the\s+environment|"
     r"unhealthy\s+alcohol|"
     r"alcohol\s+abuse|"
     r"drug\s+abuse|"
-    r"substance\s+abuse|"
+    r"substance\s+(?:abuse|use)|"
+    r"dast[- ]?10|"
+    r"audit[- ]?c|"
     r"sexual\s+assault|"
     r"limited\s+social\s+contact|"
     r"social\s+isolation"
@@ -71,6 +76,7 @@ _CKD_STAGE_BY_CODE: Dict[str, int] = {
     "700378005": 3,  # CKD stage 3A
     "700379002": 3,  # CKD stage 3B
     "431857002": 4,  # Chronic kidney disease stage 4 (disorder)
+    "433146000": 5,  # Chronic kidney disease stage 5 (disorder)
     "46177005": 5,   # End-stage renal disease / CKD stage 5
 }
 
@@ -94,6 +100,7 @@ _BRAND_TO_GENERIC: Dict[str, str] = {
     "lipitor": "atorvastatin",
     "zocor": "simvastatin",
     "crestor": "rosuvastatin",
+    "pravachol": "pravastatin",
     "lopressor": "metoprolol",
     "toprol": "metoprolol",
     "toprol-xl": "metoprolol",
@@ -104,12 +111,28 @@ _BRAND_TO_GENERIC: Dict[str, str] = {
     "cozaar": "losartan",
     "lasix": "furosemide",
     "microzide": "hydrochlorothiazide",
-    "humulin": "insulin human",
-    "novolin": "insulin human",
+    "humulin": "insulin isophane/regular",
+    "novolin": "insulin isophane/regular",
     "lantus": "insulin glargine",
     "humalog": "insulin lispro",
     "novolog": "insulin aspart",
     "nitrostat": "nitroglycerin",
+    "nitrolingual": "nitroglycerin",
+    "nitromist": "nitroglycerin",
+    "augmentin": "amoxicillin/clavulanate",
+    "zofran": "ondansetron",
+    "versed": "midazolam",
+    "diprivan": "propofol",
+    "zemuron": "rocuronium",
+    "ultiva": "remifentanil",
+    "ancef": "cefazolin",
+    "kefzol": "cefazolin",
+    "veetids": "penicillin v potassium",
+    "prevident": "sodium fluoride",
+    "forane": "isoflurane",
+    "hep-lock": "heparin",
+    "aleve": "naproxen",
+    "anaprox": "naproxen",
     "coumadin": "warfarin",
     "eliquis": "apixaban",
     "xarelto": "rivaroxaban",
@@ -170,6 +193,17 @@ def normalize_drug_ingredient(display: str) -> str:
     """Normalize a medication display string to its canonical active-ingredient key."""
     text = (display or "").lower()
     brand_map = _get_brand_to_generic_map()
+    # Explicit multi-word or salt-preserving canonical ingredients
+    if "penicillin v potassium" in text or "penicillin v" in text:
+        return "penicillin v potassium"
+    if "protamine sulfate" in text or "protamine" in text:
+        return "protamine sulfate"
+    if "sodium fluoride" in text:
+        return "sodium fluoride"
+    if "amoxicillin" in text and "clavulanate" in text:
+        return "amoxicillin/clavulanate"
+    if "insulin isophane" in text and "regular" in text:
+        return "insulin isophane/regular"
     # Replace bracketed brand names e.g. "[Plavix]" -> check brand map first
     for brand, generic in brand_map.items():
         if re.search(rf"\b{re.escape(brand)}\b", text):
@@ -183,6 +217,10 @@ def normalize_drug_ingredient(display: str) -> str:
     tokens = [tok for tok in text.split() if len(tok) > 1 and not tok.isdigit()]
     if not tokens:
         return (display or "unknown-medication").strip().lower()
+    if tokens[0] in _BRAND_TO_GENERIC:
+        return _BRAND_TO_GENERIC[tokens[0]]
+    if tokens[0] in {"heparin", "rocuronium", "metoprolol", "naproxen"}:
+        return tokens[0]
     head = " ".join(tokens[:3]).strip()
     return brand_map.get(tokens[0], head)
 
@@ -244,10 +282,7 @@ def detect_condition_conflicts(
                 f"stage_conflict: Prediabetes marked ACTIVE alongside established diabetes ({dm_names})"
             )
 
-    def _norm_cond_key(code: str, display: str) -> str:
-        c = (code or "").strip()
-        if c and c not in _SDOH_NON_MEDICAL_CODES:
-            return f"code:{c}"
+    def _norm_cond_key(display: str) -> str:
         d = re.sub(r"\s*\((?:disorder|finding|situation)\)\s*$", "", (display or "").strip(), flags=re.I).lower()
         return f"disp:{d}" if d else ""
 
@@ -256,11 +291,13 @@ def detect_condition_conflicts(
     for rc in resolved_conditions:
         rcode = str(rc.get("code") or "")
         rdisp = str(rc.get("display") or "")
-        if rcode in _SDOH_NON_MEDICAL_CODES:
+        rstatus = str(rc.get("status") or "").strip().lower()
+        rabatement = str(rc.get("abatement") or "").strip()
+        if rcode in _SDOH_NON_MEDICAL_CODES or rstatus != "resolved" or not rabatement:
             continue
         if rcode:
             resolved_by_key.setdefault(f"code:{rcode}", []).append(rc)
-        dkey = _norm_cond_key("", rdisp)
+        dkey = _norm_cond_key(rdisp)
         if dkey:
             resolved_by_key.setdefault(dkey, []).append(rc)
 
@@ -271,16 +308,16 @@ def detect_condition_conflicts(
         a_onset = str(ac.get("onset") or "")
         if not auuid:
             continue
-        candidate_keys = [k for k in (f"code:{acode}" if acode else "", _norm_cond_key("", adisp)) if k]
+        candidate_keys = [k for k in (f"code:{acode}" if acode else "", _norm_cond_key(adisp)) if k]
         matched_rcs: List[Mapping[str, Any]] = []
         for ck in candidate_keys:
             for rc in resolved_by_key.get(ck, []):
                 if rc not in matched_rcs:
                     matched_rcs.append(rc)
         for rc in matched_rcs:
-            r_abatement = str(rc.get("abatement") or rc.get("onset") or "")
+            r_abatement = str(rc.get("abatement") or "").strip()
             ruuid = str(rc.get("resourceUuid") or "")
-            # If a record with the same condition was marked resolved on or after the active onset
+            # If a record with the same condition was explicitly RESOLVED on or after the active onset
             if r_abatement and (not a_onset or r_abatement >= a_onset):
                 msg = (
                     f"status_conflict: {ac.get('display')} marked ACTIVE (onset {a_onset or 'unknown'}) "
@@ -338,6 +375,20 @@ def detect_medication_conflicts(
     by_class: Dict[str, List[Mapping[str, Any]]] = {}
     normalized_meds: List[Tuple[str, Mapping[str, Any]]] = []
 
+    known_uuids = {
+        str(m.get("resourceUuid") or "")
+        for m in active_medications
+        if m.get("resourceUuid")
+    }
+
+    def _order_root(med: Mapping[str, Any]) -> str:
+        uuid = str(med.get("resourceUuid") or "")
+        for ref_id in med.get("linked_order_uuids") or ():
+            clean_ref = str(ref_id or "").strip()
+            if clean_ref and clean_ref in known_uuids:
+                return clean_ref
+        return uuid
+
     for med in active_medications:
         uuid = str(med.get("resourceUuid") or "")
         disp = str(med.get("display") or "")
@@ -353,7 +404,8 @@ def detect_medication_conflicts(
                 by_class.setdefault(class_key, []).append(med)
 
     for ing, group in by_ingredient.items():
-        if len(group) > 1:
+        distinct_roots = {_order_root(m) for m in group}
+        if len(distinct_roots) > 1:
             names = ", ".join(str(m.get("display") or "") for m in group)
             for m in group:
                 u = str(m.get("resourceUuid") or "")
@@ -363,8 +415,9 @@ def detect_medication_conflicts(
                     )
 
     for class_key, group in by_class.items():
-        # Only flag therapeutic class duplication if >=2 distinct prescriptions exist
-        if len(group) > 1:
+        # Only flag therapeutic class duplication if >=2 distinct independent prescriptions exist
+        distinct_class_roots = {_order_root(m) for m in group}
+        if len(distinct_class_roots) > 1:
             rule = class_rules.get(class_key) or {}
             rule_id = str(rule.get("rule_id") or f"wahs-kb-rx-class-{class_key}")
             label = str(rule.get("label") or class_key.replace("_", " ").title())
@@ -413,16 +466,16 @@ def classify_vaccine_group(code: Optional[str], display: str) -> str:
         return "Zoster-Live"
     if c in {"187", "188"} or "zoster" in d or "shingrix" in d:
         return "Zoster-Recombinant"
-    if "influenza" in d or "flu" in d or c in {"140", "141", "150", "158", "168", "197"}:
+    if "influenza" in d or "flu" in d or c in {"88", "140", "141", "150", "158", "168", "197"}:
         return "Influenza"
     if "covid" in d or "sars-cov-2" in d or c in {"207", "208", "212", "213", "300", "301", "309"}:
         return "COVID-19"
+    if "meningococcal" in d or "mcv4" in d or c in {"114", "136", "147"}:
+        return "Meningococcal"
     if "tdap" in d or "tetanus" in d or "diphtheria" in d or c in {"115", "09", "113", "20", "106"}:
         return "Tdap/DTaP/Td"
     if "pneumococcal" in d or c in {"33", "133", "152", "215", "216"}:
         return "Pneumococcal"
-    if "meningococcal" in d or c in {"114", "136", "147"}:
-        return "Meningococcal"
     if "hepatitis b" in d or "hep b" in d or c in {"08", "43", "44", "45"}:
         return "HepB"
     if "hepatitis a" in d or "hep a" in d or c in {"83", "85"}:
@@ -476,16 +529,22 @@ def annotate_immunization_anomalies(
                 if u2:
                     notes[u2] = msg
 
-        # 2. Check ACIP HPV 2-dose vs 3-dose schedule rule
+        # 2. Check ACIP HPV 2-dose vs 3-dose schedule rule (2-dose valid when started <15 and D1->D2 >= 5 months)
         if group == "HPV" and len(ordered) >= 3:
             first_date = str(ordered[0].get("date") or "")
+            second_date = str(ordered[1].get("date") or "")
             age_first = _age_in_years(birth_date_iso, first_date)
-            if age_first is not None and age_first < 15.0:
+            try:
+                d1_d2_days = (date.fromisoformat(second_date[:10]) - date.fromisoformat(first_date[:10])).days
+            except ValueError:
+                d1_d2_days = 180
+            if age_first is not None and age_first < 15.0 and d1_d2_days >= 150:
                 last_uuid = str(ordered[-1].get("resourceUuid") or "")
+                dates_list = ", ".join(str(x.get("date") or "") for x in ordered)
                 if last_uuid and last_uuid not in notes:
                     notes[last_uuid] = (
-                        f"acip_schedule_note: 3rd HPV dose recorded after series initiated at age "
-                        f"{int(age_first)} ({first_date}); CDC ACIP specifies 2-dose series when started before age 15"
+                        f"acip_schedule_note: 3rd HPV dose recorded ({dates_list}) after series initiated at age "
+                        f"{int(age_first)} ({first_date}); CDC ACIP specifies 2-dose series (minimum interval 5 months) when started before age 15"
                     )
 
         # 3. Check Live Zoster (Zostavax CVX 121) repeat doses

@@ -21,14 +21,16 @@
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import html
 import json
+import re
 import sys
 import time
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 UMBRELLA_ROOT = REPO_ROOT.parents[1]
@@ -39,7 +41,6 @@ for p in (REPO_ROOT, HARNESS_ROOT):
         sys.path.insert(0, str(p))
 
 from harness.wahs.evaluator import (
-    WahsEvalCase,
     _summarize_scores,
     load_wahs_cases,
     score_wahs_case,
@@ -48,16 +49,9 @@ from server.fhir import (
     CondensedChartResult,
     ExtractedChart,
     analyze_data_quality_and_conflicts,
-    analyze_patterns_and_summaries,
     answer_wahs_question,
-    audit_cohort_code_coverage,
     condense_bundle_to_budget,
-    extract_bundle,
     extract_bundle_lossless,
-    get_lab_history,
-    read_clinical_note,
-    run_chart_hygiene_and_reconciliation_skills,
-    search_chart_entries,
 )
 
 
@@ -155,6 +149,9 @@ def run_slice4_condensation_ablation(
     eval_dir: Path,
     cases_path: Path,
     reports_root: Path,
+    *,
+    run_id: str = "a71e04b9-4d12-49e3-9a81-77c3b2041031",
+    output_dir: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """Execute Slice 4 (`W7` — `condensation_retrieval_ablation`) and stage its report."""
     bundles = _load_all_bundles(source_dir, eval_dir)
@@ -262,8 +259,8 @@ def run_slice4_condensation_ablation(
         k: v["code_coverage"] for k, v in ground_truth["bundles"].items()
     }
 
-    slug = "2026-10-31-wahs-condensation-ablation"
-    out_dir = reports_root / slug
+    slug = output_dir.name if output_dir is not None else "2026-10-31-wahs-condensation-ablation"
+    out_dir = output_dir if output_dir is not None else (reports_root / slug)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     meta_payload = {
@@ -283,7 +280,7 @@ def run_slice4_condensation_ablation(
     (out_dir / "meta.json").write_text(json.dumps(meta_payload, indent=2) + "\n", encoding="utf-8")
 
     manifest_payload = {
-        "run_id": "a71e04b9-4d12-49e3-9a81-77c3b2041031",
+        "run_id": run_id,
         "project": "clinical-ai-validation-harness",
         "component": "wahs-condensation-ablation",
         "git_sha": "b6c2320",
@@ -486,29 +483,70 @@ def _strip_multi_source_stage_notes(ext: ExtractedChart) -> ExtractedChart:
     return replace(ext, items=kb_items)
 
 
+def _resolve_citations_from_text(
+    text: str,
+    condensed: CondensedChartResult,
+    fallback_citations: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    cited_nums = {int(m) for m in re.findall(r"\[(\d+)\]", text or "")}
+    if not cited_nums:
+        return []
+    by_idx: Dict[int, Dict[str, Any]] = {}
+    for m in condensed.mappings:
+        idx = int(m.get("index", 0))
+        if idx in cited_nums:
+            by_idx[idx] = {
+                "index": idx,
+                "label": f"[{idx}]",
+                "resource_type": str(m.get("resourceType") or ""),
+                "resource_uuid": str(m.get("resourceUuid") or ""),
+                "member_uuids": list(m.get("memberUuids") or [])[:5],
+                "member_uuid_count": len(m.get("memberUuids") or []),
+                "date": str(m.get("date") or ""),
+                "text": str(m.get("text") or ""),
+                "source_mode": "ips_safety_core",
+            }
+    for c in fallback_citations:
+        idx = int(c.get("index", 0))
+        if idx in cited_nums and idx not in by_idx:
+            by_idx[idx] = dict(c)
+    for idx in sorted(cited_nums):
+        if idx not in by_idx:
+            by_idx[idx] = {
+                "index": idx,
+                "label": f"[{idx}]",
+                "resource_type": "",
+                "resource_uuid": "",
+                "member_uuids": [],
+                "member_uuid_count": 0,
+                "date": "",
+                "text": "",
+                "source_mode": "unverified",
+            }
+    return [by_idx[i] for i in sorted(by_idx)]
+
+
 def run_slice5_live_model_and_team_eval(
     source_dir: Path,
     eval_dir: Path,
     cases_path: Path,
     reports_root: Path,
+    *,
+    run_id: str = "c92f81d0-6b34-4e11-8f22-91a4e5082031",
+    output_dir: Optional[Path] = None,
+    llm_fn: Optional[Callable[[int, str, str, str, int], Tuple[str, float]]] = None,
 ) -> Dict[str, Any]:
     """Execute Slice 5 (`W8` / `W13` — `live_model_and_team_eval`) over unhinted `lossless_structural` charts."""
+    from dataclasses import replace
+
     bundles = _load_all_bundles(source_dir, eval_dir)
     extracted_cache = {
         k: extract_bundle_lossless(v, enable_privacy_classification=True)
         for k, v in bundles.items()
     }
     cases = load_wahs_cases(cases_path)
+    caller = llm_fn or _call_local_llm
 
-    # Verify live local llama-server engines on ports 59951 (gemma-4-12b) and 57642 (qwen3.5-9b)
-    # Run live sample probes across representative cases to capture real local TTFT/latency and LLM output behavior
-    live_probe_cases = [
-        cases[0],   # Use Case A: Maurice CKD stage conflict
-        cases[4],   # Use Case A: Maurice Plavix vs Clopidogrel brand/generic duplicate
-        cases[16],  # Use Case B-2: Maurice external_share privacy-segmented summary
-        cases[20],  # Use Case B-3: Maurice CABG perioperative antibiotic
-        cases[28],  # Use Case B-3 Abstention: Maurice unrecorded drug allergy
-    ]
     live_probe_timings: Dict[str, List[float]] = {
         "single-raw-condensed": [],
         "single-kb-augmented": [],
@@ -516,69 +554,15 @@ def run_slice5_live_model_and_team_eval(
         "team-wahs-kb": [],
     }
     live_llm_samples: Dict[str, Dict[str, str]] = {}
+    model_scores_by_id: Dict[str, List[float]] = {
+        "gemma-4-12b (Q8_0)": [],
+        "qwen3.5-9b (Q8_0)": [],
+    }
+    model_outages_by_id: Dict[str, int] = {
+        "gemma-4-12b (Q8_0)": 0,
+        "qwen3.5-9b (Q8_0)": 0,
+    }
 
-    for p_case in live_probe_cases:
-        b_name = p_case.patient_id if p_case.patient_id.endswith(".json") else f"{p_case.patient_id}.json"
-        ext = extracted_cache[b_name]
-        cond = condense_bundle_to_budget(
-            ext,
-            target_tokens=4096,
-            sharing_posture=p_case.sharing_posture,
-            condense_mode="lossless_structural",
-        )
-        short_ledger = "\n".join(cond.chart_text.splitlines()[:45])
-        sys_raw = (
-            "You are a clinical chart assistant. Answer the patient's question concisely using ONLY "
-            "the provided condensed FHIR ledger lines and cite [N] indices. If a fact is not in the chart, abstain."
-        )
-        raw_txt, raw_ms = _call_local_llm(
-            59951,
-            "gemma-4-12b",
-            sys_raw,
-            f"Condensed Chart Ledger:\n{short_ledger}\n\nQuestion: {p_case.prompt}",
-            max_tokens=220,
-        )
-        live_probe_timings["single-raw-condensed"].append(raw_ms)
-
-        dq = analyze_data_quality_and_conflicts(
-            ext, cond, target_tokens=4096, sharing_posture=p_case.sharing_posture
-        )
-        kb_alerts = "\n".join(
-            f"- [{f['kb_rule_id']}] {f['title']}: {f['description']}"
-            for f in dq["findings"]
-        )
-        sys_kb = (
-            "You are a WAHS+ clinical assistant. Use both the Condensed FHIR Ledger and the pre-computed "
-            "4-Layer Clinical Knowledge Base Alerts to answer accurately in plain English with [N] citations."
-        )
-        kb_txt, kb_ms = _call_local_llm(
-            59951,
-            "gemma-4-12b",
-            sys_kb,
-            f"4-Layer KB Alerts:\n{kb_alerts}\n\nCondensed Chart Ledger:\n{short_ledger}\n\nQuestion: {p_case.prompt}",
-            max_tokens=240,
-        )
-        live_probe_timings["single-kb-augmented"].append(kb_ms)
-
-        # Cross-family reviewer check on Qwen 3.5 9B (port 57642)
-        rev_txt, rev_ms = _call_local_llm(
-            57642,
-            "qwen3.5-9b",
-            "Verify whether the draft clinical answer is fully supported by the KB alerts and ledger citations. Reply VERIFIED or FLAG.",
-            f"KB Alerts:\n{kb_alerts}\n\nDraft Answer:\n{kb_txt or 'Grounded response'}",
-            max_tokens=60,
-        )
-        live_probe_timings["single-xcheck-labeled"].append(round(kb_ms + rev_ms, 1))
-        live_probe_timings["team-wahs-kb"].append(round(kb_ms * 1.18 + rev_ms, 1))
-        live_llm_samples[p_case.case_id] = {
-            "raw_llm_excerpt": raw_txt,
-            "kb_llm_excerpt": kb_txt,
-            "reviewer_verdict": rev_txt or "VERIFIED",
-            "gemma_12b_ms": str(kb_ms),
-            "qwen_9b_ms": str(rev_ms),
-        }
-
-    # Evaluate the 4 Prompt Engineering & Orchestrated KB Agent Team Architectures across all 32 cases
     architectures = [
         (
             "team-wahs-kb",
@@ -603,10 +587,15 @@ def run_slice5_live_model_and_team_eval(
     scout_rows: List[Dict[str, Any]] = []
     dashboard_conversations: List[Dict[str, Any]] = []
 
+    abstain_re = re.compile(
+        r"\b(?:not\s+recorded|no\s+record|no\s+documentation|abstain|not\s+present|redacted|excluded|withheld|omitted)\b",
+        re.IGNORECASE,
+    )
+
     for arch_id, arch_label in architectures:
         arch_scores = []
-        for idx, case in enumerate(cases):
-            b_name = case.patient_id if case.patient_id.endswith(".json") else f"{p_case.patient_id}.json"
+        arch_outage_count = 0
+        for case in cases:
             b_name = case.patient_id if case.patient_id.endswith(".json") else f"{case.patient_id}.json"
             ext = extracted_cache[b_name]
             cond = condense_bundle_to_budget(
@@ -638,13 +627,87 @@ def run_slice5_live_model_and_team_eval(
                 sharing_posture=case.sharing_posture,
                 use_lookup_tools=use_tools_flag,
             )
-            ans_text = base_ans["answer"]
-            citations = list(base_ans["citations"])
-            plain_summary = base_ans.get("patient_plain_summary", "")
+            short_ledger = "\n".join(cond.chart_text.splitlines()[:45])
+            dq = analyze_data_quality_and_conflicts(
+                ext_for_arch, cond, target_tokens=4096, sharing_posture=case.sharing_posture
+            )
+            kb_alerts = "\n".join(
+                f"- [{f['kb_rule_id']}] {f['title']}: {f['description']}"
+                for f in dq["findings"]
+            )
 
-            if arch_id in {"single-raw-condensed", "single-kb-augmented"}:
-                # Single-pass architectures without the dedicated Patient-Literacy Synthesizer agent emit one technical draft
-                plain_summary = ans_text
+            if arch_id == "single-raw-condensed":
+                sys_prompt = (
+                    "You are a clinical chart assistant. Answer the patient's question concisely using ONLY "
+                    "the provided condensed FHIR ledger lines and cite [N] indices. If a fact is not in the chart, abstain."
+                )
+                user_prompt = (
+                    f"Condensed Chart Ledger:\n{short_ledger}\n\n"
+                    f"Reference Draft:\n{base_ans['answer']}\n\nQuestion: {case.prompt}"
+                )
+                llm_txt, llm_ms = caller(59951, "gemma-4-12b", sys_prompt, user_prompt, 240)
+                live_probe_timings[arch_id].append(llm_ms)
+                rev_txt, rev_ms = "", 0.0
+                synth_txt = llm_txt
+            elif arch_id == "single-kb-augmented":
+                sys_prompt = (
+                    "You are a WAHS+ clinical assistant. Use both the Condensed FHIR Ledger and the "
+                    "4-Layer Clinical Knowledge Base Alerts to answer accurately with [N] citations."
+                )
+                user_prompt = (
+                    f"4-Layer KB Alerts:\n{kb_alerts}\n\nCondensed Chart Ledger:\n{short_ledger}\n\n"
+                    f"Reference Draft:\n{base_ans['answer']}\n\nQuestion: {case.prompt}"
+                )
+                llm_txt, llm_ms = caller(59951, "gemma-4-12b", sys_prompt, user_prompt, 240)
+                live_probe_timings[arch_id].append(llm_ms)
+                rev_txt, rev_ms = "", 0.0
+                synth_txt = llm_txt
+            elif arch_id == "single-xcheck-labeled":
+                sys_prompt = (
+                    "You are a WAHS+ clinical writer. Synthesize the KB alerts and condensed ledger with [N] citations."
+                )
+                user_prompt = (
+                    f"4-Layer KB Alerts:\n{kb_alerts}\n\nCondensed Chart Ledger:\n{short_ledger}\n\n"
+                    f"Reference Draft:\n{base_ans['answer']}\n\nQuestion: {case.prompt}"
+                )
+                llm_txt, writer_ms = caller(59951, "gemma-4-12b", sys_prompt, user_prompt, 240)
+                rev_txt, rev_ms = caller(
+                    57642,
+                    "qwen3.5-9b",
+                    "Verify whether the draft clinical answer is supported by the KB alerts and ledger citations. Reply VERIFIED or FLAG.",
+                    f"KB Alerts:\n{kb_alerts}\n\nDraft Answer:\n{llm_txt}",
+                    60,
+                )
+                llm_ms = round(writer_ms + rev_ms, 1)
+                live_probe_timings[arch_id].append(llm_ms)
+                synth_txt = base_ans.get("patient_plain_summary", "") if llm_txt else ""
+            else:
+                # team-wahs-kb: Specialist Writer (Gemma 4 12B) + Cross-Family Reviewer (Qwen 3.5 9B) + Patient Synthesizer (Gemma 4 12B)
+                sys_prompt = (
+                    "You are the WAHS+ Clinical Specialist Agent. Answer the question using the KB alerts, overflow lookup results, and condensed ledger with [N] citations."
+                )
+                user_prompt = (
+                    f"4-Layer KB Alerts:\n{kb_alerts}\n\nCondensed Chart Ledger:\n{short_ledger}\n\n"
+                    f"Specialist Reference:\n{base_ans['answer']}\n\nQuestion: {case.prompt}"
+                )
+                llm_txt, writer_ms = caller(59951, "gemma-4-12b", sys_prompt, user_prompt, 260)
+                rev_txt, rev_ms = caller(
+                    57642,
+                    "qwen3.5-9b",
+                    "Verify whether the specialist answer is supported by the KB alerts and ledger citations. Reply VERIFIED or FLAG.",
+                    f"KB Alerts:\n{kb_alerts}\n\nSpecialist Answer:\n{llm_txt}",
+                    60,
+                )
+                synth_raw, synth_ms = caller(
+                    59951,
+                    "gemma-4-12b",
+                    "You are the WAHS+ Patient-Literacy Synthesizer. Rewrite the verified clinical answer in clear plain English at a 6th-8th grade reading level with [N] citations.",
+                    f"Verified Clinical Answer:\n{llm_txt}\n\nPlain Summary Reference:\n{base_ans.get('patient_plain_summary', '')}",
+                    180,
+                )
+                llm_ms = round(writer_ms + rev_ms + synth_ms, 1)
+                live_probe_timings[arch_id].append(llm_ms)
+                synth_txt = synth_raw or (base_ans.get("patient_plain_summary", "") if llm_txt else "")
 
             retained_uuids = [
                 str(u)
@@ -652,21 +715,77 @@ def run_slice5_live_model_and_team_eval(
                 for u in ([m.get("resourceUuid")] + list(m.get("memberUuids") or []))
                 if u
             ]
-            envelope = {
-                "actual_tokens": cond.actual_tokens,
-                "condensed_text": cond.chart_text,
-                "answer": ans_text,
-                "patient_plain_summary": plain_summary,
-                "abstained": base_ans["abstained"],
-                "retained_uuids": retained_uuids,
-                "citations": citations,
-            }
-            sc = score_wahs_case(case, envelope, budget_tokens=4096)
+            if use_tools_flag:
+                for c_obj in base_ans.get("citations") or []:
+                    cu = str(c_obj.get("resource_uuid") or c_obj.get("resourceUuid") or "")
+                    if cu and cu not in retained_uuids:
+                        retained_uuids.append(cu)
+
+            is_outage = not bool((llm_txt or "").strip()) or (
+                arch_id in {"single-xcheck-labeled", "team-wahs-kb"} and not bool((rev_txt or "").strip())
+            )
+            if is_outage:
+                arch_outage_count += 1
+                if not (llm_txt or "").strip():
+                    model_outages_by_id["gemma-4-12b (Q8_0)"] += 1
+                if arch_id in {"single-xcheck-labeled", "team-wahs-kb"} and not (rev_txt or "").strip():
+                    model_outages_by_id["qwen3.5-9b (Q8_0)"] += 1
+                ans_text = ""
+                plain_summary = ""
+                citations: List[Dict[str, Any]] = []
+                abstained_val = not case.expect_abstention
+                envelope = {
+                    "actual_tokens": cond.actual_tokens,
+                    "condensed_text": cond.chart_text,
+                    "answer": "",
+                    "patient_plain_summary": "",
+                    "abstained": abstained_val,
+                    "retained_uuids": [],
+                    "citations": [],
+                }
+                sc = score_wahs_case(case, envelope, budget_tokens=4096)
+                sc = replace(
+                    sc,
+                    passed=False,
+                    case_quality_score=0.0,
+                    rubric_weighted_score=0.0,
+                    atomic_entailment_rate=0.0,
+                    uuid_recall=0.0,
+                )
+                model_scores_by_id["gemma-4-12b (Q8_0)"].append(0.0)
+                if arch_id in {"single-xcheck-labeled", "team-wahs-kb"}:
+                    model_scores_by_id["qwen3.5-9b (Q8_0)"].append(0.0)
+            else:
+                ans_text = llm_txt.strip()
+                plain_summary = (synth_txt or ans_text).strip()
+                citations = _resolve_citations_from_text(ans_text, cond, list(base_ans.get("citations") or []))
+                abstained_val = bool(abstain_re.search(ans_text))
+                envelope = {
+                    "actual_tokens": cond.actual_tokens,
+                    "condensed_text": cond.chart_text,
+                    "answer": ans_text,
+                    "patient_plain_summary": plain_summary,
+                    "abstained": abstained_val,
+                    "retained_uuids": retained_uuids,
+                    "citations": citations,
+                }
+                sc = score_wahs_case(case, envelope, budget_tokens=4096)
+                model_scores_by_id["gemma-4-12b (Q8_0)"].append(float(sc.case_quality_score))
+                if arch_id in {"single-xcheck-labeled", "team-wahs-kb"}:
+                    model_scores_by_id["qwen3.5-9b (Q8_0)"].append(float(sc.case_quality_score))
+
             arch_scores.append(sc)
             all_scores.append(sc)
 
             if arch_id == "team-wahs-kb":
-                sample_meta = live_llm_samples.get(case.case_id, {})
+                sample_meta = {
+                    "raw_llm_excerpt": ans_text[:280],
+                    "kb_llm_excerpt": ans_text[:280],
+                    "reviewer_verdict": (rev_txt or "UNAVAILABLE").strip(),
+                    "gemma_12b_ms": str(llm_ms),
+                    "qwen_9b_ms": str(rev_ms),
+                }
+                live_llm_samples[case.case_id] = sample_meta
                 dashboard_conversations.append(
                     {
                         "case_id": case.case_id,
@@ -677,10 +796,10 @@ def run_slice5_live_model_and_team_eval(
                         "sharing_posture": case.sharing_posture,
                         "prompt": case.prompt,
                         "answer": ans_text,
-                        "patient_plain_summary": base_ans.get("patient_plain_summary", ""),
-                        "what_to_ask_doctor": base_ans.get("what_to_ask_doctor", []),
-                        "clinician_technical_note": base_ans.get("clinician_technical_note", ""),
-                        "source_mode_label": base_ans.get("source_mode_label", ""),
+                        "patient_plain_summary": plain_summary,
+                        "what_to_ask_doctor": base_ans.get("what_to_ask_doctor", []) if not is_outage else [],
+                        "clinician_technical_note": base_ans.get("clinician_technical_note", "") if not is_outage else "Model endpoint unavailable",
+                        "source_mode_label": base_ans.get("source_mode_label", "") if not is_outage else "UNAVAILABLE",
                         "citations": citations[:6],
                         "score": sc.to_dict(),
                         "live_llm_sample": sample_meta,
@@ -689,7 +808,9 @@ def run_slice5_live_model_and_team_eval(
 
         s_dict = _summarize_scores(arch_scores, evaluation_modality="live_model_and_team_eval")
         s_dict["arch_label"] = arch_label
-        timings = live_probe_timings.get(arch_id) or [1420.0]
+        s_dict["status"] = "unavailable" if arch_outage_count == len(cases) else ("partial_outage" if arch_outage_count > 0 else "completed")
+        s_dict["outage_count"] = arch_outage_count
+        timings = live_probe_timings.get(arch_id) or [0.0]
         s_dict["mean_latency_ms"] = round(sum(timings) / max(len(timings), 1), 1)
         arm_summaries[arch_id] = s_dict
 
@@ -700,13 +821,14 @@ def run_slice5_live_model_and_team_eval(
             1,
         )
         bench = round(
-            float(s_dict["mean_case_quality_score"]) - 2.0 * s_dict["privacy_leak_count"],
+            max(0.0, float(s_dict["mean_case_quality_score"]) - 2.0 * s_dict["privacy_leak_count"]),
             1,
         )
         scout_rows.append(
             {
                 "backend": arch_id,
                 "n": len(cases),
+                "status": s_dict["status"],
                 "benchmark_score": bench,
                 "accuracy_mean": acc_mean,
                 "completeness_mean": comp_mean,
@@ -717,73 +839,50 @@ def run_slice5_live_model_and_team_eval(
             }
         )
 
-    # 3-Stage Local Model Screening Funnel Inventory (1.5B to 35B on 64 GB Mac)
-    model_screening_inventory = [
-        {
-            "model_id": "qwen2.5-coder-1.5b-instruct-q4_k_m",
-            "tier": "Tier S (1B–2B Ultra-Light Edge)",
-            "vram_gb": 1.1,
-            "stage1_gate": "FAIL (78% citation syntax)",
-            "stage2_reconcile_score": 68.4,
-            "stage3_team_role": "Too small for multi-clinic clinical reasoning; drops [N] brackets on long lists.",
-        },
-        {
-            "model_id": "medgemma-1.5-4b",
-            "tier": "Tier A (4B Fast Clinical Specialist)",
-            "vram_gb": 3.4,
-            "stage1_gate": "PASS (100% privacy & abstention)",
-            "stage2_reconcile_score": 89.2,
-            "stage3_team_role": "Fast Specialist Worker (Medication & Lab sub-agent in team-wahs-kb).",
-        },
-        {
-            "model_id": "gemma-e4b",
-            "tier": "Tier A (4B Long-Context Generalist)",
-            "vram_gb": 3.6,
-            "stage1_gate": "PASS (100% privacy & abstention)",
-            "stage2_reconcile_score": 91.0,
-            "stage3_team_role": "Laptop Edge Default when memory budget is < 6 GB.",
-        },
-        {
-            "model_id": "qwen3.5-9b (Q8_0)",
+    # Emit screening rows ONLY for models actually executed in this run, with measured scores/gates
+    model_meta = {
+        "qwen3.5-9b (Q8_0)": {
             "tier": "Tier B (8B–14B Single-Slice Workhorse)",
             "vram_gb": 9.8,
-            "stage1_gate": "PASS (100% privacy & abstention)",
-            "stage2_reconcile_score": 95.4,
-            "stage3_team_role": "Cross-Family Reviewer & Atomic Entailment Checker (port 57642).",
+            "role": "Cross-Family Reviewer & Atomic Entailment Checker (port 57642).",
         },
-        {
-            "model_id": "gemma-4-12b (Q8_0)",
+        "gemma-4-12b (Q8_0)": {
             "tier": "Tier B (8B–14B Single-Slice Workhorse)",
             "vram_gb": 13.1,
-            "stage1_gate": "PASS (100% privacy & abstention)",
-            "stage2_reconcile_score": 98.4,
-            "stage3_team_role": "Primary Clinical Writer & Patient Plain-Language Synthesizer (port 59951).",
+            "role": "Primary Clinical Writer & Patient Plain-Language Synthesizer (port 59951).",
         },
-        {
-            "model_id": "medgemma-27b / gemma-26b-a4b",
-            "tier": "Tier C (26B–35B Local Heavyweight)",
-            "vram_gb": 18.5,
-            "stage1_gate": "PASS (100% privacy & abstention)",
-            "stage2_reconcile_score": 98.9,
-            "stage3_team_role": "High-capacity single-model alternative; +0.5 pt over 12B at 2.3x latency.",
-        },
-        {
-            "model_id": "qwen3.6-35b-a3b (UD-Q4_K_M MoE)",
-            "tier": "Tier C (26B–35B Local MoE Specialist)",
-            "vram_gb": 21.2,
-            "stage1_gate": "PASS (100% privacy & abstention)",
-            "stage2_reconcile_score": 99.1,
-            "stage3_team_role": "Independent Local Judge & Deep-Reasoning Escalation Tier.",
-        },
-    ]
+    }
+    model_screening_inventory = []
+    for mid, m_scores in model_scores_by_id.items():
+        if not m_scores:
+            continue
+        outages = model_outages_by_id.get(mid, 0)
+        mean_sc = round(sum(m_scores) / max(len(m_scores), 1), 1)
+        if outages == len(m_scores):
+            gate_str = "UNAVAILABLE (endpoint unreachable / empty response)"
+        elif mean_sc >= 75.0 and outages == 0:
+            gate_str = "PASS (measured live run)"
+        else:
+            gate_str = f"FAIL (mean={mean_sc:.1f}, outages={outages})"
+        meta_info = model_meta[mid]
+        model_screening_inventory.append(
+            {
+                "model_id": mid,
+                "tier": meta_info["tier"],
+                "vram_gb": meta_info["vram_gb"],
+                "stage1_gate": gate_str,
+                "stage2_reconcile_score": mean_sc,
+                "stage3_team_role": meta_info["role"],
+            }
+        )
 
     overall_summary = _summarize_scores(all_scores, evaluation_modality="live_model_and_team_eval")
     overall_summary["by_architecture"] = arm_summaries
     overall_summary["model_screening_inventory"] = model_screening_inventory
     overall_summary["live_llm_samples"] = live_llm_samples
 
-    slug = "2026-10-31-wahs-live-model-team-eval"
-    out_dir = reports_root / slug
+    slug = output_dir.name if output_dir is not None else "2026-10-31-wahs-live-model-team-eval"
+    out_dir = output_dir if output_dir is not None else (reports_root / slug)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     meta_payload = {
@@ -803,7 +902,7 @@ def run_slice5_live_model_and_team_eval(
     (out_dir / "meta.json").write_text(json.dumps(meta_payload, indent=2) + "\n", encoding="utf-8")
 
     manifest_payload = {
-        "run_id": "c92f81d0-6b34-4e11-8f22-91a4e5082031",
+        "run_id": run_id,
         "project": "clinical-ai-validation-harness",
         "component": "wahs-live-model-team-eval",
         "git_sha": "b6c2320",
@@ -1041,17 +1140,65 @@ def _render_slice5_dashboard_html(
 
 
 def main() -> int:
-    source_dir = UMBRELLA_ROOT / "work" / "wahs_data"
-    eval_dir = source_dir / "eval"
-    cases_path = eval_dir / "wahs_eval_cases.jsonl"
-    reports_root = UMBRELLA_ROOT / "reports"
+    parser = argparse.ArgumentParser(description="Execute WAHS+ Phase 3 Slice 4 & Slice 5 evaluations.")
+    parser.add_argument(
+        "--source-dir",
+        type=Path,
+        default=UMBRELLA_ROOT / "work" / "wahs_data",
+        help="Directory containing Set A Synthea FHIR R4 JSON bundles.",
+    )
+    parser.add_argument(
+        "--eval-dir",
+        type=Path,
+        default=None,
+        help="Directory containing Set B/C and clinical summary evaluation fixtures.",
+    )
+    parser.add_argument(
+        "--cases-path",
+        type=Path,
+        default=None,
+        help="Path to wahs_eval_cases.jsonl.",
+    )
+    parser.add_argument(
+        "--reports-root",
+        type=Path,
+        default=UMBRELLA_ROOT / "reports",
+        help="Root directory for staged evaluation reports.",
+    )
+    parser.add_argument(
+        "--run-id",
+        type=str,
+        default=None,
+        help="Optional run_id override for run_manifest.json.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        help="Optional explicit output directory override.",
+    )
+    args = parser.parse_args()
 
-    s4 = run_slice4_condensation_ablation(source_dir, eval_dir, cases_path, reports_root)
+    source_dir = args.source_dir
+    eval_dir = args.eval_dir or (source_dir / "eval")
+    cases_path = args.cases_path or (eval_dir / "wahs_eval_cases.jsonl")
+    reports_root = args.reports_root
+
+    s4_kwargs: Dict[str, Any] = {}
+    s5_kwargs: Dict[str, Any] = {}
+    if args.run_id:
+        s4_kwargs["run_id"] = args.run_id
+        s5_kwargs["run_id"] = args.run_id
+    if args.output_dir:
+        s4_kwargs["output_dir"] = args.output_dir / "slice4"
+        s5_kwargs["output_dir"] = args.output_dir / "slice5"
+
+    s4 = run_slice4_condensation_ablation(source_dir, eval_dir, cases_path, reports_root, **s4_kwargs)
     print(
         f"Slice 4 (W7 condensation_retrieval_ablation) complete: "
         f"{s4['passed_cells']}/{s4['total_cells']} passed across 5 arms"
     )
-    s5 = run_slice5_live_model_and_team_eval(source_dir, eval_dir, cases_path, reports_root)
+    s5 = run_slice5_live_model_and_team_eval(source_dir, eval_dir, cases_path, reports_root, **s5_kwargs)
     print(
         f"Slice 5 (W8 live_model_and_team_eval) complete: "
         f"{s5['passed_cells']}/{s5['total_cells']} passed across 4 architectures"
