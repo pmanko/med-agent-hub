@@ -150,6 +150,7 @@ def _make_synthetic_wahs_bundle() -> Dict[str, Any]:
                 "status": "active",
                 "authoredOn": "2025-11-01T09:00:00Z",
                 "medicationCodeableConcept": {"coding": [{"code": "314076", "display": "lisinopril 10 MG Oral Tablet"}]},
+                "dosageInstruction": [{"text": "Take 1 tablet by mouth once daily"}],
             }
         },
         {
@@ -394,6 +395,7 @@ def test_extract_bundle_normalizes_notes_panels_components_and_conflicts():
     meds = {x.resource_uuid: x for x in extracted.items if x.section in {"med_active", "med_historical"}}
     assert "cefazolin 2000 MG Injection" in meds["medadm-cefazolin"].text
     assert "inpatient/administered" in meds["medadm-cefazolin"].text
+    assert "dosage: Take 1 tablet by mouth once daily" in meds["medreq-lisinopril"].text
 
     # 4. Stage conflicts and ACIP immunization anomalies are pre-annotated
     conds = {x.resource_uuid: x for x in extracted.items if x.section == "condition_active"}
@@ -417,6 +419,7 @@ def test_sharing_postures_keep_or_redact_privacy_sensitive_sdoh():
     self_res = condense_bundle_to_budget(bundle, target_tokens=8192, sharing_posture="patient_self")
     assert "Has a criminal record" in self_res.chart_text
     assert "[sensitivity: SDOH/PRIVACY-SENSITIVE]" in self_res.chart_text
+    assert any(m.get("sensitivity") == "SDOH/PRIVACY-SENSITIVE" for m in self_res.mappings)
     assert self_res.redacted_for_privacy == []
 
     ext_res = condense_bundle_to_budget(bundle, target_tokens=8192, sharing_posture="external_share")
@@ -482,6 +485,8 @@ def test_tier_3_and_tier_4_trajectories_support_temporal_trend_verification():
     assert egfr["direction"] == "down"
     assert egfr["window"]["start"] == "2020-08-10"
     assert egfr["window"]["end"] == "2025-08-10"
+    ledger_isos = {e["iso"] for e in facts["date_ledger"]}
+    assert "2005-06-15" in ledger_isos
 
 
 def test_fhir_bundle_context_source_and_resilient_token_counter():
@@ -519,3 +524,172 @@ def test_fhir_bundle_context_source_and_resilient_token_counter():
         assert any(m.get("memberUuids") for m in mappings)
 
     asyncio.run(_run())
+
+
+def test_condenser_privacy_trajectories_units_dosage_devices_and_temporal_range():
+    import pytest
+    from server.context_sources import ContextSourceError
+
+    # 1. Privacy-sensitive numeric observations & notes are redacted in external_share (including trajectories)
+    note_b64 = base64.b64encode(b"Patient reports intimate partner abuse and requests safety plan.").decode("ascii")
+    b_priv = {
+        "resourceType": "Bundle",
+        "entry": [
+            {
+                "resource": {
+                    "resourceType": "Observation",
+                    "id": "audit-1",
+                    "status": "final",
+                    "code": {"coding": [{"code": "228366006", "display": "Unhealthy alcohol drinking behavior"}]},
+                    "effectiveDateTime": "2024-01-01",
+                    "valueQuantity": {"value": 8, "unit": "score"},
+                }
+            },
+            {
+                "resource": {
+                    "resourceType": "Observation",
+                    "id": "audit-2",
+                    "status": "final",
+                    "code": {"coding": [{"code": "228366006", "display": "Unhealthy alcohol drinking behavior"}]},
+                    "effectiveDateTime": "2025-01-01",
+                    "valueQuantity": {"value": 9, "unit": "score"},
+                }
+            },
+            {
+                "resource": {
+                    "resourceType": "DocumentReference",
+                    "id": "note-ipv",
+                    "date": "2025-01-01",
+                    "content": [{"attachment": {"contentType": "text/plain", "data": note_b64}}],
+                }
+            },
+        ],
+    }
+    ext_items, redacted, _ = build_tier_items(extract_bundle(b_priv), 3, sharing_posture="external_share")
+    assert len(redacted) == 3
+    assert not any("alcohol" in it.text.lower() or "abuse" in it.text.lower() for it in ext_items)
+
+    # 2. Incompatible units are never merged into a single lab trajectory; intermediate extrema preserved in temporal range
+    b_units_and_range = {
+        "resourceType": "Bundle",
+        "entry": [
+            {
+                "resource": {
+                    "resourceType": "Observation",
+                    "id": "g-mg-1",
+                    "status": "final",
+                    "code": {"coding": [{"code": "2345-7", "display": "Glucose"}]},
+                    "effectiveDateTime": "2023-01-01",
+                    "valueQuantity": {"value": 90, "unit": "mg/dL"},
+                }
+            },
+            {
+                "resource": {
+                    "resourceType": "Observation",
+                    "id": "g-mg-2",
+                    "status": "final",
+                    "code": {"coding": [{"code": "2345-7", "display": "Glucose"}]},
+                    "effectiveDateTime": "2024-01-01",
+                    "valueQuantity": {"value": 200, "unit": "mg/dL"},
+                }
+            },
+            {
+                "resource": {
+                    "resourceType": "Observation",
+                    "id": "g-mg-3",
+                    "status": "final",
+                    "code": {"coding": [{"code": "2345-7", "display": "Glucose"}]},
+                    "effectiveDateTime": "2025-01-01",
+                    "valueQuantity": {"value": 100, "unit": "mg/dL"},
+                }
+            },
+            {
+                "resource": {
+                    "resourceType": "Observation",
+                    "id": "g-mmol-1",
+                    "status": "final",
+                    "code": {"coding": [{"code": "15074-8", "display": "Glucose"}]},
+                    "effectiveDateTime": "2025-02-01",
+                    "valueQuantity": {"value": 5.5, "unit": "mmol/L"},
+                }
+            },
+            {
+                "resource": {
+                    "resourceType": "Observation",
+                    "id": "bounded-obs",
+                    "status": "final",
+                    "code": {"coding": [{"code": "14959-1", "display": "Microalbumin"}]},
+                    "effectiveDateTime": "2025-02-01",
+                    "valueQuantity": {"value": 5, "comparator": "<", "unit": "mg/L"},
+                }
+            },
+        ],
+    }
+    from server.chart_serializer import render_chart
+    from server.fhir import items_to_querystore_records
+
+    t3_items, _, _ = build_tier_items(extract_bundle(b_units_and_range), 3)
+    t3_chart, _ = render_chart(items_to_querystore_records(t3_items))
+    assert "Glucose [mg/dL]" in t3_chart
+    assert "Glucose [mmol/L]" in t3_chart
+    facts = build_temporal_facts(t3_chart, None)
+    mg_series = next(s for s in facts["numeric_series"] if "mg/dL" in s["concept"])
+    assert mg_series["range"] == {"min": 90.0, "max": 200.0}
+    res_t0 = condense_bundle_to_budget(b_units_and_range, target_tokens=8192)
+    assert "<5 mg/L" in res_t0.chart_text
+
+    # 3. Structured dosage without text, device active vs inactive separation, and invalid budget rejection
+    b_struct = {
+        "resourceType": "Bundle",
+        "entry": [
+            {
+                "resource": {
+                    "resourceType": "MedicationRequest",
+                    "id": "warfarin",
+                    "status": "on-hold",
+                    "authoredOn": "2025-01-01",
+                    "medicationCodeableConcept": {"text": "Warfarin"},
+                    "dosageInstruction": [
+                        {
+                            "timing": {"repeat": {"frequency": 1, "period": 1, "periodUnit": "d"}},
+                            "doseAndRate": [{"doseQuantity": {"value": 5, "unit": "mg"}}],
+                        }
+                    ],
+                }
+            },
+            {
+                "resource": {
+                    "resourceType": "Device",
+                    "id": "dev-1",
+                    "status": "active",
+                    "manufactureDate": "2024-01-01",
+                    "type": {"text": "Pacemaker"},
+                }
+            },
+            {
+                "resource": {
+                    "resourceType": "Device",
+                    "id": "dev-2",
+                    "status": "inactive",
+                    "manufactureDate": "2025-01-01",
+                    "type": {"text": "Pacemaker"},
+                }
+            },
+        ],
+    }
+    res_struct = condense_bundle_to_budget(b_struct, target_tokens=4096)
+    assert "dosage: 5 mg once daily" in res_struct.chart_text
+    dev_recs = [r for r in res_struct.records if r["resourceType"] == "Device"]
+    assert len(dev_recs) == 2
+    assert any(r["metadata"].get("mandatory_context") is True and "status: active" in r["text"] for r in dev_recs)
+
+    for bad_budget in (0, -5, 1):
+        with pytest.raises(ValueError):
+            condense_bundle_to_budget(b_struct, target_tokens=bad_budget)
+
+    async def _check_missing():
+        src = FhirBundleContextSource(bundles_by_patient={})
+        with pytest.raises(ContextSourceError):
+            await src.fetch(ContextRequest(messages=[], patient="missing"))
+
+    asyncio.run(_check_missing())
