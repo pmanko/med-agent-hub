@@ -108,6 +108,7 @@
       "scenario": "convo-vitals-monitoring",
       "chart": "zabella-halambe",
       "claim": "The patient's pulse oximetry reading of 93% on 2026-01_26 [14] is within a generally acceptable range, but the downward trend from 98% in December 2025 should be monitored.",
+      "expected_claim": "The patient's pulse oximetry reading of 93% on 2026-01-26 [14] is within a generally acceptable range, but the downward trend from 98% in December 2025 should be monitored.",
       "flagged_in_run": [
         "date_format:fail"
       ],
