@@ -361,3 +361,202 @@ def test_an_old_item_the_answer_frames_as_older_is_not_named():
         [4, 9], [], facts,
     )
     assert not [f for f in findings if f["id"] == "rule_window" and f["status"] == "fail"]
+
+
+def test_rule_scoping_table_cells_and_boundary_cases():
+    chart = """Patient records (most recent first):
+[1] (2026-06-01) Drug order: Metformin. Action: DISCONTINUE. Urgency: ROUTINE
+[2] (2026-05-01) Drug order: Amlodipine. Action: NEW. Urgency: ROUTINE
+[3] (2026-04-01) Drug order: Metformin. Action: NEW. Urgency: ROUTINE
+[4] (2026-06-01) Weight (kg): 72 kg
+[5] (2026-05-01) Weight (kg): 68 kg
+[6] (2026-04-01) Weight (kg): 70 kg
+[7] (2026-06-01) Systolic blood pressure: 120 mmHg
+[8] (2026-05-01) Systolic blood pressure: 120 mmHg
+[9] (2026-04-01) Systolic blood pressure: 120 mmHg
+[10] (2026-05-01) Program: Diabetes care program. Status: Active. Current state: Enrolled
+[11] (2026-06-01) Diagnosis: No tuberculosis diagnosis documented
+"""
+    facts = build_temporal_facts(chart, "2026-06-20")
+
+    # Date/action mismatch on drug replacement retains draft and reports rule_drug_citation fail
+    text, _c, _b, findings = answer_rules.apply_answer_rules(
+        "What was prescribed?", "Metformin was started on 2026-05-01 [2].", [2], [], facts
+    )
+    assert text == "Metformin was started on 2026-05-01 [2]."
+    assert _ids(findings, "fail") == ["rule_drug_citation"]
+
+    # Warn mode assesses original text without simulated repair
+    w_text, _wc, _wb, w_findings = answer_rules.apply_answer_rules(
+        "What was prescribed?", "Amlodipine was prescribed [1].", [1], [], facts, edit=False
+    )
+    assert w_text == "Amlodipine was prescribed [1]."
+    assert _ids(w_findings, "fail") == ["rule_drug_citation"]
+
+    # Table cell wrong drug citation is edited in enforce mode and flagged in warn mode
+    blocks = [{"kind": "table", "rows": [{"cells": {"drug": {"text": "Amlodipine", "refs": [1]}}}]}]
+    _bt, _bc, new_blocks, b_findings = answer_rules.apply_answer_rules(
+        "What was prescribed?", "The orders are shown below.", [], blocks, facts
+    )
+    assert new_blocks[0]["rows"][0]["cells"]["drug"]["refs"] == [2]
+    assert _ids(b_findings, "info") == ["rule_drug_citation"]
+
+    # Specific diagnosis denial is not contradicted by an unrelated program or negative record
+    assert answer_rules.claim_marks("No diagnosis of tuberculosis is documented [11].", facts) == []
+
+    # Steady wording on another measurement or negated steady wording is not flagged
+    for q, ans in (
+        (
+            "How have weight and systolic blood pressure changed?",
+            "Weight fell from 70 kg [6] to 68 kg [5] then rose to 72 kg [4]. Systolic blood pressure stayed steady at 120 mmHg [7][8][9].",
+        ),
+        (
+            "How has weight changed?",
+            "Weight did not fall steadily: it fell from 70 kg [6] to 68 kg [5] then rose to 72 kg [4].",
+        ),
+        (
+            "How has weight changed over the past 2 months?",
+            "The weight was 70 kg on 2026-04-01 [6], before the requested window. It rose from 68 kg [5] to 72 kg [4].",
+        ),
+    ):
+        _st, _sc, _sb, s_findings = answer_rules.apply_answer_rules(q, ans, [], [], facts)
+        assert not [f for f in s_findings if f["status"] == "fail"], ans
+
+    # Negative window statement for a specific drug is not contradicted by another drug's order
+    drug_window_facts = build_temporal_facts(
+        "Patient records (most recent first):\n"
+        "[1] (2026-06-01) Drug order: Amlodipine. Action: NEW. Urgency: ROUTINE\n"
+        "[2] (2026-01-01) Drug order: Metformin. Action: NEW. Urgency: ROUTINE\n",
+        "2026-06-20",
+    )
+    neg_ans = "No orders in the last 3 months for metformin; it was last ordered on 2026-01-01 [2]."
+    dw_text, _dwc, _dwb, dw_findings = answer_rules.apply_answer_rules(
+        "Was metformin ordered in the last 3 months?", neg_ans, [2], [], drug_window_facts
+    )
+    assert dw_text == neg_ans and dw_findings == []
+
+    # Constant series with all readings already cited/dated is not duplicated; >8 readings deduplicate in chronological order
+    const_facts = build_temporal_facts(
+        "Patient records (most recent first):\n"
+        "[1] (2026-06-01) Weight (kg): 70 kg\n"
+        "[2] (2026-05-01) Weight (kg): 70 kg\n"
+        "[3] (2026-04-01) Weight (kg): 70 kg\n",
+        "2026-06-20",
+    )
+    const_ans = "Recorded weight readings: 70 kg (2026-04-01) [3], 70 kg (2026-05-01) [2], 70 kg (2026-06-01) [1]."
+    c_text, _cc, _cb, c_findings = answer_rules.apply_answer_rules(
+        "How has weight changed?", const_ans, [3, 2, 1], [], const_facts
+    )
+    assert c_text == const_ans and c_findings == []
+
+    long_chart = "Patient records (most recent first):\n" + "\n".join(
+        f"[{i}] (2026-06-{20 - i:02d}) Weight (kg): {60 + (i % 3)} kg" for i in range(1, 10)
+    )
+    long_facts = build_temporal_facts(long_chart, "2026-06-20")
+    l_text, _lc, _lb, l_findings = answer_rules.apply_answer_rules(
+        "How has weight changed?", "Weight changed from 60 kg [9] to 61 kg [1].", [9, 1], [], long_facts
+    )
+    assert "9 weight readings; first, lowest, highest and last:" in l_text
+    assert _ids(l_findings, "info") == ["rule_series"]
+
+    # Oversized/non-positive window spans and empty/missing facts degrade cleanly; future-dated citations in window fail
+    for bad_q in ("last 0 days", "past 10000 years", "past 999999999999999999999999 days"):
+        assert answer_rules.asked_window(bad_q, facts) is None
+    assert answer_rules.apply_answer_rules("What was prescribed?", "Amlodipine [1].", [1], [], None)[3] == []
+    future_facts = build_temporal_facts(
+        "Patient records (most recent first):\n[4] (2026-07-01) Weight (kg): 70 kg\n", "2026-06-20"
+    )
+    _ft, _fc, _fb, f_findings = answer_rules.apply_answer_rules(
+        "What happened in the last month?", "Weight was 70 kg [4].", [4], [], future_facts
+    )
+    assert _ids(f_findings, "fail") == ["rule_window"]
+
+
+def test_stage_engine_streams_rule_findings_inline_indepth_reasons_and_edit_history(monkeypatch):
+    import asyncio
+    import json
+    from tests.factories import make_profile, patient_source_registry, stream_profile
+
+    chart = """Patient records (most recent first):
+[1] (2026-05-01) Program: Diabetes care program. Status: Active. Current state: Enrolled
+[2] (2026-05-01) Drug order: Metformin. Action: NEW. Urgency: ROUTINE
+[3] (2026-05-01) Drug order: Amlodipine. Action: NEW. Urgency: ROUTINE
+[4] (2026-05-01) Patient: Test Person. Male. Born 1960-02-01
+"""
+    mappings = [
+        {"index": 1, "resourceType": "Program", "resourceUuid": "p1", "date": "2026-05-01", "text": "Program: Diabetes care program. Status: Active. Current state: Enrolled"},
+        {"index": 2, "resourceType": "Drug order", "resourceUuid": "o1", "date": "2026-05-01", "text": "Drug order: Metformin. Action: NEW. Urgency: ROUTINE"},
+        {"index": 3, "resourceType": "Drug order", "resourceUuid": "o2", "date": "2026-05-01", "text": "Drug order: Amlodipine. Action: NEW. Urgency: ROUTINE"},
+        {"index": 4, "resourceType": "Patient", "resourceUuid": "pt1", "date": "2026-05-01", "text": "Patient: Test Person. Male. Born 1960-02-01"},
+    ]
+    registry = patient_source_registry(chart, mappings)
+    monkeypatch.setattr(team, "_write_trace", lambda *a, **k: None)
+
+    # 1. Rule failure preserved through model review and In-Depth rule mark rendered with check="rule" and inline reason
+    async def synth_fail(*_a, **_k):
+        return "The record does not state a diagnosis, but metformin was ordered [2].", [2], []
+
+    async def review_ok(*_a, **_k):
+        return {"answer_ok": True, "errors": []}
+
+    async def indepth_fail(*_a, **_k):
+        return ["She has diabetes [4]."], {"level": "green", "note": ""}
+
+    monkeypatch.setattr(team, "_synthesize_answer", synth_fail)
+    monkeypatch.setattr(team, "_validate_answer_label", review_ok)
+    monkeypatch.setattr(team, "_gen_indepth", indepth_fail)
+
+    reviewed_profile = make_profile(
+        topology="single",
+        output="product",
+        stages=["context", "answer", "gate", "resolve_refs", "review", "gate", "final_resolve_refs", "ground_verdicts", "indepth", "indepth_gate"],
+        models={"answer": "W", "review": "R", "indepth": "W"},
+        policies={"anchor": "2026-06-20", "confidence": "findings", "review": {"action": "label", "grounding": "off"}},
+        prompts={"answer": "synthesis-answer", "review": "validation-label", "indepth": "synthesis-indepth"},
+    )
+
+    async def collect(profile):
+        events = []
+        async for ev, raw in stream_profile(
+            profile, [{"role": "user", "content": "What is she being treated for?"}], patient="p", source_registry=registry
+        ):
+            events.append((ev, json.loads(raw)))
+        return dict(events)
+
+    done = asyncio.run(collect(reviewed_profile))["done"]
+    assert done["answerValidation"]["status"] == "needs_review"
+    assert done["confidence"]["answer"]["findings"] == [
+        {"check": "rule", "where": "answer", "status": "fail", "says": "[1] records Diabetes care program"}
+    ]
+    assert done["confidence"]["in_depth"]["findings"] == [
+        {
+            "check": "rule",
+            "where": 1,
+            "status": "fail",
+            "says": "[4] is the patient demographics record and states no clinical fact",
+        }
+    ]
+    assert "[4] is the patient demographics record and states no clinical fact" in done["inDepth"]["answer"]
+
+    # 2. Rule edit tracks originalAnswer and sets status="edited"
+    async def synth_edit(*_a, **_k):
+        return "Amlodipine [2] was prescribed.", [2], []
+
+    async def unchanged(_client, **kwargs):
+        return kwargs["answer_text"], kwargs["citations"], kwargs["blocks"], {"level": "green", "note": ""}
+
+    monkeypatch.setattr(team, "_synthesize_answer", synth_edit)
+    monkeypatch.setattr(team, "_ensure_substantive_answer", unchanged)
+    bare_profile = make_profile(
+        topology="single",
+        output="product",
+        stages=["context", "answer", "gate", "resolve_refs", "final_resolve_refs"],
+        models={"answer": "W"},
+        policies={"anchor": "2026-06-20", "confidence": "findings"},
+        prompts={"answer": "synthesis-answer"},
+    )
+    edited_done = asyncio.run(collect(bare_profile))["done"]
+    assert edited_done["answer"] == "Amlodipine [3] was prescribed."
+    assert edited_done["answerValidation"]["status"] == "edited"
+    assert edited_done["answerValidation"]["originalAnswer"] == "Amlodipine [2] was prescribed."
+    assert edited_done["confidence"]["answer"]["findings"][0]["check"] == "rule"
