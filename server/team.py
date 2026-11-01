@@ -654,10 +654,10 @@ async def _ground_references(
     mappings: List[Dict[str, Any]],
     *,
     deterministic_checks: Optional[List[Dict[str, Any]]] = None,
-    index_verdicts: Optional[Mapping[int, bool]] = None,
+    index_verdicts: Optional[Mapping[Any, Any]] = None,
     attribution_only: bool = False,
 ) -> List[Dict[str, Any]]:
-    """Ground final claims against their cited source sets in one bounded entailment call.
+    """Ground final claims against their cited source sets in context-bounded sequential batches.
 
     A sentence may rely on multiple citations collectively (for example, two dated weights support
     a change claim). Grouping identical usage text prevents each source from being incorrectly asked
@@ -815,12 +815,41 @@ async def _ground_references(
         for i in checkable_positions
     ]
     if index_verdicts is not None:
+        usage_offsets: Dict[int, int] = {}
         verdicts = []
         for position in checkable_positions:
-            judged = [
-                index_verdicts.get(references[reference_position].get("index"))
-                for reference_position in groups[position]["references"]
-            ]
+            group = groups[position]
+            judged = []
+            for reference_position in group["references"]:
+                idx = references[reference_position].get("index")
+                specific = None
+                if isinstance(idx, int):
+                    for key, val in index_verdicts.items():
+                        if (
+                            isinstance(key, tuple)
+                            and len(key) == 3
+                            and key[0] == idx
+                            and (
+                                (key[1] and key[1] == group["path"])
+                                or (
+                                    key[2]
+                                    and normalize_fact(key[2])
+                                    == normalize_fact(group["claim"])
+                                )
+                            )
+                        ):
+                            specific = val
+                            break
+                if specific is not None:
+                    judged.append(specific)
+                    continue
+                raw_val = index_verdicts.get(idx)
+                if isinstance(raw_val, list):
+                    offset = usage_offsets.get(idx, 0)
+                    judged.append(raw_val[offset] if offset < len(raw_val) else None)
+                    usage_offsets[idx] = offset + 1
+                else:
+                    judged.append(raw_val)
             verdicts.append(
                 False
                 if any(value is False for value in judged)
@@ -1574,7 +1603,9 @@ def _review_payload_from_messages(messages: List[Dict[str, Any]]) -> Dict[str, A
     return {}
 
 
-def _block_temporal_text_and_refs(blocks: List[Any]) -> Tuple[str, List[int]]:
+def _block_temporal_text_and_refs(
+    blocks: List[Any], *, include_refs: bool = False
+) -> Tuple[str, List[int]]:
     """Render structured rows as lines so dates stay bound to their row values."""
     texts: List[str] = []
     refs: List[int] = []
@@ -1582,11 +1613,19 @@ def _block_temporal_text_and_refs(blocks: List[Any]) -> Tuple[str, List[int]]:
     def collect_strings(value: Any) -> List[str]:
         found: List[str] = []
         if isinstance(value, dict):
+            local_refs: List[int] = []
             for key, child in value.items():
                 if key == "refs" and isinstance(child, list):
-                    refs.extend(i for i in child if isinstance(i, int))
+                    local_refs = [i for i in child if isinstance(i, int)]
+                    refs.extend(local_refs)
                 else:
                     found.extend(collect_strings(child))
+            if include_refs and local_refs:
+                markers = "".join(f"[{i}]" for i in local_refs)
+                if found:
+                    found[-1] = f"{found[-1]} {markers}".strip()
+                else:
+                    found.append(markers)
         elif isinstance(value, list):
             for child in value:
                 found.extend(collect_strings(child))
@@ -1607,7 +1646,10 @@ def _block_temporal_text_and_refs(blocks: List[Any]) -> Tuple[str, List[int]]:
                     if key not in {"rows", "refs"}:
                         walk(child)
                 if isinstance(value.get("refs"), list):
-                    refs.extend(i for i in value["refs"] if isinstance(i, int))
+                    block_refs = [i for i in value["refs"] if isinstance(i, int)]
+                    refs.extend(block_refs)
+                    if include_refs and block_refs:
+                        texts.append("".join(f"[{i}]" for i in block_refs))
                 return
             texts.extend(collect_strings(value))
         elif isinstance(value, list):
@@ -1969,13 +2011,23 @@ async def _validate_answer_label(
     result: Dict[str, Any] = {"answer_ok": answer_ok, "errors": errors}
     if citation_support:
         cited = set(_extract_citations(answer_text))
+        grouped_citations: Dict[Any, List[Any]] = {}
+        for item in verdict.get("citations") or []:
+            if (
+                isinstance(item, dict)
+                and isinstance(item.get("index"), int)
+                and isinstance(item.get("supported"), bool)
+                and item["index"] in cited
+            ):
+                idx = item["index"]
+                claim_key = str(item.get("claim") or "").strip()
+                path_key = str(item.get("path") or "").strip()
+                if path_key or claim_key:
+                    grouped_citations[(idx, path_key, claim_key)] = [item["supported"]]
+                grouped_citations.setdefault(idx, []).append(item["supported"])
         result["citations"] = {
-            item["index"]: item["supported"]
-            for item in verdict.get("citations") or []
-            if isinstance(item, dict)
-            and isinstance(item.get("index"), int)
-            and isinstance(item.get("supported"), bool)
-            and item["index"] in cited
+            key: values[0] if len(set(values)) == 1 else values
+            for key, values in grouped_citations.items()
         }
     return result
 
@@ -2132,13 +2184,12 @@ async def _validate_indepth_verdict(
     )
     result: Dict[str, Any] = {"flag": flag, "issues": verdict.get("issues", "")}
     if citation_support:
-        result["unsupported"] = sorted(
-            {
-                d
-                for d in (verdict.get("unsupported") or [])
-                if isinstance(d, int) and 1 <= d <= len(claims)
-            }
-        )
+        raw_unsupported = verdict.get("unsupported")
+        if isinstance(raw_unsupported, list) and all(
+            isinstance(d, int) and not isinstance(d, bool) and 1 <= d <= len(claims)
+            for d in raw_unsupported
+        ):
+            result["unsupported"] = sorted(set(raw_unsupported))
     return result
 
 
@@ -2347,7 +2398,9 @@ async def _review_existing_answer(
 
     if status in {"checked", "edited"} and _is_substantive_answer(answer_text):
         review_text = answer_text
-        block_text, _block_refs = _block_temporal_text_and_refs(blocks)
+        block_text, _block_refs = _block_temporal_text_and_refs(
+            blocks, include_refs=True
+        )
         if block_text:
             review_text += "\n\n=== STRUCTURED BLOCK TEXT ===\n" + block_text
         review_chart = (
@@ -2436,7 +2489,9 @@ async def _review_existing_answer(
             review_step["overruled_by_date_checks"] = overruled
         if citation_verdicts is not None:
             review_step["citation_support"] = {
-                str(index): supported for index, supported in citation_verdicts.items()
+                str(index): supported
+                for index, supported in citation_verdicts.items()
+                if not isinstance(index, tuple)
             }
         steps.append(review_step)
         if verdict and not verdict.get("answer_ok", True) and errs:
@@ -2577,8 +2632,8 @@ async def _gen_indepth(
     flagged = list(verdict.get("flag") or [])
     # Folded grounding: the review's citation verdicts travel with its labels to the In-Depth gate.
     support = (
-        {"citation_unsupported": list(verdict.get("unsupported") or [])}
-        if citation_support
+        {"citation_unsupported": list(verdict["unsupported"])}
+        if citation_support and isinstance(verdict.get("unsupported"), list)
         else {}
     )
     if not flagged:
