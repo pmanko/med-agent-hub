@@ -454,6 +454,133 @@ def test_a_claim_asserting_a_trend_over_one_point_still_fails():
     assert "single_point_trend:fail" in _flags(result)
 
 
+def test_generic_count_trend_claim_resolves_series_from_citation_without_question():
+    claim = "The count has declined to 341 cells/uL [178]."
+
+    warn_result = gate_indepth_claims([claim], MULTI_COUNT_FACTS, mode="warn")
+    assert warn_result["status"] == "needs_review"
+    assert warn_result["flagged"] == [1]
+    assert "single_point_trend:fail" in _flags(warn_result)
+
+    enforce_result = gate_indepth_claims([claim], MULTI_COUNT_FACTS, mode="enforce")
+    assert enforce_result["status"] == "edited"
+    assert enforce_result["flagged"] == []
+    assert enforce_result["claims"] == [
+        "The chart shows one dated CD4 count measurement: 341 cells/uL on 2006-04-04 [178]. "
+        "A trend cannot be determined from one point."
+    ]
+
+
+def test_engine_judges_indepth_claims_without_question_while_answer_gate_uses_question(
+    monkeypatch,
+):
+    import asyncio
+    from dataclasses import replace
+    from server import engine, team
+    from server.levels_loader import get_profile
+    from tests.factories import patient_source_registry
+
+    chart = (
+        "[1] (2026-01-01) CD4 count: 341 cells/uL\n"
+        "[2] (2026-01-01) Weight (kg): 70 kg\n"
+    )
+    single_value_claim = "The CD4 count was 341 cells/uL on 2026-01-01 [1]."
+    unsupported_trend_claim = "The count has declined to 341 cells/uL [999]."
+
+    async def fake_answer(*_args, **_kwargs):
+        return "The weight was 70 kg on 2026-01-01 [2].", [2], []
+
+    async def fake_substantive(*_args, **kwargs):
+        return (
+            kwargs["answer_text"],
+            kwargs["citations"],
+            kwargs["blocks"],
+            {"level": "green", "note": ""},
+        )
+
+    async def fake_ground(_client, _model, _answer, refs, _map, **_kwargs):
+        return [{**ref, "groundingStatus": "verified", "grounded": True} for ref in refs]
+
+    monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
+    monkeypatch.setattr(team, "_ensure_substantive_answer", fake_substantive)
+    monkeypatch.setattr(team, "_ground_references", fake_ground)
+    monkeypatch.setattr(team, "_write_trace", lambda *_a, **_k: None)
+
+    class _Counter:
+        async def count(self, *_args):
+            return 1
+
+        async def count_chat(self, *_args):
+            return 1
+
+    registry = patient_source_registry(
+        chart,
+        [
+            {
+                "resourceType": "obs",
+                "resourceUuid": "cd4",
+                "date": "2026-01-01",
+                "text": "(2026-01-01) CD4 count: 341 cells/uL",
+            },
+            {
+                "resourceType": "obs",
+                "resourceUuid": "weight",
+                "date": "2026-01-01",
+                "text": "(2026-01-01) Weight (kg): 70 kg",
+            },
+        ],
+    )
+    profile = get_profile("single-12b-checked")
+    profile = replace(
+        profile,
+        stages=tuple(stage for stage in profile.stages if stage != "review"),
+        policies={**profile.policies, "anchor": "2026-06-20", "drug_safety": False},
+    )
+    request = engine.ExecutionRequest(
+        profile=profile,
+        messages=[{"role": "user", "content": "How has the weight changed over the past year?"}],
+        patient="synthetic",
+        source_registry=registry,
+        token_counter=_Counter(),
+    )
+
+    async def fake_indepth_single_value(*_args, **_kwargs):
+        return [single_value_claim], {"level": "green", "note": ""}
+
+    monkeypatch.setattr(team, "_gen_indepth", fake_indepth_single_value)
+    payload = json.loads(asyncio.run(engine.drain_profile(request)))
+    assert payload["temporalGate"]["status"] == "fail"
+    assert payload["temporalGate"]["applied"] == "patch"
+    assert payload["inDepth"]["answer"] == f"- {single_value_claim}"
+    assert payload["inDepth"]["validation"]["status"] == "checked"
+
+    async def fake_indepth_unsupported_trend(*_args, **_kwargs):
+        return ["The CD4 count has declined over time [999]."], {"level": "green", "note": ""}
+
+    monkeypatch.setattr(team, "_gen_indepth", fake_indepth_unsupported_trend)
+    flagged_payload = json.loads(asyncio.run(engine.drain_profile(request)))
+    assert flagged_payload["inDepth"]["validation"]["status"] == "needs_review"
+    assert flagged_payload["inDepth"]["validation"]["flagged"] == [1]
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="Known limitation in #41: risk, outcome, and no-trend denial words still match _TREND_RE.",
+)
+def test_risk_and_outcome_words_are_not_read_as_the_patients_trend():
+    claims = [
+        "The low CD4 count reflects a severely compromised immune status, increasing the risk of infection.",
+        "Antiretroviral therapy should start regardless of the CD4 count to improve outcomes.",
+        "A single CD4 count of 341 cells/uL [178] is insufficient to establish a trend.",
+    ]
+
+    result = gate_indepth_claims(claims, MULTI_COUNT_FACTS, mode="enforce")
+
+    assert result["flagged"] == []
+    assert result["claims"] == claims
+    assert _flags(result) == []
+
+
 def test_claims_the_question_used_to_fail_are_judged_on_their_own_words():
     """Every In-Depth claim the gate questioned in the 26 October 2026 run, replayed claim-only."""
     goldens = json.loads((FIXTURES / "indepth-gate-goldens.json").read_text())
@@ -467,3 +594,4 @@ def test_claims_the_question_used_to_fail_are_judged_on_their_own_words():
         result = gate_indepth_claims([case["claim"]], facts[chart], mode="enforce")
 
         assert _flags(result) == case["expected"], case["scenario"]
+        assert result["claims"] == [case.get("expected_claim", case["claim"])], case["scenario"]

@@ -1011,7 +1011,10 @@ def _series_terms(item: Dict[str, Any]) -> Tuple[List[str], set[str]]:
 
 
 def _selected_series(
-    question: str, answer: str, facts: Dict[str, Any]
+    question: str,
+    answer: str,
+    facts: Dict[str, Any],
+    citations: Optional[List[int]] = None,
 ) -> List[Dict[str, Any]]:
     series = facts.get("numeric_series") or []
 
@@ -1035,9 +1038,26 @@ def _selected_series(
                 candidates.append((value, matched, item))
         return candidates
 
+    cited = {int(value) for value in re.findall(r"\[(\d+)]", answer or "")} | {
+        value for value in (citations or []) if isinstance(value, int)
+    }
+    by_citation = [
+        item
+        for item in series
+        if cited
+        and any(
+            isinstance(point.get("index"), int) and point["index"] in cited
+            for point in (item.get("points") or [])
+        )
+    ]
     candidates = scored(answer)
     if not candidates:
         candidates = scored(question)
+    if len(by_citation) == 1 and (
+        not candidates
+        or all(score < 100 and matched <= {"cells"} for score, matched, _item in candidates)
+    ):
+        return by_citation
     selected: List[Dict[str, Any]] = []
     for score, matched, item in candidates:
         dominated = any(
@@ -1666,7 +1686,7 @@ def run_temporal_gate(
                 )
                 patch_citations = activity_indices[:1]
 
-    selected = _selected_series(q, a, temporal_facts)
+    selected = _selected_series(q, a, temporal_facts, citations)
     if _TREND_RE.search(qa) and selected:
         for s in selected:
             answer_dir = _answer_direction_for_series(a, s, selected)
