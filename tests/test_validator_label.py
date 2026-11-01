@@ -1,4 +1,4 @@
-"""Rewrite-mode answer validator: the validator LOCALIZES each chart contradiction. Its verdict labels
+"""Label-mode answer validator: the validator LOCALIZES each chart contradiction. Its verdict labels
 the answer: a flagged answer is shown as written with a yellow note and needs_review metadata, and is
 never replaced by the reviewer's correction or regenerated. Statements the deterministic date checks
 confirmed are given to the reviewer as confirmed, and an error that targets one is set aside.
@@ -7,7 +7,7 @@ Selected by the profile's review prompt. Mocks only the model boundary (`_chat`)
 and exercises the compiled stages end-to-end, branching on the response_format json_schema name so the
 Answer synth, the label_verdict validator, and the In-Depth calls are served independently.
 
-Run: pytest tests/test_validator_rewrite.py
+Run: pytest tests/test_validator_label.py
 """
 
 import asyncio

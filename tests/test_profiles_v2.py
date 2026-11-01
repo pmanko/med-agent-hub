@@ -501,24 +501,26 @@ def test_compiled_profile_configuration_is_immutable():
 
 
 @pytest.mark.parametrize(
-    ("profile_id", "models", "grounding", "review_temperature"),
+    ("profile_id", "models", "grounding", "review_prompt", "review_temperature"),
     [
         (
             "single-12b-verify",
             {"answer": "gemma-4-12b", "review": "qwen3.6-35b", "grounding": "qwen3.6-35b", "indepth": "gemma-4-12b"},
             "separate",
+            "validation-verify",
             0.7,
         ),
         (
             "single-31b-xcheck",
             {"answer": "gemma-31b", "review": "qwen3.5-9b", "grounding": "qwen3.5-9b", "indepth": "gemma-31b"},
             "separate",
+            "validation-verify",
             0.7,
         ),
     ],
 )
 def test_checked_answer_arms_change_only_their_declared_choice(
-    profile_id, models, grounding, review_temperature
+    profile_id, models, grounding, review_prompt, review_temperature
 ):
     default = get_profile("single-12b-checked")
     arm = get_profile(profile_id)
@@ -531,7 +533,7 @@ def test_checked_answer_arms_change_only_their_declared_choice(
     assert {role: prompt for role, prompt in arm.prompts.items() if role != "review"} == {
         role: prompt for role, prompt in default.prompts.items() if role != "review"
     }
-    assert arm.prompts["review"] in {"validation-label", "validation-verify"}
+    assert arm.prompts["review"] == review_prompt
     assert arm.supplemental_sources == default.supplemental_sources
     assert (arm.context_window, arm.reserved_output_tokens, arm.exact_tokenizer) == (
         default.context_window,
@@ -546,4 +548,100 @@ def test_checked_answer_arms_change_only_their_declared_choice(
     assert {k: v for k, v in arm.policies.items() if k != "review"} == {
         k: v for k, v in default.policies.items() if k != "review"
     }
-    assert arm.knobs.get("review", {}).get("temperature") == review_temperature
+    expected_knobs = {
+        role: dict(role_knobs) for role, role_knobs in default.knobs.items()
+    }
+    if review_temperature is not None:
+        expected_knobs["review"] = {"temperature": review_temperature}
+    assert {
+        role: dict(role_knobs) for role, role_knobs in arm.knobs.items()
+    } == expected_knobs
+
+
+@pytest.mark.parametrize(
+    ("profile_id", "expected_model"),
+    [
+        ("single-12b-verify", "qwen3.6-35b"),
+        ("single-31b-xcheck", "qwen3.5-9b"),
+    ],
+)
+def test_cross_family_checked_answer_arms_pass_checker_temperature_to_grounding(
+    profile_id: str, expected_model: str, monkeypatch: pytest.MonkeyPatch
+):
+    import asyncio
+    from server import engine, team
+
+    profile = get_profile(profile_id)
+    sampling = engine._sampling(
+        engine.ExecutionRequest(
+            profile=profile,
+            messages=[{"role": "user", "content": "What was the weight?"}],
+        )
+    )
+    assert sampling["review_temperature"] == 0.7
+    assert sampling["grounding_temperature"] == 0.7
+
+    captured: list[dict] = []
+
+    async def fake_chat(_client, model, _messages, **kwargs):
+        captured.append({"model": model, **kwargs})
+        return {"content": '{"pairs": [{"facts": [{"fact": "71 kg", "status": "found"}]}]}'}
+
+    monkeypatch.setattr(team, "_chat", fake_chat)
+
+    verdicts = asyncio.run(
+        team._entailment_verdicts(
+            None,
+            profile.models["grounding"],
+            [("2026-01-01 Weight: 71 kg", "Weight was 71 kg.")],
+        )
+    )
+    assert verdicts[0]["support"] == "supported"
+    assert captured[-1]["model"] == expected_model
+    assert captured[-1]["temperature"] == 0.7
+
+
+def test_verifier_answer_review_retains_checked_questions_and_findings(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import asyncio
+    from server import team
+
+    async def fake_chat(_client, _model, _messages, **_kwargs):
+        return {
+            "content": (
+                '{"answer_ok": true, "errors": [], '
+                '"checked": [{"question": "Was weight 71 kg?", "chart": "[1] 2026-01-26 Weight: 71 kg"}]}'
+            )
+        }
+
+    monkeypatch.setattr(team, "_chat", fake_chat)
+    steps: list[dict] = []
+    _content, _conf, _ans, _val, _gate, _orig = asyncio.run(
+        team._review_existing_answer(
+            None,
+            messages=[{"role": "user", "content": "What was the weight?"}],
+            gathered="",
+            chart="[1] 2026-01-26 Weight: 71 kg",
+            temporal_facts=None,
+            temporal_gate_mode="off",
+            reviewer_model="qwen3.6-35b",
+            reviewer_prompt="validation-verify",
+            validator_temperature=0.7,
+            validator_repeat_penalty=None,
+            validator_dry=0.0,
+            max_tokens=256,
+            steps=steps,
+            payload_override={
+                "schema_version": "answer_to_review.v1",
+                "original_question": "What was the weight?",
+                "answer": "Weight was 71 kg [1].",
+                "citations": [1],
+                "blocks": [],
+            },
+        )
+    )
+    review_step = next(step for step in steps if step.get("role") == "answer_review")
+    assert review_step["checked"] == [
+        {"question": "Was weight 71 kg?", "chart": "[1] 2026-01-26 Weight: 71 kg"}
+    ]
