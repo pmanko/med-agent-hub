@@ -542,4 +542,128 @@ def test_checked_answer_arms_change_only_their_declared_choice(
     assert {k: v for k, v in arm.policies.items() if k != "review"} == {
         k: v for k, v in default.policies.items() if k != "review"
     }
-    assert arm.knobs.get("review", {}).get("temperature") == review_temperature
+    expected_knobs = {
+        role: dict(role_knobs) for role, role_knobs in default.knobs.items()
+    }
+    if review_temperature is not None:
+        expected_knobs["review"] = {"temperature": review_temperature}
+    assert {
+        role: dict(role_knobs) for role, role_knobs in arm.knobs.items()
+    } == expected_knobs
+
+
+@pytest.mark.parametrize(
+    ("profile_id", "expected_model"),
+    [
+        ("single-12b-xcheck", "qwen3.6-35b"),
+        ("single-31b-xcheck", "qwen3.5-9b"),
+    ],
+)
+def test_cross_family_checked_answer_arms_pass_checker_temperature_to_grounding(
+    profile_id: str, expected_model: str, monkeypatch: pytest.MonkeyPatch
+):
+    import asyncio
+    from server import engine, team
+
+    profile = get_profile(profile_id)
+    sampling = engine._sampling(
+        engine.ExecutionRequest(
+            profile=profile,
+            messages=[{"role": "user", "content": "What was the weight?"}],
+        )
+    )
+    assert sampling["review_temperature"] == 0.7
+    assert sampling["grounding_temperature"] == 0.7
+
+    captured: list[dict] = []
+
+    async def fake_chat(_client, model, _messages, **kwargs):
+        captured.append({"model": model, **kwargs})
+        return {"content": '{"verdicts": ["YES"]}'}
+
+    monkeypatch.setattr(team, "_chat", fake_chat)
+
+    verdicts = asyncio.run(
+        team._entailment_verdicts(
+            None,
+            profile.models["grounding"],
+            [("2026-01-01 Weight: 71 kg", "Weight was 71 kg.")],
+        )
+    )
+    assert verdicts == [True]
+    assert captured[-1]["model"] == expected_model
+    assert captured[-1]["temperature"] == 0.7
+
+
+def test_nodry_checked_answer_arm_disables_only_dry_for_writer_and_reviewer(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import asyncio
+    from server import engine, team
+
+    default = get_profile("single-12b-checked")
+    arm = get_profile("single-12b-checked-nodry")
+
+    assert arm.label == "Checked answer (12B, DRY penalty off)"
+    assert arm.visibility == "product"
+    assert not arm.default
+    assert arm.stages == default.stages
+    assert arm.models == default.models
+    assert arm.prompts == default.prompts
+    assert arm.policies == default.policies
+    assert {
+        role: dict(role_knobs) for role, role_knobs in arm.knobs.items()
+    } == {
+        "answer": {"temperature": 0, "dry": 0},
+        "review": {"dry": 0},
+    }
+
+    sampling = engine._sampling(
+        engine.ExecutionRequest(
+            profile=arm,
+            messages=[{"role": "user", "content": "What was the weight?"}],
+        )
+    )
+    assert sampling["answer_temperature"] == 0
+    assert sampling["answer_dry"] == 0
+    assert sampling["answer_repeat_penalty"] == 1.15
+    assert sampling["review_dry"] == 0
+
+    captured: list[dict] = []
+
+    async def fake_chat(_client, model, _messages, **kwargs):
+        captured.append({"model": model, **kwargs})
+        return {"content": '{"answer": "Weight was 71 kg [1].", "citations": [1], "blocks": []}'}
+
+    monkeypatch.setattr(team, "_chat", fake_chat)
+    asyncio.run(
+        team._synthesize_answer(
+            None,
+            arm.models["answer"],
+            [{"role": "user", "content": "What was the weight?"}],
+            "synthesis-answer",
+            "",
+            response_format=None,
+            max_tokens=256,
+            temperature=sampling["answer_temperature"],
+            repeat_penalty=sampling["answer_repeat_penalty"],
+            dry=sampling["answer_dry"],
+        )
+    )
+    assert captured[-1]["dry_multiplier"] == 0
+    assert captured[-1]["repeat_penalty"] == 1.15
+
+    asyncio.run(
+        team._validate_answer_label(
+            None,
+            arm.models["review"],
+            chart="[1] 2026-01-01 Weight: 71 kg",
+            gathered="",
+            answer_text="Weight was 71 kg [1].",
+            max_tokens=256,
+            temperature=sampling["review_temperature"],
+            repeat_penalty=sampling["review_repeat_penalty"],
+            dry=sampling["review_dry"],
+        )
+    )
+    assert captured[-1]["dry_multiplier"] == 0

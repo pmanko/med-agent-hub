@@ -459,6 +459,200 @@ def test_a_claim_asserting_a_trend_over_one_point_still_fails():
     assert "single_point_trend:fail" in _flags(result)
 
 
+def test_generic_count_trend_claim_resolves_series_from_citation_without_question():
+    claim = "The count has declined to 341 cells/uL [178]."
+
+    warn_result = gate_indepth_claims([claim], MULTI_COUNT_FACTS, mode="warn")
+    assert warn_result["status"] == "needs_review"
+    assert warn_result["flagged"] == [1]
+    assert "single_point_trend:fail" in _flags(warn_result)
+
+    enforce_result = gate_indepth_claims([claim], MULTI_COUNT_FACTS, mode="enforce")
+    assert enforce_result["status"] == "edited"
+    assert enforce_result["flagged"] == []
+    assert enforce_result["claims"] == [
+        "The chart shows one dated CD4 count measurement: 341 cells/uL on 2006-04-04 [178]. "
+        "A trend cannot be determined from one point."
+    ]
+
+
+def test_engine_judges_indepth_claims_without_question_while_answer_gate_uses_question(
+    monkeypatch,
+):
+    import asyncio
+    from dataclasses import replace
+    from server import engine, team
+    from server.levels_loader import get_profile
+    from tests.factories import patient_source_registry
+
+    chart = (
+        "[1] (2026-01-01) CD4 count: 341 cells/uL\n"
+        "[2] (2026-01-01) Weight (kg): 70 kg\n"
+    )
+    single_value_claim = "The CD4 count was 341 cells/uL on 2026-01-01 [1]."
+
+    async def fake_answer(*_args, **_kwargs):
+        return "The weight was 70 kg on 2026-01-01 [2].", [2], []
+
+    async def fake_substantive(*_args, **kwargs):
+        return (
+            kwargs["answer_text"],
+            kwargs["citations"],
+            kwargs["blocks"],
+            {"level": "green", "note": ""},
+        )
+
+    async def fake_ground(_client, _model, _answer, refs, _map, **_kwargs):
+        return [{**ref, "groundingStatus": "verified", "grounded": True} for ref in refs]
+
+    monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
+    monkeypatch.setattr(team, "_ensure_substantive_answer", fake_substantive)
+    monkeypatch.setattr(team, "_ground_references", fake_ground)
+    monkeypatch.setattr(team, "_write_trace", lambda *_a, **_k: None)
+
+    class _Counter:
+        async def count(self, *_args):
+            return 1
+
+        async def count_chat(self, *_args):
+            return 1
+
+    registry = patient_source_registry(
+        chart,
+        [
+            {
+                "resourceType": "obs",
+                "resourceUuid": "cd4",
+                "date": "2026-01-01",
+                "text": "(2026-01-01) CD4 count: 341 cells/uL",
+            },
+            {
+                "resourceType": "obs",
+                "resourceUuid": "weight",
+                "date": "2026-01-01",
+                "text": "(2026-01-01) Weight (kg): 70 kg",
+            },
+        ],
+    )
+    profile = get_profile("single-12b-checked")
+    profile = replace(
+        profile,
+        stages=tuple(stage for stage in profile.stages if stage != "review"),
+        policies={**profile.policies, "anchor": "2026-06-20", "drug_safety": False},
+    )
+    request = engine.ExecutionRequest(
+        profile=profile,
+        messages=[{"role": "user", "content": "How has the weight changed over the past year?"}],
+        patient="synthetic",
+        source_registry=registry,
+        token_counter=_Counter(),
+    )
+
+    async def fake_indepth_single_value(*_args, **_kwargs):
+        return [single_value_claim], {"level": "green", "note": ""}
+
+    monkeypatch.setattr(team, "_gen_indepth", fake_indepth_single_value)
+    payload = json.loads(asyncio.run(engine.drain_profile(request)))
+    assert payload["temporalGate"]["status"] == "fail"
+    assert payload["temporalGate"]["applied"] == "patch"
+    assert payload["inDepth"]["answer"] == f"- {single_value_claim}"
+    assert payload["inDepth"]["validation"]["status"] == "checked"
+
+    async def fake_indepth_unsupported_trend(*_args, **_kwargs):
+        return ["The CD4 count has declined on 2026-01_01 [2]."], {"level": "green", "note": ""}
+
+    monkeypatch.setattr(team, "_gen_indepth", fake_indepth_unsupported_trend)
+    flagged_payload = json.loads(asyncio.run(engine.drain_profile(request)))
+    assert flagged_payload["inDepth"]["validation"]["status"] == "needs_review"
+    assert flagged_payload["inDepth"]["validation"]["flagged"] == [1]
+
+
+def test_risk_and_outcome_words_are_not_read_as_the_patients_trend():
+    claims = [
+        "The low CD4 count reflects a severely compromised immune status, increasing the risk of infection.",
+        "The low CD4 count of 341 cells/uL [178] indicates increasing risk of infection.",
+        "The low CD4 count of 341 cells/uL [178] increases the risk of infection.",
+        "Antiretroviral therapy should start regardless of the CD4 count to improve outcomes.",
+        "A single CD4 count of 341 cells/uL [178] is insufficient to establish a trend.",
+    ]
+
+    result = gate_indepth_claims(claims, MULTI_COUNT_FACTS, mode="enforce")
+
+    assert result["flagged"] == []
+    assert result["claims"] == claims
+    assert _flags(result) == []
+
+
+def test_trend_denial_is_scoped_to_its_own_series_and_clause():
+    chart = (
+        "[1] (2025-10-22) Finding — Weight: 52 kg\n"
+        "[2] (2026-01-07) Finding — Weight: 41 kg\n"
+        "[3] (2025-11-24) Test — CD4 count: 341 cells/uL\n"
+        "[4] (2026-01-07) Encounter — Clinic visit\n"
+    )
+    facts = build_temporal_facts(chart, "2026-06-20")
+
+    cross_series = (
+        "Weight increased [1][2], while a single CD4 count of 341 cells/uL [3] "
+        "is insufficient to establish a trend."
+    )
+    cross_result = gate_indepth_claims([cross_series], facts, mode="enforce")
+    assert cross_result["status"] == "needs_review"
+    assert cross_result["flagged"] == [1]
+    assert cross_result["claims"] == [cross_series]
+    assert _flags(cross_result) == ["trend_direction:fail"]
+
+    single_positive = "The CD4 count is declining based on a single value [3]."
+    single_warn = gate_indepth_claims([single_positive], facts, mode="warn")
+    assert single_warn["status"] == "needs_review"
+    assert single_warn["flagged"] == [1]
+    assert _flags(single_warn) == ["single_point_trend:fail"]
+
+    other_series_denial = "There is no clear trend in weight, but the CD4 count is declining [3]."
+    other_warn = gate_indepth_claims([other_series_denial], facts, mode="warn")
+    assert other_warn["status"] == "needs_review"
+    assert other_warn["flagged"] == [1]
+    assert _flags(other_warn) == ["single_point_trend:fail"]
+
+
+def test_measurement_explicitly_placed_at_last_visit_is_checked_against_last_encounter():
+    chart = (
+        "[1] (2025-10-22) Finding — Weight: 52 kg\n"
+        "[2] (2026-01-07) Finding — Weight: 41 kg\n"
+        "[4] (2026-01-07) Encounter — Clinic visit\n"
+    )
+    facts = build_temporal_facts(chart, "2026-06-20")
+    claim = "At the last visit, weight was 52 kg on 2025-10-22 [1]."
+
+    result = gate_indepth_claims([claim], facts, mode="enforce")
+    assert result["status"] == "needs_review"
+    assert result["flagged"] == [1]
+    assert result["claims"] == [claim]
+    assert "last_visit:fail" in _flags(result)
+
+
+def test_coordinated_dates_and_shared_leading_date_bind_values_across_clauses():
+    chart = (
+        "[1] (2025-10-22) Finding — Weight: 52 kg\n"
+        "[2] (2026-01-07) Finding — Weight: 41 kg\n"
+        "[3] (2025-10-22) Test — CD4 count: 200 cells/uL\n"
+        "[4] (2026-01-07) Test — CD4 count: 341 cells/uL\n"
+    )
+    facts = build_temporal_facts(chart, "2026-06-20")
+
+    coordinated = "Weight was 52 kg on 2025-10-22 and 2026-01-07 [1][2]."
+    coord_warn = gate_indepth_claims([coordinated], facts, mode="warn")
+    assert coord_warn["status"] == "needs_review"
+    assert coord_warn["flagged"] == [1]
+    assert "date_value_binding:fail" in _flags(coord_warn)
+
+    shared_leading = "On 2025-10-22, weight was 52 kg and CD4 count was 341 cells/uL [4]."
+    shared_warn = gate_indepth_claims([shared_leading], facts, mode="warn")
+    assert shared_warn["status"] == "needs_review"
+    assert shared_warn["flagged"] == [1]
+    assert "date_value_binding:fail" in _flags(shared_warn)
+
+
 @pytest.mark.parametrize(
     "goldens_file", ["indepth-gate-goldens.json", "indepth-gate-goldens-2026-10-27.json"]
 )
@@ -477,3 +671,4 @@ def test_claims_the_gate_questioned_in_past_runs_get_the_reviewed_verdict(golden
         result = gate_indepth_claims([case["claim"]], facts[chart], mode="enforce")
 
         assert _flags(result) == case["expected"], case["scenario"]
+        assert result["claims"] == [case.get("expected_claim", case["claim"])], case["scenario"]

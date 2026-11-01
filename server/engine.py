@@ -138,6 +138,28 @@ def _grounding_policy(profile: Profile) -> str:
     return str(review.get("grounding") or "separate")
 
 
+_GENERAL_GUIDANCE_RE = re.compile(
+    r"\b(?:guideline|guidelines|who\b|standard|typically|generally|should|recommended|"
+    r"requires|necessitates|warrants|monitoring|surveillance|patients\s+with|risk\s+for|"
+    r"range|threshold|below|above|interpretation|context)\b",
+    re.I,
+)
+_PATIENT_FACT_ASSERTION_RE = re.compile(
+    r"\b\d{4}-\d{2}-\d{2}\b|"
+    r"\b(?:was|were|is|are|had|has|recorded|measured|documented|showed|shows)\b"
+    r"[^.]{0,30}\b\d+(?:\.\d+)?\s*(?:%|[a-zA-Z][a-zA-Z/^0-9\u00b2\u00b3]*)",
+    re.I,
+)
+
+
+def _is_uncited_patient_fact(claim: str) -> bool:
+    """True when an uncited In-Depth claim asserts a specific patient measurement or date
+    without general-guidance framing."""
+    if not claim or _GENERAL_GUIDANCE_RE.search(claim):
+        return False
+    return bool(_PATIENT_FACT_ASSERTION_RE.search(claim))
+
+
 @dataclass
 class _State:
     messages: List[Dict[str, Any]]
@@ -657,7 +679,9 @@ async def _select_answer_review_context(
     reviewer_model = request.profile.models["review"]
     folded = _grounding_policy(request.profile) == "folded"
     review_text = answer_text
-    block_text, _block_refs = stages._block_temporal_text_and_refs(blocks)
+    block_text, _block_refs = stages._block_temporal_text_and_refs(
+        blocks, include_refs=True
+    )
     if block_text:
         review_text += "\n\n=== STRUCTURED BLOCK TEXT ===\n" + block_text
 
@@ -979,6 +1003,12 @@ def _sampling(request: ExecutionRequest) -> Dict[str, Any]:
         "review_temperature": stages._knob(knobs, "review", "temperature", 0.0),
         "review_repeat_penalty": stages._knob(knobs, "review", "repeat_penalty", None),
         "review_dry": stages._knob(knobs, "review", "dry", None),
+        "grounding_temperature": stages._knob(
+            knobs,
+            "grounding",
+            "temperature",
+            stages._knob(knobs, "review", "temperature", 0.0),
+        ),
     }
 
 
@@ -1959,6 +1989,10 @@ async def _execute_stages(
                             grounding_options["index_verdicts"] = (
                                 state.review_citation_verdicts or {}
                             )
+                        else:
+                            grounding_options["temperature"] = sampling[
+                                "grounding_temperature"
+                            ]
                         state.references = await stages._ground_references(
                             client,
                             None if folded else request.profile.models["grounding"],
@@ -2267,6 +2301,18 @@ async def _execute_stages(
                     for claim_index, claim in enumerate(state.claims, 1):
                         claim_citations = stages._extract_citations(claim)
                         if not claim_citations:
+                            if _is_uncited_patient_fact(claim):
+                                citation_checks.append(
+                                    {
+                                        "claim_index": claim_index,
+                                        "claim": claim,
+                                        "status": "warn",
+                                        "reason": "In-Depth claim states a patient-specific fact without citing a record.",
+                                        "source_indices": [],
+                                    }
+                                )
+                                mark(claim_index, "yellow", "patient fact, not cited")
+                                continue
                             # General guidance cites no record. It is tagged, not marked for review.
                             state.indepth_tags[claim_index] = "general guidance, not from the chart"
                             citation_checks.append(
@@ -2346,6 +2392,7 @@ async def _execute_stages(
                             flattened,
                             state.mappings,
                             attribution_only=True,
+                            temperature=sampling["grounding_temperature"],
                         )
 
                     indepth_references: list[dict[str, Any]] = []
