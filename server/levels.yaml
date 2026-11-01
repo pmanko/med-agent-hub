@@ -378,3 +378,235 @@ profiles:
     visibility: evaluation
     context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true, supplemental_sources: [knowledge-base]}
     knobs: {answer: {temperature: 0}}
+
+  # Washington Health Summary (WAHS+) profiles (workflow: wahs).
+  # Exposed via GET /v1/models?workflow=wahs and executed via POST /v1/chat/completions.
+  wahs-12b-kb:
+    label: "WAHS+ Checked Synthesis — Gemma 4 12B + 4-Layer Clinical KB"
+    workflow: wahs
+    topology: single
+    stages: [context, answer, gate]
+    models: {answer: gemma-4-12b}
+    prompts: {answer: wahs-kb-guided}
+    policies:
+      provider: local
+      include_kb_findings: true
+      overflow_lookup_tools: true
+      citation_grounding: enforce
+      description: "Default WAHS+ profile: combines the Step 2 Condensed FHIR Chart Ledger with 4-Layer Clinical KB Findings (RxNorm, SNOMED, LOINC, CVX/ACIP) and enforces [N] citation grounding + safety abstention."
+    knobs:
+      answer: {temperature: 0.1, dry: 0.0, maxTokens: 900}
+    visibility: product
+    default: true
+    selection_priority: 10
+    context: {window: 24576, reserved_output_tokens: 2048, exact_tokenizer: true}
+
+  wahs-12b-raw:
+    label: "WAHS+ Unhinted Control — Gemma 4 12B (Condensed Chart Only, No KB Hints)"
+    workflow: wahs
+    topology: single
+    stages: [context, answer, gate]
+    models: {answer: gemma-4-12b}
+    prompts: {answer: wahs-raw-unhinted}
+    policies:
+      provider: local
+      include_kb_findings: false
+      overflow_lookup_tools: false
+      citation_grounding: enforce
+      description: "Ablation control profile: passes ONLY the Step 2 Condensed FHIR Chart Ledger without 4-Layer Clinical KB hints, testing raw LLM medication/staging/note reconciliation across 8k vs 1k budgets."
+    knobs:
+      answer: {temperature: 0.1, dry: 0.0, maxTokens: 900}
+    visibility: product
+    selection_priority: 20
+    context: {window: 24576, reserved_output_tokens: 2048, exact_tokenizer: true}
+
+  wahs-12b-xcheck:
+    label: "WAHS+ Cross-Checked — Gemma 4 12B Writer + Qwen 3.5 9B Verifier"
+    workflow: wahs
+    topology: xcheck
+    stages: [context, answer, review, gate]
+    models: {answer: gemma-4-12b, review: qwen3.5-9b}
+    prompts: {answer: wahs-kb-guided, review: wahs-xcheck-review}
+    policies:
+      provider: local
+      include_kb_findings: true
+      overflow_lookup_tools: true
+      citation_grounding: enforce
+      description: "Two-stage cross-family verification: Gemma 4 12B synthesizes the answer and Qwen 3.5 9B audits [N] citations, hold/stop safety alerts, and budget fidelity."
+    knobs:
+      answer: {temperature: 0.1, dry: 0.0, maxTokens: 900}
+      review: {temperature: 0.0, dry: 0.0, maxTokens: 350}
+    visibility: product
+    selection_priority: 30
+    context: {window: 24576, reserved_output_tokens: 2048, exact_tokenizer: true}
+
+  wahs-e4b-kb:
+    label: "WAHS+ Fast Edge — Gemma 4 E4B + 4-Layer Clinical KB"
+    workflow: wahs
+    topology: single
+    stages: [context, answer, gate]
+    models: {answer: gemma-e4b}
+    prompts: {answer: wahs-kb-guided}
+    policies:
+      provider: local
+      include_kb_findings: true
+      overflow_lookup_tools: true
+      citation_grounding: enforce
+      description: "Compact edge profile (~5 GB RAM): pairs Gemma 4 E4B with the 4-Layer Clinical KB to test sub-second TTFT and small-model reasoning on 8k vs 1k charts."
+    knobs:
+      answer: {temperature: 0.1, dry: 0.0, maxTokens: 800}
+    visibility: product
+    selection_priority: 40
+    context: {window: 24576, reserved_output_tokens: 2048, exact_tokenizer: true}
+
+  wahs-31b-kb:
+    label: "WAHS+ High-Capacity Local — Gemma 4 31B + 4-Layer Clinical KB"
+    workflow: wahs
+    topology: single
+    stages: [context, answer, gate]
+    models: {answer: gemma-31b}
+    prompts: {answer: wahs-kb-guided}
+    policies:
+      provider: local
+      include_kb_findings: true
+      overflow_lookup_tools: true
+      citation_grounding: enforce
+      description: "High-capacity local profile: runs Gemma 4 31B with the 4-Layer Clinical KB for deep multi-clinic synthesis."
+    knobs:
+      answer: {temperature: 0.1, dry: 0.0, maxTokens: 1024}
+    visibility: product
+    selection_priority: 50
+    context: {window: 24576, reserved_output_tokens: 2048, exact_tokenizer: true}
+
+  wahs-qwen35-9b-kb:
+    label: "WAHS+ Cross-Family — Qwen 3.5 9B + 4-Layer Clinical KB"
+    workflow: wahs
+    topology: single
+    stages: [context, answer, gate]
+    models: {answer: qwen3.5-9b}
+    prompts: {answer: wahs-kb-guided}
+    policies:
+      provider: local
+      include_kb_findings: true
+      overflow_lookup_tools: true
+      citation_grounding: enforce
+      description: "Cross-family comparison profile: runs Qwen 3.5 9B with the identical WAHS+ KB prompt to compare model-family behavior on the same condensed chart."
+    knobs:
+      answer: {temperature: 0.1, dry: 0.0, maxTokens: 900}
+    visibility: product
+    selection_priority: 60
+    context: {window: 24576, reserved_output_tokens: 2048, exact_tokenizer: true}
+
+  wahs-openrouter-gemma-3-27b-kb:
+    label: "OpenRouter — Google Gemma 3 27B IT + 4-Layer Clinical KB"
+    workflow: wahs
+    topology: single
+    stages: [context, answer, gate]
+    models: {answer: google/gemma-3-27b-it}
+    prompts: {answer: wahs-kb-guided}
+    policies:
+      provider: openrouter
+      include_kb_findings: true
+      overflow_lookup_tools: true
+      citation_grounding: enforce
+      description: "Cloud comparison via OpenRouter: runs Google Gemma 3 27B IT with the WAHS+ 4-Layer Clinical KB prompt."
+    knobs:
+      answer: {temperature: 0.1, dry: 0.0, maxTokens: 1024}
+    visibility: product
+    selection_priority: 110
+    context: {window: 32768, reserved_output_tokens: 2048, exact_tokenizer: false}
+
+  wahs-openrouter-qwen-2.5-72b-kb:
+    label: "OpenRouter — Qwen 2.5 72B Instruct + 4-Layer Clinical KB"
+    workflow: wahs
+    topology: single
+    stages: [context, answer, gate]
+    models: {answer: qwen/qwen-2.5-72b-instruct}
+    prompts: {answer: wahs-kb-guided}
+    policies:
+      provider: openrouter
+      include_kb_findings: true
+      overflow_lookup_tools: true
+      citation_grounding: enforce
+      description: "Cloud comparison via OpenRouter: runs Qwen 2.5 72B Instruct with the WAHS+ 4-Layer Clinical KB prompt."
+    knobs:
+      answer: {temperature: 0.1, dry: 0.0, maxTokens: 1024}
+    visibility: product
+    selection_priority: 120
+    context: {window: 32768, reserved_output_tokens: 2048, exact_tokenizer: false}
+
+  wahs-openrouter-llama-3.3-70b-kb:
+    label: "OpenRouter — Meta Llama 3.3 70B Instruct + 4-Layer Clinical KB"
+    workflow: wahs
+    topology: single
+    stages: [context, answer, gate]
+    models: {answer: meta-llama/llama-3.3-70b-instruct}
+    prompts: {answer: wahs-kb-guided}
+    policies:
+      provider: openrouter
+      include_kb_findings: true
+      overflow_lookup_tools: true
+      citation_grounding: enforce
+      description: "Cloud comparison via OpenRouter: runs Meta Llama 3.3 70B Instruct with the WAHS+ 4-Layer Clinical KB prompt."
+    knobs:
+      answer: {temperature: 0.1, dry: 0.0, maxTokens: 1024}
+    visibility: product
+    selection_priority: 130
+    context: {window: 32768, reserved_output_tokens: 2048, exact_tokenizer: false}
+
+  wahs-openrouter-gemini-2.5-flash-kb:
+    label: "OpenRouter — Google Gemini 2.5 Flash + 4-Layer Clinical KB"
+    workflow: wahs
+    topology: single
+    stages: [context, answer, gate]
+    models: {answer: google/gemini-2.5-flash}
+    prompts: {answer: wahs-kb-guided}
+    policies:
+      provider: openrouter
+      include_kb_findings: true
+      overflow_lookup_tools: true
+      citation_grounding: enforce
+      description: "Frontier cloud comparison via OpenRouter: runs Google Gemini 2.5 Flash with the WAHS+ 4-Layer Clinical KB prompt."
+    knobs:
+      answer: {temperature: 0.1, dry: 0.0, maxTokens: 1024}
+    visibility: product
+    selection_priority: 140
+    context: {window: 32768, reserved_output_tokens: 2048, exact_tokenizer: false}
+
+  wahs-openrouter-gemini-2.5-flash-raw:
+    label: "OpenRouter — Google Gemini 2.5 Flash (Unhinted Control, No KB Hints)"
+    workflow: wahs
+    topology: single
+    stages: [context, answer, gate]
+    models: {answer: google/gemini-2.5-flash}
+    prompts: {answer: wahs-raw-unhinted}
+    policies:
+      provider: openrouter
+      include_kb_findings: false
+      overflow_lookup_tools: false
+      citation_grounding: enforce
+      description: "Frontier cloud ablation control via OpenRouter: runs Google Gemini 2.5 Flash on the Condensed Chart Ledger alone without 4-Layer KB hints."
+    knobs:
+      answer: {temperature: 0.1, dry: 0.0, maxTokens: 1024}
+    visibility: product
+    selection_priority: 145
+    context: {window: 32768, reserved_output_tokens: 2048, exact_tokenizer: false}
+
+  wahs-openrouter-claude-sonnet-kb:
+    label: "OpenRouter — Anthropic Claude 3.7 Sonnet + 4-Layer Clinical KB"
+    workflow: wahs
+    topology: single
+    stages: [context, answer, gate]
+    models: {answer: anthropic/claude-3.7-sonnet}
+    prompts: {answer: wahs-kb-guided}
+    policies:
+      provider: openrouter
+      include_kb_findings: true
+      overflow_lookup_tools: true
+      citation_grounding: enforce
+      description: "Frontier cloud comparison via OpenRouter: runs Anthropic Claude 3.7 Sonnet with the WAHS+ 4-Layer Clinical KB prompt."
+    knobs:
+      answer: {temperature: 0.1, dry: 0.0, maxTokens: 1024}
+    visibility: product
+    selection_priority: 150
+    context: {window: 32768, reserved_output_tokens: 2048, exact_tokenizer: false}

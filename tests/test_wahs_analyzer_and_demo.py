@@ -458,6 +458,115 @@ def test_w15_fhir_browser_condensation_matrix_and_readonly_skills() -> None:
         assert len(s["suggested_remediation"]) >= 1
 
 
+def test_w19_wahs_profiles_discovery_and_execution_surface(monkeypatch) -> None:
+    from server import openai_compat
+    from server.levels_loader import (
+        get_wahs_profile,
+        validate_wahs_profiles,
+        wahs_profile_ids,
+    )
+
+    validated = validate_wahs_profiles()
+    ids = wahs_profile_ids()
+    assert len(validated) == len(ids)
+    assert "wahs-12b-kb" in ids
+    assert "wahs-12b-raw" in ids
+    assert "wahs-12b-xcheck" in ids
+    assert "wahs-openrouter-gemini-2.5-flash-kb" in ids
+
+    kb_prof = get_wahs_profile("wahs-12b-kb")
+    raw_prof = get_wahs_profile("wahs-12b-raw")
+    assert kb_prof.policies["include_kb_findings"] is True
+    assert raw_prof.policies["include_kb_findings"] is False
+
+    # Verify condensation_matrix cells include retained_uuids
+    bundle = _make_synthetic_wahs_bundle()
+    w15 = build_patient_skills_and_condensation_matrix(bundle)
+    cell_8k = w15["condensation_matrix"]["lossless_structural"]["8192"]
+    assert len(cell_8k["retained_uuids"]) >= 5
+
+    monkeypatch.setattr(
+        openai_compat,
+        "_served_backend_model_metadata",
+        lambda: {"gemma-4-12b": {"id": "gemma-4-12b"}, "qwen3.5-9b": {"id": "qwen3.5-9b"}},
+    )
+    client = TestClient(app)
+
+    # Without OpenRouter key: local profiles with loaded models are available, OpenRouter profiles are unavailable
+    r_models = client.get("/v1/models?workflow=wahs")
+    assert r_models.status_code == 200
+    body = r_models.json()
+    assert body["workflow"] == "wahs"
+    by_id = {m["id"]: m for m in body["data"]}
+    assert by_id["wahs-12b-kb"]["available"] is True
+    assert by_id["wahs-12b-raw"]["available"] is True
+    assert by_id["wahs-12b-xcheck"]["available"] is True
+    assert "SUMMARY:" in by_id["wahs-12b-kb"]["system_prompts"]["answer"]
+    assert by_id["wahs-openrouter-gemini-2.5-flash-kb"]["available"] is False
+
+    # With X-OpenRouter-Key header: OpenRouter profiles become available
+    r_or = client.get(
+        "/v1/models?workflow=wahs", headers={"X-OpenRouter-Key": "sk-or-test-key"}
+    )
+    assert r_or.status_code == 200
+    by_id_or = {m["id"]: m for m in r_or.json()["data"]}
+    assert by_id_or["wahs-openrouter-gemini-2.5-flash-kb"]["available"] is True
+
+    # Test POST /v1/chat/completions execution for a WAHS profile
+    captured_calls = []
+
+    class DummyResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "SUMMARY:\nGrounded synthesis [1].\n\nQUESTIONS_FOR_DOCTOR:\n- Check Plavix vs clopidogrel.",
+                        }
+                    }
+                ]
+            }
+
+    class DummyAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def post(self, url, headers=None, json=None):
+            captured_calls.append({"url": url, "headers": headers, "json": json})
+            return DummyResponse()
+
+    monkeypatch.setattr(openai_compat.httpx, "AsyncClient", DummyAsyncClient)
+
+    r_comp = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "wahs-12b-kb",
+            "messages": [{"role": "user", "content": "Check my medications."}],
+            "stream": False,
+        },
+    )
+    assert r_comp.status_code == 200
+    comp_body = r_comp.json()
+    assert comp_body["model"] == "wahs-12b-kb"
+    assert comp_body["hub_profile"]["id"] == "wahs-12b-kb"
+    assert comp_body["hub_profile"]["policies"]["include_kb_findings"] is True
+    assert len(captured_calls) == 1
+    assert captured_calls[0]["json"]["model"] == "gemma-4-12b"
+    assert captured_calls[0]["json"]["messages"][0]["role"] == "system"
+    assert "WAHS+" in captured_calls[0]["json"]["messages"][0]["content"]
+
+
+
 
 
 

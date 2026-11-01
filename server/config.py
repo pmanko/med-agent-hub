@@ -20,6 +20,10 @@ class LLMConfig:
     base_url: str = os.getenv("LLM_BASE_URL", "http://localhost:8077")
     provider: str = os.getenv("LLM_PROVIDER", "openai-compatible")
     api_key: str = os.getenv("LLM_API_KEY", "")
+    openrouter_base_url: str = os.getenv(
+        "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"
+    )
+    openrouter_api_key: str = os.getenv("OPENROUTER_API_KEY", "")
     temperature: float = float(os.getenv("LLM_TEMPERATURE", "0.2"))
     max_tokens: int = int(os.getenv("LLM_MAX_TOKENS", "2000"))
     request_timeout_seconds: float = float(

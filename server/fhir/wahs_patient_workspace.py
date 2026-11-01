@@ -196,6 +196,14 @@ def build_patient_skills_and_condensation_matrix(
                 condense_mode=internal_mode,
             )
             red_pct = round((1.0 - (c_res.actual_tokens / max(1, raw_json_tokens))) * 100.0, 1)
+            retained_uuids: set[str] = set()
+            for m_entry in c_res.mappings:
+                r_uuid = m_entry.get("resourceUuid")
+                if r_uuid:
+                    retained_uuids.add(str(r_uuid))
+                for m_uuid in m_entry.get("memberUuids") or []:
+                    if m_uuid:
+                        retained_uuids.add(str(m_uuid))
             condensation_matrix[mode_key][str(b_tok)] = {
                 "condense_mode": mode_key,
                 "mode_label": (
@@ -209,8 +217,9 @@ def build_patient_skills_and_condensation_matrix(
                 "tier": c_res.tier,
                 "tier_name": c_res.tier_name,
                 "rendered_records": len(c_res.records),
+                "retained_uuids": sorted(retained_uuids),
                 "omitted_sections": c_res.completeness_manifest.get("omitted_sections", {}),
-                "chart_text": c_res.chart_text[:14000],
+                "chart_text": c_res.chart_text,
                 "human_summary": _extract_human_summary_from_condensed(
                     c_res, condense_mode=mode_key
                 ),
@@ -237,6 +246,7 @@ def build_patient_skills_and_condensation_matrix(
                 "source_org": al.source_org or "Chart Record",
                 "code": al.code,
                 "tone": "warn",
+                "resource_uuids": [al.resource_uuid] if al.resource_uuid else [],
             }
         )
     for c_it in active_conds[:8]:
@@ -248,6 +258,7 @@ def build_patient_skills_and_condensation_matrix(
                 "source_org": c_it.source_org or "Primary / Specialist Clinic",
                 "code": f"SNOMED {c_it.code}" if c_it.code else "",
                 "tone": "info",
+                "resource_uuids": [c_it.resource_uuid] if c_it.resource_uuid else [],
             }
         )
     for m_it in active_meds[:8]:
@@ -260,6 +271,7 @@ def build_patient_skills_and_condensation_matrix(
                 "source_org": m_it.source_org or "Prescribing Clinic",
                 "code": f"RxNorm {m_it.code}" if m_it.code else "",
                 "tone": "ok",
+                "resource_uuids": [m_it.resource_uuid] if m_it.resource_uuid else [],
             }
         )
     visit_questions = [
@@ -305,6 +317,11 @@ def build_patient_skills_and_condensation_matrix(
 
     # Skill 2: Explain My Recent Hospital Stay or Procedure
     hosp_rows: List[Dict[str, Any]] = []
+    hl_cite_uuids = [
+        str(c.get("resource_uuid") or c.get("resourceUuid"))
+        for c in (hl_enc.get("citations") or [])
+        if c.get("resource_uuid") or c.get("resourceUuid")
+    ]
     for p_str in hl_enc.get("key_procedures") or hl_enc.get("procedures") or []:
         hosp_rows.append(
             {
@@ -314,6 +331,7 @@ def build_patient_skills_and_condensation_matrix(
                 "source_org": hl_enc.get("facility") or "Hospital / Surgical Center",
                 "code": "SNOMED Procedure",
                 "tone": "info",
+                "resource_uuids": hl_cite_uuids,
             }
         )
     for m_str in hl_enc.get("inpatient_medications") or []:
@@ -325,6 +343,7 @@ def build_patient_skills_and_condensation_matrix(
                 "source_org": hl_enc.get("facility") or "Hospital Team",
                 "code": "RxNorm",
                 "tone": "ok",
+                "resource_uuids": hl_cite_uuids,
             }
         )
     for dev_it in [d for d in devices if not d.metadata.get("is_room_equipment")]:
@@ -336,6 +355,7 @@ def build_patient_skills_and_condensation_matrix(
                 "source_org": dev_it.source_org or "Surgical / Clinical Team",
                 "code": f"SNOMED {dev_it.code}" if dev_it.code else "Device",
                 "tone": "info",
+                "resource_uuids": [dev_it.resource_uuid] if dev_it.resource_uuid else [],
             }
         )
     for n_it in notes[:3]:
@@ -348,6 +368,7 @@ def build_patient_skills_and_condensation_matrix(
                 "source_org": n_it.source_org or "Care Team",
                 "code": "DocumentReference",
                 "tone": "info",
+                "resource_uuids": [n_it.resource_uuid] if n_it.resource_uuid else [],
             }
         )
     skill_hospital_stay = {
@@ -412,6 +433,7 @@ def build_patient_skills_and_condensation_matrix(
                 "source_org": m_it.source_org or "Prescribing Clinic",
                 "code": f"RxNorm {m_it.code}" if m_it.code else "MedicationRequest",
                 "tone": "ok",
+                "resource_uuids": [m_it.resource_uuid] if m_it.resource_uuid else [],
             }
         )
     med_cites = _citations_for_uuids(
@@ -454,6 +476,11 @@ def build_patient_skills_and_condensation_matrix(
         min_pt = t.get("min") or t.get("trough") or first_pt
         max_pt = t.get("max") or t.get("peak") or last_pt
         delta_val = float(last_pt.get("value", 0.0)) - float(first_pt.get("value", 0.0))
+        t_uuids = [
+            str(c_obj.get("resource_uuid") or c_obj.get("resourceUuid"))
+            for c_obj in (t.get("citations") or [])
+            if c_obj.get("resource_uuid") or c_obj.get("resourceUuid")
+        ]
         lab_rows.append(
             {
                 "category": f"Direction: {str(t.get('direction') or 'tracked').upper()}",
@@ -471,12 +498,10 @@ def build_patient_skills_and_condensation_matrix(
                 if str(t.get("direction") or "")
                 in {"increasing", "decreasing", "rising", "falling"}
                 else "info",
+                "resource_uuids": t_uuids,
             }
         )
-        for c_obj in t.get("citations") or []:
-            u = c_obj.get("resource_uuid") or c_obj.get("resourceUuid")
-            if u:
-                lab_uuids.append(u)
+        lab_uuids.extend(t_uuids)
     lab_cites = _citations_for_uuids(lab_uuids, uuid_map, condensed_8k)
     skill_lab_trends = {
         "id": "skill-lab-trends",
@@ -526,6 +551,7 @@ def build_patient_skills_and_condensation_matrix(
                 "source_org": orgs_str,
                 "code": f"CVX {ordered[-1].code}" if ordered[-1].code else "Immunization",
                 "tone": "ok",
+                "resource_uuids": [x.resource_uuid for x in ordered if x.resource_uuid],
             }
         )
     imm_cites = _citations_for_uuids([im.resource_uuid for im in imms], uuid_map, condensed_8k)
@@ -579,6 +605,11 @@ def build_patient_skills_and_condensation_matrix(
     med_check_remediation: List[str] = []
     med_check_cites: List[Dict[str, Any]] = []
     for f in med_conflict_findings:
+        f_uuids = [
+            str(c.get("resource_uuid") or c.get("resourceUuid"))
+            for c in (f.get("citations") or [])
+            if c.get("resource_uuid") or c.get("resourceUuid")
+        ]
         med_check_rows.append(
             {
                 "category": f.get("domain") or "Medication Reconciliation Alert",
@@ -588,6 +619,7 @@ def build_patient_skills_and_condensation_matrix(
                 or "Multi-Clinic / Discharge Record",
                 "code": f.get("kb_rule_id") or "RxNorm Check",
                 "tone": "warn",
+                "resource_uuids": f_uuids,
             }
         )
         if f.get("what_to_ask_doctor"):
@@ -664,6 +696,11 @@ def build_patient_skills_and_condensation_matrix(
     cond_check_remediation: List[str] = []
     cond_check_cites: List[Dict[str, Any]] = []
     for f in cond_conflict_findings:
+        f_uuids = [
+            str(c.get("resource_uuid") or c.get("resourceUuid"))
+            for c in (f.get("citations") or [])
+            if c.get("resource_uuid") or c.get("resourceUuid")
+        ]
         cond_check_rows.append(
             {
                 "category": f.get("domain") or "Problem-List Discrepancy",
@@ -673,6 +710,7 @@ def build_patient_skills_and_condensation_matrix(
                 or "Multi-Clinic Problem List",
                 "code": f.get("kb_rule_id") or "SNOMED Check",
                 "tone": "warn",
+                "resource_uuids": f_uuids,
             }
         )
         if f.get("what_to_ask_doctor"):
@@ -745,6 +783,11 @@ def build_patient_skills_and_condensation_matrix(
         or (f.get("id") or "").startswith("conflict-imm")
     ]
     for f in imm_conflict_findings:
+        f_uuids = [
+            str(c.get("resource_uuid") or c.get("resourceUuid"))
+            for c in (f.get("citations") or [])
+            if c.get("resource_uuid") or c.get("resourceUuid")
+        ]
         hygiene_rows.append(
             {
                 "category": f.get("domain") or "Immunization Registry Artifact",
@@ -753,6 +796,7 @@ def build_patient_skills_and_condensation_matrix(
                 "source_org": "Clinic vs. State Registry",
                 "code": f.get("kb_rule_id") or "CVX / ACIP",
                 "tone": "warn",
+                "resource_uuids": f_uuids,
             }
         )
         if f.get("what_to_ask_doctor"):
@@ -760,6 +804,11 @@ def build_patient_skills_and_condensation_matrix(
         hygiene_cites.extend(f.get("citations") or [])
 
     for card in bloat.get("cards") or []:
+        c_uuids = [
+            str(c.get("resource_uuid") or c.get("resourceUuid"))
+            for c in (card.get("citations") or [])
+            if c.get("resource_uuid") or c.get("resourceUuid")
+        ]
         hygiene_rows.append(
             {
                 "category": card.get("category") or "Chart Redundancy / Bloat",
@@ -768,6 +817,7 @@ def build_patient_skills_and_condensation_matrix(
                 "source_org": "Raw FHIR Bundle Audit",
                 "code": "Non-Destructive Prep",
                 "tone": "info",
+                "resource_uuids": c_uuids,
             }
         )
         hygiene_cites.extend(card.get("citations") or [])
@@ -822,6 +872,7 @@ def build_patient_skills_and_condensation_matrix(
                 "source_org": s_it.source_org or "Chart Record",
                 "code": f"{s_it.resource_type} ({s_it.code})",
                 "tone": "warn",
+                "resource_uuids": [s_it.resource_uuid] if s_it.resource_uuid else [],
             }
         )
     if not priv_rows:

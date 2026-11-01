@@ -23,7 +23,11 @@ _PATH = Path(__file__).parent / "levels.yaml"
 _PROMPTS = Path(__file__).parent / "prompts"
 _TEMPORAL_GATE_MODES = {"off", "warn", "enforce"}
 _CLINICAL_TOPOLOGIES = {"single", "team", "leg"}
-_WORKFLOWS = {"clinical_answer", "catalyst_query"}
+_WORKFLOWS = {"clinical_answer", "catalyst_query", "wahs"}
+_WAHS_TOPOLOGIES = {"single", "xcheck"}
+_WAHS_ALLOWED_STAGES = {"context", "answer", "review", "gate"}
+_WAHS_ALLOWED_ROLES = {"answer", "review"}
+_WAHS_PROVIDERS = {"local", "openrouter"}
 _OUTPUT_MODES = {"bare", "combined", "product", "review", "indepth"}
 _ANSWER_CONTRACTS = {"caller", "chart_answer"}
 # What happens with a model reviewer's verdict. Only labelling is built; applying the reviewer's fix
@@ -238,6 +242,88 @@ def validate_catalyst_query_profiles() -> Tuple[Profile, ...]:
         get_catalyst_query_profile(profile_id)
         for profile_id in catalyst_query_profile_ids()
     )
+
+
+def wahs_profile_ids() -> List[str]:
+    raw = _load_raw()
+    ids = [
+        profile_id
+        for profile_id, spec in raw.items()
+        if str((spec or {}).get("workflow") or "clinical_answer") == "wahs"
+    ]
+    defaults = [
+        profile_id for profile_id in ids if bool((raw[profile_id] or {}).get("default"))
+    ]
+    if len(defaults) > 1:
+        raise ValueError(
+            f"levels.yaml may define at most one default wahs profile; found {defaults}"
+        )
+    return ids
+
+
+def get_wahs_profile(profile_id: str) -> Profile:
+    raw = _load_raw()
+    if profile_id not in wahs_profile_ids():
+        raise ModelNotFoundError(profile_id, wahs_profile_ids())
+    return _from_spec(profile_id, raw[profile_id] or {})
+
+
+def validate_wahs_profiles() -> Tuple[Profile, ...]:
+    """Validate every configured WAHS profile at Hub startup."""
+    return tuple(get_wahs_profile(profile_id) for profile_id in wahs_profile_ids())
+
+
+def wahs_profile_metadata(
+    profile: Profile,
+    *,
+    backend_models: set[str] | None,
+    openrouter_configured: bool = False,
+    effective_default: bool = False,
+) -> Dict[str, Any]:
+    provider = str(profile.policies.get("provider") or "local").lower()
+    if provider == "openrouter":
+        available = bool(openrouter_configured)
+        unavailable_reasons = (
+            [] if available else ["openrouter_api_key_not_configured"]
+        )
+    else:
+        unavailable_reasons = (
+            ["model_backend_unreachable"]
+            if backend_models is None
+            else [
+                f"model_not_advertised:{model}"
+                for model in sorted(set(profile.models.values()) - backend_models)
+            ]
+        )
+        available = not unavailable_reasons
+
+    system_prompts: Dict[str, str] = {}
+    for role, p_name in sorted(profile.prompts.items()):
+        system_prompts[str(role)] = load_prompt(str(p_name)).strip()
+
+    return {
+        "id": profile.id,
+        "label": profile.label,
+        "workflow": profile.workflow,
+        "topology": profile.topology,
+        "provider": provider,
+        "available": available,
+        "default": bool(effective_default or profile.default),
+        "selection_priority": profile.selection_priority,
+        "visibility": profile.visibility,
+        "stages": list(profile.stages),
+        "required_models": sorted(set(profile.models.values())),
+        "role_models": _jsonable(profile.models),
+        "role_knobs": _jsonable(profile.knobs),
+        "policies": _jsonable(profile.policies),
+        "prompts": _jsonable(profile.prompts),
+        "system_prompts": system_prompts,
+        "profile_configuration_digest": _profile_configuration_digest(profile),
+        "role_prompt_digests": _role_prompt_digests(profile),
+        "context_window": profile.context_window or None,
+        "exact_tokenizer": profile.exact_tokenizer,
+        "unavailable_reasons": unavailable_reasons,
+    }
 
 
 def catalyst_query_profile_evidence(profile: Profile) -> Dict[str, Any]:
@@ -473,6 +559,58 @@ def _review_policy(profile: Profile) -> Optional[str]:
     return grounding
 
 
+def _compile_wahs_profile(profile: Profile) -> Profile:
+    if profile.topology not in _WAHS_TOPOLOGIES:
+        raise ValueError(
+            f"WAHS profile {profile.id!r} topology must be one of {_WAHS_TOPOLOGIES}"
+        )
+    if not profile.stages or profile.stages[0] != "context":
+        raise ValueError(f"WAHS profile {profile.id!r} must start with context")
+    unknown = [stage for stage in profile.stages if stage not in _WAHS_ALLOWED_STAGES]
+    if unknown:
+        raise ValueError(f"WAHS profile {profile.id!r} has unknown stages {unknown}")
+    if "answer" not in profile.models or set(profile.models) - _WAHS_ALLOWED_ROLES:
+        raise ValueError(
+            f"WAHS profile {profile.id!r} must define answer and optional review roles"
+        )
+    has_review = "review" in profile.models
+    if has_review != ("review" in profile.stages):
+        raise ValueError(
+            f"WAHS profile {profile.id!r} review role and stage must agree"
+        )
+    provider = str(profile.policies.get("provider") or "local").lower()
+    if provider not in _WAHS_PROVIDERS:
+        raise ValueError(
+            f"WAHS profile {profile.id!r} has invalid provider {provider!r}"
+        )
+    for role, model in profile.models.items():
+        if not isinstance(model, str) or not model.strip():
+            raise ValueError(f"WAHS profile {profile.id!r} has invalid {role} model")
+        prompt = profile.prompts.get(role)
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise ValueError(f"WAHS profile {profile.id!r} has no {role} prompt")
+        load_prompt(prompt)
+    return Profile(
+        id=profile.id,
+        label=profile.label,
+        topology=profile.topology,
+        stages=tuple(profile.stages),
+        models=_freeze_mapping(profile.models),
+        prompts=_freeze_mapping(profile.prompts),
+        policies=_freeze_mapping(profile.policies),
+        workflow=profile.workflow,
+        supplemental_sources=tuple(profile.supplemental_sources),
+        knobs=_freeze_mapping(profile.knobs),
+        visibility=profile.visibility,
+        default=profile.default,
+        selection_priority=profile.selection_priority,
+        context_window=profile.context_window,
+        reserved_output_tokens=profile.reserved_output_tokens,
+        exact_tokenizer=profile.exact_tokenizer,
+        output_contracts=tuple(profile.output_contracts),
+    )
+
+
 def compile_profile(profile: Profile) -> Profile:
     if not profile.id or not profile.label:
         raise ValueError("profile id and label are required")
@@ -482,6 +620,8 @@ def compile_profile(profile: Profile) -> Profile:
         )
     if profile.workflow == "catalyst_query":
         return _compile_catalyst_query_profile(profile)
+    if profile.workflow == "wahs":
+        return _compile_wahs_profile(profile)
     if profile.topology not in _CLINICAL_TOPOLOGIES:
         raise ValueError(
             f"profile {profile.id!r} has invalid topology {profile.topology!r}"
@@ -805,7 +945,7 @@ def _profile_configuration_digest(profile: Profile) -> str:
 
 
 def _prompt_assets(profile: Profile, role: str, configured: str) -> Tuple[str, ...]:
-    if role != "review":
+    if role != "review" or profile.workflow == "wahs":
         return (configured,)
     assets = [configured + "-answer"]
     if "indepth" in profile.stages:
