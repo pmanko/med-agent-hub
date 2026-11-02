@@ -310,3 +310,64 @@ def test_indepth_citation_support_probe_fixture_exercises_separate_and_folded_co
     )
     assert folded_verdict["unsupported"] == [8]
     assert folded_verdict["not_addressed"] == [5, 6, 7, 10]
+
+
+def test_label_findings_edge_cases_fail_open_and_preserve_contradiction_precedence(
+    monkeypatch,
+):
+    assert (
+        team._support_from_facts([{"fact": "weight 44 kg", "status": "differs"}])[
+            "support"
+        ]
+        == "unchecked"
+    )
+
+    unresolved = team._resolve_references([99], [], answer="Claim [99].", blocks=[])
+    assert unresolved[0]["support"] == "unchecked"
+    grounded_unresolved = asyncio.run(
+        team._ground_references(None, "G", "Claim [99].", unresolved, [])
+    )
+    assert grounded_unresolved[0]["support"] == "unchecked"
+
+    async def truncated_chat(*_args, **_kwargs):
+        return {
+            "content": json.dumps(
+                {"pairs": [{"facts": [{"fact": "71 kg", "status": "found"}]}]}
+            )
+        }
+
+    monkeypatch.setattr(team, "_chat", truncated_chat)
+    short_verdicts = asyncio.run(
+        team._entailment_verdicts(
+            None,
+            "G",
+            [("71 kg", "Weight 71 kg."), ("500 cells/uL", "CD4 500 cells/uL.")],
+        )
+    )
+    assert [v["support"] for v in short_verdicts] == ["unchecked", "unchecked"]
+
+    async def malformed_not_addressed_chat(*_args, **_kwargs):
+        return {
+            "content": json.dumps(
+                {"flag": [], "issues": "", "unsupported": [1], "not_addressed": "bad"}
+            )
+        }
+
+    monkeypatch.setattr(team, "_chat", malformed_not_addressed_chat)
+    bad_folded = asyncio.run(
+        team._validate_indepth_verdict(
+            None,
+            "R",
+            chart="[1] weight",
+            gathered="",
+            answer_text="Answer [1].",
+            claims=["Claim [1]."],
+            max_tokens=None,
+            temperature=0,
+            repeat_penalty=None,
+            dry=None,
+            citation_support=True,
+        )
+    )
+    assert "unsupported" not in bad_folded
+    assert "not_addressed" not in bad_folded
