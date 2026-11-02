@@ -14,8 +14,13 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .config import llm_config, validate_config
 from .generic_role import router as generic_role_router
-from .levels_loader import validate_catalyst_query_profiles, validate_profiles
+from .levels_loader import (
+    validate_catalyst_query_profiles,
+    validate_profiles,
+    validate_wahs_profiles,
+)
 from .openai_compat import router as openai_router
+from .wahs_demo import router as wahs_router
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -24,6 +29,7 @@ server_start_time = time.time()
 validate_config()
 validate_profiles()
 validate_catalyst_query_profiles()
+validate_wahs_profiles()
 
 app = FastAPI(
     title="med-agent-hub",
@@ -72,3 +78,4 @@ def health_check():
 
 app.include_router(openai_router)
 app.include_router(generic_role_router)
+app.include_router(wahs_router)

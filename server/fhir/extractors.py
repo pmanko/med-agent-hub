@@ -172,6 +172,17 @@ def _iso_date(val: Optional[str]) -> Optional[str]:
     return None
 
 
+def _iso_timestamp(val: Optional[str]) -> Optional[str]:
+    """Return `YYYY-MM-DDTHH:MM` when an intraday time component is present on an ISO datetime string."""
+    if not val:
+        return None
+    s = str(val).strip()
+    m = re.match(r"^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2})", s)
+    if m:
+        return f"{m.group(1)}T{m.group(2)}"
+    return None
+
+
 def _coding_pair(codeable: Optional[Mapping[str, Any]]) -> Tuple[str, str]:
     if not isinstance(codeable, Mapping):
         return "", ""
@@ -330,7 +341,7 @@ def _format_structured_dosage(d_inst: Mapping[str, Any]) -> str:
     return d_txt or structured_str
 
 
-def _extract_unique_note_narrative(decoded_text: str) -> str:
+def _extract_unique_note_narrative(decoded_text: str, *, preserve_all_sections: bool = False) -> str:
     """Extract unique encounter narrative (`# Chief Complaint`, `# Assessment and Plan`, etc.)
     from a clinical note while stripping repeated Synthea template header/table dumps.
 
@@ -356,7 +367,9 @@ def _extract_unique_note_narrative(decoded_text: str) -> str:
     has_markdown_headers = any(k != "preamble" for k in sections)
     if has_markdown_headers:
         for header, body_lines in sections.items():
-            if header == "preamble" or header in _BOILERPLATE_NOTE_SECTIONS:
+            if header == "preamble":
+                continue
+            if not preserve_all_sections and header in _BOILERPLATE_NOTE_SECTIONS:
                 continue
             compact_body = " ".join(body_lines).strip()
             if not compact_body or compact_body.lower() in {"no active allergies.", "none", "n/a"}:
@@ -376,7 +389,38 @@ def _extract_unique_note_narrative(decoded_text: str) -> str:
     return " ".join(non_empty).strip()
 
 
-def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
+def extract_bundle_lossless(
+    bundle: Mapping[str, Any],
+    *,
+    enable_privacy_classification: bool = False,
+    filter_room_equipment_devices: bool = False,
+) -> ExtractedChart:
+    """Non-destructive W12/W15 FHIR Bundle extractor:
+    - Zero pre-baked `[conflict_note]` mutations in rendered chart lines
+    - Optional `enable_privacy_classification` (`False` by default, deferred to W9)
+    - Optional `filter_room_equipment_devices` (`False` by default so clinic-equipment `Device` artifacts are retained non-destructively and inspectable)
+    - Preserves intraday timestamps (`YYYY-MM-DDTHH:MM`) on lab/vital observations
+    - Preserves all non-empty clinical note sections (`# Medications`, `# HPI`, etc.) plus full decoded text in metadata
+    """
+    return extract_bundle(
+        bundle,
+        include_conflict_annotations=False,
+        enable_privacy_classification=enable_privacy_classification,
+        preserve_intraday_timestamps=True,
+        preserve_all_note_sections=True,
+        filter_room_equipment_devices=filter_room_equipment_devices,
+    )
+
+
+def extract_bundle(
+    bundle: Mapping[str, Any],
+    *,
+    include_conflict_annotations: bool = True,
+    enable_privacy_classification: bool = True,
+    preserve_intraday_timestamps: bool = False,
+    preserve_all_note_sections: bool = False,
+    filter_room_equipment_devices: bool = True,
+) -> ExtractedChart:
     """Parse a FHIR R4 Bundle dict into normalized `ClinicalItem` objects and numeric series points."""
     entries = bundle.get("entry") or []
     resources: List[Mapping[str, Any]] = []
@@ -631,8 +675,15 @@ def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
         abatement = _iso_date(res.get("abatementDateTime"))
         cats = _categories(res)
         cond_kb = resolve_condition_code(code, disp)
-        sens = classify_sensitivity(code, disp, cats) or (
-            cond_kb.get("sensitivity") if cond_kb.get("resolved_by") != "heuristic_fallback" else None
+        sens = (
+            classify_sensitivity(code, disp, cats)
+            or (
+                cond_kb.get("sensitivity")
+                if cond_kb.get("resolved_by") != "heuristic_fallback"
+                else None
+            )
+            if enable_privacy_classification
+            else None
         )
         raw_conditions.append(
             {
@@ -656,7 +707,11 @@ def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
     resolved_cond_dicts = [
         c for c in raw_conditions if c["status"] not in {"active", "recurrence", "relapse"}
     ]
-    condition_conflicts = detect_condition_conflicts(active_cond_dicts, resolved_cond_dicts)
+    condition_conflicts = (
+        detect_condition_conflicts(active_cond_dicts, resolved_cond_dicts)
+        if include_conflict_annotations
+        else {}
+    )
 
     for c in raw_conditions:
         rid = c["resourceUuid"]
@@ -802,7 +857,11 @@ def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
             }
         )
 
-    med_conflicts = detect_medication_conflicts([m for m in raw_meds if m["is_active"]])
+    med_conflicts = (
+        detect_medication_conflicts([m for m in raw_meds if m["is_active"]])
+        if include_conflict_annotations
+        else {}
+    )
     for m in raw_meds:
         rid = m["resourceUuid"]
         m_conflict = med_conflicts.get(rid)
@@ -872,7 +931,11 @@ def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
             }
         )
 
-    imm_anomalies = annotate_immunization_anomalies(raw_imms, birth_date)
+    imm_anomalies = (
+        annotate_immunization_anomalies(raw_imms, birth_date)
+        if include_conflict_annotations
+        else {}
+    )
     imms_by_group: Dict[str, List[str]] = {}
     for imm in raw_imms:
         imms_by_group.setdefault(imm["group"], []).append(imm["resourceUuid"])
@@ -983,7 +1046,10 @@ def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
                         }
 
     for note_info in notes_by_hash.values():
-        snippet = _extract_unique_note_narrative(note_info["decoded"])
+        snippet = _extract_unique_note_narrative(
+            note_info["decoded"],
+            preserve_all_sections=preserve_all_note_sections,
+        )
         if not snippet:
             continue
         members = tuple(dict.fromkeys(note_info["member_uuids"]))
@@ -994,7 +1060,11 @@ def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
             if len(distinct_dates) > 1
             else ""
         )
-        note_sens = classify_sensitivity("", f"{note_info['title']} {note_info['decoded']} {snippet}")
+        note_sens = (
+            classify_sensitivity("", f"{note_info['title']} {note_info['decoded']} {snippet}")
+            if enable_privacy_classification
+            else None
+        )
         sens_suffix = " [sensitivity: SDOH/PRIVACY-SENSITIVE]" if note_sens == "SDOH/PRIVACY-SENSITIVE" else ""
         items.append(
             ClinicalItem(
@@ -1061,9 +1131,10 @@ def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
             else:
                 _, vc_disp = _coding_pair(comp.get("valueCodeableConcept"))
                 c_val_str = vc_disp
-            cs = classify_sensitivity(c_code, f"{c_disp} {c_val_str}", obs_cats)
-            if cs:
-                comp_sens.append(cs)
+            if enable_privacy_classification:
+                cs = classify_sensitivity(c_code, f"{c_disp} {c_val_str}", obs_cats)
+                if cs:
+                    comp_sens.append(cs)
         return pts, comp_sens
 
     claimed_obs_ids: Set[str] = set()
@@ -1099,11 +1170,22 @@ def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
             o_code, o_disp = _coding_pair(child_obs.get("code"))
             val_str, num_val, unit = _format_obs_value(child_obs)
             o_cats = _categories(child_obs)
-            o_date = _iso_date(child_obs.get("effectiveDateTime") or child_obs.get("issued")) or p_date
+            o_date_raw = child_obs.get("effectiveDateTime") or child_obs.get("issued")
+            o_date = (
+                (_iso_timestamp(o_date_raw) if preserve_intraday_timestamps else _iso_date(o_date_raw))
+                or p_date
+            )
             o_primary_cat = o_cats[0] if o_cats else ("survey" if is_survey else "laboratory")
-            o_sens = classify_sensitivity(o_code, f"{o_disp} {val_str}", o_cats)
+            o_sens = (
+                classify_sensitivity(o_code, f"{o_disp} {val_str}", o_cats)
+                if enable_privacy_classification
+                else None
+            )
             if o_sens:
                 child_sensitivities.append(o_sens)
+            short_label = o_disp or o_code or "item"
+            if val_str:
+                child_parts.append(f"{short_label}: {val_str}")
             if child_obs.get("component"):
                 comp_pts, comp_sens = _extract_obs_components(
                     child_obs, oid, o_date, o_primary_cat, o_cats
@@ -1115,21 +1197,22 @@ def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
                     NumericPoint(
                         resource_uuid=oid,
                         date=o_date,
-                        code=o_code or (o_disp or "item"),
-                        concept=o_disp or o_code or "item",
+                        code=o_code or short_label,
+                        concept=short_label,
                         value=num_val,
                         unit=unit,
                         category=o_primary_cat,
                     )
                 )
-            short_label = o_disp or o_code or "item"
-            if val_str:
-                child_parts.append(f"{short_label}: {val_str}")
 
         panel_sens = (
-            "SDOH/PRIVACY-SENSITIVE"
-            if "SDOH/PRIVACY-SENSITIVE" in child_sensitivities
-            else classify_sensitivity(code, disp)
+            (
+                "SDOH/PRIVACY-SENSITIVE"
+                if "SDOH/PRIVACY-SENSITIVE" in child_sensitivities
+                else classify_sensitivity(code, disp)
+            )
+            if enable_privacy_classification
+            else None
         )
         sens_suffix = " [sensitivity: SDOH/PRIVACY-SENSITIVE]" if panel_sens == "SDOH/PRIVACY-SENSITIVE" else ""
         joined_children = "; ".join(child_parts) if child_parts else "completed"
@@ -1164,15 +1247,21 @@ def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
         if rid in claimed_obs_ids:
             continue
         code, disp = _coding_pair(res.get("code"))
-        o_date = _iso_date(res.get("effectiveDateTime") or res.get("issued")) or reference_date
+        raw_obs_dt = res.get("effectiveDateTime") or res.get("issued")
+        o_date = _iso_date(raw_obs_dt) or reference_date
+        o_ts = (_iso_timestamp(raw_obs_dt) if preserve_intraday_timestamps else None) or o_date
         cats = _categories(res)
         val_str, num_val, unit = _format_obs_value(res)
-        sens = classify_sensitivity(code, f"{disp} {val_str}", cats)
+        sens = (
+            classify_sensitivity(code, f"{disp} {val_str}", cats)
+            if enable_privacy_classification
+            else None
+        )
 
         primary_cat = cats[0] if cats else "observation"
         has_components = bool(res.get("component"))
         if has_components:
-            comp_pts, comp_sens = _extract_obs_components(res, rid, o_date, primary_cat, cats)
+            comp_pts, comp_sens = _extract_obs_components(res, rid, o_ts or o_date, primary_cat, cats)
             numeric_points.extend(comp_pts)
             if "SDOH/PRIVACY-SENSITIVE" in comp_sens:
                 sens = "SDOH/PRIVACY-SENSITIVE"
@@ -1182,7 +1271,7 @@ def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
             numeric_points.append(
                 NumericPoint(
                     resource_uuid=rid,
-                    date=o_date,
+                    date=o_ts or o_date,
                     code=code or disp,
                     concept=disp or code or "Observation",
                     value=num_val,
@@ -1208,6 +1297,7 @@ def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
             cls_label = "Finding"
 
         sens_suffix = " [sensitivity: SDOH/PRIVACY-SENSITIVE]" if sens == "SDOH/PRIVACY-SENSITIVE" else ""
+        ts_suffix = f" (timestamp: {o_ts})" if (preserve_intraday_timestamps and o_ts and "T" in o_ts) else ""
         body_val = f": {val_str}" if val_str else ""
         obs_kb = resolve_lab_code(code, disp) if sec in {"vital_sign", "lab_observation"} else {}
         items.append(
@@ -1220,7 +1310,7 @@ def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
                 section=sec,
                 code=code or disp,
                 display=disp or code or "Observation",
-                text=f"{cls_label} — {disp or code}{body_val}{sens_suffix}",
+                text=f"{cls_label} — {disp or code}{body_val}{ts_suffix}{sens_suffix}",
                 mandatory=False,
                 status=str(res.get("status") or "final").lower(),
                 source_org=resolve_source_org(res),
@@ -1231,6 +1321,7 @@ def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
                     "numeric": num_val,
                     "unit": unit,
                     "category": primary_cat,
+                    "timestamp": o_ts,
                     **({"kb_resolution": obs_kb} if obs_kb else {}),
                 },
             )
@@ -1357,11 +1448,16 @@ def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
                 names = res.get("deviceName") or []
                 if names and isinstance(names[0], Mapping):
                     disp = str(names[0].get("name") or "")
-            if is_clinic_room_equipment(disp):
+            is_room_equip = is_clinic_room_equipment(disp)
+            if is_room_equip and filter_room_equipment_devices:
                 excluded_counts["Device(clinic_equipment)"] = (
                     excluded_counts.get("Device(clinic_equipment)", 0) + 1
                 )
                 continue
+            elif is_room_equip:
+                excluded_counts["Device(clinic_equipment_retained)"] = (
+                    excluded_counts.get("Device(clinic_equipment_retained)", 0) + 1
+                )
             d_date = _iso_date(res.get("manufactureDate")) or reference_date
             status = str(res.get("status") or "active").lower()
             items.append(
@@ -1375,9 +1471,11 @@ def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
                     code=code or disp,
                     display=disp or code or "Medical Device",
                     text=f"Device: {disp or code} (status: {status})",
-                    mandatory=(status == "active"),
+                    mandatory=(status == "active" and not is_room_equip),
                     status=status,
                     source_org=resolve_source_org(res),
+                    is_routine=is_room_equip,
+                    metadata={"is_room_equipment": is_room_equip},
                 )
             )
         elif rtype == "Encounter":
@@ -1429,6 +1527,64 @@ def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
                 )
             )
 
+    # 11. Detect free-text clinical note vs. structured active MedicationRequest contradictions
+    if include_conflict_annotations:
+        active_med_items = [it for it in items if it.section == "med_active"]
+        note_items = [it for it in items if it.section in {"clinical_note", "note"}]
+        hold_re = re.compile(
+            r"\b(hold|stop|discontinue|held|stopped|discontinued|do\s+not\s+take)\s+([a-z][a-z0-9-]{2,25})\b",
+            re.IGNORECASE,
+        )
+        negation_prefix_re = re.compile(
+            r"\b(?:do\s+not|don't|never|not\s+to|not|without|no\s+need\s+to|avoid)\s+$",
+            re.IGNORECASE,
+        )
+        conditional_clause_re = re.compile(
+            r"\b(?:if|unless|when|should|in\s+case|for\s+sbp|for\s+bp|for\s+hr|parameters?\s*:)\b",
+            re.IGNORECASE,
+        )
+        for n_item in note_items:
+            note_txt = n_item.text or ""
+            for clause in re.split(r"[.;|\n]+", note_txt):
+                if conditional_clause_re.search(clause):
+                    continue
+                for match in hold_re.finditer(clause):
+                    prefix = clause[: match.start()]
+                    if negation_prefix_re.search(prefix):
+                        continue
+                    raw_drug = match.group(2)
+                    norm_ing = normalize_drug_ingredient(raw_drug)
+                    if not norm_ing or norm_ing in {"on", "the", "all", "any", "medication", "medications", "therapy"}:
+                        continue
+                    for m_item in active_med_items:
+                        if m_item.ingredient_key == norm_ing or norm_ing in m_item.display.lower():
+                            msg = (
+                                f"note_medication_contradiction: Clinical note ({n_item.clinical_date or 'recent'}) "
+                                f"instructs to hold/discontinue {m_item.display}, but structured MedicationRequest remains ACTIVE"
+                            )
+                            if not m_item.conflict_note:
+                                m_item.conflict_note = msg
+                                m_item.text += f" [{msg}]"
+                            elif msg not in m_item.conflict_note:
+                                m_item.conflict_note = f"{m_item.conflict_note}; {msg}"
+                                m_item.text += f" [{msg}]"
+                            if n_item.resource_uuid not in m_item.member_uuids:
+                                m_item.member_uuids = tuple(list(m_item.member_uuids) + [n_item.resource_uuid])
+                            c_notes = list(m_item.metadata.get("contradicting_note_uuids") or [])
+                            if n_item.resource_uuid not in c_notes:
+                                c_notes.append(n_item.resource_uuid)
+                                m_item.metadata["contradicting_note_uuids"] = c_notes
+                            c_meds = list(n_item.metadata.get("contradicted_med_uuids") or [])
+                            if m_item.resource_uuid not in c_meds:
+                                c_meds.append(m_item.resource_uuid)
+                                n_item.metadata["contradicted_med_uuids"] = c_meds
+                            if not n_item.conflict_note:
+                                n_item.conflict_note = msg
+                                n_item.mandatory = True
+                            elif msg not in n_item.conflict_note:
+                                n_item.conflict_note = f"{n_item.conflict_note}; {msg}"
+                                n_item.mandatory = True
+
     return ExtractedChart(
         patient_id=patient_id,
         patient_name=patient_name,
@@ -1440,3 +1596,7 @@ def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
         deduplicated_note_count=dedup_note_count,
         total_bundle_entries=len(resources),
     )
+
+
+
+from .fhir_browser import build_fhir_browser_index  # noqa: E402,F401

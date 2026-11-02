@@ -9,7 +9,14 @@ from .condenser import (
     estimate_tokens_local,
     items_to_querystore_records,
 )
-from .extractors import ClinicalItem, ExtractedChart, NumericPoint, extract_bundle
+from .extractors import (
+    ClinicalItem,
+    ExtractedChart,
+    NumericPoint,
+    extract_bundle,
+    extract_bundle_lossless,
+)
+from .fhir_browser import build_fhir_browser_index
 from .kb_lookup import (
     audit_cohort_code_coverage,
     extract_chart_kb_codes,
@@ -31,16 +38,43 @@ from .normalizers import (
     normalize_drug_ingredient,
 )
 from .source import FhirBundleContextSource, ResilientTokenCounter
+from .wahs_analyzer import (
+    analyze_data_quality_and_conflicts,
+    analyze_duplicates_and_bloat,
+    analyze_patterns_and_summaries,
+    answer_wahs_question,
+)
+from .wahs_patient_workspace import build_patient_skills_and_condensation_matrix
+from .wahs_skills import (
+    ChartFinding,
+    run_acip_immunization_skill,
+    run_chart_hygiene_and_reconciliation_skills,
+    run_condition_stage_reconciliation_skill,
+    run_duplicate_and_redundancy_skill,
+    run_medication_reconciliation_skill,
+)
+from .wahs_tools import (
+    get_lab_history,
+    read_clinical_note,
+    search_chart_entries,
+)
 
 __all__ = [
+    "ChartFinding",
     "ClinicalItem",
     "CondensedChartResult",
     "ExtractedChart",
     "FhirBundleContextSource",
     "NumericPoint",
     "ResilientTokenCounter",
+    "analyze_data_quality_and_conflicts",
+    "analyze_duplicates_and_bloat",
+    "analyze_patterns_and_summaries",
     "annotate_immunization_anomalies",
+    "answer_wahs_question",
     "audit_cohort_code_coverage",
+    "build_fhir_browser_index",
+    "build_patient_skills_and_condensation_matrix",
     "build_tier_items",
     "classify_sensitivity",
     "classify_vaccine_group",
@@ -49,15 +83,24 @@ __all__ = [
     "detect_medication_conflicts",
     "estimate_tokens_local",
     "extract_bundle",
+    "extract_bundle_lossless",
     "extract_chart_kb_codes",
     "get_acip_rules",
     "get_clinical_exclusivity_and_privacy",
+    "get_lab_history",
     "get_rxnorm_lookup",
     "is_clinic_room_equipment",
     "items_to_querystore_records",
     "normalize_drug_ingredient",
+    "read_clinical_note",
     "resolve_condition_code",
     "resolve_immunization_code",
     "resolve_lab_code",
     "resolve_medication_code",
+    "run_acip_immunization_skill",
+    "run_chart_hygiene_and_reconciliation_skills",
+    "run_condition_stage_reconciliation_skill",
+    "run_duplicate_and_redundancy_skill",
+    "run_medication_reconciliation_skill",
+    "search_chart_entries",
 ]

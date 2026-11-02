@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -25,9 +25,13 @@ from .levels_loader import (
     ModelNotFoundError,
     Profile,
     get_profile,
+    get_wahs_profile,
     profile_ids,
     profile_metadata,
+    wahs_profile_ids,
+    wahs_profile_metadata,
 )
+from .prompt_loader import load_prompt
 
 router = APIRouter()
 
@@ -186,12 +190,55 @@ def _backend_discovery_metadata() -> Dict[str, str]:
 
 
 @router.get("/v1/models")
-def list_models() -> Dict[str, Any]:
+def list_models(
+    workflow: Optional[str] = None,
+    x_openrouter_key: Optional[str] = Header(default=None, alias="X-OpenRouter-Key"),
+) -> Dict[str, Any]:
     created = int(time.time())
     backend_models = _served_backend_model_metadata()
     backend_reachable = backend_models is not None
     advertised = set(backend_models) if backend_models else set()
     backend = _backend_discovery_metadata()
+
+    if isinstance(workflow, str) and workflow.strip().lower() == "wahs":
+        header_key = (
+            x_openrouter_key.strip() if isinstance(x_openrouter_key, str) else ""
+        )
+        openrouter_configured = bool(
+            header_key or (llm_config.openrouter_api_key or "").strip()
+        )
+        wahs_profiles = [get_wahs_profile(pid) for pid in wahs_profile_ids()]
+        wahs_data = []
+        for profile in wahs_profiles:
+            meta = wahs_profile_metadata(
+                profile,
+                backend_models=advertised if backend_reachable else None,
+                openrouter_configured=openrouter_configured,
+                effective_default=profile.default,
+            )
+            wahs_data.append(
+                {
+                    **meta,
+                    "object": "model",
+                    "created": created,
+                    "owned_by": "med-agent-hub",
+                    "backend": backend,
+                }
+            )
+        return {
+            "object": "list",
+            "workflow": "wahs",
+            "data": wahs_data,
+            "backend": {
+                "contract_version": "med-agent-hub.backend-model-inventory.v1",
+                **backend,
+                "catalog_reachable": backend_reachable,
+                "advertised_model_ids": sorted(advertised),
+                "openrouter_configured": openrouter_configured,
+                "openrouter_base_url": _public_url(llm_config.openrouter_base_url),
+            },
+        }
+
     profiles = [get_profile(profile_id) for profile_id in profile_ids()]
     readiness = []
     for profile in profiles:
@@ -425,8 +472,222 @@ def _context_error(error: ContextSourceError) -> HTTPException:
     )
 
 
+async def _execute_wahs_chat_completion(
+    req: ChatCompletionRequest,
+    profile: Profile,
+    request: Request,
+):
+    provider = str(profile.policies.get("provider") or "local").lower()
+    if provider == "openrouter":
+        target_base_url = llm_config.openrouter_base_url.rstrip("/")
+        api_key = (
+            (request.headers.get("x-openrouter-key") or "").strip()
+            or (llm_config.openrouter_api_key or "").strip()
+        )
+        if not api_key:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "openrouter_api_key_required",
+                    "model": profile.id,
+                    "message": (
+                        "OpenRouter API key is required for OpenRouter profiles "
+                        "(set OPENROUTER_API_KEY or pass X-OpenRouter-Key header)."
+                    ),
+                },
+            )
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://wahs-demo.openclinai.org",
+            "X-Title": "OpenClinAI WAHS+ Explorer",
+        }
+    else:
+        target_base_url = llm_config.base_url.rstrip("/")
+        headers = {"Content-Type": "application/json"}
+        if llm_config.api_key:
+            headers["Authorization"] = f"Bearer {llm_config.api_key}"
+
+    sys_prompt = load_prompt(str(profile.prompts["answer"])).strip()
+    caller_sys_parts = [
+        str(m.get("content") or "").strip()
+        for m in req.messages
+        if str(m.get("role") or "").lower() == "system" and str(m.get("content") or "").strip()
+    ]
+    combined_sys_prompt = (
+        f"{sys_prompt}\n\n{chr(10).join(caller_sys_parts)}"
+        if caller_sys_parts
+        else sys_prompt
+    )
+    user_messages = [
+        m for m in req.messages if str(m.get("role") or "").lower() != "system"
+    ]
+    upstream_messages = [{"role": "system", "content": combined_sys_prompt}, *user_messages]
+
+    answer_knobs = dict(profile.knobs.get("answer") or {})
+    temperature = (
+        req.temperature
+        if req.temperature is not None
+        else float(answer_knobs.get("temperature", 0.1))
+    )
+    max_tokens = (
+        req.max_tokens
+        if req.max_tokens is not None
+        else int(answer_knobs.get("maxTokens", 900))
+    )
+    writer_model = str(profile.models["answer"])
+    upstream_url = (
+        f"{target_base_url}/chat/completions"
+        if target_base_url.endswith("/v1")
+        else f"{target_base_url}/v1/chat/completions"
+    )
+
+    upstream_payload: Dict[str, Any] = {
+        "model": writer_model,
+        "messages": upstream_messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "stream": bool(req.stream),
+    }
+
+    async def _run_review_stage(draft_answer: str) -> str:
+        if "review" not in profile.stages or "review" not in profile.models:
+            return ""
+        rev_model = str(profile.models["review"])
+        rev_prompt = load_prompt(str(profile.prompts["review"])).strip()
+        rev_knobs = dict(profile.knobs.get("review") or {})
+        last_user = next(
+            (
+                str(m.get("content") or "")
+                for m in reversed(user_messages)
+                if str(m.get("role") or "") == "user"
+            ),
+            "",
+        )
+        review_context = (
+            f"{chr(10).join(caller_sys_parts)}\n\n{last_user}".strip()
+            if caller_sys_parts
+            else last_user
+        )
+        rev_payload = {
+            "model": rev_model,
+            "messages": [
+                {"role": "system", "content": rev_prompt},
+                {
+                    "role": "user",
+                    "content": (
+                        f"CHART & QUESTION CONTEXT:\n{review_context}\n\n"
+                        f"WRITER DRAFT ANSWER:\n{draft_answer}"
+                    ),
+                },
+            ],
+            "temperature": float(rev_knobs.get("temperature", 0.0)),
+            "max_tokens": int(rev_knobs.get("maxTokens", 350)),
+            "stream": False,
+        }
+        try:
+            async with httpx.AsyncClient(
+                timeout=llm_config.request_timeout_seconds
+            ) as client:
+                r = await client.post(upstream_url, headers=headers, json=rev_payload)
+                r.raise_for_status()
+                r_data = r.json()
+                verdict = (
+                    ((r_data.get("choices") or [{}])[0].get("message") or {}).get(
+                        "content"
+                    )
+                    or ""
+                ).strip()
+                if verdict:
+                    return f"\n\n---\n🔍 **Cross-Family Verifier (`{rev_model}`):**\n{verdict}"
+        except Exception:
+            return ""
+        return ""
+
+    if req.stream:
+        completion_id = f"chatcmpl-{uuid.uuid4().hex}"
+        created = int(time.time())
+
+        async def _wahs_sse():
+            accumulated: List[str] = []
+            async with httpx.AsyncClient(
+                timeout=llm_config.request_timeout_seconds
+            ) as client:
+                async with client.stream(
+                    "POST", upstream_url, headers=headers, json=upstream_payload
+                ) as resp:
+                    resp.raise_for_status()
+                    async for raw_line in resp.aiter_lines():
+                        line = raw_line.strip()
+                        if not line or not line.startswith("data:"):
+                            continue
+                        data_str = line[5:].strip()
+                        if data_str == "[DONE]":
+                            break
+                        try:
+                            chunk_obj = json.loads(data_str)
+                            delta = (
+                                (chunk_obj.get("choices") or [{}])[0].get("delta")
+                                or {}
+                            )
+                            piece = delta.get("content") or ""
+                            if piece:
+                                accumulated.append(piece)
+                            chunk_obj["model"] = profile.id
+                            yield f"data: {json.dumps(chunk_obj)}\n\n"
+                        except Exception:
+                            yield f"{line}\n\n"
+            review_appendix = await _run_review_stage("".join(accumulated))
+            if review_appendix:
+                rev_chunk = {
+                    "id": completion_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": profile.id,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {"content": review_appendix},
+                            "finish_reason": None,
+                        }
+                    ],
+                }
+                yield f"data: {json.dumps(rev_chunk)}\n\n"
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(
+            _wahs_sse(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    async with httpx.AsyncClient(timeout=llm_config.request_timeout_seconds) as client:
+        resp = await client.post(upstream_url, headers=headers, json=upstream_payload)
+        resp.raise_for_status()
+        body = resp.json()
+    content = (
+        ((body.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+    )
+    review_appendix = await _run_review_stage(content)
+    if review_appendix:
+        content = f"{content}{review_appendix}"
+    envelope = _completion_envelope(profile.id, content)
+    envelope["hub_profile"] = {
+        "id": profile.id,
+        "label": profile.label,
+        "provider": provider,
+        "role_models": dict(profile.models),
+        "policies": dict(profile.policies),
+    }
+    return envelope
+
+
 @router.post("/v1/chat/completions")
 async def chat_completions(req: ChatCompletionRequest, request: Request):
+    if req.model in wahs_profile_ids():
+        wahs_profile = get_wahs_profile(req.model)
+        return await _execute_wahs_chat_completion(req, wahs_profile, request)
+
     try:
         profile = get_profile(req.model)
     except ModelNotFoundError as error:

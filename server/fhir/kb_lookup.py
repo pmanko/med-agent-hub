@@ -242,7 +242,11 @@ def extract_chart_kb_codes(
     priority_codes: List[str] = []
     secondary_codes: List[str] = []
 
-    items: Sequence[Any] = getattr(extracted, "items", None) or []
+    items: Sequence[Any] = (
+        extracted
+        if isinstance(extracted, (list, tuple))
+        else (getattr(extracted, "items", None) or [])
+    )
     for it in items:
         code = str(getattr(it, "code", "") or "").strip()
         if not code:
@@ -281,25 +285,59 @@ def extract_chart_kb_codes(
 
 def audit_cohort_code_coverage(extracted: Any) -> Dict[str, Any]:
     """Audit exact KB resolution coverage across active conditions, medications, lab panels,
-    standalone lab observations, vital signs, and immunizations in an `ExtractedChart`."""
+    standalone lab observations, vital signs, and immunizations in an `ExtractedChart`,
+    separating direct code-only lookup (`precoded_pct` / `exact_code_resolved`) from
+    Layer 2–4 display/alias/ingredient fallback recovery (`text_fallback_recovered_pct` / `display_or_alias_resolved`)."""
     exact_resolvers = {"snomed_code", "rxnorm_code", "cvx_code", "loinc_code"}
     counts = {
-        "condition_active": {"total": 0, "resolved": 0, "exact_code_resolved": 0, "display_or_alias_resolved": 0},
-        "medications": {"total": 0, "resolved": 0, "exact_code_resolved": 0, "display_or_alias_resolved": 0},
-        "immunizations": {"total": 0, "resolved": 0, "exact_code_resolved": 0, "display_or_alias_resolved": 0},
-        "lab_panels_and_vitals": {"total": 0, "resolved": 0, "exact_code_resolved": 0, "display_or_alias_resolved": 0},
+        "condition_active": {
+            "total": 0,
+            "code_only": 0,
+            "text_fallback": 0,
+            "resolved": 0,
+            "exact_code_resolved": 0,
+            "display_or_alias_resolved": 0,
+        },
+        "medications": {
+            "total": 0,
+            "code_only": 0,
+            "text_fallback": 0,
+            "resolved": 0,
+            "exact_code_resolved": 0,
+            "display_or_alias_resolved": 0,
+        },
+        "immunizations": {
+            "total": 0,
+            "code_only": 0,
+            "text_fallback": 0,
+            "resolved": 0,
+            "exact_code_resolved": 0,
+            "display_or_alias_resolved": 0,
+        },
+        "lab_panels_and_vitals": {
+            "total": 0,
+            "code_only": 0,
+            "text_fallback": 0,
+            "resolved": 0,
+            "exact_code_resolved": 0,
+            "display_or_alias_resolved": 0,
+        },
     }
     unresolved: List[Dict[str, str]] = []
 
-    def _record_result(bucket_name: str, sec_name: str, code_val: str, disp_val: str, res_obj: Mapping[str, Any]) -> None:
+    def _record_result(
+        bucket_name: str, sec_name: str, code_val: str, disp_val: str, res_obj: Mapping[str, Any]
+    ) -> None:
         bucket = counts[bucket_name]
         bucket["total"] += 1
         r_by = str(res_obj.get("resolved_by") or "heuristic_fallback")
         if r_by != "heuristic_fallback":
             bucket["resolved"] += 1
             if r_by in exact_resolvers:
+                bucket["code_only"] += 1
                 bucket["exact_code_resolved"] += 1
             else:
+                bucket["text_fallback"] += 1
                 bucket["display_or_alias_resolved"] += 1
         else:
             unresolved.append({"section": sec_name, "code": code_val, "display": disp_val})
@@ -321,11 +359,16 @@ def audit_cohort_code_coverage(extracted: Any) -> Dict[str, Any]:
     total_resolved = sum(v["resolved"] for v in counts.values())
     exact_code_resolved = sum(v["exact_code_resolved"] for v in counts.values())
     display_or_alias_resolved = sum(v["display_or_alias_resolved"] for v in counts.values())
+    denom = max(total_checked, 1)
     return {
         "total_checked": total_checked,
+        "code_only_resolved": exact_code_resolved,
+        "text_fallback_recovered": display_or_alias_resolved,
         "total_resolved": total_resolved,
         "exact_code_resolved": exact_code_resolved,
         "display_or_alias_resolved": display_or_alias_resolved,
+        "precoded_pct": round((exact_code_resolved / denom) * 100.0, 1) if total_checked else 100.0,
+        "text_fallback_recovered_pct": round((display_or_alias_resolved / denom) * 100.0, 1) if total_checked else 0.0,
         "resolution_rate": 1.0 if total_checked == 0 else total_resolved / total_checked,
         "exact_code_resolution_rate": 1.0 if total_checked == 0 else exact_code_resolved / total_checked,
         "by_category": counts,

@@ -6,12 +6,15 @@ from typing import Any, Dict
 
 from scripts.build_wahs_eval_fixtures import (
     NATURAL_ANOMALIES_BY_PATIENT,
+    build_deidentified_real_clinical_summaries,
     build_eval_cases,
     inject_byron_multisource_perturbations,
     inject_lamar_multisource_perturbations,
     inject_maurice_multisource_perturbations,
+    inject_messy_ehr_perturbations,
 )
 from server.fhir import (
+    audit_cohort_code_coverage,
     build_tier_items,
     condense_bundle_to_budget,
     detect_condition_conflicts,
@@ -118,6 +121,23 @@ def test_detect_condition_conflicts_active_vs_resolved_cross_clinic() -> None:
     assert "cond-sinus-resolved" in conflicts
     assert "status_conflict" in conflicts["cond-sinus-active"]
     assert "status_conflict" in conflicts["cond-sinus-resolved"]
+
+    # Uncoded / display-only condition records also match by normalized clinical display
+    disp_only_conflicts = detect_condition_conflicts(
+        active,
+        [
+            {
+                "resourceUuid": "cond-sinus-resolved-uncoded",
+                "code": "",
+                "display": "Chronic sinusitis",
+                "onset": "2008-02-29",
+                "abatement": "2024-09-10",
+                "status": "resolved",
+            }
+        ],
+    )
+    assert "cond-sinus-active" in disp_only_conflicts
+    assert "cond-sinus-resolved-uncoded" in disp_only_conflicts
 
     # Non-resolved statuses (remission, inactive) or missing abatement must not produce false status_conflict
     assert (
@@ -341,24 +361,43 @@ def test_multisource_perturbation_functions_preserve_anomaly_uuids_across_budget
 def test_build_eval_cases_covers_all_wahs_use_cases() -> None:
     """`build_eval_cases` produces machine-checkable rubrics across Use Cases A, B-1, B-2, and B-3."""
     cases = build_eval_cases()
-    assert len(cases) == 33
+    assert len(cases) == 45
 
     by_use_case: Dict[str, int] = {}
+    real_summary_keys = set(build_deidentified_real_clinical_summaries().keys())
     case_ids = set()
+    covered_bundles = set()
     for c in cases:
         use_case = str(c["use_case"])
         by_use_case[use_case] = by_use_case.get(use_case, 0) + 1
         assert c["case_id"]
         case_ids.add(str(c["case_id"]))
         assert str(c["patient_bundle"]).endswith(".json")
-        stem = str(c["patient_bundle"]).replace("_multisource.json", "").replace(".json", "")
-        assert stem in NATURAL_ANOMALIES_BY_PATIENT
+        covered_bundles.add(str(c["patient_bundle"]))
+        stem = (
+            str(c["patient_bundle"])
+            .replace("_multisource.json", "")
+            .replace("_messy.json", "")
+            .replace(".json", "")
+        )
+        assert (
+            stem in NATURAL_ANOMALIES_BY_PATIENT
+            or str(c["patient_bundle"]) in real_summary_keys
+        )
         assert c["mode"] in {"reconcile", "summary", "qa"}
         assert c["question"]
 
-    assert by_use_case["A_reconcile"] == 14
+    assert by_use_case["A_reconcile"] == 20
     assert "uc_b3_maurice_qa_plavix_duplicate" in case_ids
     assert "uc_a_maurice-setb-flu-iis-dup" in case_ids
+    for messy_name in (
+        "Maurice742_Auer97_messy.json",
+        "Lamar193_Beer512_messy.json",
+        "Byron202_Emard19_messy.json",
+    ):
+        assert messy_name in covered_bundles
+    for summary_name in real_summary_keys:
+        assert summary_name in covered_bundles
     assert by_use_case.get("B1_encounter_summary", 0) + by_use_case.get("B1_longitudinal_summary", 0) >= 4
     assert by_use_case["B2_directed_summary"] >= 3
     assert by_use_case["B3_qa_answerable"] >= 6
@@ -373,3 +412,87 @@ def test_build_eval_cases_covers_all_wahs_use_cases() -> None:
         if c["use_case"] == "B3_qa_abstention":
             assert c["expected_answer_type"] == "abstain_not_in_chart"
             assert c["expected_facts"] == []
+
+
+def test_messy_set_c_and_real_clinical_summaries_recover_uncoded_entries_and_note_contradictions() -> None:
+    """Set C messy perturbations and Pathway B synthetic US Core / IPS clinical summaries
+    strip ~25% of standard codes (lowering `precoded_pct`) while Layer 2/3 text/ingredient
+    fallback recovers 100% of clinical concepts and flags note-vs-medication contradictions."""
+    base_bundle: Dict[str, Any] = _make_synthetic_wahs_bundle()
+    lamar_b, _ = inject_lamar_multisource_perturbations(base_bundle)
+    lamar_c, messy_anoms = inject_messy_ehr_perturbations(lamar_b, "Lamar193_Beer512")
+
+    ext_b = extract_bundle(lamar_b)
+    ext_c = extract_bundle(lamar_c)
+    cov_b = audit_cohort_code_coverage(ext_b)
+    cov_c = audit_cohort_code_coverage(ext_c)
+
+    assert cov_c["precoded_pct"] < cov_b["precoded_pct"]
+    assert cov_c["text_fallback_recovered"] >= 1
+    assert cov_c["resolution_rate"] == 1.0
+    assert any("note_medication_contradiction" in (it.conflict_note or "") for it in ext_c.items)
+    assert len(messy_anoms) == 1
+
+    # Readable conflict-note instruction is preserved even at tight 1,024-token budget
+    cond_c_1024 = condense_bundle_to_budget(ext_c, target_tokens=1024)
+    assert cond_c_1024.actual_tokens <= 1024
+    assert "Hold lisinopril" in cond_c_1024.chart_text
+    assert "note_medication_contradiction" in cond_c_1024.chart_text
+
+    real_summaries = build_deidentified_real_clinical_summaries()
+    assert "MIMIC_IV_Cardiorenal_Summary.json" in real_summaries
+    assert "SMART_IPS_Transition_Summary.json" in real_summaries
+    for label, (r_bundle, r_anoms) in real_summaries.items():
+        ext_r = extract_bundle(r_bundle)
+        cov_r = audit_cohort_code_coverage(ext_r)
+        if label != "Arthur_Pendelton_Anticoag.json":
+            assert cov_r["precoded_pct"] < 100.0, f"Expected uncoded entries in {label}"
+            assert cov_r["text_fallback_recovered"] >= 1
+        assert cov_r["resolution_rate"] == 1.0
+        cond_r = condense_bundle_to_budget(ext_r, target_tokens=2048)
+        present_r = {
+            str(u)
+            for m in cond_r.mappings
+            for u in ([m.get("resourceUuid")] + list(m.get("memberUuids") or []))
+            if u
+        }
+        for a in r_anoms:
+            for uid in a["expected_resource_uuids"]:
+                assert uid in present_r, f"Missing {uid} in {label}"
+
+
+def test_w17_script_modularity_archetypes_and_demo_exporter(tmp_path: Any) -> None:
+    """W17: `wahs_uscore_archetypes` and `wahs_demo_exporter` expose standalone builders and re-exports."""
+    from scripts.wahs_demo_exporter import (
+        PERSONA_BIOS,
+        PRIMARY_PERSONA_IDS,
+        QUESTIONS_BY_PATIENT,
+        write_wahs_demo_data_js,
+    )
+    from scripts.wahs_uscore_archetypes import (
+        build_deidentified_real_clinical_summaries as build_archetypes_direct,
+    )
+
+    assert build_archetypes_direct is build_deidentified_real_clinical_summaries
+    assert len(PRIMARY_PERSONA_IDS) == 6
+    assert set(PERSONA_BIOS.keys()) == {
+        "Maurice742_Auer97",
+        "Elena_Rostova_Cardiorenal",
+        "Arthur_Pendelton_Anticoag",
+        "Margaret_Chen_Polypharmacy",
+        "Lamar193_Beer512",
+        "Byron202_Emard19",
+    }
+    assert "default" in QUESTIONS_BY_PATIENT
+
+    out_js = tmp_path / "wahs_demo_data.js"
+    stub_results = {
+        "code_coverage": {"resolution_rate": 1.0},
+        "ablation_rows": [],
+        "demo_patients": {pid: {"id": pid} for pid in PRIMARY_PERSONA_IDS},
+    }
+    written_bytes = write_wahs_demo_data_js(stub_results, out_js)
+    assert written_bytes > 100
+    assert "window.WAHS_DEMO_DATA = " in out_js.read_text(encoding="utf-8")
+
+
