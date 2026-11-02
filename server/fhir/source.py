@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
 
@@ -113,12 +114,23 @@ class FhirBundleContextSource:
                     )
                 return bundle
             if self.bundle_dir and self.bundle_dir.is_dir():
-                candidate = self.bundle_dir / f"{request.patient}.json"
-                if not candidate.exists():
-                    matches = sorted(self.bundle_dir.glob(f"{request.patient}*.json"))
-                    if matches:
-                        candidate = matches[0]
-                if candidate.exists():
+                patient_id = str(request.patient).strip()
+                if not re.fullmatch(r"[A-Za-z0-9._-]+", patient_id) or ".." in patient_id:
+                    raise ContextSourceError(
+                        "invalid_patient_identifier",
+                        f"Invalid patient identifier {request.patient!r}.",
+                        source=self.name,
+                    )
+                base_dir = self.bundle_dir.resolve()
+                stem = patient_id[:-5] if patient_id.endswith(".json") else patient_id
+                candidate = (base_dir / f"{stem}.json").resolve()
+                if not candidate.is_relative_to(base_dir) or candidate.parent != base_dir:
+                    raise ContextSourceError(
+                        "invalid_patient_identifier",
+                        f"Invalid patient identifier {request.patient!r}.",
+                        source=self.name,
+                    )
+                if candidate.is_file():
                     try:
                         parsed_file = json.loads(candidate.read_text(encoding="utf-8"))
                     except Exception as exc:
