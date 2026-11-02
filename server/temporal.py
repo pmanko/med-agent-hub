@@ -44,6 +44,11 @@ _DATE_ID_TOKEN_RE = re.compile(r"\bD\d{4}_\d{2}_\d{2}\b")
 _LEADING_NUM_RE = re.compile(r"^([+-]?\d+(?:\.\d+)?)\s*(.*)$")
 _NUMBER_TOKEN_RE = re.compile(r"(?<![\[\d.-])([+-]?\d+(?:\.\d+)?)(?![\]\d.-])")
 _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+|\n+")
+_DELTA_PREFIX_RE = re.compile(
+    r"\b(?:(?:loss|gain|drop|decrease|increase|change|difference|reduction|fall|rise|decline)"
+    r"\s+of|by)\s+(?:about\s+|approximately\s+|~\s*)?$",
+    re.I,
+)
 _UPCOMING_RE = re.compile(
     r"\b(upcoming|future|next|scheduled|appointment|follow-?up|return visit)\b", re.I
 )
@@ -1133,6 +1138,32 @@ def _selected_series(
     return selected
 
 
+def _named_series(text: str, series: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The series ``text`` names in full ("CD4 count") or by an unambiguous measurement alias
+    ("hemoglobin", "CD4"), or all of them when it names none.
+
+    A trend claim is about the measurement it names; a series matched only by a shared word
+    ("cells" in "White blood cells" beside a CD4 count) is not checked for a trend."""
+    word_list = [token for token in re.split(r"[^a-z0-9%]+", (text or "").lower()) if token]
+    words = set(word_list)
+    named = []
+    for item in series:
+        phrase_tokens, aliases = _series_terms(item)
+        core_tokens = [token for token in phrase_tokens if token not in _CONCEPT_STOP_TOKENS]
+        explicit_aliases = aliases - set(phrase_tokens) - {"growth", "gaining", "growing"}
+        phrase_match = bool(phrase_tokens) and any(
+            word_list[start : start + len(phrase_tokens)] == phrase_tokens
+            for start in range(len(word_list) - len(phrase_tokens) + 1)
+        )
+        core_match = bool(core_tokens) and any(
+            word_list[start : start + len(core_tokens)] == core_tokens
+            for start in range(len(word_list) - len(core_tokens) + 1)
+        )
+        if phrase_match or core_match or bool(words & explicit_aliases):
+            named.append(item)
+    return named or list(series)
+
+
 def _series_mention_spans(answer: str, item: Dict[str, Any]) -> List[Tuple[int, int]]:
     phrase_tokens, aliases = _series_terms(item)
     if phrase_tokens:
@@ -1322,6 +1353,12 @@ def _series_value_candidates(
     values: List[tuple[re.Match, float]] = []
     all_numbers: List[tuple[re.Match, float]] = []
     for match in _NUMBER_TOKEN_RE.finditer(text):
+        # A digit inside a unit ("cells/mm3") or a change amount ("a loss of 3 kg", "rose by
+        # 5") is not a recorded value of the series.
+        if match.start() and text[match.start() - 1].isalpha():
+            continue
+        if _DELTA_PREFIX_RE.search(text[max(0, match.start() - 24) : match.start()]):
+            continue
         try:
             all_numbers.append((match, float(match.group())))
         except ValueError:
@@ -1820,13 +1857,38 @@ def run_temporal_gate(
 
     selected = _selected_series(q, a, temporal_facts, citations)
     if _TREND_RE.search(qa) and selected:
-        for s in selected:
+        for s in _named_series(a, selected):
             answer_dir = _answer_direction_for_series(a, s, selected)
             indices = [
                 p.get("index")
                 for p in (s.get("points") or [])
                 if isinstance(p.get("index"), int)
             ]
+            if not s.get("trend_supported") and (
+                _NO_TREND_CLAIM_RE.search(a) or _NO_OTHER_VALUES_RE.search(a)
+            ):
+                if _series_refuses_trend(a, s, selected, answer_dir):
+                    _add_check(
+                        checks,
+                        "single_point_trend",
+                        "pass",
+                        "info",
+                        a[:240],
+                        f"{s.get('concept')} has one dated point and the answer says no trend can be drawn.",
+                        indices,
+                    )
+                    if _WINDOW_RE.search(qa):
+                        window = s.get("window") or {}
+                        _add_check(
+                            checks,
+                            "window_scope",
+                            "info",
+                            "info",
+                            a[:240],
+                            f"The chart's {s.get('concept')} data spans less than the requested window (first point {window.get('first_date_in_window')}).",
+                            indices,
+                        )
+                    continue
             if not s.get("trend_supported"):
                 _add_check(
                     checks,
@@ -1860,8 +1922,8 @@ def run_temporal_gate(
                 _add_check(
                     checks,
                     "window_scope",
-                    "warn",
-                    "warn",
+                    "info",
+                    "info",
                     a[:240],
                     f"Answer/query names a strict window, but the documented {s.get('concept')} window is {window.get('start')}..{window.get('end')}.",
                     indices,
@@ -2114,10 +2176,75 @@ _NO_TREND_CLAIM_RE = re.compile(
     r"\bno\s+(?:clear\s+|established\s+|specific\s+(?:[a-z0-9]+\s+){0,4})?trend\b",
     re.I,
 )
+_NO_OTHER_VALUES_RE = re.compile(
+    r"\bno other\b[^.;!?]{0,40}\b(?:values?|counts?|measurements?|readings?|results?|points?)\b",
+    re.I,
+)
 _TREND_CLAUSE_SPLIT_RE = re.compile(
     r"[.;!?]+|,\s*(?=\b(?:while|whereas|but|although|though)\b)|\b(?:while|whereas|but|although|though)\b",
     re.I,
 )
+
+
+def _series_refuses_trend(
+    answer: str,
+    item: Dict[str, Any],
+    selected: List[Dict[str, Any]],
+    answer_dir: Optional[str],
+) -> bool:
+    """True when ``answer`` explicitly refuses a trend for ``item`` without asserting one."""
+    if answer_dir is not None:
+        return False
+    item_indices = {
+        p.get("index")
+        for p in (item.get("points") or [])
+        if isinstance(p.get("index"), int)
+    }
+    other_items = [other for other in selected if other is not item]
+    other_indices = {
+        p.get("index")
+        for other in other_items
+        for p in (other.get("points") or [])
+        if isinstance(p.get("index"), int)
+    }
+    clauses = [
+        clause.strip()
+        for sentence in _SENTENCE_RE.split(answer or "")
+        for clause in _TREND_CLAUSE_SPLIT_RE.split(sentence)
+        if clause.strip()
+    ]
+    has_scoped_refusal = False
+    for clause in clauses:
+        clause_cites = {int(v) for v in re.findall(r"\[(\d+)\]", clause)}
+        mentions_item = bool(_series_mention_spans(clause, item)) or bool(
+            clause_cites & item_indices
+        )
+        mentions_other = any(
+            bool(_series_mention_spans(clause, other)) for other in other_items
+        ) or bool(clause_cites & other_indices)
+        clause_refuses = bool(_NO_TREND_CLAIM_RE.search(clause)) or bool(
+            _NO_OTHER_VALUES_RE.search(clause)
+        )
+        if mentions_item and not clause_refuses:
+            if _answer_direction(clause) is not None or re.search(
+                r"\b(?:shows?|demonstrates?|exhibits?|indicates?)\s+(?:a|an)\s+(?:\w+\s+)?trend\b|"
+                r"\b(?:stable|unchanged|flat|plateau(?:ed|ing)?)\b",
+                clause,
+                re.I,
+            ):
+                return False
+        if clause_refuses:
+            if _answer_direction_for_series(clause, item, selected) is not None or re.search(
+                r"\b(?:stable|unchanged|flat|plateau(?:ed|ing)?)\b",
+                clause,
+                re.I,
+            ):
+                continue
+            if mentions_item or (
+                not mentions_other and len(_named_series(answer, selected)) == 1
+            ):
+                has_scoped_refusal = True
+    return has_scoped_refusal
 _NON_SERIES_TREND_PHRASE_RE = re.compile(
     r"\b(?:increas(?:e|es|ed|ing)|decreas(?:e|es|ed|ing)|reduc(?:e|es|ed|ing)|"
     r"improv(?:e|es|ed|ing)|worsen(?:s|ed|ing)?|growing|rising|falling|higher|lower)\s+"
@@ -2192,15 +2319,17 @@ def _scope_indepth_trend_checks(
     ]
     if len(kept) == len(checks):
         return gate
-    dropped_fail = any(
-        check.get("status") == "fail" for check in checks if check not in kept
+    dropped_trend = any(
+        check.get("status") == "fail" or check.get("id") in _TREND_CHECK_IDS
+        for check in checks
+        if check not in kept
     )
     return {
         **gate,
         "status": _final_gate_status(kept) if kept else "not_applicable",
         "checks": kept,
-        "patch_answer": None if dropped_fail else gate.get("patch_answer"),
-        "patch_citations": [] if dropped_fail else list(gate.get("patch_citations") or []),
+        "patch_answer": None if dropped_trend else gate.get("patch_answer"),
+        "patch_citations": [] if dropped_trend else list(gate.get("patch_citations") or []),
     }
 
 

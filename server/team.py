@@ -4,7 +4,6 @@ import asyncio
 import inspect
 import json
 import logging
-import math
 import os
 import re
 import unicodedata
@@ -16,12 +15,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Sequ
 import httpx
 
 from . import drug_safety, temporal
-from .config import (
-    EXPERT_DRY_MULTIPLIER,
-    llm_config,
-    resolve_hub_build_revision,
-    scorer_config,
-)
+from .config import EXPERT_DRY_MULTIPLIER, llm_config, resolve_hub_build_revision
 from .context_sources import (
     CHART_MARKER,
     ChatTokenCounter,
@@ -742,63 +736,6 @@ async def _entailment_verdicts(
 
 
 _CITATION_BATCH = 4
-_SCORER_BATCH = 64
-
-
-def _valid_probability(value: Any) -> Optional[float]:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    try:
-        num = float(value)
-    except (OverflowError, TypeError, ValueError):
-        return None
-    if not math.isfinite(num) or num < 0.0 or num > 1.0:
-        return None
-    return num
-
-
-async def _scorer_verdicts(
-    client: httpx.AsyncClient, pairs: List[Tuple[str, str]]
-) -> List[Dict[str, Any]]:
-    """The entailment scorer's probabilities for ``(source, statement)`` pairs, in shadow.
-
-    Returns one ``{"supported": p, "contradicted": p, "support": label}`` per pair, with the
-    label read at 0.5 on the contradiction probability and 0.5 on support. Fails open to
-    ``unchecked`` entries when no scorer is configured or the call fails; nothing here sets a
-    shipped label (confidence-labels L6.2).
-    """
-    unchecked = {"supported": None, "contradicted": None, "support": UNCHECKED}
-    if not pairs or not scorer_config.base_url:
-        return [dict(unchecked) for _ in pairs]
-    out: List[Dict[str, Any]] = []
-    for start in range(0, len(pairs), _SCORER_BATCH):
-        batch = pairs[start : start + _SCORER_BATCH]
-        try:
-            response = await client.post(
-                f"{scorer_config.base_url.rstrip('/')}/score",
-                json={"pairs": [{"source": s, "statement": t} for s, t in batch]},
-                timeout=scorer_config.request_timeout_seconds,
-            )
-            response.raise_for_status()
-            scores = response.json().get("scores")
-            if not isinstance(scores, list):
-                raise ValueError("scorer response missing a 'scores' array")
-        except Exception as e:
-            logger.warning("scorer shadow call failed -> %d pair(s) unchecked: %s", len(batch), e)
-            out.extend(dict(unchecked) for _ in batch)
-            continue
-        for i in range(len(batch)):
-            item = scores[i] if i < len(scores) and isinstance(scores[i], dict) else {}
-            p_sup = _valid_probability(item.get("supported"))
-            p_con = _valid_probability(item.get("contradicted"))
-            if p_sup is None or p_con is None:
-                out.append(dict(unchecked))
-                continue
-            label = (
-                CONTRADICTED if p_con >= 0.5 else SUPPORTED if p_sup >= 0.5 else NOT_ADDRESSED
-            )
-            out.append({"supported": round(p_sup, 3), "contradicted": round(p_con, 3), "support": label})
-    return out
 
 
 async def _bounded_entailment_verdicts(
@@ -830,52 +767,6 @@ async def _bounded_entailment_verdicts(
     out: List[Dict[str, Any]] = []
     for start in range(0, len(pairs), _CITATION_BATCH):
         out.extend(await check(pairs[start : start + _CITATION_BATCH]))
-    return out
-
-
-async def _shadow_score_facts(
-    client: httpx.AsyncClient,
-    pairs: List[Tuple[str, str]],
-    positions: List[int],
-    verdict_by_position: Mapping[int, Mapping[str, Any]],
-) -> Dict[int, Dict[str, Any]]:
-    """The scorer's verdict per check, scored fact by fact.
-
-    The 28 October replay showed a scorer cannot judge a whole In-Depth point (the clinical
-    reading joined to the fact drags every point to "not entailed"); it can judge a bare
-    fact against its record. So each fact the prompted check listed is scored against the
-    source, and the check's scorer verdict is unchecked when any fact score is unchecked,
-    contradicted when any fact is contradicted, supported when every fact is supported, and
-    not addressed otherwise; a check whose fact list is empty (for example, folded or
-    deterministic checks) falls back to scoring the whole statement.
-    """
-    fact_pairs: List[Tuple[str, str]] = []
-    owners: List[Tuple[int, int]] = []
-    for position, (source, statement) in zip(positions, pairs):
-        facts = [
-            str(f.get("fact") or "").strip()
-            for f in (verdict_by_position.get(position) or {}).get("facts") or []
-            if str(f.get("fact") or "").strip()
-        ] or [statement]
-        for fact_index, fact in enumerate(facts):
-            fact_pairs.append((source, fact))
-            owners.append((position, fact_index))
-    scored = await _scorer_verdicts(client, fact_pairs)
-    out: Dict[int, Dict[str, Any]] = {}
-    for (position, _fact_index), (_, fact), score in zip(owners, fact_pairs, scored):
-        entry = out.setdefault(position, {"support": UNCHECKED, "facts": []})
-        entry["facts"].append({"fact": fact, **score})
-    for entry in out.values():
-        labels = [f["support"] for f in entry["facts"]]
-        entry["support"] = (
-            UNCHECKED
-            if UNCHECKED in labels
-            else CONTRADICTED
-            if CONTRADICTED in labels
-            else SUPPORTED
-            if all(label == SUPPORTED for label in labels)
-            else NOT_ADDRESSED
-        )
     return out
 
 
@@ -996,7 +887,6 @@ async def _ground_references(
     *,
     deterministic_checks: Optional[List[Dict[str, Any]]] = None,
     index_verdicts: Optional[Mapping[Any, Any]] = None,
-    shadow_scorer: bool = False,
     temperature: Optional[float] = None,
 ) -> List[Dict[str, Any]]:
     """Ground final claims against their cited source sets in context-bounded sequential batches.
@@ -1011,8 +901,7 @@ async def _ground_references(
 
     Every reference gets ``support`` (supported, contradicted, not_addressed, unchecked) beside
     the older ``groundingStatus``; only a contradiction is a failure, a fact the record does not
-    hold is neutral. With ``shadow_scorer`` the entailment scorer judges the same pairs and its
-    verdict is recorded on each check as ``scorer``, never as the label.
+    hold is neutral.
     """
     mapping_by_index = {
         mapping.get("index"): mapping
@@ -1247,18 +1136,6 @@ async def _ground_references(
         **{position: {**blank, "support": SUPPORTED} for position in deterministic_positions},
         **dict(zip(checkable_positions, verdicts)),
     }
-    scorer_positions = [
-        position for position, group in enumerate(groups) if group["sources"]
-    ]
-    scorer_pairs = [
-        ("\n".join(groups[i]["sources"]), groups[i]["claim"])
-        for i in scorer_positions
-    ]
-    scorer_by_position: Dict[int, Dict[str, Any]] = {}
-    if shadow_scorer and scorer_pairs:
-        scorer_by_position = await _shadow_score_facts(
-            client, scorer_pairs, scorer_positions, verdict_by_position
-        )
 
     grounded_refs: List[Dict[str, Any]] = []
     for i, ref in enumerate(references or []):
@@ -1296,8 +1173,6 @@ async def _ground_references(
                 grounding_check["not_found"] = group_verdict["not_found"]
             if group_verdict.get("chart_value"):
                 grounding_check["chart_value"] = group_verdict["chart_value"]
-            if group_position in scorer_by_position:
-                grounding_check["scorer"] = scorer_by_position[group_position]
             grounding_checks.append(grounding_check)
         supports = {check["support"] for check in grounding_checks}
         if not grounding_checks or UNCHECKED in supports:

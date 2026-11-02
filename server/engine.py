@@ -195,12 +195,6 @@ def _confidence_section(
     return out
 
 
-def _shadow_scorer(profile: Profile) -> bool:
-    """Whether the profile records the entailment scorer's verdict beside each citation check."""
-    review = profile.policies.get("review") or {}
-    return str(review.get("shadow") or "") == "scorer"
-
-
 def _grounding_policy(profile: Profile) -> str:
     """How the profile checks that cited records support their sentences (``review.grounding``)."""
     if "ground_verdicts" not in profile.stages:
@@ -1919,7 +1913,7 @@ async def _execute_stages(
                     gate_issues = [
                         check
                         for check in (state.answer_gate or {}).get("checks", [])
-                        if check.get("status") in {"warn", "fail"}
+                        if check.get("status") in {"info", "warn", "fail"}
                     ]
                     gate_issues.extend(state.citation_issues)
                     unresolved = [
@@ -2129,7 +2123,7 @@ async def _execute_stages(
                             + [
                                 check
                                 for check in (state.answer_gate or {}).get("checks", [])
-                                if check.get("status") in {"warn", "fail"}
+                                if check.get("status") in {"info", "warn", "fail"}
                             ]
                             + [
                                 {
@@ -2343,8 +2337,6 @@ async def _execute_stages(
                         ]
                         folded = grounding == "folded"
                         grounding_options: Dict[str, Any] = {}
-                        if _shadow_scorer(request.profile):
-                            grounding_options["shadow_scorer"] = True
                         if deterministic_checks:
                             grounding_options["deterministic_checks"] = deterministic_checks
                         # A folded review that judged no cited record at all (the 9B returned an
@@ -2385,8 +2377,11 @@ async def _execute_stages(
                                 "policy": "folded-fallback" if fold_missed else grounding,
                                 "model": (
                                     request.profile.models["review"]
-                                    if folded
-                                    else request.profile.models["grounding"]
+                                    if folded and not fold_missed
+                                    else (
+                                        request.profile.models.get("grounding")
+                                        or request.profile.models["review"]
+                                    )
                                 ),
                             }
                         )
@@ -2687,6 +2682,24 @@ async def _execute_stages(
                             _date_check_label(gate_entries.get(claim_index) or {}),
                             "date",
                         )
+                    for entry in state.indepth_gate.get("checks") or []:
+                        claim_index = entry.get("claim_index")
+                        if not isinstance(claim_index, int):
+                            continue
+                        for gate_check in (entry.get("gate") or {}).get("checks") or []:
+                            if (
+                                isinstance(gate_check, dict)
+                                and gate_check.get("status") == "info"
+                                and str(gate_check.get("reason") or "").strip()
+                            ):
+                                state.indepth_findings.append(
+                                    {
+                                        "check": "date",
+                                        "where": claim_index,
+                                        "status": "info",
+                                        "says": str(gate_check.get("reason") or "").strip(),
+                                    }
+                                )
                     if review.get("status") == "flagged":
                         state.indepth_gate["review_status"] = "flagged"
                         state.indepth_gate["review_flagged"] = list(
@@ -2797,7 +2810,6 @@ async def _execute_stages(
                                     references,
                                     state.mappings,
                                     index_verdicts=verdicts,
-                                    shadow_scorer=_shadow_scorer(request.profile),
                                 )
                             )
                         flattened = grounded
@@ -2810,7 +2822,6 @@ async def _execute_stages(
                             "\n".join(claim for _index, claim, _refs in candidates),
                             flattened,
                             state.mappings,
-                            shadow_scorer=_shadow_scorer(request.profile),
                             **(
                                 {"temperature": sampling["grounding_temperature"]}
                                 if sampling["grounding_temperature"] is not None

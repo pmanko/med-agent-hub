@@ -21,7 +21,7 @@ def test_the_fast_checked_profile_keeps_every_answer_check_and_drops_only_in_dep
     assert {role: fast.models[role] for role in fast.models} == {
         role: checked.models[role] for role in ("answer", "review", "grounding")
     }
-    assert checked.default and not fast.default
+    assert not checked.default and not fast.default
 
 
 def test_in_depth_without_its_gate_is_rejected():

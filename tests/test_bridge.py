@@ -746,7 +746,8 @@ def test_v1_models_advertises_staged_capability_not_just_id_prefix():
     by_id = {m["id"]: m for m in r.json()["data"]}
     assert by_id["single-12b-checked"]["staged"] is True
     assert by_id["eval-e4b-answer-only"]["staged"] is False
-    assert by_id["single-12b-checked"]["default"] is True
+    assert by_id["single-12b-bare"]["default"] is True
+    assert by_id["single-12b-checked"]["default"] is False
     assert by_id["single-e4b-checked"]["default"] is False
     assert by_id["single-e2b-checked"]["available"] is False
     assert by_id["single-e2b-checked"]["required_models"] == [
