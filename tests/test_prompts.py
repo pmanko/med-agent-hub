@@ -164,7 +164,7 @@ def test_indepth_prompt_asks_for_guideline_context_with_honest_citations():
     "name",
     (
         "validation-indepth",
-        "validation-rewrite-indepth",
+        "validation-label-indepth",
     ),
 )
 def test_indepth_review_prompts_flag_claims_for_the_clinician_to_check(name):

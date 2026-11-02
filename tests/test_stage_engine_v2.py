@@ -518,7 +518,7 @@ def test_product_request_cannot_disable_answer_or_indepth_temporal_enforcement(
             "note": "",
         }
 
-    async def fake_ground(_client, _model, _answer, references, _mappings):
+    async def fake_ground(_client, _model, _answer, references, _mappings, **_kwargs):
         return references
 
     monkeypatch.setattr(team, "_synthesize_answer", fake_answer)

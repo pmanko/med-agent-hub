@@ -1,0 +1,6 @@
+=== CITATION SUPPORT ===
+Also judge every [N] citation in the Answer. For each one, say whether chart record N states what the sentence citing it claims: the value, date, drug or status that sentence attaches to [N]. A sentence citing several records is supported by them together; judge each record by the part of the sentence it carries. Do not report an unsupported citation in "errors"; report it here.
+
+Add to the JSON object:
+  "citations": [{"index": <N>, "supported": <true|false>}]
+with one entry per distinct [N] in the Answer.

@@ -9,7 +9,7 @@ ChartSearchAI handoff. The In-Depth review labels claims and never removes or re
 
 Mocks only the model boundary (`_chat`) and exercises the compiled stages end-to-end. The mock
 branches on the response_format json_schema name so the four call sites (chart_answer synth, in_depth
-synth, rewrite_verdict, indepth_verdict) are served independently.
+synth, label_verdict, indepth_verdict) are served independently.
 Run: pytest tests/test_validator.py
 """
 
@@ -42,7 +42,7 @@ def _factory(calls, verdicts, iv_drops=None):
     """Mock _chat. Branches on the response_format json_schema name:
     "chart_answer"    (Answer synth)      -> {answer: ans-vN, ...} (N = answer-synth call index);
     "in_depth"        (In-Depth synth)    -> {claims: [claim-A-vN, claim-B-vN]};
-    "rewrite_verdict" (Answer validator)  -> the Nth `{answer_ok, errors}` verdict;
+    "label_verdict" (Answer validator)  -> the Nth `{answer_ok, errors}` verdict;
     "indepth_verdict" (In-Depth validator)-> {flag} = the Nth entry of `iv_drops` (a list of flag-
                         lists per In-Depth audit); falls back to verdicts[0].drop / [].
     no response_format (orchestrator)     -> no tools (break to synthesis)."""
@@ -80,7 +80,7 @@ def _factory(calls, verdicts, iv_drops=None):
                 "content": json.dumps({"claims": [f"claim-A-v{n}", f"claim-B-v{n}"]})
             }
 
-        if name == "rewrite_verdict":
+        if name == "label_verdict":
             v = (
                 verdicts[min(state["answer_val"], len(verdicts) - 1)]
                 if verdicts
@@ -108,7 +108,7 @@ def _counts(calls):
     return (
         sum(1 for _m, n in calls if n == "chart_answer"),
         sum(1 for _m, n in calls if n == "in_depth"),
-        sum(1 for _m, n in calls if n == "rewrite_verdict"),
+        sum(1 for _m, n in calls if n == "label_verdict"),
         sum(1 for _m, n in calls if n == "indepth_verdict"),
     )
 

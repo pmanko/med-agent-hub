@@ -282,7 +282,7 @@ def _shape_chat():
                     {"claims": ["WHO anemia threshold is Hgb < 12 g/dL."]}
                 )
             }
-        if name in ("rewrite_verdict", "indepth_verdict", "answer_verdict"):
+        if name in ("label_verdict", "indepth_verdict", "answer_verdict"):
             return {
                 "content": json.dumps({"answer_ok": True, "errors": [], "drop": []})
             }

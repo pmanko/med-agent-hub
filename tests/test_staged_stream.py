@@ -74,7 +74,7 @@ def _stub_common(monkeypatch):
     async def fake_unreviewed_indepth(*_a, **_k):
         return ["claim one [1]", "claim two [2]"]
 
-    async def fake_ground(_client, _model, _answer, references, _mappings):
+    async def fake_ground(_client, _model, _answer, references, _mappings, **_kwargs):
         # Deterministic stand-in for the real entailment call: these sequencing/wiring tests care
         # that grounding runs exactly once, after review, on the FINAL references — not what a real
         # LLM would verdict. The entailment call itself has its own dedicated tests below.
@@ -95,7 +95,7 @@ def _stub_common(monkeypatch):
     monkeypatch.setattr(team, "_merge_temporal_gate_conf", lambda conf, _gate: conf)
     monkeypatch.setattr(team, "_write_trace", lambda *_a, **_k: None)
     monkeypatch.setattr(team, "_ground_references", fake_ground)
-    monkeypatch.setattr(team, "_validate_answer_rewrite", clean_answer_review)
+    monkeypatch.setattr(team, "_validate_answer_label", clean_answer_review)
 
 
 def _product_profile(
@@ -123,7 +123,7 @@ def _product_profile(
     if review_model:
         stages.extend(["review", "gate"])
         models["review"] = review_model
-        prompts["review"] = "validation-rewrite"
+        prompts["review"] = "validation-label"
     stages.extend(["final_resolve_refs", "ground_verdicts", "indepth", "indepth_gate"])
     models["grounding"] = answer_model
     models["indepth"] = answer_model
@@ -180,7 +180,7 @@ def test_e2b_product_profile_routes_each_stage_to_its_declared_model(monkeypatch
         return (["Claim [1]."], {"level": "green", "note": ""})
 
     monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
-    monkeypatch.setattr(team, "_validate_answer_rewrite", fake_review)
+    monkeypatch.setattr(team, "_validate_answer_label", fake_review)
     monkeypatch.setattr(team, "_ground_references", fake_ground)
     monkeypatch.setattr(team, "_gen_indepth", fake_indepth)
 
@@ -232,7 +232,7 @@ def test_staged_stream_with_validator_emits_full_phase_sequence(monkeypatch):
 
     monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
     monkeypatch.setattr(team, "_ensure_substantive_answer", fake_validate)
-    monkeypatch.setattr(team, "_validate_answer_rewrite", fake_rewrite)
+    monkeypatch.setattr(team, "_validate_answer_label", fake_rewrite)
     monkeypatch.setattr(engine, "_select_answer_review_context", fake_select_review)
 
     events = _collect(_product_profile(review_model="V"))
@@ -310,7 +310,7 @@ def test_review_flag_with_an_unusable_rewrite_keeps_the_answer_needs_review(
 
     monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
     monkeypatch.setattr(team, "_ensure_substantive_answer", fake_validate)
-    monkeypatch.setattr(team, "_validate_answer_rewrite", punctuation_rewrite)
+    monkeypatch.setattr(team, "_validate_answer_label", punctuation_rewrite)
 
     events = dict(_collect(_product_profile(review_model="V")))
 
@@ -388,7 +388,7 @@ def test_preliminary_problem_stays_checking_until_configured_review_finishes(
 
     monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
     monkeypatch.setattr(team, "_ensure_substantive_answer", fake_validate)
-    monkeypatch.setattr(team, "_validate_answer_rewrite", clean_review)
+    monkeypatch.setattr(team, "_validate_answer_label", clean_review)
 
     events = dict(_collect(_product_profile(review_model="V")))
 
@@ -488,7 +488,7 @@ def test_stage_timing_covers_reviewed_profile_and_repeated_gate(monkeypatch):
     monkeypatch.setattr(team, "_ensure_substantive_answer", fake_validate)
     monkeypatch.setattr(
         team,
-        "_validate_answer_rewrite",
+        "_validate_answer_label",
         lambda *_args, **_kwargs: asyncio.sleep(
             0, result={"answer_ok": True, "errors": []}
         ),
@@ -534,7 +534,7 @@ def test_stage_timing_is_closed_before_public_phase_yield(monkeypatch):
     monkeypatch.setattr(team, "_ensure_substantive_answer", fake_validate)
     monkeypatch.setattr(
         team,
-        "_validate_answer_rewrite",
+        "_validate_answer_label",
         lambda *_args, **_kwargs: asyncio.sleep(
             0, result={"answer_ok": True, "errors": []}
         ),
@@ -678,7 +678,7 @@ def test_stage_drain_returns_final_post_review_envelope(monkeypatch):
 
     monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
     monkeypatch.setattr(team, "_ensure_substantive_answer", fake_validate)
-    monkeypatch.setattr(team, "_validate_answer_rewrite", fake_rewrite)
+    monkeypatch.setattr(team, "_validate_answer_label", fake_rewrite)
 
     async def fake_indepth(*_args, **_kwargs):
         return ["In-Depth-only support [1]."], {"level": "green", "note": ""}
@@ -1031,7 +1031,7 @@ def test_ground_references_accepts_matching_deterministic_temporal_source_set(
 def test_ground_references_does_not_apply_temporal_pass_to_a_larger_claim(monkeypatch):
     calls = []
 
-    async def semantic_grounding(_client, _model, pairs):
+    async def semantic_grounding(_client, _model, pairs, **_kwargs):
         calls.extend(pairs)
         return [False]
 
@@ -1109,7 +1109,7 @@ def test_ground_references_does_not_silently_drop_sources_within_one_claim(monke
 def test_ground_references_sends_a_large_source_to_exact_budget_checker(monkeypatch):
     checked = []
 
-    async def exact_checker(_client, _model, pairs):
+    async def exact_checker(_client, _model, pairs, **_kwargs):
         checked.extend(pairs)
         return [True]
 
@@ -1142,7 +1142,7 @@ def test_ground_references_sends_a_large_source_to_exact_budget_checker(monkeypa
 def test_ground_references_sends_complete_multi_source_claim_to_exact_budget_checker(monkeypatch):
     checked = []
 
-    async def exact_checker(_client, _model, pairs):
+    async def exact_checker(_client, _model, pairs, **_kwargs):
         checked.extend(pairs)
         return [True]
 
@@ -1216,7 +1216,7 @@ def test_ground_references_verifies_literal_table_facts_without_an_llm(monkeypat
 def test_ground_references_does_not_exact_verify_a_conflicting_multi_source_cell(
     monkeypatch,
 ):
-    async def semantic_grounding(_client, _model, _pairs):
+    async def semantic_grounding(_client, _model, _pairs, **_kwargs):
         return [False]
 
     monkeypatch.setattr(team, "_bounded_entailment_verdicts", semantic_grounding)
@@ -1473,7 +1473,7 @@ def test_ground_references_marks_all_pairs_unchecked_when_a_fitting_call_fails(m
 def test_grounding_batch_splits_until_each_request_fits(monkeypatch):
     calls = []
 
-    async def limited(_client, _model, pairs):
+    async def limited(_client, _model, pairs, **_kwargs):
         calls.append(len(pairs))
         if len(pairs) > 2:
             raise InsufficientContextError(
@@ -1701,7 +1701,7 @@ def test_gen_indepth_refits_the_review_and_never_resynthesizes(monkeypatch):
             "gathered",
             "answer",
             validator_model="reviewer",
-            validator_prompt="validation-rewrite",
+            validator_prompt="validation-label",
             chart="answer chart",
             synth_temperature=0,
             synth_repeat_penalty=None,
@@ -1775,7 +1775,7 @@ def test_product_review_context_overflow_reaches_structured_terminal_metadata(
     monkeypatch.setattr(team, "_gen_indepth", real_gen_indepth)
     monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
     monkeypatch.setattr(team, "_ensure_substantive_answer", keep_answer)
-    monkeypatch.setattr(team, "_validate_answer_rewrite", clean_review)
+    monkeypatch.setattr(team, "_validate_answer_label", clean_review)
     monkeypatch.setattr(team, "_synthesize_indepth", fake_indepth)
     monkeypatch.setattr(engine, "_select_indepth_review_context", review_overflow)
 
@@ -1892,7 +1892,7 @@ def test_needs_review_answer_still_runs_indepth(monkeypatch):
 
     monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
     monkeypatch.setattr(team, "_ensure_substantive_answer", fake_validate)
-    monkeypatch.setattr(team, "_validate_answer_rewrite", unusable_rewrite)
+    monkeypatch.setattr(team, "_validate_answer_label", unusable_rewrite)
 
     collected = _collect(_product_profile(review_model="V"))
     assert [name for name, _payload in collected] == [
@@ -1917,7 +1917,7 @@ def test_final_source_set_grounding_failure_is_reported_once(monkeypatch):
     async def fake_answer(*_args, **_kwargs):
         return "Collective unsupported claim [1][2].", [1, 2], []
 
-    async def unsupported_set(_client, _model, _answer, references, _mappings):
+    async def unsupported_set(_client, _model, _answer, references, _mappings, **_kwargs):
         output = []
         for reference in references:
             item = dict(reference)
@@ -1964,7 +1964,7 @@ def test_final_unchecked_grounding_cannot_leave_answer_checked(monkeypatch):
     async def fake_answer(*_args, **_kwargs):
         return "Claim with unavailable support [1].", [1], []
 
-    async def unchecked(_client, _model, _answer, references, _mappings):
+    async def unchecked(_client, _model, _answer, references, _mappings, **_kwargs):
         output = []
         for reference in references:
             item = dict(reference)
@@ -2080,7 +2080,7 @@ def test_withheld_malformed_table_remains_needs_review_after_llm_review(monkeypa
 
     monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
     monkeypatch.setattr(team, "_ensure_substantive_answer", keep_answer)
-    monkeypatch.setattr(team, "_validate_answer_rewrite", clean_review)
+    monkeypatch.setattr(team, "_validate_answer_label", clean_review)
 
     final = dict(_collect(_product_profile(review_model="V")))["done"]
 
@@ -2166,7 +2166,7 @@ def test_review_correction_does_not_replace_an_answer_whose_table_was_withheld(m
 
     monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
     monkeypatch.setattr(team, "_ensure_substantive_answer", keep_answer)
-    monkeypatch.setattr(team, "_validate_answer_rewrite", correct_prose)
+    monkeypatch.setattr(team, "_validate_answer_label", correct_prose)
 
     final = dict(_collect(_product_profile(review_model="V")))["done"]
 
@@ -2317,7 +2317,7 @@ def test_post_review_failure_restores_exact_emitted_answer_state(monkeypatch):
         raise RuntimeError("grounding unavailable")
 
     monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
-    monkeypatch.setattr(team, "_validate_answer_rewrite", rewrite_answer)
+    monkeypatch.setattr(team, "_validate_answer_label", rewrite_answer)
     monkeypatch.setattr(team, "_ground_references", failed_grounding)
 
     events = dict(_collect(_product_profile(review_model="V")))
@@ -2354,7 +2354,7 @@ def test_indepth_failure_preserves_latest_validated_answer_state(monkeypatch):
         raise RuntimeError("in-depth gate unavailable")
 
     monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
-    monkeypatch.setattr(team, "_validate_answer_rewrite", rewrite_answer)
+    monkeypatch.setattr(team, "_validate_answer_label", rewrite_answer)
     monkeypatch.setattr(engine.temporal, "gate_indepth_claims", failed_indepth_gate)
 
     events = dict(_collect(_product_profile(review_model="V")))
@@ -2389,7 +2389,7 @@ def test_review_correction_does_not_replace_an_answer_with_an_unresolved_citatio
         return {"answer_ok": True, "errors": []}
 
     monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
-    monkeypatch.setattr(team, "_validate_answer_rewrite", rewrite_answer)
+    monkeypatch.setattr(team, "_validate_answer_label", rewrite_answer)
 
     events = dict(_collect(_product_profile(review_model="V")))
 
@@ -2406,7 +2406,7 @@ def test_final_mixed_grounding_cannot_leave_answer_checked(monkeypatch):
     async def fake_answer(*_args, **_kwargs):
         return "One supported and one unsupported claim share source [1].", [1], []
 
-    async def mixed(_client, _model, _answer, references, _mappings):
+    async def mixed(_client, _model, _answer, references, _mappings, **_kwargs):
         output = []
         for reference in references:
             item = dict(reference)
@@ -2437,7 +2437,7 @@ def test_answer_and_indepth_grounding_checks_merge_for_shared_reference(monkeypa
     async def fake_indepth(*_args, **_kwargs):
         return ["Supported In-Depth claim [1][2]."]
 
-    async def checks_by_usage(_client, _model, _answer, references, _mappings):
+    async def checks_by_usage(_client, _model, _answer, references, _mappings, **_kwargs):
         output = []
         for reference in references:
             item = dict(reference)
@@ -2600,7 +2600,7 @@ def test_indepth_citation_keeps_its_own_unsupported_verdict_beside_the_answer(mo
     async def fake_indepth(*_args, **_kwargs):
         return ["Unsupported In-Depth claim [1]."]
 
-    async def ground_by_usage(_client, _model, _answer, references, _mappings):
+    async def ground_by_usage(_client, _model, _answer, references, _mappings, **_kwargs):
         calls.append(references)
         output = []
         for reference in references:
@@ -2685,7 +2685,7 @@ def test_knowledge_reference_survives_source_set_grounding_with_provenance(monke
     # only its own source rather than as one combined source_set — the same compound-citation
     # decoupling as the enumeration case. The point of this test is that the knowledge reference's
     # provenance/source metadata SURVIVES grounding, which it still does.
-    async def supported(_client, _model, pairs):
+    async def supported(_client, _model, pairs, **_kwargs):
         assert len(pairs) == 2
         assert "[1]" in pairs[0][0] and "Examplemed" in pairs[0][1]
         assert "[2]" in pairs[1][0] and "monitoring" in pairs[1][1]
@@ -2734,7 +2734,7 @@ def test_product_review_and_final_event_preserve_grounded_knowledge_reference(mo
             {"level": "green", "note": ""},
         )
 
-    async def supported(_client, _model, pairs):
+    async def supported(_client, _model, pairs, **_kwargs):
         assert pairs
         return [True] * len(pairs)
 
@@ -2742,7 +2742,7 @@ def test_product_review_and_final_event_preserve_grounded_knowledge_reference(mo
         return [], []
 
     monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
-    monkeypatch.setattr(team, "_validate_answer_rewrite", fake_review)
+    monkeypatch.setattr(team, "_validate_answer_label", fake_review)
     monkeypatch.setattr(team, "_gen_indepth", fake_indepth)
     monkeypatch.setattr(team, "_entailment_verdicts", supported)
     monkeypatch.setattr(team, "_gather_evidence", fake_gather)
@@ -2802,7 +2802,7 @@ def test_unreviewed_indepth_claim_whose_citation_was_not_checked_is_shown_marked
     async def fake_indepth(*_args, **_kwargs):
         return ["In-Depth claim whose support was not checked [1]."]
 
-    async def ground_by_usage(_client, _model, _answer, references, _mappings):
+    async def ground_by_usage(_client, _model, _answer, references, _mappings, **_kwargs):
         output = []
         for reference in references:
             item = dict(reference)
@@ -2832,7 +2832,7 @@ def test_unreviewed_indepth_claim_whose_citation_was_not_checked_is_shown_marked
     assert "could not be checked" in check["reason"]
 
 
-def test_uncited_indepth_claim_is_shown_labelled_as_general_guidance(monkeypatch):
+def test_uncited_indepth_claim_is_tagged_general_guidance_not_marked(monkeypatch):
     _stub_common(monkeypatch)
 
     async def fake_answer(*_args, **_kwargs):
@@ -2848,13 +2848,15 @@ def test_uncited_indepth_claim_is_shown_labelled_as_general_guidance(monkeypatch
 
     assert final["inDepth"]["status"] == "complete"
     assert final["inDepth"]["answer"] == (
-        "- Uncited clinical interpretation. *(Check: general guidance, not cited.)*"
+        "- Uncited clinical interpretation. *(General guidance, not from the chart.)*"
     )
-    assert final["confidence"]["in_depth"]["level"] == "yellow"
-    check = final["inDepth"]["validation"]["citation_checks"][0]
-    assert check["status"] == "warn"
+    assert final["confidence"]["in_depth"]["level"] == "green"
+    validation = final["inDepth"]["validation"]
+    assert validation["status"] == "checked"
+    assert "marked" not in validation
+    check = validation["citation_checks"][0]
+    assert check["status"] == "info"
     assert "cites no record" in check["reason"]
-    assert "cites no record" in final["inDepth"]["validation"]["summary"]
 
 
 def test_named_sse_emits_heartbeats_while_a_leg_stalls():
@@ -3322,7 +3324,7 @@ def test_indepth_claim_whose_citation_could_not_be_checked_is_shown_with_a_cauti
     async def one_claim(*_args, **_kwargs):
         return ["Supporting context [1]."], {"level": "green", "note": ""}
 
-    async def unchecked_ground(_client, _model, _answer, references, _mappings):
+    async def unchecked_ground(_client, _model, _answer, references, _mappings, **_kwargs):
         return [dict(ref, grounded=None, groundingStatus="unchecked") for ref in references]
 
     async def unchanged(_client, **kwargs):

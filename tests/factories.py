@@ -103,6 +103,11 @@ def make_profile(
         "temporal_render": "full",
         **dict(policies or {}),
     }
+    if {"review", "ground_verdicts"} & set(stages) and "review" not in merged_policies:
+        merged_policies["review"] = {
+            "action": "label",
+            "grounding": "separate" if "ground_verdicts" in stages else "off",
+        }
     return compile_profile(
         Profile(
             id=profile_id,
@@ -130,7 +135,7 @@ def team_profile(
     review: Optional[str] = None,
     indepth: Optional[str] = None,
     answer_prompt: str = "synthesis-answer",
-    review_prompt: str = "validation-rewrite",
+    review_prompt: str = "validation-label",
     knobs: Optional[Mapping[str, Any]] = None,
     policies: Optional[Mapping[str, Any]] = None,
     supplemental_sources: Sequence[str] = ("knowledge-base",),
@@ -170,7 +175,7 @@ def single_profile(
     review: Optional[str] = None,
     indepth: Optional[str] = None,
     answer_prompt: str = "synthesis-answer",
-    review_prompt: str = "validation-rewrite",
+    review_prompt: str = "validation-label",
     knobs: Optional[Mapping[str, Any]] = None,
     policies: Optional[Mapping[str, Any]] = None,
     profile_id: str = "test-single-profile",

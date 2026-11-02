@@ -174,8 +174,8 @@ profiles:
     topology: single
     stages: *product
     models: {answer: gemma-e4b, review: gemma-e4b, grounding: gemma-e4b, indepth: gemma-e4b}
-    prompts: {answer: synthesis-answer, review: validation-rewrite, indepth: synthesis-indepth}
-    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true}
+    prompts: {answer: synthesis-answer, review: validation-label, indepth: synthesis-indepth}
+    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true, review: {action: label, grounding: separate}}
     visibility: product
     selection_priority: 10
     context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true, supplemental_sources: [knowledge-base]}
@@ -186,8 +186,8 @@ profiles:
     topology: single
     stages: *product
     models: {answer: gemma-e2b, review: gemma-e4b, grounding: gemma-e4b, indepth: gemma-e4b}
-    prompts: {answer: synthesis-answer, review: validation-rewrite, indepth: synthesis-indepth}
-    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true}
+    prompts: {answer: synthesis-answer, review: validation-label, indepth: synthesis-indepth}
+    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true, review: {action: label, grounding: separate}}
     visibility: product
     selection_priority: 15
     context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true, supplemental_sources: [knowledge-base]}
@@ -198,8 +198,8 @@ profiles:
     topology: single
     stages: *product
     models: {answer: gemma-26b, review: gemma-26b, grounding: gemma-26b, indepth: gemma-26b}
-    prompts: {answer: synthesis-answer, review: validation-rewrite, indepth: synthesis-indepth}
-    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true}
+    prompts: {answer: synthesis-answer, review: validation-label, indepth: synthesis-indepth}
+    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true, review: {action: label, grounding: separate}}
     visibility: product
     selection_priority: 20
     context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true, supplemental_sources: [knowledge-base]}
@@ -210,8 +210,8 @@ profiles:
     topology: single
     stages: *product
     models: {answer: gemma-4-12b, review: gemma-4-12b, grounding: gemma-4-12b, indepth: gemma-4-12b}
-    prompts: {answer: synthesis-answer, review: validation-rewrite, indepth: synthesis-indepth}
-    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true}
+    prompts: {answer: synthesis-answer, review: validation-label, indepth: synthesis-indepth}
+    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true, review: {action: label, grounding: separate}}
     visibility: product
     default: true
     selection_priority: 30
@@ -223,8 +223,8 @@ profiles:
     topology: single
     stages: *product_fast
     models: {answer: gemma-4-12b, review: gemma-4-12b, grounding: gemma-4-12b}
-    prompts: {answer: synthesis-answer, review: validation-rewrite}
-    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true}
+    prompts: {answer: synthesis-answer, review: validation-label}
+    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true, review: {action: label, grounding: separate}}
     visibility: product
     selection_priority: 35
     context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true, supplemental_sources: [knowledge-base]}
@@ -238,7 +238,7 @@ profiles:
     stages: *product_answer
     models: {answer: gemma-4-12b, grounding: gemma-4-12b}
     prompts: {answer: synthesis-answer}
-    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true}
+    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true, review: {action: label, grounding: separate}}
     visibility: product
     selection_priority: 40
     context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true, supplemental_sources: [knowledge-base]}
@@ -249,8 +249,8 @@ profiles:
     topology: team
     stages: *team_product
     models: {orchestrator: gemma-e4b-q8, expert: medgemma-1.5-4b-q8, answer: qwen2.5-14b, review: gemma-4-12b, grounding: qwen2.5-14b, indepth: qwen2.5-14b}
-    prompts: {answer: synthesis-answer, review: validation-rewrite, indepth: synthesis-indepth, orchestrator: orchestrator, expert: medical_expert}
-    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true}
+    prompts: {answer: synthesis-answer, review: validation-label, indepth: synthesis-indepth, orchestrator: orchestrator, expert: medical_expert}
+    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true, review: {action: label, grounding: separate}}
     visibility: product
     selection_priority: 100
     context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true, supplemental_sources: [knowledge-base]}
@@ -263,8 +263,8 @@ profiles:
     topology: team
     stages: *team_product
     models: {orchestrator: gemma-31b, expert: medgemma-27b, answer: qwen3.6-35b-q6, review: gemma-31b, grounding: qwen3.6-35b-q6, indepth: qwen3.6-35b-q6}
-    prompts: {answer: synthesis-answer, review: validation-rewrite, indepth: synthesis-indepth, orchestrator: orchestrator, expert: medical_expert}
-    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true}
+    prompts: {answer: synthesis-answer, review: validation-label, indepth: synthesis-indepth, orchestrator: orchestrator, expert: medical_expert}
+    policies: {output: product, temporal_gate: enforce, temporal_render: full, drug_safety: true, review: {action: label, grounding: separate}}
     visibility: debug
     context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true, supplemental_sources: [knowledge-base]}
 
