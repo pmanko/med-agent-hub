@@ -329,12 +329,15 @@ def _fold_stopped_medications(meds: Sequence[ClinicalItem]) -> List[ClinicalItem
 
 
 def _fold_resolved_conditions(conds: Sequence[ClinicalItem]) -> List[ClinicalItem]:
-    """Run-length fold resolved conditions by code/display while preserving sensitivity tags."""
+    """Run-length fold resolved conditions by code/display while preserving sensitivity and conflict tags."""
+    anomalous = [c for c in conds if c.conflict_note]
+    routine = [c for c in conds if not c.conflict_note]
+
     by_code: Dict[str, List[ClinicalItem]] = {}
-    for c in conds:
+    for c in routine:
         by_code.setdefault(c.code or c.display, []).append(c)
 
-    folded: List[ClinicalItem] = []
+    folded: List[ClinicalItem] = list(anomalous)
     for _code, group in by_code.items():
         ordered = sorted(group, key=lambda x: _date_sort_key(x.date))
         latest = ordered[-1]
@@ -1093,6 +1096,11 @@ def build_tier_items(
             for x in cond_active
             if x.sensitivity != "SDOH-SOCIAL"
         ]
+        anomalous_cond_res = [
+            _compact_item_for_micro_tier(x)
+            for x in cond_resolved
+            if x.conflict_note
+        ]
         sdoh_active = [x for x in cond_active if x.sensitivity == "SDOH-SOCIAL"]
         if sdoh_active:
             l_date, _ = _span_phrase([x.date for x in sdoh_active])
@@ -1162,6 +1170,7 @@ def build_tier_items(
             patient_items
             + compact_allergies
             + compact_cond_active
+            + anomalous_cond_res
             + compact_med_active
             + anomalous_imms
             + folded_devices
@@ -1295,7 +1304,7 @@ def _pack_items_to_token_budget(
         conflict_conds = [
             it
             for it in mandatory_items
-            if it.section == "condition_active"
+            if it.section in {"condition_active", "condition_resolved"}
             and (it.conflict_note or it.sensitivity == "SDOH/PRIVACY-SENSITIVE")
         ]
         conflict_imms = [
@@ -1322,7 +1331,15 @@ def _pack_items_to_token_budget(
         for _ckey, cgroup in by_conflict_key.items():
             lead = cgroup[-1]
             l_date, _ = _span_phrase([x.date for x in cgroup])
-            names = "; ".join(f"{x.display} ({x.date})" for x in cgroup)
+            has_mixed_status = any((x.status or "active") != "active" for x in cgroup)
+            if has_mixed_status:
+                names = "; ".join(
+                    f"{x.display} ({x.date}, status: {x.status or 'active'})" for x in cgroup
+                )
+                cond_prefix = "Condition:"
+            else:
+                names = "; ".join(f"{x.display} ({x.date})" for x in cgroup)
+                cond_prefix = "Condition (status: active):"
             sens_tag = (
                 " [sensitivity: SDOH/PRIVACY-SENSITIVE]"
                 if any(x.sensitivity == "SDOH/PRIVACY-SENSITIVE" for x in cgroup)
@@ -1339,8 +1356,9 @@ def _pack_items_to_token_budget(
                     section="condition_active",
                     code=lead.code,
                     display=lead.display,
-                    text=f"Condition (status: active): {names}{note_tag}{sens_tag}",
+                    text=f"{cond_prefix} {names}{note_tag}{sens_tag}",
                     mandatory=True,
+                    status=lead.status,
                     sensitivity=lead.sensitivity,
                     conflict_note=lead.conflict_note,
                     member_uuids=_merge_uuids(cgroup),
@@ -1443,11 +1461,18 @@ def _pack_items_to_token_budget(
             ultra: List[ClinicalItem] = list(non_cond_imm_med)
             if raw_all_conds:
                 l_date, _ = _span_phrase([c.date for c in raw_all_conds])
+                has_non_active_cond = any((c.status or "active") != "active" for c in raw_all_conds)
                 c_parts = []
                 for c in raw_all_conds:
-                    tag = " [conflict]" if c.conflict_note else ""
+                    tag = f" [{c.conflict_note}]" if c.conflict_note else ""
                     sens = " [SDOH/PRIVACY-SENSITIVE]" if c.sensitivity == "SDOH/PRIVACY-SENSITIVE" else ""
-                    c_parts.append(f"{c.display} ({c.date}){tag}{sens}")
+                    st_str = (
+                        f", status: {c.status or 'active'}"
+                        if has_non_active_cond
+                        else ""
+                    )
+                    c_parts.append(f"{c.display} ({c.date}{st_str}){tag}{sens}")
+                ultra_cond_prefix = "Condition:" if has_non_active_cond else "Condition (status: active):"
                 ultra.append(
                     ClinicalItem(
                         resource_type="Condition",
@@ -1458,7 +1483,7 @@ def _pack_items_to_token_budget(
                         section="condition_active",
                         code="active-conditions-ultra",
                         display="Active Conditions",
-                        text=f"Condition (status: active): {'; '.join(c_parts)}",
+                        text=f"{ultra_cond_prefix} {'; '.join(c_parts)}",
                         mandatory=True,
                         member_uuids=_merge_uuids(raw_all_conds),
                     )
@@ -1519,7 +1544,13 @@ def _pack_items_to_token_budget(
                 ultra.append(med_ultra_item)
             if all_imms:
                 l_date, _ = _span_phrase([i.date for i in all_imms])
-                i_parts = [f"{i.display} ({i.date})" for i in all_imms]
+                include_imm_notes = target_tokens >= 1024
+                i_parts = [
+                    f"{i.display} ({i.date}) [{i.conflict_note}]"
+                    if (include_imm_notes and i.conflict_note)
+                    else f"{i.display} ({i.date})"
+                    for i in all_imms
+                ]
                 ultra.append(
                     ClinicalItem(
                         resource_type="Immunization",
