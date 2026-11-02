@@ -707,7 +707,9 @@ def test_render_temporal_facts_default_profile_is_the_uncompacted_sidecar_verbat
     facts = temporal.build_temporal_facts(_CHART, "2006-05-18")
     rendered = temporal.render_temporal_facts(facts)
     payload = _rendered_json_payload(rendered)
-    assert payload == facts
+    # The parsed records serve the deterministic answer rules and are never shown to a model.
+    assert payload == {key: value for key, value in facts.items() if key != "records"}
+    assert facts["records"] and "records" not in payload
     assert "classes" in facts["clinical_dates"][0]
     assert "classes" in payload["clinical_dates"][0]
 

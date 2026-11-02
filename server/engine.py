@@ -148,6 +148,7 @@ _ISSUE_CHECKS = (
     ("answer_review_unavailable", "review"),
     ("review_doubt", "review"),
     ("citation_", "record"),
+    ("rule_", "rule"),
 )
 
 
@@ -1396,12 +1397,22 @@ def _indepth_mark_note(marked: int, total: int, review: Mapping[str, Any]) -> st
     return note[0].upper() + note[1:] + ". Verify marked points against the chart."
 
 
+def _flag_check(entry: Mapping[str, Any]) -> str:
+    """The check that flagged an In-Depth claim: a chart rule (answer rules) or the date check."""
+    for check in (entry.get("gate") or {}).get("checks") or []:
+        if check.get("status") == "fail":
+            return "rule" if str(check.get("id") or "").startswith("rule_") else "date"
+    return "date"
+
+
 def _date_check_label(entry: Mapping[str, Any]) -> str:
-    """A short inline reason for a claim the date check failed, in the chart's terms."""
+    """A short inline reason for a claim a deterministic date check or answer rule failed, in the chart's terms."""
     for check in (entry.get("gate") or {}).get("checks") or []:
         if check.get("status") != "fail":
             continue
         reason = str(check.get("reason") or "")
+        if str(check.get("id") or "").startswith("rule_"):
+            return reason
         found = re.match(r"(.+?) has fewer than two dated points", reason)
         if check.get("id") == "single_point_trend" and found:
             return f"the chart has one dated {found.group(1)} value, so no trend"
@@ -1801,13 +1812,9 @@ async def _execute_stages(
                         state.answer_conf = stages._merge_temporal_gate_conf(
                             state.answer_conf, state.answer_gate
                         )
-                        state.answer_check_edited = (
-                            state.answer_check_edited
-                            or state.answer_text != before_gate_answer
-                            or (
-                                state.answer_gate.get("applied")
-                                in {"patch", "fallback", "repair"}
-                            )
+                        state.answer_check_edited = state.answer_check_edited or (
+                            state.answer_gate.get("applied") in {"patch", "fallback", "edit"}
+                            or state.answer_gate.get("applied") == "repair"
                         )
                     elif state.review_edited:
                         (
@@ -1830,13 +1837,9 @@ async def _execute_stages(
                             answer_conf=state.answer_conf,
                             prior_original_answer=state.original_answer,
                         )
-                        state.answer_check_edited = (
-                            state.answer_check_edited
-                            or state.answer_text != before_gate_answer
-                            or (
-                                state.answer_gate.get("applied")
-                                in {"patch", "fallback", "repair"}
-                            )
+                        state.answer_check_edited = state.answer_check_edited or (
+                            state.answer_gate.get("applied") in {"patch", "fallback", "edit"}
+                            or state.answer_gate.get("applied") == "repair"
                         )
                     else:
                         state.answer_conf = stages._merge_temporal_gate_conf(
@@ -2676,12 +2679,8 @@ async def _execute_stages(
                         for entry in state.indepth_gate.get("checks") or []
                     }
                     for claim_index in state.indepth_gate.get("flagged") or []:
-                        mark(
-                            claim_index,
-                            "red",
-                            _date_check_label(gate_entries.get(claim_index) or {}),
-                            "date",
-                        )
+                        entry = gate_entries.get(claim_index) or {}
+                        mark(claim_index, "red", _date_check_label(entry), _flag_check(entry))
                     for entry in state.indepth_gate.get("checks") or []:
                         claim_index = entry.get("claim_index")
                         if not isinstance(claim_index, int):

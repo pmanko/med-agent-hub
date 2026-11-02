@@ -637,6 +637,17 @@ def build_temporal_facts(
         "numeric_series": numeric_series,
         "return_visit_dates": return_visit_dates,
         "appointment_candidates": candidates_by_relation,
+        # The answer rules read the records; render_temporal_facts never shows them to a model.
+        "records": [
+            {
+                "index": e["index"],
+                "date": e["date"],
+                "cls": e["cls"],
+                "body": e["body"],
+                "clinical": e["is_clinical_event"],
+            }
+            for e in events
+        ],
     }
 
 
@@ -717,8 +728,9 @@ def render_temporal_facts(facts: Dict[str, Any], profile: str = "full") -> str:
 
     ``profile`` is a configured temporal-render policy, never an implicit default change:
     ``"full"`` (the default, and the only behavior every research/batch arm has ever seen) ships
-    the ``facts`` dict verbatim; ``"compact"`` is an explicit per-level opt-in for context-window
-    pressure on small product profiles and drops repeated per-date class mirrors.
+    the ``facts`` dict except the internal ``records`` list read only by deterministic answer
+    rules; ``"compact"`` is an explicit per-level opt-in for context-window pressure on small
+    product profiles and drops repeated per-date class mirrors.
     """
     if not facts:
         return ""
@@ -726,7 +738,7 @@ def render_temporal_facts(facts: Dict[str, Any], profile: str = "full") -> str:
         prompt_facts = compact_temporal_facts_for_prompt(facts)
         marker = "compact deterministic JSON from the chart"
     else:
-        prompt_facts = facts
+        prompt_facts = {key: value for key, value in facts.items() if key != "records"}
         marker = "deterministic JSON from the chart"
     return (
         f"Structured temporal facts ({marker}). "
@@ -2319,17 +2331,12 @@ def _scope_indepth_trend_checks(
     ]
     if len(kept) == len(checks):
         return gate
-    dropped_trend = any(
-        check.get("status") == "fail" or check.get("id") in _TREND_CHECK_IDS
-        for check in checks
-        if check not in kept
-    )
     return {
         **gate,
         "status": _final_gate_status(kept) if kept else "not_applicable",
         "checks": kept,
-        "patch_answer": None if dropped_trend else gate.get("patch_answer"),
-        "patch_citations": [] if dropped_trend else list(gate.get("patch_citations") or []),
+        "patch_answer": None,
+        "patch_citations": [],
     }
 
 
@@ -2391,6 +2398,16 @@ def gate_indepth_claims(
             citations,
             run_temporal_gate("", claim or "", citations, temporal_facts, normalized_mode),
         )
+        if normalized_mode != "off":
+            from . import answer_rules
+
+            rule_marks = answer_rules.claim_marks(claim or "", temporal_facts)
+            if rule_marks:
+                gate = dict(gate)
+                gate_checks = list(gate.get("checks") or []) + rule_marks
+                gate.update({"checks": gate_checks, "status": _final_gate_status(gate_checks)})
+                if any(m.get("status") == "fail" for m in rule_marks):
+                    gate.update({"patch_answer": None, "patch_citations": []})
         if normalized_mode != "off" and _has_malformed_citation_syntax(claim or ""):
             gate = dict(gate)
             gate_checks = list(gate.get("checks") or [])

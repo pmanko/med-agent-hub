@@ -14,7 +14,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Sequ
 
 import httpx
 
-from . import drug_safety, temporal
+from . import answer_rules, drug_safety, temporal
 from .config import EXPERT_DRY_MULTIPLIER, llm_config, resolve_hub_build_revision
 from .context_sources import (
     CHART_MARKER,
@@ -2197,6 +2197,20 @@ def _apply_temporal_gate(
                 [],
             )
             gate["applied"] = "fallback"
+    if gate.get("mode") in {"warn", "enforce"} and gate.get("applied") != "fallback":
+        enforce = gate.get("mode") == "enforce"
+        ruled_text, ruled_citations, ruled_blocks, rule_findings = answer_rules.apply_answer_rules(
+            question, answer_text, citations, blocks, temporal_facts, edit=enforce
+        )
+        if rule_findings:
+            gate["checks"] = list(gate.get("checks") or []) + rule_findings
+            gate["status"] = temporal._final_gate_status(gate["checks"])
+        if enforce and (ruled_text != answer_text or ruled_blocks != blocks):
+            original_answer = original_answer if original_answer is not None else answer_text
+            answer_text, citations, blocks = ruled_text, ruled_citations, ruled_blocks
+            gate["rule_edits"] = [f["id"] for f in rule_findings if f.get("status") == "info"]
+            if gate.get("applied") in {"none", "repair"}:
+                gate["applied"] = "edit"
     steps.append(
         {
         "role": "temporal_gate",
@@ -2917,6 +2931,40 @@ async def _review_existing_answer(
                     if c.get("status") == "warn"
                 ]
             )
+        if (
+            temporal_gate_result.get("mode") in {"warn", "enforce"}
+            and temporal_gate_result.get("applied") != "fallback"
+        ):
+            _ruled_text, _ruled_citations, _ruled_blocks, rule_findings = (
+                answer_rules.apply_answer_rules(
+                    question,
+                    answer_text,
+                    citations,
+                    blocks,
+                    temporal_facts,
+                    edit=False,
+                )
+            )
+            if rule_findings:
+                temporal_gate_result["checks"] = (
+                    list(temporal_gate_result.get("checks") or []) + rule_findings
+                )
+                temporal_gate_result["status"] = temporal._final_gate_status(
+                    temporal_gate_result["checks"]
+                )
+                issues.extend(
+                    f
+                    for f in rule_findings
+                    if f.get("status") in {"warn", "fail"}
+                )
+            if any(f.get("status") == "fail" for f in rule_findings):
+                status = "needs_review"
+                summary = (
+                    "The answer check found a deterministic rule issue that needs review."
+                )
+                answer_conf = _merge_temporal_gate_conf(
+                    answer_conf, temporal_gate_result
+                )
 
     if status in {"checked", "edited"} and _is_substantive_answer(answer_text):
         review_text = answer_text
