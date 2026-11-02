@@ -505,8 +505,8 @@ def test_compiled_profile_configuration_is_immutable():
     [
         (
             "single-12b-verify",
-            {"answer": "gemma-4-12b", "review": "qwen3.6-35b", "grounding": "qwen3.6-35b", "indepth": "gemma-4-12b"},
-            "separate",
+            {"answer": "gemma-4-12b", "review": "qwen3.5-9b", "indepth": "gemma-4-12b"},
+            "folded",
             "validation-verify",
             0.7,
         ),
@@ -561,7 +561,7 @@ def test_checked_answer_arms_change_only_their_declared_choice(
 @pytest.mark.parametrize(
     ("profile_id", "expected_model"),
     [
-        ("single-12b-verify", "qwen3.6-35b"),
+        ("single-12b-verify", "qwen3.5-9b"),
         ("single-31b-xcheck", "qwen3.5-9b"),
     ],
 )
@@ -599,7 +599,7 @@ def test_cross_family_checked_answer_arms_pass_checker_temperature_to_grounding(
     verdicts = asyncio.run(
         team._entailment_verdicts(
             None,
-            profile.models["grounding"],
+            profile.models.get("grounding") or profile.models["review"],
             [("2026-01-01 Weight: 71 kg", "Weight was 71 kg.")],
         )
     )

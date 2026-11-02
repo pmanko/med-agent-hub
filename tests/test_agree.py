@@ -283,6 +283,59 @@ def test_the_writer_runs_without_the_repetition_penalty_by_default():
     assert config.SYNTH_DRY_MULTIPLIER == 0.0
 
 
+def _bare_profile():
+    return make_profile(
+        topology="single",
+        stages=["context", "answer", "gate", "resolve_refs", "final_resolve_refs", "indepth", "indepth_gate"],
+        models={"answer": "M", "indepth": "M"},
+        prompts={"answer": "synthesis-answer", "indepth": "synthesis-indepth"},
+        output="product",
+        policies={"confidence": "findings"},
+        supplemental_sources=("knowledge-base",),
+    )
+
+
+def test_a_bare_profile_reports_a_gate_patch_as_edited_and_no_review(monkeypatch):
+    import asyncio
+    import json
+    from tests.factories import _TestTokenCounter, patient_source_registry, stream_profile
+
+    real_gate = team._apply_temporal_gate
+    _stub_common(monkeypatch)
+    monkeypatch.setattr(team, "_apply_temporal_gate", real_gate)
+
+    async def fake_answer(_client, _model, *_args, **_kwargs):
+        return "The visit was on 2026-01_26 [1].", [1], []
+
+    monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
+    monkeypatch.setattr(team, "_ensure_substantive_answer", _unchanged)
+
+    source = patient_source_registry(
+        "[1] (2026-01-26) Weight: 71 kg",
+        [{"index": 1, "resourceType": "obs", "resourceUuid": "u1", "date": "2026-01-26", "text": "(2026-01-26) Weight: 71 kg"}],
+    )
+
+    async def run():
+        out = {}
+        async for name, raw in stream_profile(
+            _bare_profile(),
+            [{"role": "user", "content": "What was the visit date?"}],
+            patient="p",
+            source_registry=source,
+            token_counter=_TestTokenCounter(),
+        ):
+            out[name] = json.loads(raw)
+        return out
+
+    done = asyncio.run(run())["done"]
+
+    assert done["answer"] == "The visit was on 2026-01-26 [1]."
+    assert done["answerValidation"]["status"] == "edited"
+    assert done["answerValidation"]["originalAnswer"] == "The visit was on 2026-01_26 [1]."
+    assert "review_status" not in done["inDepth"]["validation"]
+    assert "groundingChecks" not in (done["references"][0] if done["references"] else {})
+
+
 def test_second_writer_fits_context_with_its_own_tokenizer(monkeypatch):
     import asyncio
     from server.engine import ContextView, IncludedRecord

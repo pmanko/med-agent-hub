@@ -1,6 +1,7 @@
 """Reusable clinical answer, review, grounding, and optional gather stages."""
 
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -1113,7 +1114,14 @@ async def _ground_references(
     else:
         entailment_options: Dict[str, Any] = {}
         if temperature is not None:
-            entailment_options["temperature"] = temperature
+            try:
+                params = inspect.signature(_bounded_entailment_verdicts).parameters
+                if "temperature" in params or any(
+                    p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+                ):
+                    entailment_options["temperature"] = temperature
+            except (TypeError, ValueError):
+                entailment_options["temperature"] = temperature
         verdicts = [
             _as_verdict(value)
             for value in (
@@ -2154,6 +2162,7 @@ def _apply_temporal_gate(
     steps: List[Dict[str, Any]],
 ) -> Tuple[str, List[int], List[Any], Dict[str, Any], Optional[str]]:
     """Run the deterministic temporal gate and optionally replace the answer in enforce mode."""
+    draft_answer = answer_text
     repaired_text, date_repairs = temporal.repair_garbled_dates(answer_text, temporal_facts)
     if date_repairs and (temporal_gate_mode or "enforce").strip().lower() == "enforce":
         answer_text = repaired_text
@@ -2168,8 +2177,9 @@ def _apply_temporal_gate(
     if date_repairs and gate.get("mode") == "enforce":
         gate["date_repairs"] = date_repairs
         gate["applied"] = "repair"
+        original_answer = draft_answer
     if gate.get("mode") == "enforce" and gate.get("status") == "fail":
-        original_answer = answer_text
+        original_answer = draft_answer
         patch = (gate.get("patch_answer") or "").strip()
         patch_citations = [
             c for c in (gate.get("patch_citations") or []) if isinstance(c, int)
