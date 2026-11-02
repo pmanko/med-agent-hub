@@ -50,7 +50,8 @@ def render_chart(records: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any
         index += 1
         date, is_clinical = _display_date(rec)
         body = _trim_zero(rec.get("text") or "")
-        group = _group_label(rec.get("metadata") or {})
+        metadata = rec.get("metadata") or {}
+        group = _group_label(metadata)
         date_prefix = f"({date}) " if date else ""
         # Nothing to qualify when there is no date to show at all.
         marker = "" if is_clinical or not date else f" [{rec.get('dateKind') or 'unknown'}]"
@@ -60,13 +61,18 @@ def render_chart(records: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any
         # reject otherwise-supported claims.
         grounding_text = f"{date_prefix}{body}{group}"
         lines.append(f"[{index}] {grounding_text}{marker}")
-        mappings.append({
+        mapping_entry: dict[str, Any] = {
             "index": index,
             "resourceType": rec.get("resourceType"),
             "resourceUuid": rec.get("resourceUuid"),
             "date": date,
             "text": grounding_text,
-        })
+        }
+        if metadata.get("memberUuids"):
+            mapping_entry["memberUuids"] = list(metadata["memberUuids"])
+        if metadata.get("sensitivity"):
+            mapping_entry["sensitivity"] = metadata["sensitivity"]
+        mappings.append(mapping_entry)
     return ("\n".join(lines) + "\n" if lines else ""), mappings
 
 
