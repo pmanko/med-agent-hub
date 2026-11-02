@@ -31,11 +31,10 @@ def test_configured_catalog_contains_only_current_product_eval_and_debug_profile
         "single-12b-checked",
         "single-12b-fast",
         "single-12b-answer",
-        "single-12b-xcheck",
         "single-31b-xcheck",
-        "single-12b-checked-folded",
-        "single-12b-checked-noground",
-        "single-12b-checked-nodry",
+        "single-12b-bare",
+        "single-12b-verify",
+        "single-12b-agree",
         "single-a4b-checked",
         "team-med-checked",
         "debug-team-high-checked",
@@ -502,26 +501,26 @@ def test_compiled_profile_configuration_is_immutable():
 
 
 @pytest.mark.parametrize(
-    ("profile_id", "models", "grounding", "review_temperature"),
+    ("profile_id", "models", "grounding", "review_prompt", "review_temperature"),
     [
         (
-            "single-12b-xcheck",
+            "single-12b-verify",
             {"answer": "gemma-4-12b", "review": "qwen3.6-35b", "grounding": "qwen3.6-35b", "indepth": "gemma-4-12b"},
             "separate",
+            "validation-verify",
             0.7,
         ),
         (
             "single-31b-xcheck",
             {"answer": "gemma-31b", "review": "qwen3.5-9b", "grounding": "qwen3.5-9b", "indepth": "gemma-31b"},
             "separate",
+            "validation-verify",
             0.7,
         ),
-        ("single-12b-checked-folded", None, "folded", None),
-        ("single-12b-checked-noground", None, "off", None),
     ],
 )
 def test_checked_answer_arms_change_only_their_declared_choice(
-    profile_id, models, grounding, review_temperature
+    profile_id, models, grounding, review_prompt, review_temperature
 ):
     default = get_profile("single-12b-checked")
     arm = get_profile(profile_id)
@@ -530,7 +529,11 @@ def test_checked_answer_arms_change_only_their_declared_choice(
     assert not arm.default
     assert arm.selection_priority > default.selection_priority
     assert arm.stages == default.stages
-    assert arm.prompts == default.prompts
+    # The verifier arms ask verification questions; every other prompt is the default's.
+    assert {role: prompt for role, prompt in arm.prompts.items() if role != "review"} == {
+        role: prompt for role, prompt in default.prompts.items() if role != "review"
+    }
+    assert arm.prompts["review"] == review_prompt
     assert arm.supplemental_sources == default.supplemental_sources
     assert (arm.context_window, arm.reserved_output_tokens, arm.exact_tokenizer) == (
         default.context_window,
@@ -558,7 +561,7 @@ def test_checked_answer_arms_change_only_their_declared_choice(
 @pytest.mark.parametrize(
     ("profile_id", "expected_model"),
     [
-        ("single-12b-xcheck", "qwen3.6-35b"),
+        ("single-12b-verify", "qwen3.6-35b"),
         ("single-31b-xcheck", "qwen3.5-9b"),
     ],
 )
@@ -605,75 +608,47 @@ def test_cross_family_checked_answer_arms_pass_checker_temperature_to_grounding(
     assert captured[-1]["temperature"] == 0.7
 
 
-def test_nodry_checked_answer_arm_disables_only_dry_for_writer_and_reviewer(
+def test_verifier_answer_review_retains_checked_questions_and_findings(
     monkeypatch: pytest.MonkeyPatch,
 ):
     import asyncio
-    from server import engine, team
+    from server import team
 
-    default = get_profile("single-12b-checked")
-    arm = get_profile("single-12b-checked-nodry")
-
-    assert arm.label == "Checked answer (12B, DRY penalty off)"
-    assert arm.visibility == "product"
-    assert not arm.default
-    assert arm.stages == default.stages
-    assert arm.models == default.models
-    assert arm.prompts == default.prompts
-    assert arm.policies == default.policies
-    assert {
-        role: dict(role_knobs) for role, role_knobs in arm.knobs.items()
-    } == {
-        "answer": {"temperature": 0, "dry": 0},
-        "review": {"dry": 0},
-    }
-
-    sampling = engine._sampling(
-        engine.ExecutionRequest(
-            profile=arm,
-            messages=[{"role": "user", "content": "What was the weight?"}],
-        )
-    )
-    assert sampling["answer_temperature"] == 0
-    assert sampling["answer_dry"] == 0
-    assert sampling["answer_repeat_penalty"] == 1.15
-    assert sampling["review_dry"] == 0
-
-    captured: list[dict] = []
-
-    async def fake_chat(_client, model, _messages, **kwargs):
-        captured.append({"model": model, **kwargs})
-        return {"content": '{"answer": "Weight was 71 kg [1].", "citations": [1], "blocks": []}'}
+    async def fake_chat(_client, _model, _messages, **_kwargs):
+        return {
+            "content": (
+                '{"answer_ok": true, "errors": [], '
+                '"checked": [{"question": "Was weight 71 kg?", "chart": "[1] 2026-01-26 Weight: 71 kg"}]}'
+            )
+        }
 
     monkeypatch.setattr(team, "_chat", fake_chat)
-    asyncio.run(
-        team._synthesize_answer(
+    steps: list[dict] = []
+    _content, _conf, _ans, _val, _gate, _orig = asyncio.run(
+        team._review_existing_answer(
             None,
-            arm.models["answer"],
-            [{"role": "user", "content": "What was the weight?"}],
-            "synthesis-answer",
-            "",
-            response_format=None,
-            max_tokens=256,
-            temperature=sampling["answer_temperature"],
-            repeat_penalty=sampling["answer_repeat_penalty"],
-            dry=sampling["answer_dry"],
-        )
-    )
-    assert captured[-1]["dry_multiplier"] == 0
-    assert captured[-1]["repeat_penalty"] == 1.15
-
-    asyncio.run(
-        team._validate_answer_label(
-            None,
-            arm.models["review"],
-            chart="[1] 2026-01-01 Weight: 71 kg",
+            messages=[{"role": "user", "content": "What was the weight?"}],
             gathered="",
-            answer_text="Weight was 71 kg [1].",
+            chart="[1] 2026-01-26 Weight: 71 kg",
+            temporal_facts=None,
+            temporal_gate_mode="off",
+            reviewer_model="qwen3.6-35b",
+            reviewer_prompt="validation-verify",
+            validator_temperature=0.7,
+            validator_repeat_penalty=None,
+            validator_dry=0.0,
             max_tokens=256,
-            temperature=sampling["review_temperature"],
-            repeat_penalty=sampling["review_repeat_penalty"],
-            dry=sampling["review_dry"],
+            steps=steps,
+            payload_override={
+                "schema_version": "answer_to_review.v1",
+                "original_question": "What was the weight?",
+                "answer": "Weight was 71 kg [1].",
+                "citations": [1],
+                "blocks": [],
+            },
         )
     )
-    assert captured[-1]["dry_multiplier"] == 0
+    review_step = next(step for step in steps if step.get("role") == "answer_review")
+    assert review_step["checked"] == [
+        {"question": "Was weight 71 kg?", "chart": "[1] 2026-01-26 Weight: 71 kg"}
+    ]

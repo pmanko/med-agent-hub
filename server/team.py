@@ -1196,6 +1196,140 @@ async def _ground_references(
     return grounded_refs
 
 
+_ANSWER_SENTENCE_RE = re.compile(r"(?<=[.!?])\s+|\n+")
+
+
+def _answer_claims(answer_text: str, blocks: Optional[List[Any]] = None) -> List[str]:
+    """The sentences of an answer, citations removed, plus each structured table row."""
+    claims = [
+        _INLINE_CITATION_RE.sub("", part).strip()
+        for part in _ANSWER_SENTENCE_RE.split(answer_text or "")
+    ]
+    for block in blocks or []:
+        if not isinstance(block, dict):
+            continue
+        columns = block.get("columns") if isinstance(block.get("columns"), list) else []
+        labels = {
+            str(col.get("key") or ""): str(col.get("label") or col.get("key") or "").strip()
+            for col in columns
+            if isinstance(col, dict) and col.get("key")
+        }
+        rows = block.get("rows")
+        if isinstance(rows, list):
+            for row in rows:
+                cells = row.get("cells") if isinstance(row, dict) else None
+                if isinstance(cells, dict):
+                    parts = []
+                    ordered_keys = [
+                        str(col.get("key"))
+                        for col in columns
+                        if isinstance(col, dict) and str(col.get("key")) in cells
+                    ]
+                    for key in ordered_keys + [k for k in cells if k not in ordered_keys]:
+                        cell = cells.get(key)
+                        text = (
+                            str(cell.get("text") or "")
+                            if isinstance(cell, dict)
+                            else str(cell or "")
+                        )
+                        text = _INLINE_CITATION_RE.sub("", text).strip()
+                        if not text:
+                            continue
+                        label = labels.get(key, "")
+                        parts.append(f"{label}: {text}" if label else text)
+                    if parts:
+                        claims.append(" | ".join(parts))
+                else:
+                    row_text, _ = _block_temporal_text_and_refs([row])
+                    for line in (row_text or "").splitlines():
+                        claims.append(_INLINE_CITATION_RE.sub("", line).strip())
+        else:
+            block_text, _ = _block_temporal_text_and_refs([block])
+            for line in (block_text or "").splitlines():
+                claims.append(_INLINE_CITATION_RE.sub("", line).strip())
+    return [claim for claim in claims if any(c.isalnum() for c in claim)]
+
+
+def _agreement_record(
+    model: str,
+    second_text: str,
+    claims: List[str],
+    verdicts: List[Dict[str, Any]],
+    *,
+    second_blocks: Optional[List[Any]] = None,
+) -> Dict[str, Any]:
+    """What the second writer agreed with, claim by claim: ``agreed`` (every fact stated),
+    ``differs`` (a fact stated differently, with the other reading), ``unverified`` (not stated)."""
+    status_for = {SUPPORTED: "agreed", CONTRADICTED: "differs", NOT_ADDRESSED: "unverified"}
+    rows = []
+    for claim, verdict in zip(claims, verdicts):
+        verdict = _as_verdict(verdict)
+        row = {"claim": claim, "status": status_for.get(verdict["support"], "unchecked")}
+        if verdict.get("chart_value"):
+            row["other"] = verdict["chart_value"]
+        if verdict.get("not_found"):
+            row["not_stated"] = verdict["not_found"]
+        rows.append(row)
+    for claim in claims[len(verdicts):]:
+        rows.append({"claim": claim, "status": "unchecked"})
+    statuses = {row["status"] for row in rows}
+    status = (
+        "differs"
+        if "differs" in statuses
+        else "unchecked"
+        if "unchecked" in statuses or not rows
+        else "agreed"
+        if statuses <= {"agreed"}
+        else "partly"
+    )
+    record: Dict[str, Any] = {
+        "model": model,
+        "answer": second_text,
+        "status": status,
+        "claims": rows,
+    }
+    if second_blocks:
+        record["blocks"] = list(second_blocks)
+    return record
+
+
+def _agreement_issues(agreement: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    """``fail`` for a claim the second writer states differently, ``info`` for one it does not state,
+    and ``warn`` when the agreement check could not be completed."""
+    issues = []
+    for row in agreement.get("claims") or []:
+        if row.get("status") == "differs":
+            issues.append(
+                {
+                    "id": "agreement",
+                    "status": "fail",
+                    "severity": "block",
+                    "claim": row["claim"],
+                    "reason": f"The second writer states something different: {row.get('other') or 'see its answer'}.",
+                }
+            )
+        elif row.get("status") == "unverified":
+            issues.append(
+                {
+                    "id": "agreement_unverified",
+                    "status": "info",
+                    "severity": "info",
+                    "claim": row["claim"],
+                    "reason": f"The second writer did not state: {row.get('not_stated') or 'this'}.",
+                }
+            )
+    if agreement.get("status") == "unchecked":
+        issues.append(
+            {
+                "id": "agreement_unavailable",
+                "status": "warn",
+                "severity": "warn",
+                "reason": "The second-writer agreement check could not be completed.",
+            }
+        )
+    return issues
+
+
 def _grounding_failure_issues(
     references: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
@@ -1636,6 +1770,16 @@ _LABEL_VERDICT_RF = {
                         },
                     },
                 },
+                "checked": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "question": {"type": "string"},
+                            "chart": {"type": "string"},
+                        },
+                    },
+                },
             },
             "required": ["answer_ok"],
         },
@@ -1685,6 +1829,16 @@ _INDEPTH_VERDICT_RF = {
             "properties": {
                 "flag": {"type": "array", "items": {"type": "integer"}},
                 "issues": {"type": "string"},
+                "checked": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "question": {"type": "string"},
+                            "chart": {"type": "string"},
+                        },
+                    },
+                },
             },
             "required": ["flag"],
         },
@@ -2296,6 +2450,20 @@ async def _validate_answer_label(
         len(errors),
     )
     result: Dict[str, Any] = {"answer_ok": answer_ok, "errors": errors}
+    if isinstance(verdict.get("checked"), list):
+        checked = [
+            {
+                "question": str(item.get("question") or "").strip(),
+                "chart": str(item.get("chart") or "").strip(),
+            }
+            for item in verdict["checked"]
+            if isinstance(item, dict)
+            and (
+                str(item.get("question") or "").strip()
+                or str(item.get("chart") or "").strip()
+            )
+        ]
+        result["checked"] = checked
     if citation_support:
         cited = set(_extract_citations(answer_text))
         grouped_citations: Dict[Any, List[Any]] = {}
@@ -2477,6 +2645,20 @@ async def _validate_indepth_verdict(
         (verdict.get("issues") or "")[:120],
     )
     result: Dict[str, Any] = {"flag": flag, "issues": verdict.get("issues", "")}
+    if isinstance(verdict.get("checked"), list):
+        checked = [
+            {
+                "question": str(item.get("question") or "").strip(),
+                "chart": str(item.get("chart") or "").strip(),
+            }
+            for item in verdict["checked"]
+            if isinstance(item, dict)
+            and (
+                str(item.get("question") or "").strip()
+                or str(item.get("chart") or "").strip()
+            )
+        ]
+        result["checked"] = checked
     if citation_support:
         raw_unsupported = verdict.get("unsupported")
         valid_unsupported = isinstance(raw_unsupported, list) and all(
@@ -2817,6 +2999,8 @@ async def _review_existing_answer(
         }
         if overruled:
             review_step["overruled_by_date_checks"] = overruled
+        if isinstance((verdict or {}).get("checked"), list):
+            review_step["checked"] = list(verdict["checked"])
         if citation_verdicts is not None:
             review_step["citation_support"] = {
                 str(index): supported
@@ -2961,16 +3145,17 @@ async def _gen_indepth(
     except Exception as e:
         logger.warning("indepth-validator call failed: %s", e)
         verdict = {"flag": [], "issues": "In-Depth review unavailable.", "unavailable": True}
-    steps.append(
-        {
-            "role": "indepth_validator",
-            "model": validator_model,
-            "status": "unavailable" if verdict.get("unavailable") else "checked",
-            "flag": verdict.get("flag") or [],
-            "issues": verdict.get("issues", ""),
-            "claims_in": len(claims),
-        }
-    )
+    validator_step: Dict[str, Any] = {
+        "role": "indepth_validator",
+        "model": validator_model,
+        "status": "unavailable" if verdict.get("unavailable") else "checked",
+        "flag": verdict.get("flag") or [],
+        "issues": verdict.get("issues", ""),
+        "claims_in": len(claims),
+    }
+    if isinstance(verdict.get("checked"), list):
+        validator_step["checked"] = list(verdict["checked"])
+    steps.append(validator_step)
     if verdict.get("unavailable"):
         return claims, {
             "level": "yellow",
@@ -2980,6 +3165,8 @@ async def _gen_indepth(
     flagged = list(verdict.get("flag") or [])
     # Folded grounding: the review's citation verdicts travel with its labels to the In-Depth gate.
     support: Dict[str, Any] = {}
+    if isinstance(verdict.get("checked"), list):
+        support["checked"] = list(verdict["checked"])
     if citation_support and isinstance(verdict.get("unsupported"), list):
         support["citation_unsupported"] = list(verdict["unsupported"])
         if isinstance(verdict.get("not_addressed"), list):

@@ -133,13 +133,15 @@ def _answer_response_format(request: ExecutionRequest) -> Optional[Dict[str, Any
 
 
 def _confidence_policy(profile: Profile) -> str:
-    """What the confidence sections carry (``review.confidence``): ``levels`` (a green, yellow
-    or red grade) or ``findings`` (no grade; the list of what the checks found)."""
+    """What the confidence sections carry (``policies.confidence``, or ``review.confidence``):
+    ``levels`` (a green, yellow or red grade) or ``findings`` (no grade; the list of what the
+    checks found)."""
     review = profile.policies.get("review") or {}
-    return str(review.get("confidence") or "levels")
+    return str(profile.policies.get("confidence") or review.get("confidence") or "levels")
 
 
 _ISSUE_CHECKS = (
+    ("agreement", "agreement"),
     ("citation_grounding", "citation"),
     ("citation_not_addressed", "citation"),
     ("citation_grounding_unavailable", "citation"),
@@ -195,6 +197,8 @@ def _confidence_section(
 
 def _grounding_policy(profile: Profile) -> str:
     """How the profile checks that cited records support their sentences (``review.grounding``)."""
+    if "ground_verdicts" not in profile.stages:
+        return "off"
     review = profile.policies.get("review") or {}
     return str(review.get("grounding") or "separate")
 
@@ -275,6 +279,7 @@ class _State:
     # 1-based In-Depth claim index -> what each check marked on it; shown beside the claim.
     indepth_marks: Dict[int, List[str]] = field(default_factory=dict)
     indepth_findings: List[Dict[str, Any]] = field(default_factory=list)
+    agreement: Optional[Dict[str, Any]] = None
     # Neutral tags: what a claim is, not a call to check it (uncited general guidance).
     indepth_tags: Dict[int, str] = field(default_factory=dict)
     indepth_error: str = ""
@@ -592,6 +597,8 @@ async def _count_answer_input(
     chart: str,
     *,
     messages: Optional[Sequence[Mapping[str, Any]]] = None,
+    model: Optional[str] = None,
+    prompt_role: str = "answer",
 ) -> int:
     counter = state.token_counter
     if counter is None:
@@ -600,10 +607,16 @@ async def _count_answer_input(
             "The profile requires an exact token counter.",
             source="llama-router",
         )
+    target_model = model or request.profile.models["answer"]
+    default_prompt = (
+        str(request.profile.prompts.get("answer") or "synthesis-answer")
+        if prompt_role == "second"
+        else "synthesis-answer"
+    )
     base_messages = [dict(message) for message in (messages or state.messages)]
     actual_messages = _replace_chart_message(base_messages, chart, requester_line(request.context), state.gathered)
     user = stages.with_gathered(
-        _prompt(request.profile, "answer", "synthesis-answer"), state.gathered, actual_messages
+        _prompt(request.profile, prompt_role, default_prompt), state.gathered, actual_messages
     )
     actual_messages.append({"role": "user", "content": user})
     count_chat = getattr(counter, "count_chat", None)
@@ -612,7 +625,7 @@ async def _count_answer_input(
         response_format = _answer_response_format(request)
         if response_format is not None:
             payload["response_format"] = response_format
-        return await count_chat(request.profile.models["answer"], payload)
+        return await count_chat(target_model, payload)
     # Unit-test counters can implement the simpler text protocol. Production
     # profiles instantiate RouterTokenCounter and therefore always take the exact
     # chat-template path above.
@@ -620,7 +633,7 @@ async def _count_answer_input(
         f"{message.get('role', 'user')}: {message.get('content', '')}"
         for message in actual_messages
     )
-    return await counter.count(request.profile.models["answer"], rendered)
+    return await counter.count(target_model, rendered)
 
 
 async def _select_answer_context(
@@ -644,6 +657,64 @@ async def _select_answer_context(
     )
     state.chart = state.view.render()
     state.messages = _replace_chart_message(state.messages, state.chart, requester_line(request.context), state.gathered)
+
+
+async def _select_second_answer_context(
+    request: ExecutionRequest,
+    state: _State,
+) -> List[Dict[str, Any]]:
+    if state.token_counter is None or state.context_budget is None:
+        raise ContextSourceError(
+            "tokenization_unavailable",
+            "The profile requires exact context selection.",
+            source="llama-router",
+        )
+    second_model = request.profile.models["second"]
+
+    def measure(chart: str) -> Awaitable[int]:
+        return _count_answer_input(
+            request,
+            state,
+            chart,
+            model=second_model,
+            prompt_role="second",
+        )
+
+    if state.view is not None and await _reuse_answer_chart(state, measure, "agree"):
+        return _replace_chart_message(
+            state.messages, state.chart, requester_line(request.context), state.gathered
+        )
+    selector = request.context_selector or select_context
+    view = await selector(
+        state.ledger,
+        question=stages._latest_user_text(state.messages),
+        model=second_model,
+        budget=state.context_budget,
+        counter=state.token_counter,
+        input_measure=measure,
+    )
+    chart = view.render()
+    messages = _replace_chart_message(
+        state.messages, chart, requester_line(request.context), state.gathered
+    )
+    state.steps.append(
+        {
+            "role": "context_selection",
+            "stage": "agree",
+            "mode": view.mode,
+            "input_tokens": view.input_tokens,
+            "input_limit": view.input_limit,
+            "included": [
+                {"stable_id": item.stable_id, "reason": item.reason}
+                for item in view.included
+            ],
+            "excluded": [
+                {"stable_id": item.stable_id, "reason": item.reason}
+                for item in view.excluded
+            ],
+        }
+    )
+    return messages
 
 
 async def _count_indepth_input(
@@ -1201,6 +1272,8 @@ def _stream_payload(
         payload["answerValidation"] = validation
     if state.answer_gate is not None:
         payload["temporalGate"] = state.answer_gate
+    if state.agreement is not None:
+        payload["agreement"] = state.agreement
     if in_depth is not None:
         payload["inDepth"] = in_depth
     safety_check = stages._compute_safety_check(
@@ -1823,6 +1896,10 @@ async def _execute_stages(
                     )
                     has_review = "review" in request.profile.stages
                     has_final_grounding = "ground_verdicts" in request.profile.stages
+                    has_agree = "agree" in request.profile.stages
+                    has_later_answer_check = (
+                        has_review or has_final_grounding or has_agree
+                    )
                     gate_issues = [
                         check
                         for check in (state.answer_gate or {}).get("checks", [])
@@ -1850,13 +1927,16 @@ async def _execute_stages(
                             "One or more citations do not resolve to the current evidence ledger.",
                         )
                     fast_status = (
-                        "checking" if has_review or has_final_grounding else "checked"
+                        "checking"
+                        if has_later_answer_check
+                        else ("edited" if _initial_answer_changed(state) else "checked")
                     )
                     if (
                         state.answer_conf.get("level") == "red"
                         or (state.answer_gate or {}).get("applied") == "fallback"
                         or unresolved
-                    ) and not (has_review or has_final_grounding):
+                        or state.citation_issues
+                    ) and not has_later_answer_check:
                         fast_status = "needs_review"
                     fast_validation = stages._answer_validation_wire(
                         fast_status,
@@ -2046,6 +2126,144 @@ async def _execute_stages(
                                 or (state.review_draft if state.review_edited else None)
                             ),
                         )
+                    record_stage_timing()
+                    continue
+
+                if stage == "agree":
+                    # A second writer from another family answers the same question on its own;
+                    # the answer shown is the first writer's, never a merged text. Each sentence
+                    # of it is then checked against the second answer as a source: a fact the
+                    # second writer states differently is a disagreement the clinician sees.
+                    second_model = request.profile.models["second"]
+                    second_messages = (
+                        await _select_second_answer_context(request, state)
+                        if product and request.profile.exact_tokenizer
+                        else state.messages
+                    )
+                    second_text, _second_citations, second_blocks = await stages._synthesize_answer(
+                        client,
+                        second_model,
+                        second_messages,
+                        _prompt(
+                            request.profile,
+                            "second",
+                            str(
+                                request.profile.prompts.get("answer")
+                                or "synthesis-answer"
+                            ),
+                        ),
+                        state.gathered,
+                        response_format=answer_response_format,
+                        temperature=sampling["answer_temperature"],
+                        max_tokens=request.max_tokens,
+                        repeat_penalty=sampling["answer_repeat_penalty"],
+                        dry=0.0,
+                    )
+                    second_block_text, _ = stages._block_temporal_text_and_refs(
+                        list(second_blocks or [])
+                    )
+                    second_source = "\n".join(
+                        part
+                        for part in (second_text.strip(), second_block_text.strip())
+                        if part
+                    )
+                    claims = stages._answer_claims(state.answer_text, state.blocks)
+                    verdicts = (
+                        await stages._bounded_entailment_verdicts(
+                            client,
+                            second_model,
+                            [(second_source, claim) for claim in claims],
+                        )
+                        if claims and second_source
+                        else []
+                    )
+                    state.agreement = stages._agreement_record(
+                        second_model,
+                        second_text,
+                        claims,
+                        verdicts,
+                        second_blocks=second_blocks,
+                    )
+                    state.steps.append(
+                        {
+                            "role": "second_writer",
+                            "model": second_model,
+                            "output": second_text,
+                            "agreement": state.agreement["status"],
+                            "claims": len(claims),
+                        }
+                    )
+                    issues = stages._agreement_issues(state.agreement)
+                    prior = state.answer_validation or {}
+                    prior_status = prior.get("status")
+                    unresolved = any(
+                        reference.get("resolutionStatus") == "unresolved"
+                        for reference in state.references
+                    )
+                    if unresolved:
+                        _mark_answer_low_confidence(
+                            state,
+                            "One or more citations do not resolve to the current evidence ledger.",
+                        )
+                    if state.citation_issues:
+                        _mark_answer_low_confidence(
+                            state,
+                            "The answer has a blocking citation-format or citation-scope issue.",
+                        )
+                    differs = [issue for issue in issues if issue["status"] == "fail"]
+                    if differs:
+                        _mark_answer_low_confidence(
+                            state,
+                            "The two writers differ on " + "; ".join(
+                                issue["claim"] for issue in differs
+                            ) + ".",
+                        )
+                        status = "needs_review"
+                        summary = "A second writer from another model family stated something different."
+                    elif state.agreement["status"] == "unchecked":
+                        if state.answer_conf.get("level") == "green":
+                            state.answer_conf = {
+                                "level": "yellow",
+                                "note": "The second-writer agreement check could not be completed.",
+                            }
+                        status = (
+                            "needs_review"
+                            if (
+                                prior_status == "needs_review"
+                                or unresolved
+                                or state.citation_issues
+                                or state.answer_conf.get("level") == "red"
+                            )
+                            else "unavailable"
+                        )
+                        summary = (
+                            str(prior.get("summary") or "")
+                            or "The second-writer agreement check could not be completed."
+                        )
+                    else:
+                        if (
+                            prior_status == "needs_review"
+                            or unresolved
+                            or state.citation_issues
+                            or state.answer_conf.get("level") == "red"
+                        ):
+                            status = "needs_review"
+                        elif prior_status == "unavailable":
+                            status = "unavailable"
+                        elif state.review_edited or _initial_answer_changed(state):
+                            status = "edited"
+                        else:
+                            status = "checked"
+                        summary = str(prior.get("summary") or state.answer_conf.get("note", ""))
+                    state.answer_validation = stages._answer_validation_wire(
+                        status,
+                        summary=summary,
+                        issues=list(prior.get("issues") or [])
+                        + list(state.citation_issues)
+                        + issues,
+                        original_answer=prior.get("originalAnswer"),
+                    )
+                    state.stable_answer_snapshot = _snapshot_stable_answer(state)
                     record_stage_timing()
                     continue
 
@@ -2895,6 +3113,7 @@ class StageEngine:
         for key in (
             "confidence",
             "answerValidation",
+            "agreement",
             "inDepth",
             "model",
             "safetyStatus",
