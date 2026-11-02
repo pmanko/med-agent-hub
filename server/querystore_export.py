@@ -76,7 +76,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--timeout", type=_positive_finite_timeout, default=60.0)
     args = parser.parse_args(argv)
     if not querystore_config.enabled:
-        print("ERROR: QueryStore is not configured in this Hub (QUERYSTORE_BASE_URL, _USERNAME, _PASSWORD)", file=sys.stderr)
+        print(
+            "ERROR: QueryStore is not configured in this Hub (QUERYSTORE_BASE_URL, QUERYSTORE_USERNAME, QUERYSTORE_PASSWORD)",
+            file=sys.stderr,
+        )
         return 1
     client = QueryStoreClient(
         querystore_config.base_url,
