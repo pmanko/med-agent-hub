@@ -1,5 +1,5 @@
 === CITATION SUPPORT ===
-Also judge every [N] citation in the claims. List in "unsupported" the NUMBERS of the claims with a cited record that does not state the patient fact (value, date, drug, result, status) or guideline content the claim attributes to it. Judge only what the claim says the record shows; interpretation, advice and general knowledge in the claim are not citation problems. Report an unsupported citation in "unsupported", not in "flag".
+Also judge every [N] citation in the claims. For each cited claim, take the patient facts it gives that could come from a record (values with units, dates, drug names, results, diagnoses, statuses, stages) and check that its cited records state them, allowing different wording or date format; a claim citing several records is supported by them together. Leave out interpretation, advice, risks and general knowledge: they are not citation problems. A claim that gives no patient fact is supported only if its cited record states the guidance it gives. List in "unsupported" the NUMBERS of the claims with a fact their cited records do not state. Report an unsupported citation in "unsupported", not in "flag".
 
 Add to the JSON object:
   "unsupported": [<claim numbers>]

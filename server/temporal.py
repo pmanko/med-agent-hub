@@ -15,7 +15,7 @@ import datetime as _dt
 import json
 import re
 import unicodedata
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 from zoneinfo import ZoneInfo
 
 # A record line is `[N] <rest>`; the date `(YYYY-MM-DD)` is present only on the FIRST line of a
@@ -811,6 +811,18 @@ def _final_gate_status(checks: List[Dict[str, Any]]) -> str:
     return "pass"
 
 
+_MEASUREMENT_DATE_PREFIX_RE = re.compile(
+    r"(?:\b\d+(?:\.\d+)?\s*(?:%|[A-Za-z][A-Za-z/^0-9]{0,11})|"
+    r"\b(?:point|measurement|result|reading|value|count|level|test))"
+    r"\s+(?:recorded\s+|measured\s+)?(?:on|from)\s*$",
+    re.I,
+)
+_SEPARATE_VISIT_MEASUREMENT_RE = re.compile(
+    r"\b(?:to|from|beyond|since|before|after|prior|than|versus|vs\.?|compared|while|whereas|but)\b|;",
+    re.I,
+)
+
+
 def _asserted_last_visit_dates(question: str, answer: str) -> List[str]:
     """Return dates governed by a positive last-visit assertion.
 
@@ -826,10 +838,33 @@ def _asserted_last_visit_dates(question: str, answer: str) -> List[str]:
         if not re.search(r"\breturn[- ]visit\b", match.group(0), re.I)
     ]
     date_matches = list(_ISO_TOKEN_RE.finditer(answer))
+
+    # A visit phrase governs only its nearest date, and not a date that belongs to a
+    # separate measurement endpoint: in "from 52 kg on 2025-10-22 to 41 kg by the last visit"
+    # no visit date is given, whereas in "At the last visit, weight was 52 kg on 2025-10-22"
+    # the measurement is explicitly placed at that visit.
+    governed = set()
+    for visit_match in named_visits:
+        def measurement_date(d: re.Match) -> bool:
+            if not _MEASUREMENT_DATE_PREFIX_RE.search(answer[max(0, d.start() - 30) : d.start()]):
+                return False
+            between_start = min(d.end(), visit_match.end())
+            between_end = max(d.start(), visit_match.start())
+            return bool(_SEPARATE_VISIT_MEASUREMENT_RE.search(answer[between_start:between_end]))
+
+        if date_matches:
+            nearest = min(
+                date_matches,
+                key=lambda d: min(
+                    abs(d.start() - visit_match.end()), abs(visit_match.start() - d.end())
+                ),
+            )
+            if not measurement_date(nearest):
+                governed.add(nearest.start())
     asserted: List[str] = []
     for date_match in date_matches:
         candidates = []
-        for visit_match in named_visits:
+        for visit_match in named_visits if date_match.start() in governed else []:
             between_start = min(date_match.end(), visit_match.end())
             between_end = max(date_match.start(), visit_match.start())
             between = answer[between_start:between_end] if between_end > between_start else ""
@@ -1398,6 +1433,109 @@ def _claim_local_series_values(
     return assigned
 
 
+_STRONG_SEPARATOR_RE = re.compile(r"\b(?:to|and|versus|vs\.?|but|while)\b|;", re.I)
+_NON_AND_STRONG_SEPARATOR_RE = re.compile(r"\b(?:to|versus|vs\.?|but|while|whereas)\b|;", re.I)
+_WEAK_SEPARATOR_RE = re.compile(r",")
+_COORDINATED_DATE_CONNECTOR_RE = re.compile(
+    r"^\s*(?:,\s*(?:(?:and|or)\s+)?|(?:and|or|&|as well as)\s+)(?:on\s+)?$",
+    re.I,
+)
+_RELATIVE_TIME_ANCHOR_RE = re.compile(
+    r"\b(?:last|most recent|latest|current|currently|now|today|baseline|previous|prior|earlier|later|subsequent|initial)\b",
+    re.I,
+)
+
+
+def _segment(text: str, separators: Sequence[re.Match], start: int, end: int) -> Tuple[int, int]:
+    """The span between the nearest separators around ``start``..``end``."""
+    left = max((m.end() for m in separators if m.end() <= start), default=0)
+    right = min((m.start() for m in separators if m.start() >= end), default=len(text))
+    return left, right
+
+
+def _coordinated_date_groups(
+    sentence: str, date_matches: Sequence[re.Match]
+) -> Tuple[Dict[int, List[re.Match]], List[Tuple[int, int]]]:
+    """Group dates joined directly in a coordinated list (e.g. 'on 2025-10-22 and 2026-01-07')."""
+    if len(date_matches) < 2:
+        return {d.start(): [d] for d in date_matches}, []
+    groups: List[List[re.Match]] = [[date_matches[0]]]
+    connector_spans: List[Tuple[int, int]] = []
+    for prev, curr in zip(date_matches, date_matches[1:]):
+        between = sentence[prev.end() : curr.start()]
+        group_lead_prefix = sentence[max(0, groups[-1][0].start() - 16) : groups[-1][0].start()]
+        if _COORDINATED_DATE_CONNECTOR_RE.match(between) and not re.search(
+            r"\b(?:between|from)\s+$", group_lead_prefix, re.I
+        ):
+            groups[-1].append(curr)
+            connector_spans.append((prev.end(), curr.start()))
+        else:
+            groups.append([curr])
+    by_start = {d.start(): group for group in groups for d in group}
+    return by_start, connector_spans
+
+
+def _value_date_bindings(
+    sentence: str, date_matches: Sequence[re.Match], values: Sequence[Tuple[re.Match, float]]
+) -> List[Tuple[re.Match, Tuple[re.Match, float]]]:
+    """Bind each value to the date(s) it is stated with.
+
+    A value takes the nearest date in its own clause (split at commas and at "to", "and",
+    "versus", "but", "while", ";"), else the nearest date in its span between those words, else
+    a shared sentence-leading date across coordinated "and" measurement clauses, else none: in
+    "from 52 kg on 2025-10-22 to 41 kg by the last visit" the 41 has no date of its own.
+    Coordinated date lists ("52 kg on 2025-10-22 and 2026-01-07") bind the shared value to each
+    coordinated date. With "respectively", values pair with dates in order.
+    """
+    if re.search(r"\brespectively\b", sentence, re.I) and len(date_matches) == len(values):
+        return list(zip(date_matches, values))
+    date_groups, connector_spans = _coordinated_date_groups(sentence, date_matches)
+
+    def in_date_connector(m: re.Match) -> bool:
+        return any(start <= m.start() and m.end() <= end for start, end in connector_spans)
+
+    strong = [m for m in _STRONG_SEPARATOR_RE.finditer(sentence) if not in_date_connector(m)]
+    weak = strong + [m for m in _WEAK_SEPARATOR_RE.finditer(sentence) if not in_date_connector(m)]
+    bindings: List[Tuple[re.Match, Tuple[re.Match, float]]] = []
+    for item in values:
+        value_match = item[0]
+        bound_group: Optional[List[re.Match]] = None
+        for separators in (weak, strong):
+            left, right = _segment(sentence, separators, value_match.start(), value_match.end())
+            local = [d for d in date_matches if left <= d.start() and d.end() <= right]
+            if local:
+                nearest = min(
+                    local,
+                    key=lambda d: min(
+                        abs(d.start() - value_match.end()), abs(value_match.start() - d.end())
+                    ),
+                )
+                bound_group = date_groups.get(nearest.start(), [nearest])
+                break
+        if bound_group is None and date_matches:
+            lead_date = date_matches[0]
+            strong_left, strong_right = _segment(
+                sentence, strong, value_match.start(), value_match.end()
+            )
+            lead_prefix = sentence[: lead_date.start()]
+            if (
+                lead_date.end() <= value_match.start()
+                and not _NUMBER_TOKEN_RE.search(lead_prefix)
+                and not _MEASUREMENT_DATE_PREFIX_RE.search(
+                    sentence[max(0, lead_date.start() - 30) : lead_date.start()]
+                )
+                and not _NON_AND_STRONG_SEPARATOR_RE.search(
+                    sentence[lead_date.end() : value_match.start()]
+                )
+                and not _RELATIVE_TIME_ANCHOR_RE.search(sentence[strong_left:strong_right])
+            ):
+                bound_group = date_groups.get(lead_date.start(), [lead_date])
+        if bound_group:
+            for d in bound_group:
+                bindings.append((d, item))
+    return bindings
+
+
 def _date_value_failures(
     answer: str,
     series: Dict[str, Any],
@@ -1413,6 +1551,7 @@ def _date_value_failures(
             continue
         by_date.setdefault(str(p.get("date")), set()).add(val)
         value_dates.setdefault(val, set()).add(str(p.get("date")))
+    percent_series = any("%" in str(p.get("unit") or "") for p in points)
     out = []
     for sentence in _SENTENCE_RE.split(answer or ""):
         clean_sentence = re.sub(r"\[\d+\]", "", sentence)
@@ -1428,6 +1567,13 @@ def _date_value_failures(
         values = _claim_local_series_values(
             value_text, series, selected_series or [series]
         )
+        if not percent_series:
+            # "341 cells/uL (14%)": the percentage belongs to another measure.
+            values = [
+                item
+                for item in values
+                if not value_text[item[0].end() : item[0].end() + 3].lstrip().startswith("%")
+            ]
         if not values:
             continue
         all_expected_values = sorted(value_dates)
@@ -1440,50 +1586,7 @@ def _date_value_failures(
                 }
                 if failure not in out:
                     out.append(failure)
-        separators = list(
-            re.finditer(
-                r"\b(?:to|and|versus|vs\.?)\b|[;,]", clean_sentence, re.I
-            )
-        )
-        if re.search(r"\brespectively\b", clean_sentence, re.I) and len(
-            date_matches
-        ) == len(values):
-            bindings = list(zip(date_matches, values))
-        elif len(date_matches) == 1:
-            bindings = [(date_matches[0], value) for value in values]
-        else:
-            bindings = []
-            for date_match in date_matches:
-                segment_start = max(
-                    (
-                        match.end()
-                        for match in separators
-                        if match.end() <= date_match.start()
-                    ),
-                    default=0,
-                )
-                segment_end = min(
-                    (
-                        match.start()
-                        for match in separators
-                        if match.start() >= date_match.end()
-                    ),
-                    default=len(clean_sentence),
-                )
-                local_values = [
-                    item
-                    for item in values
-                    if segment_start <= item[0].start()
-                    and item[0].end() <= segment_end
-                ]
-                nearest = min(
-                    local_values or values,
-                    key=lambda item: min(
-                        abs(date_match.start() - item[0].end()),
-                        abs(item[0].start() - date_match.end()),
-                    ),
-                )
-                bindings.append((date_match, nearest))
+        bindings = _value_date_bindings(clean_sentence, date_matches, values)
         for date_match, (_nearest_match, val) in bindings:
             date = date_match.group()
             failure = None
@@ -1975,6 +2078,103 @@ def verified_series_endpoints(
     return checks
 
 
+_TREND_CHECK_IDS = {"single_point_trend", "trend_direction"}
+_NO_TREND_CLAIM_RE = re.compile(
+    r"\b(?:insufficient|not enough|cannot|can't|unable|too few)\b[^.;!?]{0,60}\btrend\b|"
+    r"\btrend\b[^.;!?]{0,40}\b(?:cannot|can't|unable|not\s+(?:established|shown|supported|clear|demonstrated|evident|possible|determined|assessable))\b|"
+    r"\bno\s+(?:clear\s+|established\s+|specific\s+(?:[a-z0-9]+\s+){0,4})?trend\b",
+    re.I,
+)
+_TREND_CLAUSE_SPLIT_RE = re.compile(
+    r"[.;!?]+|,\s*(?=\b(?:while|whereas|but|although|though)\b)|\b(?:while|whereas|but|although|though)\b",
+    re.I,
+)
+_NON_SERIES_TREND_PHRASE_RE = re.compile(
+    r"\b(?:increas(?:e|es|ed|ing)|decreas(?:e|es|ed|ing)|reduc(?:e|es|ed|ing)|"
+    r"improv(?:e|es|ed|ing)|worsen(?:s|ed|ing)?|growing|rising|falling|higher|lower)\s+"
+    r"(?:(?:the|a|an|overall|long-term|short-term|clinical|health|patient|future|further)\s+)*"
+    r"(?:risks?|outcomes?|susceptibility|vulnerability|mortality|morbidity|survival|"
+    r"efficacy|effectiveness|adherence|tolerance|quality\s+of\s+life|underlying\s+condition)\b",
+    re.I,
+)
+
+
+def _check_series_concept(check: Dict[str, Any]) -> str:
+    reason = str(check.get("reason") or "")
+    match = re.match(r"^(.+?) has fewer than two dated points\b", reason) or re.search(
+        r"\bcomputed (.+?) direction\b", reason
+    )
+    return match.group(1).strip() if match else ""
+
+
+def _series_trend_asserted_in_claim(
+    claim: str, citations: List[int], check: Dict[str, Any]
+) -> bool:
+    cited_for_series = set(citations) & set(check.get("source_indices") or [])
+    if not cited_for_series:
+        return False
+    concept = _check_series_concept(check)
+    clauses = [c for c in _TREND_CLAUSE_SPLIT_RE.split(claim or "") if c.strip()]
+    if not clauses:
+        return False
+    pertaining: List[str] = []
+    for clause in clauses:
+        clause_citations = {int(value) for value in re.findall(r"\[(\d+)\]", clause)}
+        if clause_citations & cited_for_series:
+            pertaining.append(clause)
+            continue
+        if clause_citations:
+            continue
+        if concept and _series_mention_spans(clause, {"concept": concept}):
+            pertaining.append(clause)
+    if not pertaining:
+        pertaining = clauses
+    if any(_NO_TREND_CLAIM_RE.search(clause) for clause in pertaining):
+        return False
+    return any(
+        _TREND_RE.search(_NON_SERIES_TREND_PHRASE_RE.sub("", clause))
+        for clause in pertaining
+    )
+
+
+def _scope_indepth_trend_checks(
+    claim: str, citations: List[int], gate: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Keep a trend check only for a claim that states the patient's own trend.
+
+    In-Depth prose uses change words about risks and outcomes ("increasing the risk", "to
+    improve outcomes", "rapid CD4 decline" as a general warning) and says when a trend cannot
+    be shown. A trend check applies when the claim cites a record of the measured series and
+    the series' own clause asserts a change rather than denying a trend.
+    """
+    checks = list(gate.get("checks") or [])
+    kept = [
+        check
+        for check in checks
+        if check.get("id") not in _TREND_CHECK_IDS
+        or (
+            set(citations) & set(check.get("source_indices") or [])
+            and _series_trend_asserted_in_claim(claim, citations, check)
+            and not (
+                len(_TREND_CLAUSE_SPLIT_RE.split(claim or "")) <= 1
+                and _NO_TREND_CLAIM_RE.search(claim)
+            )
+        )
+    ]
+    if len(kept) == len(checks):
+        return gate
+    dropped_fail = any(
+        check.get("status") == "fail" for check in checks if check not in kept
+    )
+    return {
+        **gate,
+        "status": _final_gate_status(kept) if kept else "not_applicable",
+        "checks": kept,
+        "patch_answer": None if dropped_fail else gate.get("patch_answer"),
+        "patch_citations": [] if dropped_fail else list(gate.get("patch_citations") or []),
+    }
+
+
 def gate_indepth_claims(
     claims: List[str],
     temporal_facts: Optional[Dict[str, Any]],
@@ -2023,8 +2223,10 @@ def gate_indepth_claims(
             claim, source_index, repair_reason = citation_repair
             edited = True
         citations = [int(value) for value in re.findall(r"\[(\d+)]", claim or "")]
-        gate = run_temporal_gate(
-            "", claim or "", citations, temporal_facts, normalized_mode
+        gate = _scope_indepth_trend_checks(
+            claim or "",
+            citations,
+            run_temporal_gate("", claim or "", citations, temporal_facts, normalized_mode),
         )
         if normalized_mode != "off" and _has_malformed_citation_syntax(claim or ""):
             gate = dict(gate)

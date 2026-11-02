@@ -535,17 +535,54 @@ _ENTAILMENT_SYSTEM_PROMPT = (
 )
 
 # In-Depth claims join a chart fact to interpretation and advice. Their citations are checked for
-# the fact the claim attributes to each record; the reasoning is the reviewer's to judge.
+# the facts the claim attributes to each record; the reasoning is the reviewer's to judge. Asking
+# for the facts first keeps a checker from rejecting a sentence for its interpretation: told only
+# to ignore interpretation, the Qwen checkers answered NO to every pair.
 _ATTRIBUTION_SYSTEM_PROMPT = (
-    "You are a strict clinical fact-checker. For each PAIR, decide whether the SOURCE record "
-    "states what the STATEMENT attributes to it: the patient value, date, drug, result or status, "
-    "or the guideline content. Ignore interpretation, advice, risk and general medical knowledge "
-    "in the statement; they are judged elsewhere. Answer NO if the statement attributes to the "
-    "source a value, date, drug, result, status or content the source does not state, or one "
-    "that differs from it, or if you are not fully certain from the source text alone. Never use "
-    "outside medical knowledge. Return exactly one verdict per pair, in the same order, as JSON: "
-    '{"verdicts": ["YES"|"NO", ...]}.'
+    "You check what clinical statements attribute to patient records. For each PAIR, first copy "
+    "the patient facts the STATEMENT gives that could come from a record: values with units, dates, "
+    "drug names, results, diagnoses, statuses, stages. Leave out interpretation, advice, risks and "
+    "general medical knowledge. Then mark each fact found (the SOURCE states it, allowing different "
+    "wording or date format) or not found. The verdict is YES when every fact is found, NO when any "
+    "fact is not found or differs. When the statement gives no patient fact, the verdict is YES only "
+    "if the SOURCE states the guidance or knowledge the statement gives, otherwise NO. Use only "
+    "the SOURCE text. Return one entry per pair, in the same order, as JSON: "
+    '{"pairs": [{"facts": [{"fact": "...", "found": true|false}], "verdict": "YES"|"NO"}, ...]}.'
 )
+
+_ATTRIBUTION_RF = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "attribution_verdicts",
+        "schema": {
+            "type": "object",
+            "properties": {
+                "pairs": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "facts": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "fact": {"type": "string"},
+                                        "found": {"type": "boolean"},
+                                    },
+                                    "required": ["fact", "found"],
+                                },
+                            },
+                            "verdict": {"type": "string", "enum": ["YES", "NO"]},
+                        },
+                        "required": ["facts", "verdict"],
+                    },
+                },
+            },
+            "required": ["pairs"],
+        },
+    },
+}
 
 _ENTAILMENT_RF = {
     "type": "json_schema",
@@ -576,6 +613,7 @@ async def _entailment_verdicts(
     pairs: List[Tuple[str, str]],
     *,
     attribution_only: bool = False,
+    reasons: Optional[List[Optional[str]]] = None,
     temperature: Optional[float] = None,
 ) -> List[Optional[bool]]:
     """Batched LLM entailment check for citation grounding — mirrors the validator call shape
@@ -583,7 +621,8 @@ async def _entailment_verdicts(
     batch since the hub's single-slot router makes per-pair fan-out no faster). ``pairs`` are
     ``(source_text, statement)``. FAIL-OPEN to ``None`` (unchecked) for every pair on any call or
     parse failure, or if the model returns fewer verdicts than pairs — a flaky grounding check must
-    never fabricate a verdict."""
+    never fabricate a verdict. With ``attribution_only``, ``reasons`` (when given) is filled with
+    one entry per pair: the facts the checker did not find in the source, or None."""
     if not pairs:
         return []
     body = "\n\n".join(
@@ -599,7 +638,9 @@ async def _entailment_verdicts(
         if temperature is None
         else float(temperature)
     )
-    chat_kwargs: Dict[str, Any] = {"response_format": _ENTAILMENT_RF}
+    chat_kwargs: Dict[str, Any] = {
+        "response_format": _ATTRIBUTION_RF if attribution_only else _ENTAILMENT_RF
+    }
     if effective_temperature is not None:
         chat_kwargs["temperature"] = effective_temperature
     try:
@@ -610,7 +651,28 @@ async def _entailment_verdicts(
             **chat_kwargs,
         )
         obj = json.loads(_message_text(msg))
-        verdicts = obj.get("verdicts") if isinstance(obj, dict) else None
+        if attribution_only:
+            entries = obj.get("pairs") if isinstance(obj, dict) else None
+            if not isinstance(entries, list):
+                raise ValueError("attribution response missing a 'pairs' array")
+            verdicts = [
+                entry.get("verdict") if isinstance(entry, dict) else None
+                for entry in entries
+            ]
+            if reasons is not None:
+                for entry in entries[: len(pairs)]:
+                    facts = entry.get("facts") if isinstance(entry, dict) else None
+                    missing = [
+                        str(fact.get("fact")).strip()
+                        for fact in (facts if isinstance(facts, list) else [])
+                        if isinstance(fact, dict)
+                        and fact.get("found") is False
+                        and str(fact.get("fact") or "").strip()
+                    ]
+                    reasons.append("; ".join(missing) or None)
+                reasons.extend([None] * (len(pairs) - len(reasons)))
+        else:
+            verdicts = obj.get("verdicts") if isinstance(obj, dict) else None
         if not isinstance(verdicts, list):
             raise ValueError("entailment response missing a 'verdicts' array")
     except InsufficientContextError:
@@ -621,6 +683,8 @@ async def _entailment_verdicts(
             model,
             len(pairs),
         )
+        if reasons is not None:
+            reasons[:] = [None] * len(pairs)
         return [None] * len(pairs)
     out: List[Optional[bool]] = []
     for i in range(len(pairs)):
@@ -640,29 +704,43 @@ async def _bounded_entailment_verdicts(
     pairs: List[Tuple[str, str]],
     *,
     attribution_only: bool = False,
+    reasons: Optional[List[Optional[str]]] = None,
     temperature: Optional[float] = None,
 ) -> List[Optional[bool]]:
-    """Check all pairs together, splitting only when exact token measurement overflows."""
+    """Check all pairs together, splitting only when exact token measurement overflows.
+
+    ``reasons``, when given, receives one entry per pair (see ``_entailment_verdicts``)."""
     options: Dict[str, Any] = {}
     if attribution_only:
         options["attribution_only"] = True
     if temperature is not None:
         options["temperature"] = temperature
 
-    async def check(items: List[Tuple[str, str]]) -> List[Optional[bool]]:
+    async def check(items: List[Tuple[str, str]]) -> Tuple[List[Optional[bool]], List[Optional[str]]]:
+        found: List[Optional[str]] = []
         try:
-            return await _entailment_verdicts(client, model, items, **options)
+            verdicts = await _entailment_verdicts(
+                client, model, items, **options, **({"reasons": found} if attribution_only else {})
+            )
+            return verdicts, (found + [None] * len(items))[: len(items)]
         except InsufficientContextError:
             if len(items) == 1:
                 logger.warning(
                     "entailment grounding[%s] single pair exceeds context -> unchecked",
                     model,
                 )
-                return [None]
+                return [None], [None]
             midpoint = len(items) // 2
-            return await check(items[:midpoint]) + await check(items[midpoint:])
+            left, left_reasons = await check(items[:midpoint])
+            right, right_reasons = await check(items[midpoint:])
+            return left + right, left_reasons + right_reasons
 
-    return await check(pairs) if pairs else []
+    if not pairs:
+        return []
+    verdicts, pair_reasons = await check(pairs)
+    if reasons is not None:
+        reasons.extend(pair_reasons)
+    return verdicts
 
 
 async def _ground_references(
@@ -834,6 +912,7 @@ async def _ground_references(
         ("\n".join(groups[i]["sources"]), groups[i]["claim"])
         for i in checkable_positions
     ]
+    pair_reasons: List[Optional[str]] = []
     if index_verdicts is not None:
         usage_offsets: Dict[int, int] = {}
         verdicts = []
@@ -881,6 +960,7 @@ async def _ground_references(
         entailment_options: Dict[str, Any] = {}
         if attribution_only:
             entailment_options["attribution_only"] = True
+            entailment_options["reasons"] = pair_reasons
         if temperature is not None:
             entailment_options["temperature"] = temperature
         verdicts = (
@@ -893,6 +973,7 @@ async def _ground_references(
             if pairs
             else []
         )
+    reason_by_position = dict(zip(checkable_positions, pair_reasons))
     verdict_by_position = {
         **{position: True for position in deterministic_positions},
         **dict(zip(checkable_positions, verdicts)),
@@ -929,6 +1010,8 @@ async def _ground_references(
                 }
             if group_position in deterministic_positions:
                 grounding_check["method"] = deterministic_methods[group_position]
+            if group_verdict is False and reason_by_position.get(group_position):
+                grounding_check["not_found"] = reason_by_position[group_position]
             grounding_checks.append(grounding_check)
         check_statuses = {check["status"] for check in grounding_checks}
         if not grounding_checks or "unchecked" in check_statuses:

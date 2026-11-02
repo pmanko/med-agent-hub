@@ -20,9 +20,7 @@
       "flagged_with_question": [
         "last_visit:fail"
       ],
-      "expected": [
-        "last_visit:fail"
-      ]
+      "expected": []
     },
     {
       "scenario": "am-weight-trend",
@@ -63,11 +61,7 @@
       "flagged_with_question": [
         "single_point_trend:fail"
       ],
-      "expected": [
-        "single_point_trend:fail"
-      ],
-      "known_limitation": true,
-      "note": "Known false positive at claim-word level: 'increasing the risk' triggers _TREND_RE until trend checks are scoped to cited series assertions."
+      "expected": []
     },
     {
       "scenario": "convo-diagnosis-evidence",
@@ -77,11 +71,7 @@
       "flagged_with_question": [
         "single_point_trend:fail"
       ],
-      "expected": [
-        "single_point_trend:fail"
-      ],
-      "known_limitation": true,
-      "note": "Known false positive at claim-word level: 'improve outcomes' triggers _TREND_RE until trend checks are scoped to cited series assertions."
+      "expected": []
     },
     {
       "scenario": "convo-diagnosis-evidence",
@@ -91,12 +81,7 @@
       "flagged_with_question": [
         "single_point_trend:fail"
       ],
-      "expected": [
-        "single_point_trend:fail"
-      ],
-      "expected_claim": "The chart shows one dated CD4 count measurement: 341 cells/uL on 2025-11-24 [182]. A trend cannot be determined from one point.",
-      "known_limitation": true,
-      "note": "Known false positive at claim-word level: explicitly denying a trend still triggers _TREND_RE and rewrites the claim in enforce mode until no-trend denials are exempted."
+      "expected": []
     },
     {
       "scenario": "convo-diagnosis-evidence",

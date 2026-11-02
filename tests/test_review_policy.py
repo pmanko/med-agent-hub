@@ -389,8 +389,21 @@ def test_off_grounding_leaves_in_depth_citations_unchecked_and_unmarked(monkeypa
 def test_attribution_check_asks_only_what_the_claim_attributes_to_its_record(monkeypatch):
     prompts = []
 
-    async def fake_chat(_client, _model, messages, **_kwargs):
+    async def fake_chat(_client, _model, messages, **kwargs):
         prompts.append(messages[-1]["content"])
+        if kwargs.get("response_format") == team._ATTRIBUTION_RF:
+            return {
+                "content": json.dumps(
+                    {
+                        "pairs": [
+                            {
+                                "facts": [{"fact": "Temperature 39.7 C", "found": True}],
+                                "verdict": "YES",
+                            }
+                        ]
+                    }
+                )
+            }
         return {"content": json.dumps({"verdicts": ["YES"]})}
 
     monkeypatch.setattr(team, "_chat", fake_chat)
