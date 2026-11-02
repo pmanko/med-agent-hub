@@ -458,12 +458,16 @@ def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
 
     def resolve_source_org(res: Mapping[str, Any]) -> Optional[str]:
         rid = str(res.get("id") or "")
-        # Check explicit performer / serviceProvider / recorder first
-        sp = res.get("serviceProvider")
-        if isinstance(sp, Mapping):
-            sp_disp = str(sp.get("display") or orgs_by_id.get(_strip_urn(sp.get("reference"))) or "").strip()
-            if sp_disp:
-                return sp_disp
+        # Check explicit serviceProvider / recorder / asserter / requester / performer first
+        for role_field in ("serviceProvider", "recorder", "asserter", "requester"):
+            role_obj = res.get(role_field)
+            if isinstance(role_obj, Mapping):
+                r_ref = _strip_urn(role_obj.get("reference"))
+                r_disp = str(
+                    role_obj.get("display") or orgs_by_id.get(r_ref) or pracs_by_id.get(r_ref) or ""
+                ).strip()
+                if r_disp:
+                    return r_disp
         for perf in res.get("performer") or []:
             if isinstance(perf, Mapping):
                 actor = perf.get("actor") or perf
@@ -656,6 +660,8 @@ def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
             details.append(f"onset: {c['onset']}")
         if c["abatement"]:
             details.append(f"resolved: {c['abatement']}")
+        if c["source_org"]:
+            details.append(f"source: {c['source_org']}")
         if c["code"]:
             details.append(f"SNOMED: {c['code']}")
         suffix = ""
