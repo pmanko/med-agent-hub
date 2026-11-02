@@ -442,7 +442,7 @@ def _review_policy(profile: Profile) -> Optional[str]:
         raise ValueError(
             f"profile {profile.id!r} must declare policies.review with action and grounding"
         )
-    unknown = sorted(set(review) - {"action", "grounding", "confidence"})
+    unknown = sorted(set(review) - {"action", "grounding", "confidence", "shadow"})
     if unknown:
         raise ValueError(f"profile {profile.id!r} review policy has unknown keys {unknown}")
     action = str(review.get("action") or "")
@@ -452,6 +452,11 @@ def _review_policy(profile: Profile) -> Optional[str]:
         )
     if action not in _REVIEW_ACTIONS:
         raise ValueError(f"profile {profile.id!r} has invalid review action {action!r}")
+    raw_shadow = review.get("shadow")
+    if raw_shadow is not None and (
+        not isinstance(raw_shadow, str) or raw_shadow not in {"", "scorer"}
+    ):
+        raise ValueError(f"profile {profile.id!r} has invalid review shadow {raw_shadow!r}")
     confidence = str(review.get("confidence") or "levels")
     if confidence not in _CONFIDENCE_POLICIES:
         raise ValueError(

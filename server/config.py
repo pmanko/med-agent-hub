@@ -46,6 +46,22 @@ class QueryStoreConfig:
 
 
 llm_config = LLMConfig()
+
+
+@dataclass(frozen=True)
+class ScorerConfig:
+    """An entailment scorer beside the generative citation check (confidence-labels L6).
+
+    ``SCORER_BASE_URL`` names a service answering ``POST /score`` with one probability pair
+    per (source, statement); empty means no scorer, and a profile asking for one records
+    ``unchecked`` scorer verdicts. Shadow only: the scorer never sets a label.
+    """
+
+    base_url: str = os.getenv("SCORER_BASE_URL", "")
+    request_timeout_seconds: float = float(os.getenv("SCORER_REQUEST_TIMEOUT_SECONDS", "120"))
+
+
+scorer_config = ScorerConfig()
 querystore_config = QueryStoreConfig()
 
 

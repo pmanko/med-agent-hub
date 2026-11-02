@@ -195,6 +195,12 @@ def _confidence_section(
     return out
 
 
+def _shadow_scorer(profile: Profile) -> bool:
+    """Whether the profile records the entailment scorer's verdict beside each citation check."""
+    review = profile.policies.get("review") or {}
+    return str(review.get("shadow") or "") == "scorer"
+
+
 def _grounding_policy(profile: Profile) -> str:
     """How the profile checks that cited records support their sentences (``review.grounding``)."""
     if "ground_verdicts" not in profile.stages:
@@ -2337,6 +2343,8 @@ async def _execute_stages(
                         ]
                         folded = grounding == "folded"
                         grounding_options: Dict[str, Any] = {}
+                        if _shadow_scorer(request.profile):
+                            grounding_options["shadow_scorer"] = True
                         if deterministic_checks:
                             grounding_options["deterministic_checks"] = deterministic_checks
                         # A folded review that judged no cited record at all (the 9B returned an
@@ -2789,6 +2797,7 @@ async def _execute_stages(
                                     references,
                                     state.mappings,
                                     index_verdicts=verdicts,
+                                    shadow_scorer=_shadow_scorer(request.profile),
                                 )
                             )
                         flattened = grounded
@@ -2801,6 +2810,7 @@ async def _execute_stages(
                             "\n".join(claim for _index, claim, _refs in candidates),
                             flattened,
                             state.mappings,
+                            shadow_scorer=_shadow_scorer(request.profile),
                             **(
                                 {"temperature": sampling["grounding_temperature"]}
                                 if sampling["grounding_temperature"] is not None
