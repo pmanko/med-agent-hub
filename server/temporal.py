@@ -1936,7 +1936,9 @@ def run_temporal_gate(
                 for p in (s.get("points") or [])
                 if isinstance(p.get("index"), int)
             ]
-            if not s.get("trend_supported") and _NO_TREND_CLAIM_RE.search(a):
+            if not s.get("trend_supported") and (
+                _NO_TREND_CLAIM_RE.search(a) or _NO_OTHER_VALUES_RE.search(a)
+            ):
                 if _series_refuses_trend(a, s, selected, answer_dir):
                     _add_check(
                         checks,
@@ -2242,8 +2244,11 @@ def verified_series_endpoints(
 _TREND_CHECK_IDS = {"single_point_trend", "trend_direction"}
 _NO_TREND_CLAIM_RE = re.compile(
     r"\b(?:insufficient|not enough|cannot|can't|unable|too few)\b[^.;!?]{0,60}\btrend\b|"
-    r"\btrend\b[^.;!?]{0,40}\b(?:cannot|can't|unable|not)\b|"
-    r"\bno\s+(?:clear\s+|established\s+|specific\s+(?:[a-z0-9]+\s+){0,4})?trend\b|"
+    r"\btrend\b[^.;!?]{0,40}\b(?:cannot|can't|unable|not\s+(?:established|shown|supported|clear|demonstrated|evident|possible|determined|assessable))\b|"
+    r"\bno\s+(?:clear\s+|established\s+|specific\s+(?:[a-z0-9]+\s+){0,4})?trend\b",
+    re.I,
+)
+_NO_OTHER_VALUES_RE = re.compile(
     r"\bno other\b[^.;!?]{0,40}\b(?:values?|counts?|measurements?|readings?|results?|points?)\b",
     re.I,
 )
@@ -2289,15 +2294,23 @@ def _series_refuses_trend(
         mentions_other = any(
             bool(_series_mention_spans(clause, other)) for other in other_items
         ) or bool(clause_cites & other_indices)
-        if mentions_item and not _NO_TREND_CLAIM_RE.search(clause):
+        clause_refuses = bool(_NO_TREND_CLAIM_RE.search(clause)) or bool(
+            _NO_OTHER_VALUES_RE.search(clause)
+        )
+        if mentions_item and not clause_refuses:
             if _answer_direction(clause) is not None or re.search(
-                r"\b(?:shows?|demonstrates?|exhibits?|indicates?)\s+(?:a|an)\s+(?:\w+\s+)?trend\b",
+                r"\b(?:shows?|demonstrates?|exhibits?|indicates?)\s+(?:a|an)\s+(?:\w+\s+)?trend\b|"
+                r"\b(?:stable|unchanged|flat|plateau(?:ed|ing)?)\b",
                 clause,
                 re.I,
             ):
                 return False
-        if _NO_TREND_CLAIM_RE.search(clause):
-            if _answer_direction_for_series(clause, item, selected) is not None:
+        if clause_refuses:
+            if _answer_direction_for_series(clause, item, selected) is not None or re.search(
+                r"\b(?:stable|unchanged|flat|plateau(?:ed|ing)?)\b",
+                clause,
+                re.I,
+            ):
                 continue
             if mentions_item or (
                 not mentions_other and len(_named_series(answer, selected)) == 1
@@ -2453,6 +2466,8 @@ def gate_indepth_claims(
                 gate = dict(gate)
                 gate_checks = list(gate.get("checks") or []) + rule_marks
                 gate.update({"checks": gate_checks, "status": _final_gate_status(gate_checks)})
+                if any(m.get("status") == "fail" for m in rule_marks):
+                    gate.update({"patch_answer": None, "patch_citations": []})
         if normalized_mode != "off" and _has_malformed_citation_syntax(claim or ""):
             gate = dict(gate)
             gate_checks = list(gate.get("checks") or [])

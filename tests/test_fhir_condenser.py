@@ -687,9 +687,15 @@ def test_condenser_privacy_trajectories_units_dosage_devices_and_temporal_range(
         with pytest.raises(ValueError):
             condense_bundle_to_budget(b_struct, target_tokens=bad_budget)
 
-    async def _check_missing():
-        src = FhirBundleContextSource(bundles_by_patient={})
+    async def _check_missing(tmp_path):
+        src = FhirBundleContextSource(bundles_by_patient={}, bundle_dir=tmp_path)
         with pytest.raises(ContextSourceError):
             await src.fetch(ContextRequest(messages=[], patient="missing"))
+        for bad_patient in ("../secret", "sub/pat", "pat*"):
+            with pytest.raises(ContextSourceError) as exc_info:
+                await src.fetch(ContextRequest(messages=[], patient=bad_patient))
+            assert exc_info.value.code == "invalid_patient_identifier"
 
-    asyncio.run(_check_missing())
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        asyncio.run(_check_missing(td))
