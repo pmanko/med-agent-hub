@@ -1,0 +1,250 @@
+{
+  "schema_version": "wahs_kb_rxnorm_lookup.v1",
+  "source": "NLM RxNorm / DailyMed Consumer Medication Reference",
+  "version": "2025",
+  "url": "https://www.nlm.nih.gov/research/umls/rxnorm/index.html",
+  "license": "US Public Domain (NLM)",
+  "brand_to_generic": {
+    "plavix": "clopidogrel",
+    "prinivil": "lisinopril",
+    "zestril": "lisinopril",
+    "lipitor": "atorvastatin",
+    "zocor": "simvastatin",
+    "crestor": "rosuvastatin",
+    "pravachol": "pravastatin",
+    "toprol": "metoprolol",
+    "lopressor": "metoprolol",
+    "humulin": "insulin isophane/regular",
+    "novolin": "insulin isophane/regular",
+    "lasix": "furosemide",
+    "microzide": "hydrochlorothiazide",
+    "nitrostat": "nitroglycerin",
+    "augmentin": "amoxicillin/clavulanate",
+    "zofran": "ondansetron",
+    "versed": "midazolam",
+    "diprivan": "propofol",
+    "zemuron": "rocuronium",
+    "ultiva": "remifentanil",
+    "ancef": "cefazolin",
+    "aleve": "naproxen",
+    "advil": "ibuprofen",
+    "motrin": "ibuprofen",
+    "tylenol": "acetaminophen"
+  },
+  "rxnorm_codes": {
+    "834061": {
+      "rxnorm": "834061",
+      "display": "Penicillin V Potassium 250 MG Oral Tablet",
+      "ingredient": "penicillin v potassium",
+      "therapeutic_class": "beta_lactam_antibiotic",
+      "brand_names": ["Veetids"],
+      "plain_purpose": "Oral penicillin antibiotic used to treat bacterial infections such as strep throat, dental infections, or sinus infections."
+    },
+    "834102": {
+      "rxnorm": "834102",
+      "display": "Penicillin V Potassium 500 MG Oral Tablet",
+      "ingredient": "penicillin v potassium",
+      "therapeutic_class": "beta_lactam_antibiotic",
+      "brand_names": ["Veetids"],
+      "plain_purpose": "Oral penicillin antibiotic used to treat bacterial respiratory, throat, and dental infections."
+    },
+    "1535362": {
+      "rxnorm": "1535362",
+      "display": "sodium fluoride 0.0272 MG/MG Oral Gel",
+      "ingredient": "sodium fluoride",
+      "therapeutic_class": "topical_dental_fluoride",
+      "brand_names": ["Prevident"],
+      "plain_purpose": "Topical dental fluoride gel applied to strengthen tooth enamel and prevent cavities and gingivitis."
+    },
+    "313782": {
+      "rxnorm": "313782",
+      "display": "Acetaminophen 325 MG Oral Tablet",
+      "ingredient": "acetaminophen",
+      "therapeutic_class": "analgesic_antipyretic",
+      "brand_names": ["Tylenol"],
+      "plain_purpose": "Non-aspirin pain reliever and fever reducer."
+    },
+    "562251": {
+      "rxnorm": "562251",
+      "display": "Amoxicillin 250 MG / Clavulanate 125 MG Oral Tablet",
+      "ingredient": "amoxicillin/clavulanate",
+      "therapeutic_class": "beta_lactam_antibiotic",
+      "brand_names": ["Augmentin"],
+      "plain_purpose": "Combination penicillin-class antibiotic used to treat bacterial sinusitis, ear infections, and respiratory tract infections."
+    },
+    "849574": {
+      "rxnorm": "849574",
+      "display": "Naproxen sodium 220 MG Oral Tablet",
+      "ingredient": "naproxen",
+      "therapeutic_class": "nsaid_anti_inflammatory",
+      "brand_names": ["Aleve", "Anaprox"],
+      "plain_purpose": "Nonsteroidal anti-inflammatory drug (NSAID) used to relieve pain, inflammation, and fever; use with caution in chronic kidney disease."
+    },
+    "310965": {
+      "rxnorm": "310965",
+      "display": "Ibuprofen 200 MG Oral Tablet",
+      "ingredient": "ibuprofen",
+      "therapeutic_class": "nsaid_anti_inflammatory",
+      "brand_names": ["Advil", "Motrin"],
+      "plain_purpose": "Nonsteroidal anti-inflammatory drug (NSAID) for pain and inflammation; use cautiously in patients with reduced kidney function or on antiplatelet therapy."
+    },
+    "310798": {
+      "rxnorm": "310798",
+      "display": "Hydrochlorothiazide 25 MG Oral Tablet",
+      "ingredient": "hydrochlorothiazide",
+      "therapeutic_class": "thiazide_diuretic",
+      "brand_names": ["Microzide"],
+      "plain_purpose": "Thiazide diuretic ('water pill') prescribed to lower high blood pressure (essential hypertension) and reduce fluid retention."
+    },
+    "106892": {
+      "rxnorm": "106892",
+      "display": "insulin isophane, human 70 UNT/ML / insulin, regular, human 30 UNT/ML Injectable Suspension [Humulin]",
+      "ingredient": "insulin isophane/regular",
+      "therapeutic_class": "insulin_antidiabetic",
+      "brand_names": ["Humulin 70/30", "Novolin 70/30"],
+      "plain_purpose": "Premixed intermediate- and short-acting human insulin injection used to control blood sugar in diabetes mellitus."
+    },
+    "309362": {
+      "rxnorm": "309362",
+      "display": "Clopidogrel 75 MG Oral Tablet",
+      "ingredient": "clopidogrel",
+      "therapeutic_class": "p2y12_antiplatelet",
+      "brand_names": ["Plavix"],
+      "plain_purpose": "P2Y12 antiplatelet ('blood thinner') medication that prevents blood clots after coronary artery bypass grafting (CABG), stenting, or in ischemic heart disease.",
+      "reconciliation_note": "Generic Clopidogrel 75 MG and brand Plavix 75 MG contain the exact same active ingredient; concurrent active prescriptions across clinics risk accidental double-dosing and major bleeding."
+    },
+    "213169": {
+      "rxnorm": "213169",
+      "display": "Plavix 75 MG Oral Tablet [clopidogrel]",
+      "ingredient": "clopidogrel",
+      "therapeutic_class": "p2y12_antiplatelet",
+      "brand_names": ["Plavix"],
+      "plain_purpose": "Brand-name clopidogrel antiplatelet ('blood thinner') medication used to prevent blood clots in coronary artery disease and after heart surgery.",
+      "reconciliation_note": "Brand Plavix 75 MG is identical in active ingredient to generic Clopidogrel 75 MG; verify with prescriber to avoid duplicate antiplatelet therapy."
+    },
+    "312961": {
+      "rxnorm": "312961",
+      "display": "Simvastatin 20 MG Oral Tablet",
+      "ingredient": "simvastatin",
+      "therapeutic_class": "statin_lipid_lowering",
+      "brand_names": ["Zocor"],
+      "plain_purpose": "HMG-CoA reductase inhibitor (statin) used to lower LDL ('bad') cholesterol and reduce cardiovascular risk in ischemic heart disease.",
+      "reconciliation_note": "Never take two statins concurrently (e.g., Simvastatin alongside Lipitor/atorvastatin) due to severe risk of muscle breakdown (myopathy/rhabdomyolysis)."
+    },
+    "617311": {
+      "rxnorm": "617311",
+      "display": "Lipitor 40 MG Oral Tablet [atorvastatin]",
+      "ingredient": "atorvastatin",
+      "therapeutic_class": "statin_lipid_lowering",
+      "brand_names": ["Lipitor"],
+      "plain_purpose": "High-intensity HMG-CoA reductase inhibitor (statin) prescribed to lower LDL cholesterol and protect coronary bypass grafts.",
+      "reconciliation_note": "Therapeutic class duplicate if prescribed alongside another active statin such as Simvastatin; clarify whether Lipitor was intended to replace Simvastatin."
+    },
+    "866412": {
+      "rxnorm": "866412",
+      "display": "24 HR metoprolol succinate 100 MG Extended Release Oral Tablet",
+      "ingredient": "metoprolol",
+      "therapeutic_class": "beta_blocker",
+      "brand_names": ["Toprol-XL"],
+      "plain_purpose": "Extended-release cardioselective beta-blocker used to treat ischemic heart disease, control blood pressure, and reduce heart workload after CABG surgery."
+    },
+    "705129": {
+      "rxnorm": "705129",
+      "display": "Nitroglycerin 0.4 MG/ACTUAT Mucosal Spray",
+      "ingredient": "nitroglycerin",
+      "therapeutic_class": "nitrate_antianginal",
+      "brand_names": ["Nitrolingual", "NitroMist"],
+      "plain_purpose": "Fast-acting sublingual vasodilator spray used as needed to relieve or prevent acute chest pain (angina) in ischemic heart disease."
+    },
+    "314076": {
+      "rxnorm": "314076",
+      "display": "lisinopril 10 MG Oral Tablet",
+      "ingredient": "lisinopril",
+      "therapeutic_class": "ace_inhibitor",
+      "brand_names": ["Prinivil", "Zestril"],
+      "plain_purpose": "Angiotensin-converting enzyme (ACE) inhibitor used to treat high blood pressure, heart failure, and diabetic kidney disease.",
+      "reconciliation_note": "Generic lisinopril 10 MG and brand Prinivil 10 MG share the same active ingredient; concurrent active orders across clinics risk hypotension, hyperkalemia, and acute kidney injury."
+    },
+    "206765": {
+      "rxnorm": "206765",
+      "display": "Prinivil 10 MG Oral Tablet [lisinopril]",
+      "ingredient": "lisinopril",
+      "therapeutic_class": "ace_inhibitor",
+      "brand_names": ["Prinivil", "Zestril"],
+      "plain_purpose": "Brand-name lisinopril ACE inhibitor used to lower blood pressure and protect kidney function.",
+      "reconciliation_note": "Brand Prinivil 10 MG is identical in active ingredient to generic lisinopril 10 MG; reconcile across clinics to prevent duplicate ACE inhibitor dosing."
+    },
+    "1665060": {
+      "rxnorm": "1665060",
+      "display": "cefazolin 2000 MG Injection",
+      "ingredient": "cefazolin",
+      "therapeutic_class": "cephalosporin_antibiotic",
+      "brand_names": ["Ancef", "Kefzol"],
+      "plain_purpose": "Intravenous first-generation cephalosporin antibiotic administered before and during major surgery (such as CABG heart surgery) to prevent surgical site infection."
+    },
+    "1659263": {
+      "rxnorm": "1659263",
+      "display": "1 ML heparin sodium, porcine 5000 UNT/ML Injection",
+      "ingredient": "heparin",
+      "therapeutic_class": "parenteral_anticoagulant",
+      "brand_names": ["Hep-Lock"],
+      "plain_purpose": "Intravenous anticoagulant ('blood thinner') used during cardiac surgery, cardiopulmonary bypass, and inpatient hospitalizations to prevent blood clots."
+    },
+    "1796676": {
+      "rxnorm": "1796676",
+      "display": "25 ML protamine sulfate (USP) 10 MG/ML Injection",
+      "ingredient": "protamine sulfate",
+      "therapeutic_class": "heparin_reversal_agent",
+      "brand_names": ["Protamine"],
+      "plain_purpose": "Intravenous medication administered at the end of coronary artery bypass grafting (CABG) surgery to reverse the anticoagulant effect of heparin."
+    },
+    "1740467": {
+      "rxnorm": "1740467",
+      "display": "2 ML Ondansetron 2 MG/ML Injection",
+      "ingredient": "ondansetron",
+      "therapeutic_class": "serotonin_5ht3_antiemetic",
+      "brand_names": ["Zofran"],
+      "plain_purpose": "Intravenous anti-nausea medication given during or after surgery to prevent postoperative nausea and vomiting."
+    },
+    "311700": {
+      "rxnorm": "311700",
+      "display": "Midazolam 1 MG/ML Injectable Solution",
+      "ingredient": "midazolam",
+      "therapeutic_class": "benzodiazepine_sedative",
+      "brand_names": ["Versed"],
+      "plain_purpose": "Short-acting intravenous sedative and anti-anxiety medication given before anesthesia or during ICU procedures."
+    },
+    "1808217": {
+      "rxnorm": "1808217",
+      "display": "100 ML Propofol 10 MG/ML Injection",
+      "ingredient": "propofol",
+      "therapeutic_class": "general_anesthetic",
+      "brand_names": ["Diprivan"],
+      "plain_purpose": "Short-acting intravenous anesthetic agent used for induction/maintenance of general anesthesia and ICU mechanical ventilation sedation."
+    },
+    "1234995": {
+      "rxnorm": "1234995",
+      "display": "Rocuronium bromide 10 MG/ML Injectable Solution",
+      "ingredient": "rocuronium",
+      "therapeutic_class": "neuromuscular_blocker",
+      "brand_names": ["Zemuron"],
+      "plain_purpose": "Intravenous neuromuscular blocking agent used during general anesthesia to facilitate endotracheal intubation and surgical muscle relaxation."
+    },
+    "542347": {
+      "rxnorm": "542347",
+      "display": "isoflurane 999 MG/ML Inhalation Solution",
+      "ingredient": "isoflurane",
+      "therapeutic_class": "inhaled_general_anesthetic",
+      "brand_names": ["Forane"],
+      "plain_purpose": "Inhaled volatile general anesthetic used to maintain unconsciousness during major surgical procedures such as CABG."
+    },
+    "1729584": {
+      "rxnorm": "1729584",
+      "display": "remifentanil 2 MG Injection",
+      "ingredient": "remifentanil",
+      "therapeutic_class": "opioid_analgesic_anesthetic",
+      "brand_names": ["Ultiva"],
+      "plain_purpose": "Ultra-short-acting intravenous opioid analgesic administered during general anesthesia and cardiac surgery."
+    }
+  }
+}

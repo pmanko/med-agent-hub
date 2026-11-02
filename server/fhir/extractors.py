@@ -19,6 +19,12 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
+from .kb_lookup import (
+    resolve_condition_code,
+    resolve_immunization_code,
+    resolve_lab_code,
+    resolve_medication_code,
+)
 from .normalizers import (
     annotate_immunization_anomalies,
     classify_sensitivity,
@@ -624,12 +630,15 @@ def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
         onset = _iso_date(res.get("onsetDateTime") or res.get("recordedDate"))
         abatement = _iso_date(res.get("abatementDateTime"))
         cats = _categories(res)
-        sens = classify_sensitivity(code, disp, cats)
+        cond_kb = resolve_condition_code(code, disp)
+        sens = classify_sensitivity(code, disp, cats) or (
+            cond_kb.get("sensitivity") if cond_kb.get("resolved_by") != "heuristic_fallback" else None
+        )
         raw_conditions.append(
             {
                 "resourceUuid": rid,
                 "code": code,
-                "display": disp or code or "Condition",
+                "display": disp or str(cond_kb.get("display") or code or "Condition"),
                 "status": c_status,
                 "verification": v_status,
                 "onset": onset,
@@ -637,6 +646,7 @@ def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
                 "categories": cats,
                 "sensitivity": sens,
                 "source_org": resolve_source_org(res),
+                "kb_resolution": cond_kb,
             }
         )
 
@@ -669,6 +679,7 @@ def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
             suffix += f" [{conflict}]"
         if sens == "SDOH/PRIVACY-SENSITIVE":
             suffix += " [sensitivity: SDOH/PRIVACY-SENSITIVE]"
+        cond_kb = c["kb_resolution"]
         items.append(
             ClinicalItem(
                 resource_type="Condition",
@@ -687,7 +698,11 @@ def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
                 sensitivity=sens,
                 conflict_note=conflict,
                 is_routine=(sens == "SDOH-SOCIAL"),
-                metadata={"onset": c["onset"], "abatement": c["abatement"]},
+                metadata={
+                    "onset": c["onset"],
+                    "abatement": c["abatement"],
+                    "kb_resolution": cond_kb,
+                },
             )
         )
 
@@ -747,7 +762,17 @@ def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
 
         setting = "inpatient/administered" if rtype == "MedicationAdministration" else "prescribed"
         is_active = status in {"active", "in-progress", "on-hold"}
-        ingredient = normalize_drug_ingredient(disp or code)
+        med_kb = resolve_medication_code(code, disp)
+        resolved_disp = disp or (
+            str(med_kb.get("display") or "")
+            if med_kb.get("resolved_by") != "heuristic_fallback"
+            else ""
+        )
+        ingredient = str(
+            med_kb.get("ingredient")
+            if med_kb.get("resolved_by") != "heuristic_fallback" and med_kb.get("ingredient")
+            else normalize_drug_ingredient(resolved_disp or code)
+        )
         linked_order_uuids: List[str] = []
         for link_field in ("basedOn", "partOf", "request", "prescription", "authorizingPrescription"):
             raw_link = res.get(link_field)
@@ -762,7 +787,7 @@ def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
                 "resourceType": rtype,
                 "resourceUuid": rid,
                 "code": code,
-                "display": disp or code or "Medication",
+                "display": resolved_disp or code or "Medication",
                 "status": status,
                 "is_active": is_active,
                 "date": m_date,
@@ -773,6 +798,7 @@ def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
                 "ingredient_key": ingredient,
                 "source_org": resolve_source_org(res),
                 "linked_order_uuids": tuple(dict.fromkeys(u for u in linked_order_uuids if u)),
+                "kb_resolution": med_kb,
             }
         )
 
@@ -780,6 +806,9 @@ def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
     for m in raw_meds:
         rid = m["resourceUuid"]
         m_conflict = med_conflicts.get(rid)
+        med_kb = m["kb_resolution"]
+        ing_grp = str(med_kb.get("ingredient") or m["ingredient_key"])
+        t_class = str(med_kb.get("therapeutic_class") or "medication")
         quals = [f"status: {m['status']}", f"type: {m['setting']}"]
         if m["dose_strs"]:
             quals.append(f"dosage: {'; '.join(m['dose_strs'][:2])}")
@@ -789,7 +818,11 @@ def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
             quals.append(f"source: {m['source_org']}")
         if m["code"]:
             quals.append(f"RxNorm: {m['code']}")
-        suffix = f" [{m_conflict}]" if m_conflict else ""
+        suffix = (
+            f" [ingredient_group: {ing_grp} ({t_class}); {m_conflict}]"
+            if m_conflict
+            else ""
+        )
         items.append(
             ClinicalItem(
                 resource_type=m["resourceType"],
@@ -807,7 +840,14 @@ def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
                 source_org=m["source_org"],
                 conflict_note=m_conflict,
                 ingredient_key=m["ingredient_key"],
-                metadata={"reasons": m["reasons"], "dosage": m["dose_strs"], "setting": m["setting"]},
+                metadata={
+                    "reasons": m["reasons"],
+                    "dosage": m["dose_strs"],
+                    "setting": m["setting"],
+                    "ingredient_group": ing_grp,
+                    "therapeutic_class": t_class,
+                    "kb_resolution": med_kb,
+                },
             )
         )
 
@@ -853,6 +893,7 @@ def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
             if anom and anom.startswith("acip_schedule_note:")
             else ()
         )
+        imm_kb = resolve_immunization_code(imm["code"], imm["display"])
         items.append(
             ClinicalItem(
                 resource_type="Immunization",
@@ -870,6 +911,10 @@ def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
                 conflict_note=anom,
                 ingredient_key=imm["group"],
                 member_uuids=series_members,
+                metadata={
+                    "vaccine_group": imm_kb.get("vaccine_group", imm["group"]),
+                    "kb_resolution": imm_kb,
+                },
             )
         )
 
@@ -1089,6 +1134,7 @@ def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
         sens_suffix = " [sensitivity: SDOH/PRIVACY-SENSITIVE]" if panel_sens == "SDOH/PRIVACY-SENSITIVE" else ""
         joined_children = "; ".join(child_parts) if child_parts else "completed"
         panel_prefix = "Survey Panel" if is_survey else "Diagnostic Panel"
+        panel_kb = resolve_lab_code(code, disp) if not is_survey else {}
         items.append(
             ClinicalItem(
                 resource_type="DiagnosticReport",
@@ -1106,6 +1152,7 @@ def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
                 sensitivity=panel_sens,
                 is_routine=is_survey,
                 member_uuids=tuple(dict.fromkeys(member_uuids)),
+                metadata={"kb_resolution": panel_kb} if panel_kb else {},
             )
         )
 
@@ -1162,6 +1209,7 @@ def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
 
         sens_suffix = " [sensitivity: SDOH/PRIVACY-SENSITIVE]" if sens == "SDOH/PRIVACY-SENSITIVE" else ""
         body_val = f": {val_str}" if val_str else ""
+        obs_kb = resolve_lab_code(code, disp) if sec in {"vital_sign", "lab_observation"} else {}
         items.append(
             ClinicalItem(
                 resource_type="Observation",
@@ -1178,7 +1226,13 @@ def extract_bundle(bundle: Mapping[str, Any]) -> ExtractedChart:
                 source_org=resolve_source_org(res),
                 sensitivity=sens,
                 is_routine=(sec in {"survey_observation", "vital_sign"}),
-                metadata={"value": val_str, "numeric": num_val, "unit": unit, "category": primary_cat},
+                metadata={
+                    "value": val_str,
+                    "numeric": num_val,
+                    "unit": unit,
+                    "category": primary_cat,
+                    **({"kb_resolution": obs_kb} if obs_kb else {}),
+                },
             )
         )
 

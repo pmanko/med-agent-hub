@@ -412,9 +412,87 @@ class StaticKnowledgeSource:
     priority = 20
     supports_patient = False
 
+    def __init__(
+        self,
+        corpus: str = "default",
+        bundles_by_patient: Optional[Mapping[str, Mapping[str, Any]]] = None,
+        *,
+        bundle_dir: Optional[Any] = None,
+        fhir_source: Optional[Any] = None,
+        sharing_posture: Optional[str] = None,
+    ) -> None:
+        if sharing_posture is not None and sharing_posture not in {"patient_self", "external_share"}:
+            raise ValueError(f"Unsupported sharing_posture: {sharing_posture!r}")
+        self.corpus = corpus
+        self.bundles_by_patient = dict(bundles_by_patient or {})
+        self.bundle_dir = bundle_dir
+        self.fhir_source = fhir_source
+        self.sharing_posture = sharing_posture
+
+    def _resolve_patient_bundle(self, request: ContextRequest) -> Optional[Mapping[str, Any]]:
+        if request.patient and request.patient in self.bundles_by_patient:
+            return self.bundles_by_patient[request.patient]
+        if self.fhir_source is not None:
+            resolver = getattr(self.fhir_source, "_resolve_bundle", None)
+            if callable(resolver):
+                try:
+                    return resolver(request)
+                except Exception:
+                    pass
+            peer_bundles = getattr(self.fhir_source, "bundles_by_patient", None)
+            if isinstance(peer_bundles, Mapping) and request.patient in peer_bundles:
+                return peer_bundles[request.patient]
+        if self.bundle_dir is not None and request.patient:
+            from pathlib import Path
+
+            bdir = Path(self.bundle_dir)
+            if bdir.is_dir():
+                cand = bdir / f"{request.patient}.json"
+                if not cand.exists():
+                    matches = sorted(bdir.glob(f"{request.patient}*.json"))
+                    if matches:
+                        cand = matches[0]
+                if cand.exists():
+                    try:
+                        parsed = json.loads(cand.read_text(encoding="utf-8"))
+                        if isinstance(parsed, Mapping) and parsed.get("resourceType") == "Bundle":
+                            return parsed
+                    except Exception:
+                        pass
+        return None
+
     async def fetch(self, request: ContextRequest) -> EvidenceLedger:
         query = request.question.strip()
-        rows = kb.search(query, k=3)
+        effective_corpus = self.corpus
+        if effective_corpus == "default":
+            if request.source == "fhir" or "fhir" in (request.sources or ()):
+                effective_corpus = "wahs"
+
+        effective_posture = (
+            self.sharing_posture
+            or getattr(self.fhir_source, "sharing_posture", None)
+            or "patient_self"
+        )
+
+        kb_codes: Optional[Sequence[str]] = None
+        if effective_corpus == "wahs":
+            bundle = self._resolve_patient_bundle(request)
+            if bundle is not None:
+                from server.fhir.extractors import extract_bundle
+                from server.fhir.kb_lookup import extract_chart_kb_codes
+
+                kb_codes = extract_chart_kb_codes(
+                    extract_bundle(bundle),
+                    sharing_posture=effective_posture,
+                )
+
+        rows = kb.search(query, k=3, corpus=effective_corpus, codes=kb_codes)
+        if effective_posture == "external_share":
+            rows = [
+                r
+                for r in rows
+                if str(r.get("id") or "") != "wahs-sdoh-privacy-sensitive-sharing"
+            ]
         prior_answer = next(
             (
                 str(message.get("content") or "").strip()
@@ -429,7 +507,15 @@ class StaticKnowledgeSource:
             expanded_query = (
                 f"{query}\nPrior answer context: {prior_answer[:1200]}".strip()
             )
-            expanded_rows = kb.search(expanded_query, k=3)
+            expanded_rows = kb.search(
+                expanded_query, k=3, corpus=effective_corpus, codes=kb_codes
+            )
+            if effective_posture == "external_share":
+                expanded_rows = [
+                    r
+                    for r in expanded_rows
+                    if str(r.get("id") or "") != "wahs-sdoh-privacy-sensitive-sharing"
+                ]
             # Protect current-topic recall while reserving one slot for anaphoric follow-ups.
             # Stable-id deduplication and fixed lane order keep the merge deterministic.
             merged: list[dict[str, Any]] = []
@@ -685,6 +771,10 @@ class SourceRegistry:
         self._sources = {source.name: source for source in sources}
         if "inline" not in self._sources:
             self._sources["inline"] = InlineChartSource()
+        fhir_src = self._sources.get("fhir")
+        kb_src = self._sources.get("knowledge-base")
+        if fhir_src is not None and isinstance(kb_src, StaticKnowledgeSource) and kb_src.fhir_source is None:
+            kb_src.fhir_source = fhir_src
 
     @classmethod
     def default(cls) -> "SourceRegistry":
@@ -703,7 +793,20 @@ class SourceRegistry:
 
     async def build_ledger(self, request: ContextRequest) -> EvidenceLedger:
         sources = self._resolve(request)
-        ledgers = [await source.fetch(request) for source in sources]
+        resolved_names = tuple(source.name for source in sources)
+        resolved_request = ContextRequest(
+            messages=request.messages,
+            patient=request.patient,
+            source=request.source or (resolved_names[0] if resolved_names else None),
+            sources=resolved_names,
+            supplemental_sources=request.supplemental_sources,
+            question=request.question,
+        )
+        fhir_src = self._sources.get("fhir")
+        for src in sources:
+            if isinstance(src, StaticKnowledgeSource) and src.fhir_source is None and fhir_src is not None:
+                src.fhir_source = fhir_src
+        ledgers = [await source.fetch(resolved_request) for source in sources]
         records = tuple(record for ledger in ledgers for record in ledger.records)
         stable_ids = [record.stable_id for record in records]
         duplicate_ids = sorted(
