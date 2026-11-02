@@ -1,0 +1,365 @@
+[1] (2026-01-26) Drug order: Nevirapine. Action: NEW. Urgency: ROUTINE
+[2] (2026-01-26) Drug order: Lamivudine. Action: NEW. Urgency: ROUTINE
+[3] (2026-01-26) Drug order: Stavudine. Action: NEW. Urgency: ROUTINE
+[4] (2026-01-26) Encounter: Adult Visit at Unknown Location. Provider: Horatio L Hornblower (Unknown)
+[5] (2026-01-26) Scheduled visit: No
+[6] (2026-01-26) Pay category: Pilot
+[7] (2026-01-26) Discordant couple: Unknown
+[8] (2026-01-26) New complaints: No
+[9] (2026-01-26) Antiretroviral use: Yes
+[10] (2026-01-26) Primary regimen: Yes
+[11] (2026-01-26) Antiretroviral adherence in past week: Most
+[12] (2026-01-26) Overall drug adherence in last month: Yes
+[13] (2026-01-26) Overall drug adherence in last month: Antiretroviral drugs
+[14] (2026-01-26) Arterial blood oxygen saturation (pulse oximeter): 93 %
+[15] (2026-01-26) Diastolic blood pressure: 60 mmHg
+[16] (2026-01-26) Pulse: 69 beats/min
+[17] (2026-01-26) Systolic blood pressure: 110 mmHg
+[18] (2026-01-26) Temperature (C): 35.9 C
+[19] (2026-01-26) Weight (kg): 71 kg
+[20] (2026-01-26) Current WHO HIV stage: WHO stage 3 adult
+[21] (2026-01-26) New WHO/CDC staging criteria met: No
+[22] (2026-01-26) Return visit date: 2026-02-23
+[23] (2026-01-26) Patient reported current cryptococcus treatment: None
+[24] (2026-01-26) Patient reported current PCP prophylaxis: None
+[25] (2026-01-26) Patient reported current tuberculosis prophylaxis: None
+[26] (2026-01-26) Patient reported current tuberculosis treatment: None
+[27] (2026-01-26) Antiretroviral plan: Continue regimen
+[28] (2026-01-26) Cryptococcal treatment plan: None
+[29] (2026-01-26) PCP prophylaxis plan: None
+[30] (2026-01-26) Tuberculosis prophylaxis plan: None
+[31] (2026-01-26) Tuberculosis treatment plan: None
+[32] (2026-01-26) Referrals ordered: None
+[33] (2026-01-26) Visit: OPD Visit at Unknown Location
+[34] (2025-12-21) Program: Human immunodeficiency virus (HIV) disease. Enrolled: 2025-12-21. Status: Active. Current state: GROUP 9
+[35] (2025-12-17) Drug order: Stavudine. Action: NEW. Urgency: ROUTINE
+[36] (2025-12-17) Drug order: Lamivudine. Action: NEW. Urgency: ROUTINE
+[37] (2025-12-17) Drug order: Nevirapine. Action: NEW. Urgency: ROUTINE
+[38] (2025-12-17) Encounter: Adult Visit at Unknown Location. Provider: Horatio L Hornblower (Unknown)
+[39] (2025-12-17) Scheduled visit: No
+[40] (2025-12-17) Pay category: Pilot
+[41] (2025-12-17) Discordant couple: No
+[42] (2025-12-17) New complaints: Yes
+[43] (2025-12-17) Antiretroviral use: Yes
+[44] (2025-12-17) Primary regimen: Yes
+[45] (2025-12-17) Antiretroviral adherence in past week: All
+[46] (2025-12-17) Overall drug adherence in last month: No
+[47] (2025-12-17) Arterial blood oxygen saturation (pulse oximeter): 98 %
+[48] (2025-12-17) Diastolic blood pressure: 60 mmHg
+[49] (2025-12-17) Pulse: 58 beats/min
+[50] (2025-12-17) Systolic blood pressure: 110 mmHg
+[51] (2025-12-17) Temperature (C): 35.1 C
+[52] (2025-12-17) Weight (kg): 73 kg
+[53] (2025-12-17) Current WHO HIV stage: WHO stage 1 adult
+[54] (2025-12-17) New WHO/CDC staging criteria met: No
+[55] (2025-12-17) Return visit date: 2026-01-14
+[56] (2025-12-17) Patient reported current cryptococcus treatment: None
+[57] (2025-12-17) Patient reported current PCP prophylaxis: None
+[58] (2025-12-17) Patient reported current tuberculosis prophylaxis: None
+[59] (2025-12-17) Patient reported current tuberculosis treatment: None
+[60] (2025-12-17) Antiretroviral plan: Continue regimen
+[61] (2025-12-17) Cryptococcal treatment plan: None
+[62] (2025-12-17) PCP prophylaxis plan: None
+[63] (2025-12-17) Tuberculosis prophylaxis plan: None
+[64] (2025-12-17) Tuberculosis treatment plan: None
+[65] (2025-12-17) Tests ordered: Complete blood count
+[66] (2025-12-17) Tests ordered: Serum glutamic-pyruvic transaminase
+[67] (2025-12-17) Tests ordered: CD4 panel
+[68] (2025-12-17) Visit: OPD Visit at Unknown Location
+[69] (2025-12-15) Drug order: Lamivudine. Action: NEW. Urgency: ROUTINE
+[70] (2025-12-15) Drug order: Stavudine. Action: NEW. Urgency: ROUTINE
+[71] (2025-12-15) Drug order: Stavudine. Action: NEW. Urgency: ROUTINE
+[72] (2025-12-15) Drug order: Efavirenz. Action: NEW. Urgency: ROUTINE
+[73] (2025-12-15) Drug order: Lamivudine. Action: NEW. Urgency: ROUTINE
+[74] (2025-12-15) Drug order: Nevirapine. Action: NEW. Urgency: ROUTINE
+[75] (2025-12-15) Encounter: Adult Visit at Unknown Location. Provider: Horatio L Hornblower (Unknown)
+[76] (2025-12-15) Encounter: Adult Visit at Unknown Location. Provider: Horatio L Hornblower (Unknown)
+[77] (2025-12-15) Scheduled visit: No
+[78] (2025-12-15) Pay category: Pilot
+[79] (2025-12-15) Discordant couple: No
+[80] (2025-12-15) New complaints: Yes
+[81] (2025-12-15) Antiretroviral use: Yes
+[82] (2025-12-15) Primary regimen: Yes
+[83] (2025-12-15) Antiretroviral adherence in past week: All
+[84] (2025-12-15) Overall drug adherence in last month: No
+[85] (2025-12-15) Arterial blood oxygen saturation (pulse oximeter): 96 %
+[86] (2025-12-15) Diastolic blood pressure: 70 mmHg
+[87] (2025-12-15) Pulse: 70 beats/min
+[88] (2025-12-15) Systolic blood pressure: 120 mmHg
+[89] (2025-12-15) Temperature (C): 36.2 C
+[90] (2025-12-15) Weight (kg): 75 kg
+[91] (2025-12-15) Current WHO HIV stage: WHO stage 3 adult
+[92] (2025-12-15) New WHO/CDC staging criteria met: No
+[93] (2025-12-15) Return visit date: 2026-01-12
+[94] (2025-12-15) Patient reported current cryptococcus treatment: None
+[95] (2025-12-15) Patient reported current PCP prophylaxis: None
+[96] (2025-12-15) Patient reported current tuberculosis prophylaxis: None
+[97] (2025-12-15) Patient reported current tuberculosis treatment: None
+[98] (2025-12-15) Antiretroviral plan: Continue regimen
+[99] (2025-12-15) Cryptococcal treatment plan: None
+[100] (2025-12-15) PCP prophylaxis plan: None
+[101] (2025-12-15) Tuberculosis prophylaxis plan: None
+[102] (2025-12-15) Tuberculosis treatment plan: None
+[103] (2025-12-15) Scheduled visit: No
+[104] (2025-12-15) Pay category: Pilot
+[105] (2025-12-15) Discordant couple: No
+[106] (2025-12-15) New complaints: Yes
+[107] (2025-12-15) Antiretroviral use: Yes
+[108] (2025-12-15) Primary regimen: Yes
+[109] (2025-12-15) Antiretroviral adherence in past week: All
+[110] (2025-12-15) Overall drug adherence in last month: No
+[111] (2025-12-15) Arterial blood oxygen saturation (pulse oximeter): 93 %
+[112] (2025-12-15) Diastolic blood pressure: 60 mmHg
+[113] (2025-12-15) Pulse: 75 beats/min
+[114] (2025-12-15) Systolic blood pressure: 100 mmHg
+[115] (2025-12-15) Temperature (C): 36.6 C
+[116] (2025-12-15) Weight (kg): 75 kg
+[117] (2025-12-15) Current WHO HIV stage: WHO stage 3 adult
+[118] (2025-12-15) New WHO/CDC staging criteria met: No
+[119] (2025-12-15) Return visit date: 2026-01-14
+[120] (2025-12-15) Patient reported current cryptococcus treatment: None
+[121] (2025-12-15) Patient reported current PCP prophylaxis: None
+[122] (2025-12-15) Patient reported current tuberculosis prophylaxis: None
+[123] (2025-12-15) Patient reported current tuberculosis treatment: None
+[124] (2025-12-15) Antiretroviral plan: Continue regimen
+[125] (2025-12-15) Cryptococcal treatment plan: None
+[126] (2025-12-15) PCP prophylaxis plan: None
+[127] (2025-12-15) Tuberculosis prophylaxis plan: None
+[128] (2025-12-15) Tuberculosis treatment plan: None
+[129] (2025-12-15) Visit: OPD Visit at Unknown Location
+[130] (2025-11-25) Drug order: Stavudine. Action: NEW. Urgency: ROUTINE
+[131] (2025-11-25) Drug order: Stavudine. Action: NEW. Urgency: ROUTINE
+[132] (2025-11-25) Drug order: Lamivudine. Action: NEW. Urgency: ROUTINE
+[133] (2025-11-25) Drug order: Nevirapine. Action: NEW. Urgency: ROUTINE
+[134] (2025-11-25) Drug order: Lamivudine. Action: NEW. Urgency: ROUTINE
+[135] (2025-11-25) Drug order: Efavirenz. Action: NEW. Urgency: ROUTINE
+[136] (2025-11-25) Encounter: Adult Visit at Unknown Location. Provider: Horatio L Hornblower (Unknown)
+[137] (2025-11-25) Scheduled visit: No
+[138] (2025-11-25) Pay category: Pilot
+[139] (2025-11-25) Discordant couple: No
+[140] (2025-11-25) New complaints: Yes
+[141] (2025-11-25) Antiretroviral use: Yes
+[142] (2025-11-25) Antiretroviral adherence in past week: All
+[143] (2025-11-25) Overall drug adherence in last month: No
+[144] (2025-11-25) Arterial blood oxygen saturation (pulse oximeter): 95 %
+[145] (2025-11-25) Diastolic blood pressure: 60 mmHg
+[146] (2025-11-25) Pulse: 64 beats/min
+[147] (2025-11-25) Systolic blood pressure: 120 mmHg
+[148] (2025-11-25) Temperature (C): 35.9 C
+[149] (2025-11-25) Weight (kg): 75 kg
+[150] (2025-11-25) Current WHO HIV stage: WHO stage 3 adult
+[151] (2025-11-25) Return visit date: 2025-12-10
+[152] (2025-11-25) Patient reported current cryptococcus treatment: None
+[153] (2025-11-25) Patient reported current PCP prophylaxis: None
+[154] (2025-11-25) Patient reported current tuberculosis prophylaxis: None
+[155] (2025-11-25) Patient reported current tuberculosis treatment: None
+[156] (2025-11-25) Antiretroviral plan: Change regimen
+[157] (2025-11-25) Cryptococcal treatment plan: None
+[158] (2025-11-25) PCP prophylaxis plan: None
+[159] (2025-11-25) Tuberculosis prophylaxis plan: None
+[160] (2025-11-25) Tuberculosis treatment plan: None
+[161] (2025-11-25) Referrals ordered: None
+[162] (2025-11-25) Visit: OPD Visit at Unknown Location
+[163] (2025-11-24) Drug order: Lamivudine. Action: NEW. Urgency: ROUTINE
+[164] (2025-11-24) Drug order: Nevirapine. Action: NEW. Urgency: ROUTINE
+[165] (2025-11-24) Drug order: Stavudine. Action: NEW. Urgency: ROUTINE
+[166] (2025-11-24) Encounter: Adult Visit at Unknown Location. Provider: Horatio L Hornblower (Unknown)
+[167] (2025-11-24) Scheduled visit: No
+[168] (2025-11-24) Pay category: Pilot
+[169] (2025-11-24) Discordant couple: No
+[170] (2025-11-24) New complaints: Yes
+[171] (2025-11-24) Antiretroviral use: Yes
+[172] (2025-11-24) Primary regimen: Yes
+[173] (2025-11-24) Antiretroviral adherence in past week: All
+[174] (2025-11-24) Overall drug adherence in last month: No
+[175] (2025-11-24) Arterial blood oxygen saturation (pulse oximeter): 94 %
+[176] (2025-11-24) Diastolic blood pressure: 50 mmHg
+[177] (2025-11-24) Pulse: 74 beats/min
+[178] (2025-11-24) Systolic blood pressure: 90 mmHg
+[179] (2025-11-24) Temperature (C): 36.4 C
+[180] (2025-11-24) Weight (kg): 72 kg
+[181] (2025-11-24) Absolute lymphocyte count: 299000 10^3/uL
+[182] (2025-11-24) CD4 count: 341 cells/uL
+[183] (2025-11-24) CD4%: 14 %
+[184] (2025-11-24) CD8 count: 1616 cells/uL
+[185] (2025-11-24) Haemoglobin: 14 g/dL
+[186] (2025-11-24) Mean corpuscular volume: 106 fL
+[187] (2025-11-24) Platelets: 100000 10^3/mL
+[188] (2025-11-24) Serum glutamic-pyruvic transaminase: 22 IU/L
+[189] (2025-11-24) White blood cells: 5300 10^3/uL
+[190] (2025-11-24) Return visit date: 2026-01-14
+[191] (2025-11-24) Patient reported current cryptococcus treatment: None
+[192] (2025-11-24) Patient reported current PCP prophylaxis: None
+[193] (2025-11-24) Patient reported current tuberculosis prophylaxis: None
+[194] (2025-11-24) Patient reported current tuberculosis treatment: None
+[195] (2025-11-24) Antiretroviral plan: Continue regimen
+[196] (2025-11-24) Cryptococcal treatment plan: None
+[197] (2025-11-24) PCP prophylaxis plan: None
+[198] (2025-11-24) Tuberculosis prophylaxis plan: None
+[199] (2025-11-24) Tuberculosis treatment plan: None
+[200] (2025-11-24) Visit: OPD Visit at Unknown Location
+[201] (2025-11-12) Drug order: Lamivudine. Action: NEW. Urgency: ROUTINE
+[202] (2025-11-12) Drug order: Stavudine. Action: NEW. Urgency: ROUTINE
+[203] (2025-11-12) Drug order: Lamivudine. Action: NEW. Urgency: ROUTINE
+[204] (2025-11-12) Drug order: Nevirapine. Action: NEW. Urgency: ROUTINE
+[205] (2025-11-12) Drug order: Stavudine. Action: NEW. Urgency: ROUTINE
+[206] (2025-11-12) Drug order: Efavirenz. Action: NEW. Urgency: ROUTINE
+[207] (2025-11-12) Encounter: Adult Visit at Unknown Location. Provider: Horatio L Hornblower (Unknown)
+[208] (2025-11-12) Scheduled visit: No
+[209] (2025-11-12) Pay category: Pilot
+[210] (2025-11-12) Discordant couple: No
+[211] (2025-11-12) New complaints: Yes
+[212] (2025-11-12) Antiretroviral use: Yes
+[213] (2025-11-12) Primary regimen: Yes
+[214] (2025-11-12) Antiretroviral adherence in past week: All
+[215] (2025-11-12) Overall drug adherence in last month: No
+[216] (2025-11-12) Arterial blood oxygen saturation (pulse oximeter): 94 %
+[217] (2025-11-12) Diastolic blood pressure: 70 mmHg
+[218] (2025-11-12) Pulse: 71 beats/min
+[219] (2025-11-12) Systolic blood pressure: 120 mmHg
+[220] (2025-11-12) Temperature (C): 37.1 C
+[221] (2025-11-12) Weight (kg): 73.5 kg
+[222] (2025-11-12) Current WHO HIV stage: WHO stage 3 adult
+[223] (2025-11-12) New WHO/CDC staging criteria met: No
+[224] (2025-11-12) Return visit date: 2025-12-10
+[225] (2025-11-12) Patient reported current cryptococcus treatment: None
+[226] (2025-11-12) Patient reported current PCP prophylaxis: None
+[227] (2025-11-12) Patient reported current tuberculosis prophylaxis: None
+[228] (2025-11-12) Patient reported current tuberculosis treatment: None
+[229] (2025-11-12) Antiretroviral plan: Change regimen
+[230] (2025-11-12) Cryptococcal treatment plan: None
+[231] (2025-11-12) PCP prophylaxis plan: None
+[232] (2025-11-12) Reason antiretrovirals stopped: Other
+[233] (2025-11-12) Tuberculosis prophylaxis plan: None
+[234] (2025-11-12) Tuberculosis treatment plan: None
+[235] (2025-11-12) Referrals ordered: None
+[236] (2025-11-12) Visit: OPD Visit at Unknown Location
+[237] (2025-11-09) Drug order: Lamivudine. Action: NEW. Urgency: ROUTINE
+[238] (2025-11-09) Drug order: Stavudine. Action: NEW. Urgency: ROUTINE
+[239] (2025-11-09) Drug order: Nevirapine. Action: NEW. Urgency: ROUTINE
+[240] (2025-11-09) Encounter: Adult Visit at Unknown Location. Provider: Horatio L Hornblower (Unknown)
+[241] (2025-11-09) Scheduled visit: No
+[242] (2025-11-09) Pay category: Pilot
+[243] (2025-11-09) Discordant couple: No
+[244] (2025-11-09) New complaints: No
+[245] (2025-11-09) Antiretroviral use: Yes
+[246] (2025-11-09) Primary regimen: Yes
+[247] (2025-11-09) Antiretroviral adherence in past week: All
+[248] (2025-11-09) Overall drug adherence in last month: No
+[249] (2025-11-09) Arterial blood oxygen saturation (pulse oximeter): 94 %
+[250] (2025-11-09) Diastolic blood pressure: 70 mmHg
+[251] (2025-11-09) Pulse: 62 beats/min
+[252] (2025-11-09) Systolic blood pressure: 130 mmHg
+[253] (2025-11-09) Temperature (C): 37 C
+[254] (2025-11-09) Weight (kg): 75 kg
+[255] (2025-11-09) Current WHO HIV stage: WHO stage 3 adult
+[256] (2025-11-09) New WHO/CDC staging criteria met: No
+[257] (2025-11-09) Return visit date: 2025-11-24
+[258] (2025-11-09) Patient reported current cryptococcus treatment: None
+[259] (2025-11-09) Patient reported current PCP prophylaxis: None
+[260] (2025-11-09) Patient reported current tuberculosis prophylaxis: None
+[261] (2025-11-09) Patient reported current tuberculosis treatment: None
+[262] (2025-11-09) Antiretroviral plan: Continue regimen
+[263] (2025-11-09) Cryptococcal treatment plan: None
+[264] (2025-11-09) PCP prophylaxis plan: None
+[265] (2025-11-09) Tuberculosis prophylaxis plan: None
+[266] (2025-11-09) Tuberculosis treatment plan: None
+[267] (2025-11-09) Referrals ordered: None
+[268] (2025-11-09) Visit: OPD Visit at Unknown Location
+[269] (2025-11-05) Drug order: Nevirapine. Action: NEW. Urgency: ROUTINE
+[270] (2025-11-05) Drug order: Stavudine. Action: NEW. Urgency: ROUTINE
+[271] (2025-11-05) Drug order: Lamivudine. Action: NEW. Urgency: ROUTINE
+[272] (2025-11-05) Encounter: Adult Visit at Unknown Location. Provider: Horatio L Hornblower (Unknown)
+[273] (2025-11-05) Scheduled visit: No
+[274] (2025-11-05) Pay category: Pilot
+[275] (2025-11-05) Discordant couple: Unknown
+[276] (2025-11-05) Pregnancy status: No
+[277] (2025-11-05) Conception since last visit: No
+[278] (2025-11-05) New complaints: Yes
+[279] (2025-11-05) Antiretroviral use: Yes
+[280] (2025-11-05) Primary regimen: Yes
+[281] (2025-11-05) Antiretroviral adherence in past week: Most
+[282] (2025-11-05) Overall drug adherence in last month: Yes
+[283] (2025-11-05) Overall drug adherence in last month: Antiretroviral drugs
+[284] (2025-11-05) Arterial blood oxygen saturation (pulse oximeter): 96 %
+[285] (2025-11-05) Diastolic blood pressure: 60 mmHg
+[286] (2025-11-05) Pulse: 62 beats/min
+[287] (2025-11-05) Systolic blood pressure: 130 mmHg
+[288] (2025-11-05) Temperature (C): 35.8 C
+[289] (2025-11-05) Weight (kg): 74 kg
+[290] (2025-11-05) Current WHO HIV stage: WHO stage 3 adult
+[291] (2025-11-05) New WHO/CDC staging criteria met: No
+[292] (2025-11-05) Return visit date: 2025-11-24
+[293] (2025-11-05) Patient reported current cryptococcus treatment: None
+[294] (2025-11-05) Patient reported current PCP prophylaxis: None
+[295] (2025-11-05) Patient reported current tuberculosis prophylaxis: None
+[296] (2025-11-05) Patient reported current tuberculosis treatment: None
+[297] (2025-11-05) Antiretroviral plan: Continue regimen
+[298] (2025-11-05) Cryptococcal treatment plan: None
+[299] (2025-11-05) PCP prophylaxis plan: None
+[300] (2025-11-05) Tuberculosis prophylaxis plan: None
+[301] (2025-11-05) Tuberculosis treatment plan: None
+[302] (2025-11-05) Referrals ordered: None
+[303] (2025-11-05) Visit: OPD Visit at Unknown Location
+[304] (2025-10-27) Drug order: Stavudine. Action: NEW. Urgency: ROUTINE
+[305] (2025-10-27) Drug order: Nevirapine. Action: NEW. Urgency: ROUTINE
+[306] (2025-10-27) Drug order: Lamivudine. Action: NEW. Urgency: ROUTINE
+[307] (2025-10-27) Encounter: Adult Visit at Unknown Location. Provider: Horatio L Hornblower (Unknown)
+[308] (2025-10-27) Scheduled visit: Yes
+[309] (2025-10-27) Pay category: Pilot
+[310] (2025-10-27) Discordant couple: Unknown
+[311] (2025-10-27) New complaints: Yes
+[312] (2025-10-27) Antiretroviral use: Yes
+[313] (2025-10-27) Antiretroviral adherence in past week: All
+[314] (2025-10-27) Overall drug adherence in last month: No
+[315] (2025-10-27) Arterial blood oxygen saturation (pulse oximeter): 94 %
+[316] (2025-10-27) Diastolic blood pressure: 60 mmHg
+[317] (2025-10-27) Pulse: 63 beats/min
+[318] (2025-10-27) Systolic blood pressure: 130 mmHg
+[319] (2025-10-27) Temperature (C): 35.8 C
+[320] (2025-10-27) Weight (kg): 73 kg
+[321] (2025-10-27) Return visit date: 2025-11-24
+[322] (2025-10-27) Patient reported current cryptococcus treatment: None
+[323] (2025-10-27) Patient reported current PCP prophylaxis: None
+[324] (2025-10-27) Patient reported current tuberculosis prophylaxis: None
+[325] (2025-10-27) Patient reported current tuberculosis treatment: None
+[326] (2025-10-27) Antiretroviral plan: Continue regimen
+[327] (2025-10-27) Cryptococcal treatment plan: None
+[328] (2025-10-27) PCP prophylaxis plan: None
+[329] (2025-10-27) Tuberculosis prophylaxis plan: None
+[330] (2025-10-27) Tuberculosis treatment plan: None
+[331] (2025-10-27) Referrals ordered: None
+[332] (2025-10-27) Visit: OPD Visit at Unknown Location
+[333] (2025-10-13) Drug order: Nevirapine. Action: NEW. Urgency: ROUTINE
+[334] (2025-10-13) Drug order: Stavudine. Action: NEW. Urgency: ROUTINE
+[335] (2025-10-13) Drug order: Lamivudine. Action: NEW. Urgency: ROUTINE
+[336] (2025-10-13) Encounter: Adult Visit at Unknown Location. Provider: Horatio L Hornblower (Unknown)
+[337] (2025-10-13) Scheduled visit: No
+[338] (2025-10-13) Pay category: Pilot
+[339] (2025-10-13) Discordant couple: Unknown
+[340] (2025-10-13) New complaints: Yes
+[341] (2025-10-13) Antiretroviral use: Yes
+[342] (2025-10-13) Primary regimen: Yes
+[343] (2025-10-13) Antiretroviral adherence in past week: All
+[344] (2025-10-13) Overall drug adherence in last month: No
+[345] (2025-10-13) Arterial blood oxygen saturation (pulse oximeter): 94 %
+[346] (2025-10-13) Diastolic blood pressure: 80 mmHg
+[347] (2025-10-13) Pulse: 93 beats/min
+[348] (2025-10-13) Systolic blood pressure: 120 mmHg
+[349] (2025-10-13) Temperature (C): 36.2 C
+[350] (2025-10-13) Weight (kg): 74 kg
+[351] (2025-10-13) Current WHO HIV stage: WHO stage 3 adult
+[352] (2025-10-13) New WHO/CDC staging criteria met: No
+[353] (2025-10-13) Return visit date: 2025-10-27
+[354] (2025-10-13) Patient reported current cryptococcus treatment: None
+[355] (2025-10-13) Patient reported current PCP prophylaxis: None
+[356] (2025-10-13) Patient reported current tuberculosis prophylaxis: None
+[357] (2025-10-13) Patient reported current tuberculosis treatment: None
+[358] (2025-10-13) Antiretroviral plan: Continue regimen
+[359] (2025-10-13) Cryptococcal treatment plan: None
+[360] (2025-10-13) PCP prophylaxis plan: None
+[361] (2025-10-13) Tuberculosis prophylaxis plan: None
+[362] (2025-10-13) Tuberculosis treatment plan: None
+[363] (2025-10-13) Referrals ordered: None
+[364] (2025-10-13) Visit: OPD Visit at Unknown Location
+[365] (2025-09-09) Patient: Zabella Talai Halambe. Female. Born 1998-05-30. Address: Maili Nne (Eld). Identifiers: OpenMRS Identification Number 2428TU-4

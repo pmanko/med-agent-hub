@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
-from server.temporal import gate_indepth_claims
+from server.temporal import build_temporal_facts, gate_indepth_claims
+
+FIXTURES = Path(__file__).parent / "fixtures"
 
 FACTS = {
     "reference_date": "2026-06-20",
@@ -41,7 +46,6 @@ MULTI_COUNT_FACTS = {
 
 def test_indepth_temporal_gate_checks_each_claim_and_flags_unsafe_output():
     result = gate_indepth_claims(
-        "Summarize follow-up timing",
         [
             "Follow-up should consider the clinical context.",
             "The visit occurred on 2025-10-//13.",
@@ -61,7 +65,6 @@ def test_indepth_temporal_gate_checks_each_claim_and_flags_unsafe_output():
 
 def test_a_claim_the_date_check_cannot_correct_is_kept_and_flagged():
     result = gate_indepth_claims(
-        "When was follow-up?",
         ["The visit occurred on 2025-10-//13."],
         FACTS,
         mode="enforce",
@@ -74,7 +77,6 @@ def test_a_claim_the_date_check_cannot_correct_is_kept_and_flagged():
 
 def test_non_temporal_claim_still_records_not_applicable_verdict():
     result = gate_indepth_claims(
-        "Summarize care",
         ["Continue to verify treatment against the chart."],
         FACTS,
         mode="enforce",
@@ -86,7 +88,7 @@ def test_non_temporal_claim_still_records_not_applicable_verdict():
 
 
 def test_empty_indepth_cannot_report_checked_or_complete():
-    result = gate_indepth_claims("What should I know?", [], FACTS, mode="enforce")
+    result = gate_indepth_claims([], FACTS, mode="enforce")
 
     assert result["status"] == "needs_review"
     assert result["claims"] == []
@@ -94,7 +96,6 @@ def test_empty_indepth_cannot_report_checked_or_complete():
 
 def test_unsafe_patch_cannot_replace_claim_with_uncited_different_series():
     result = gate_indepth_claims(
-        "Has this patient's weight changed recently?",
         [
             "The CD4 count was 341 cells/uL on 2006-04-04; the overall trend of immune suppression should be monitored."
         ],
@@ -114,7 +115,6 @@ def test_unsafe_patch_cannot_replace_claim_with_uncited_different_series():
 
 def test_safe_patch_must_stay_within_original_claim_citations():
     result = gate_indepth_claims(
-        "What is the CD4 trend?",
         ["The CD4 count is declining over time [178]."],
         MULTI_COUNT_FACTS,
         mode="enforce",
@@ -147,7 +147,6 @@ def test_long_indepth_date_is_not_inferred_as_a_last_visit_short_answer():
     )
 
     result = gate_indepth_claims(
-        "What was the most recent documented clinical visit?",
         [claim],
         facts,
         mode="enforce",
@@ -195,7 +194,6 @@ def test_indepth_blood_pressure_claim_does_not_bind_white_blood_cells():
     )
 
     result = gate_indepth_claims(
-        "What was the most recent documented clinical visit?",
         [claim],
         facts,
         mode="enforce",
@@ -223,7 +221,6 @@ def test_dangling_citation_is_repaired_from_one_exact_numeric_point():
     }
 
     result = gate_indepth_claims(
-        "What was the patient's weight?",
         ["The patient's weight was 71 kg on 2006-06-06 ["],
         facts,
         mode="enforce",
@@ -254,7 +251,7 @@ def test_dangling_citation_is_not_repaired_when_point_binding_is_ambiguous():
     claim = "The patient's weight was 71 kg on 2006-06-06 ["
 
     result = gate_indepth_claims(
-        "What was the patient's weight?", [claim], facts, mode="enforce"
+        [claim], facts, mode="enforce"
     )
 
     assert result["status"] == "needs_review"
@@ -282,7 +279,7 @@ def test_uncited_claim_without_malformed_marker_is_not_auto_cited():
     claim = "The patient's weight was 71 kg on 2006-06-06."
 
     result = gate_indepth_claims(
-        "What was the patient's weight?", [claim], facts, mode="enforce"
+        [claim], facts, mode="enforce"
     )
 
     assert result["claims"] == [claim]
@@ -309,7 +306,6 @@ def test_dangling_citation_with_wrong_unit_is_flagged_not_repaired(written_unit)
 
     claim = f"The patient's weight was 71 {written_unit} on 2006-06-06 ["
     result = gate_indepth_claims(
-        "What was the patient's weight?",
         [claim],
         facts,
         mode="enforce",
@@ -325,7 +321,7 @@ def test_existing_citation_does_not_authorize_cleaning_a_second_uncited_claim():
     claim = "Weight was 71 kg [19]. Monitoring is recommended ["
 
     result = gate_indepth_claims(
-        "What was the patient's weight?", [claim], FACTS, mode="enforce"
+        [claim], FACTS, mode="enforce"
     )
 
     assert result["status"] == "needs_review"
@@ -350,8 +346,8 @@ def test_dangling_citation_repair_does_not_mutate_off_or_warn_modes():
     }
     claim = "The patient's weight was 71 kg on 2006-06-06 ["
 
-    off = gate_indepth_claims("What was the weight?", [claim], facts, mode="off")
-    warn = gate_indepth_claims("What was the weight?", [claim], facts, mode="warn")
+    off = gate_indepth_claims([claim], facts, mode="off")
+    warn = gate_indepth_claims([claim], facts, mode="warn")
 
     assert off["claims"] == [claim]
     assert warn["claims"] == [claim]
@@ -363,7 +359,7 @@ def test_dangling_citation_repair_does_not_mutate_off_or_warn_modes():
 def test_grouped_numeric_citations_are_canonicalized_in_enforce_mode():
     claim = "The recorded vital signs are supported by sources [18, 17, 15]."
 
-    result = gate_indepth_claims("What was recorded?", [claim], FACTS, mode="enforce")
+    result = gate_indepth_claims([claim], FACTS, mode="enforce")
 
     assert result["status"] == "edited"
     assert result["claims"] == [
@@ -378,7 +374,7 @@ def test_grouped_numeric_citations_are_canonicalized_in_enforce_mode():
 def test_grouped_numeric_citations_are_not_mutated_in_warn_mode():
     claim = "The recorded vital signs are supported by sources [18, 17, 15]."
 
-    result = gate_indepth_claims("What was recorded?", [claim], FACTS, mode="warn")
+    result = gate_indepth_claims([claim], FACTS, mode="warn")
 
     assert result["claims"] == [claim]
     assert "citation_canonicalization" not in result["checks"][0]
@@ -387,7 +383,7 @@ def test_grouped_numeric_citations_are_not_mutated_in_warn_mode():
 def test_grouped_numeric_citations_deduplicate_without_reordering():
     claim = "The recorded vital signs are supported by sources [18, 18, 17]."
 
-    result = gate_indepth_claims("What was recorded?", [claim], FACTS, mode="enforce")
+    result = gate_indepth_claims([claim], FACTS, mode="enforce")
 
     assert result["claims"] == [
         "The recorded vital signs are supported by sources [18][17]."
@@ -409,7 +405,7 @@ def test_grouped_numeric_citations_deduplicate_without_reordering():
 def test_malformed_grouped_citations_are_flagged_in_enforce_mode(citation):
     claim = f"The recorded vital signs are supported by sources {citation}."
 
-    result = gate_indepth_claims("What was recorded?", [claim], FACTS, mode="enforce")
+    result = gate_indepth_claims([claim], FACTS, mode="enforce")
 
     assert result["status"] == "needs_review"
     assert result["claims"] == [claim]
@@ -421,3 +417,181 @@ def test_malformed_grouped_citations_are_flagged_in_enforce_mode(citation):
     ]
     assert len(citation_checks) == 1
     assert citation_checks[0]["severity"] == "block"
+
+
+def _flags(result):
+    return sorted(
+        {
+            f"{check['id']}:{check['status']}"
+            for claim in result["checks"]
+            for check in claim["gate"]["checks"]
+            if check["status"] in {"fail", "warn"}
+        }
+    )
+
+
+def test_a_claim_stating_one_value_passes_when_it_asserts_no_trend():
+    # Under a question asking how weight changed, this claim used to fail as a CD4 trend.
+    claim = (
+        "The patient's low CD4 count of 341 cells/uL recorded on 2006-04-04 [178] "
+        "places them at risk for opportunistic infections."
+    )
+
+    result = gate_indepth_claims([claim], MULTI_COUNT_FACTS, mode="enforce")
+
+    assert result["status"] == "checked"
+    assert result["claims"] == [claim]
+    assert _flags(result) == []
+
+
+def test_a_claim_asserting_a_trend_over_one_point_still_fails():
+    result = gate_indepth_claims(
+        ["The CD4 count has declined [178]."], MULTI_COUNT_FACTS, mode="warn"
+    )
+
+    assert result["status"] == "needs_review"
+    assert result["flagged"] == [1]
+    assert "single_point_trend:fail" in _flags(result)
+
+
+def test_generic_count_trend_claim_resolves_series_from_citation_without_question():
+    claim = "The count has declined to 341 cells/uL [178]."
+
+    warn_result = gate_indepth_claims([claim], MULTI_COUNT_FACTS, mode="warn")
+    assert warn_result["status"] == "needs_review"
+    assert warn_result["flagged"] == [1]
+    assert "single_point_trend:fail" in _flags(warn_result)
+
+    enforce_result = gate_indepth_claims([claim], MULTI_COUNT_FACTS, mode="enforce")
+    assert enforce_result["status"] == "edited"
+    assert enforce_result["flagged"] == []
+    assert enforce_result["claims"] == [
+        "The chart shows one dated CD4 count measurement: 341 cells/uL on 2006-04-04 [178]. "
+        "A trend cannot be determined from one point."
+    ]
+
+
+def test_engine_judges_indepth_claims_without_question_while_answer_gate_uses_question(
+    monkeypatch,
+):
+    import asyncio
+    from dataclasses import replace
+    from server import engine, team
+    from server.levels_loader import get_profile
+    from tests.factories import patient_source_registry
+
+    chart = (
+        "[1] (2026-01-01) CD4 count: 341 cells/uL\n"
+        "[2] (2026-01-01) Weight (kg): 70 kg\n"
+    )
+    single_value_claim = "The CD4 count was 341 cells/uL on 2026-01-01 [1]."
+    unsupported_trend_claim = "The count has declined to 341 cells/uL [999]."
+
+    async def fake_answer(*_args, **_kwargs):
+        return "The weight was 70 kg on 2026-01-01 [2].", [2], []
+
+    async def fake_substantive(*_args, **kwargs):
+        return (
+            kwargs["answer_text"],
+            kwargs["citations"],
+            kwargs["blocks"],
+            {"level": "green", "note": ""},
+        )
+
+    async def fake_ground(_client, _model, _answer, refs, _map, **_kwargs):
+        return [{**ref, "groundingStatus": "verified", "grounded": True} for ref in refs]
+
+    monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
+    monkeypatch.setattr(team, "_ensure_substantive_answer", fake_substantive)
+    monkeypatch.setattr(team, "_ground_references", fake_ground)
+    monkeypatch.setattr(team, "_write_trace", lambda *_a, **_k: None)
+
+    class _Counter:
+        async def count(self, *_args):
+            return 1
+
+        async def count_chat(self, *_args):
+            return 1
+
+    registry = patient_source_registry(
+        chart,
+        [
+            {
+                "resourceType": "obs",
+                "resourceUuid": "cd4",
+                "date": "2026-01-01",
+                "text": "(2026-01-01) CD4 count: 341 cells/uL",
+            },
+            {
+                "resourceType": "obs",
+                "resourceUuid": "weight",
+                "date": "2026-01-01",
+                "text": "(2026-01-01) Weight (kg): 70 kg",
+            },
+        ],
+    )
+    profile = get_profile("single-12b-checked")
+    profile = replace(
+        profile,
+        stages=tuple(stage for stage in profile.stages if stage != "review"),
+        policies={**profile.policies, "anchor": "2026-06-20", "drug_safety": False},
+    )
+    request = engine.ExecutionRequest(
+        profile=profile,
+        messages=[{"role": "user", "content": "How has the weight changed over the past year?"}],
+        patient="synthetic",
+        source_registry=registry,
+        token_counter=_Counter(),
+    )
+
+    async def fake_indepth_single_value(*_args, **_kwargs):
+        return [single_value_claim], {"level": "green", "note": ""}
+
+    monkeypatch.setattr(team, "_gen_indepth", fake_indepth_single_value)
+    payload = json.loads(asyncio.run(engine.drain_profile(request)))
+    assert payload["temporalGate"]["status"] == "fail"
+    assert payload["temporalGate"]["applied"] == "patch"
+    assert payload["inDepth"]["answer"] == f"- {single_value_claim}"
+    assert payload["inDepth"]["validation"]["status"] == "checked"
+
+    async def fake_indepth_unsupported_trend(*_args, **_kwargs):
+        return ["The CD4 count has declined over time [999]."], {"level": "green", "note": ""}
+
+    monkeypatch.setattr(team, "_gen_indepth", fake_indepth_unsupported_trend)
+    flagged_payload = json.loads(asyncio.run(engine.drain_profile(request)))
+    assert flagged_payload["inDepth"]["validation"]["status"] == "needs_review"
+    assert flagged_payload["inDepth"]["validation"]["flagged"] == [1]
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="Known limitation in #41: risk, outcome, and no-trend denial words still match _TREND_RE.",
+)
+def test_risk_and_outcome_words_are_not_read_as_the_patients_trend():
+    claims = [
+        "The low CD4 count reflects a severely compromised immune status, increasing the risk of infection.",
+        "Antiretroviral therapy should start regardless of the CD4 count to improve outcomes.",
+        "A single CD4 count of 341 cells/uL [178] is insufficient to establish a trend.",
+    ]
+
+    result = gate_indepth_claims(claims, MULTI_COUNT_FACTS, mode="enforce")
+
+    assert result["flagged"] == []
+    assert result["claims"] == claims
+    assert _flags(result) == []
+
+
+def test_claims_the_question_used_to_fail_are_judged_on_their_own_words():
+    """Every In-Depth claim the gate questioned in the 26 October 2026 run, replayed claim-only."""
+    goldens = json.loads((FIXTURES / "indepth-gate-goldens.json").read_text())
+    facts = {}
+    for case in goldens["cases"]:
+        chart = case["chart"]
+        if chart not in facts:
+            text = (FIXTURES / "charts" / f"{chart}.snapshot.txt").read_text()
+            facts[chart] = build_temporal_facts(text, goldens["reference_date"])
+
+        result = gate_indepth_claims([case["claim"]], facts[chart], mode="enforce")
+
+        assert _flags(result) == case["expected"], case["scenario"]
+        assert result["claims"] == [case.get("expected_claim", case["claim"])], case["scenario"]

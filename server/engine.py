@@ -2135,7 +2135,6 @@ async def _execute_stages(
                     wrote_no_claims = not state.claims and not state.indepth_error
                     review = dict(state.indepth_conf or {})
                     state.indepth_gate = temporal.gate_indepth_claims(
-                        stages._latest_user_text(state.messages),
                         state.claims,
                         state.temporal_facts,
                         mode=temporal_mode,
