@@ -565,12 +565,18 @@ _ENTAILMENT_RF = {
 }
 
 
+def _default_grounding_temperature(model: str) -> Optional[float]:
+    """Default entailment-grounding temperature when no explicit profile knob is passed."""
+    return 0.7 if "qwen3" in (model or "").lower() else None
+
+
 async def _entailment_verdicts(
     client: httpx.AsyncClient,
     model: str,
     pairs: List[Tuple[str, str]],
     *,
     attribution_only: bool = False,
+    temperature: Optional[float] = None,
 ) -> List[Optional[bool]]:
     """Batched LLM entailment check for citation grounding — mirrors the validator call shape
     (fresh one-shot message list, dedicated json_schema response_format, one call for the whole
@@ -588,12 +594,20 @@ async def _entailment_verdicts(
         _ATTRIBUTION_SYSTEM_PROMPT if attribution_only else _ENTAILMENT_SYSTEM_PROMPT
     )
     user = instruction + "\n\n" + body
+    effective_temperature = (
+        _default_grounding_temperature(model)
+        if temperature is None
+        else float(temperature)
+    )
+    chat_kwargs: Dict[str, Any] = {"response_format": _ENTAILMENT_RF}
+    if effective_temperature is not None:
+        chat_kwargs["temperature"] = effective_temperature
     try:
         msg = await _chat(
             client,
             model,
             [{"role": "user", "content": user}],
-            response_format=_ENTAILMENT_RF,
+            **chat_kwargs,
         )
         obj = json.loads(_message_text(msg))
         verdicts = obj.get("verdicts") if isinstance(obj, dict) else None
@@ -626,9 +640,14 @@ async def _bounded_entailment_verdicts(
     pairs: List[Tuple[str, str]],
     *,
     attribution_only: bool = False,
+    temperature: Optional[float] = None,
 ) -> List[Optional[bool]]:
     """Check all pairs together, splitting only when exact token measurement overflows."""
-    options = {"attribution_only": True} if attribution_only else {}
+    options: Dict[str, Any] = {}
+    if attribution_only:
+        options["attribution_only"] = True
+    if temperature is not None:
+        options["temperature"] = temperature
 
     async def check(items: List[Tuple[str, str]]) -> List[Optional[bool]]:
         try:
@@ -656,6 +675,7 @@ async def _ground_references(
     deterministic_checks: Optional[List[Dict[str, Any]]] = None,
     index_verdicts: Optional[Mapping[Any, Any]] = None,
     attribution_only: bool = False,
+    temperature: Optional[float] = None,
 ) -> List[Dict[str, Any]]:
     """Ground final claims against their cited source sets in context-bounded sequential batches.
 
@@ -858,12 +878,17 @@ async def _ground_references(
                 else None
             )
     else:
+        entailment_options: Dict[str, Any] = {}
+        if attribution_only:
+            entailment_options["attribution_only"] = True
+        if temperature is not None:
+            entailment_options["temperature"] = temperature
         verdicts = (
             await _bounded_entailment_verdicts(
                 client,
                 model,
                 pairs,
-                **({"attribution_only": True} if attribution_only else {}),
+                **entailment_options,
             )
             if pairs
             else []

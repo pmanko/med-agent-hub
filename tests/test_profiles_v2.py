@@ -31,6 +31,10 @@ def test_configured_catalog_contains_only_current_product_eval_and_debug_profile
         "single-12b-checked",
         "single-12b-fast",
         "single-12b-answer",
+        "single-12b-xcheck",
+        "single-31b-xcheck",
+        "single-12b-checked-folded",
+        "single-12b-checked-noground",
         "single-a4b-checked",
         "team-med-checked",
         "debug-team-high-checked",
@@ -494,3 +498,104 @@ def test_compiled_profile_configuration_is_immutable():
         profile.models["answer"] = "different"
     with pytest.raises(TypeError):
         profile.knobs["answer"]["temperature"] = 0.5
+
+
+@pytest.mark.parametrize(
+    ("profile_id", "models", "grounding", "review_temperature"),
+    [
+        (
+            "single-12b-xcheck",
+            {"answer": "gemma-4-12b", "review": "qwen3.6-35b", "grounding": "qwen3.6-35b", "indepth": "gemma-4-12b"},
+            "separate",
+            0.7,
+        ),
+        (
+            "single-31b-xcheck",
+            {"answer": "gemma-31b", "review": "qwen3.5-9b", "grounding": "qwen3.5-9b", "indepth": "gemma-31b"},
+            "separate",
+            0.7,
+        ),
+        ("single-12b-checked-folded", None, "folded", None),
+        ("single-12b-checked-noground", None, "off", None),
+    ],
+)
+def test_checked_answer_arms_change_only_their_declared_choice(
+    profile_id, models, grounding, review_temperature
+):
+    default = get_profile("single-12b-checked")
+    arm = get_profile(profile_id)
+
+    assert arm.visibility == "product"
+    assert not arm.default
+    assert arm.selection_priority > default.selection_priority
+    assert arm.stages == default.stages
+    assert arm.prompts == default.prompts
+    assert arm.supplemental_sources == default.supplemental_sources
+    assert (arm.context_window, arm.reserved_output_tokens, arm.exact_tokenizer) == (
+        default.context_window,
+        default.reserved_output_tokens,
+        default.exact_tokenizer,
+    )
+    assert dict(arm.models) == (models or dict(default.models))
+    assert arm.policies["review"] == {"action": "label", "grounding": grounding}
+    assert {k: v for k, v in arm.policies.items() if k != "review"} == {
+        k: v for k, v in default.policies.items() if k != "review"
+    }
+    expected_knobs = {
+        role: dict(role_knobs) for role, role_knobs in default.knobs.items()
+    }
+    if review_temperature is not None:
+        expected_knobs["review"] = {"temperature": review_temperature}
+    assert {
+        role: dict(role_knobs) for role, role_knobs in arm.knobs.items()
+    } == expected_knobs
+
+
+@pytest.mark.parametrize(
+    ("profile_id", "expected_model"),
+    [
+        ("single-12b-xcheck", "qwen3.6-35b"),
+        ("single-31b-xcheck", "qwen3.5-9b"),
+    ],
+)
+def test_cross_family_checked_answer_arms_pass_checker_temperature_to_grounding(
+    profile_id: str, expected_model: str, monkeypatch: pytest.MonkeyPatch
+):
+    import asyncio
+    from server import engine, team
+
+    profile = get_profile(profile_id)
+    default_sampling = engine._sampling(
+        engine.ExecutionRequest(
+            profile=get_profile("single-12b-checked"),
+            messages=[{"role": "user", "content": "What was the weight?"}],
+        )
+    )
+    assert default_sampling["grounding_temperature"] is None
+    sampling = engine._sampling(
+        engine.ExecutionRequest(
+            profile=profile,
+            messages=[{"role": "user", "content": "What was the weight?"}],
+        )
+    )
+    assert sampling["review_temperature"] == 0.7
+    assert sampling["grounding_temperature"] == 0.7
+
+    captured: list[dict] = []
+
+    async def fake_chat(_client, model, _messages, **kwargs):
+        captured.append({"model": model, **kwargs})
+        return {"content": '{"verdicts": ["YES"]}'}
+
+    monkeypatch.setattr(team, "_chat", fake_chat)
+
+    verdicts = asyncio.run(
+        team._entailment_verdicts(
+            None,
+            profile.models["grounding"],
+            [("2026-01-01 Weight: 71 kg", "Weight was 71 kg.")],
+        )
+    )
+    assert verdicts == [True]
+    assert captured[-1]["model"] == expected_model
+    assert captured[-1]["temperature"] == 0.7
