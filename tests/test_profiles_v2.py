@@ -538,7 +538,10 @@ def test_checked_answer_arms_change_only_their_declared_choice(
         default.exact_tokenizer,
     )
     assert dict(arm.models) == (models or dict(default.models))
-    assert arm.policies["review"] == {"action": "label", "grounding": grounding}
+    assert arm.policies["review"] == {
+        **default.policies["review"],
+        "grounding": grounding,
+    }
     assert {k: v for k, v in arm.policies.items() if k != "review"} == {
         k: v for k, v in default.policies.items() if k != "review"
     }
@@ -586,7 +589,7 @@ def test_cross_family_checked_answer_arms_pass_checker_temperature_to_grounding(
 
     async def fake_chat(_client, model, _messages, **kwargs):
         captured.append({"model": model, **kwargs})
-        return {"content": '{"verdicts": ["YES"]}'}
+        return {"content": '{"pairs": [{"facts": [{"fact": "71 kg", "status": "found"}]}]}'}
 
     monkeypatch.setattr(team, "_chat", fake_chat)
 
@@ -597,7 +600,7 @@ def test_cross_family_checked_answer_arms_pass_checker_temperature_to_grounding(
             [("2026-01-01 Weight: 71 kg", "Weight was 71 kg.")],
         )
     )
-    assert verdicts == [True]
+    assert verdicts[0]["support"] == "supported"
     assert captured[-1]["model"] == expected_model
     assert captured[-1]["temperature"] == 0.7
 

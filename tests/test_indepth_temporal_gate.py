@@ -558,7 +558,7 @@ def test_engine_judges_indepth_claims_without_question_while_answer_gate_uses_qu
     assert payload["inDepth"]["validation"]["status"] == "checked"
 
     async def fake_indepth_unsupported_trend(*_args, **_kwargs):
-        return ["The CD4 count has declined on 2026-01_01 [2]."], {"level": "green", "note": ""}
+        return ["The CD4 count has declined on 2026-02-01 [2]."], {"level": "green", "note": ""}
 
     monkeypatch.setattr(team, "_gen_indepth", fake_indepth_unsupported_trend)
     flagged_payload = json.loads(asyncio.run(engine.drain_profile(request)))

@@ -12,69 +12,94 @@ import server.team as team
 def _attribution_reply(entries):
     async def fake_chat(_client, _model, _messages, **kwargs):
         assert kwargs["response_format"]["json_schema"]["name"] == "attribution_verdicts"
+        assert kwargs["dry_multiplier"] == 0.0
         return {"content": json.dumps({"pairs": entries})}
 
     return fake_chat
 
 
-def test_attribution_check_reports_the_facts_its_record_does_not_state(monkeypatch):
+def test_the_verdict_comes_from_the_fact_list_not_the_checkers_word():
+    found = [{"fact": "Nevirapine", "status": "found"}]
+    not_found = [{"fact": "fever on 2025-12-31", "status": "found"},
+                 {"fact": "productive cough on 2025-10-22", "status": "not_found"}]
+    differs = [{"fact": "41 kg on 2026-01-07", "status": "differs", "source_value": "52 kg"}]
+
+    assert team._support_from_facts(found)["support"] == "supported"
+    assert team._support_from_facts(not_found) == {
+        "support": "not_addressed",
+        "facts": not_found,
+        "not_found": "productive cough on 2025-10-22",
+        "chart_value": None,
+    }
+    verdict = team._support_from_facts(differs)
+    assert verdict["support"] == "contradicted"
+    assert verdict["chart_value"] == "41 kg on 2026-01-07: the record states 52 kg"
+    assert team._support_from_facts([])["support"] == "unchecked"
+
+
+def test_citation_check_returns_one_fact_derived_verdict_per_pair(monkeypatch):
     monkeypatch.setattr(
         team,
         "_chat",
         _attribution_reply(
             [
-                {"facts": [{"fact": "Nevirapine", "found": True}], "verdict": "YES"},
-                {
-                    "facts": [
-                        {"fact": "fever on 2025-12-31", "found": True},
-                        {"fact": "productive cough on 2025-10-22", "found": False},
-                    ],
-                    "verdict": "NO",
-                },
+                {"facts": [{"fact": "Nevirapine", "status": "found"}]},
+                {"facts": [{"fact": "cough on 2025-10-22", "status": "not_found"}]},
             ]
         ),
     )
-    reasons: list = []
 
     verdicts = asyncio.run(
         team._entailment_verdicts(
             None,
             "G",
             [("[1] Drug order: Nevirapine", "On nevirapine."), ("[33] Fever", "Fever and cough.")],
-            attribution_only=True,
-            reasons=reasons,
         )
     )
 
-    assert verdicts == [True, False]
-    assert reasons == [None, "productive cough on 2025-10-22"]
+    assert [v["support"] for v in verdicts] == ["supported", "not_addressed"]
+    assert verdicts[1]["not_found"] == "cough on 2025-10-22"
 
 
-def test_an_unsupported_indepth_citation_carries_what_was_not_found(monkeypatch):
+def test_a_contradicted_indepth_citation_carries_what_the_record_states(monkeypatch):
     monkeypatch.setattr(
         team,
         "_chat",
         _attribution_reply(
-            [
-                {
-                    "facts": [{"fact": "productive cough on 2025-10-22", "found": False}],
-                    "verdict": "NO",
-                }
-            ]
+            [{"facts": [{"fact": "weight 44 kg", "status": "differs", "source_value": "41 kg"}]}]
         ),
     )
-    claim = "A productive cough was reported on 2025-10-22 [1]."
-    mappings = [{"index": 1, "date": "2026-05-20", "text": "Program: Tuberculosis treatment program"}]
+    claim = "The weight was 44 kg on 2026-01-07 [1]."
+    mappings = [{"index": 1, "date": "2026-01-07", "text": "Weight (kg): 41 kg"}]
     references = team._resolve_references(
         [1], mappings, answer=claim, grounding_status="unchecked", answer_usage_location="indepth"
     )
 
-    grounded = asyncio.run(
-        team._ground_references(None, "G", claim, references, mappings, attribution_only=True)
-    )
+    grounded = asyncio.run(team._ground_references(None, "G", claim, references, mappings))
 
+    assert grounded[0]["support"] == "contradicted"
     assert grounded[0]["groundingStatus"] == "unsupported"
-    assert grounded[0]["groundingChecks"][0]["not_found"] == "productive cough on 2025-10-22"
+    assert grounded[0]["groundingChecks"][0]["chart_value"] == "weight 44 kg: the record states 41 kg"
+
+
+def test_a_fact_the_record_does_not_hold_is_not_a_failure(monkeypatch):
+    monkeypatch.setattr(
+        team,
+        "_chat",
+        _attribution_reply([{"facts": [{"fact": "52 kg on 2025-10-22", "status": "not_found"},
+                                       {"fact": "41 kg on 2026-01-07", "status": "found"}]}]),
+    )
+    claim = "Weight fell from 52 kg on 2025-10-22 to 41 kg on 2026-01-07 [21]."
+    mappings = [{"index": 21, "date": "2026-01-07", "text": "Weight (kg): 41 kg"}]
+    references = team._resolve_references([21], mappings, answer=claim, grounding_status="unchecked")
+
+    grounded = asyncio.run(team._ground_references(None, "G", claim, references, mappings))
+
+    assert grounded[0]["support"] == "not_addressed"
+    assert grounded[0]["grounded"] is None
+    issues = team._grounding_failure_issues(grounded)
+    assert [issue["status"] for issue in issues] == ["info"]
+    assert "52 kg on 2025-10-22" in issues[0]["reason"]
 
 
 def test_a_date_check_mark_says_what_the_chart_has():
@@ -111,6 +136,15 @@ def test_reordered_citations_alone_do_not_make_an_answer_edited():
     assert engine._initial_answer_changed(state) is True
 
 
+def test_a_reviewer_flag_counts_only_when_it_quotes_the_chart():
+    chart = "[1] (2026-01-26) Drug order: Nevirapine. Action: NEW\n[20] Current WHO HIV stage: WHO stage 3 adult"
+
+    assert team._quoted_in_chart({"chart": "WHO stage 1 adult on 2025-12-17 [53]"}, chart) is False
+    assert team._quoted_in_chart({"chart": "Current WHO HIV stage: WHO stage 3 adult"}, chart) is True
+    assert team._quoted_in_chart({"chart": "the nevirapine order [1]"}, chart) is True
+    assert team._quoted_in_chart({"chart": "No record supports a safety claim"}, chart) is False
+
+
 def test_stream_displays_missing_fact_and_source_number_in_indepth_answer(monkeypatch):
     from dataclasses import replace
     from server.levels_loader import get_profile
@@ -142,9 +176,8 @@ def test_stream_displays_missing_fact_and_source_number_in_indepth_answer(monkey
                         "pairs": [
                             {
                                 "facts": [
-                                    {"fact": "productive cough on 2025-10-22", "found": False}
-                                ],
-                                "verdict": "NO",
+                                    {"fact": "productive cough on 2025-10-22", "status": "not_found"}
+                                ]
                             }
                         ]
                     }
@@ -191,11 +224,16 @@ def test_stream_displays_missing_fact_and_source_number_in_indepth_answer(monkey
     )
 
     payload = json.loads(asyncio.run(engine.drain_profile(request)))
-    assert "[1] does not state productive cough on 2025-10-22" in payload["inDepth"]["answer"]
     assert (
         payload["inDepth"]["validation"]["citation_checks"][0]["reason"]
-        == "Its cited record [1] does not state: productive cough on 2025-10-22."
+        == "[1] does not hold: productive cough on 2025-10-22."
     )
+    assert {
+        "check": "citation",
+        "where": 1,
+        "status": "info",
+        "says": "[1] does not hold: productive cough on 2025-10-22.",
+    } in payload["confidence"]["in_depth"]["findings"]
 
 
 def test_indepth_citation_support_probe_fixture_exercises_separate_and_folded_contracts(
@@ -213,28 +251,14 @@ def test_indepth_citation_support_probe_fixture_exercises_separate_and_folded_co
     monkeypatch.setattr(
         team,
         "_chat",
-        _attribution_reply(
-            [
-                {
-                    "facts": probe["facts"],
-                    "verdict": "YES" if probe["expected"] else "NO",
-                }
-                for probe in probes
-            ]
-        ),
+        _attribution_reply([{"facts": probe["facts"]} for probe in probes]),
     )
-    reasons: list = []
     pairs = [(probe["source"], probe["statement"]) for probe in probes]
-    verdicts = asyncio.run(
-        team._entailment_verdicts(None, "gemma-4-12b", pairs, attribution_only=True, reasons=reasons)
-    )
-    assert verdicts == [probe["expected"] for probe in probes]
-    assert sum(verdict is True for verdict in verdicts) == 5
-    assert sum(verdict is False for verdict in verdicts) == 5
-    assert all(
-        (reason is None) if probe["expected"] else bool(reason)
-        for probe, reason in zip(probes, reasons)
-    )
+    verdicts = asyncio.run(team._entailment_verdicts(None, "gemma-4-12b", pairs))
+    assert [v["support"] for v in verdicts] == [probe["expected"] for probe in probes]
+    assert sum(v["support"] == "supported" for v in verdicts) == 5
+    assert sum(v["support"] == "not_addressed" for v in verdicts) == 4
+    assert sum(v["support"] == "contradicted" for v in verdicts) == 1
 
     claims = [
         f"{probe['statement']} " + "".join(f"[{idx}]" for idx in probe["source_indices"])
@@ -250,13 +274,21 @@ def test_indepth_citation_support_probe_fixture_exercises_separate_and_folded_co
     )
     assert "=== CITATION SUPPORT ===" in folded_messages[-1]["content"]
     unsupported_indices = [
-        index for index, probe in enumerate(probes, 1) if not probe["expected"]
+        index for index, probe in enumerate(probes, 1) if probe["expected"] == "contradicted"
+    ]
+    not_addressed_indices = [
+        index for index, probe in enumerate(probes, 1) if probe["expected"] == "not_addressed"
     ]
 
     async def fake_folded_chat(_client, _model, _messages, **_kwargs):
         return {
             "content": json.dumps(
-                {"flag": [], "issues": "", "unsupported": unsupported_indices}
+                {
+                    "flag": [],
+                    "issues": "",
+                    "unsupported": unsupported_indices,
+                    "not_addressed": not_addressed_indices,
+                }
             )
         }
 
@@ -276,4 +308,66 @@ def test_indepth_citation_support_probe_fixture_exercises_separate_and_folded_co
             citation_support=True,
         )
     )
-    assert folded_verdict["unsupported"] == [5, 6, 7, 8, 10]
+    assert folded_verdict["unsupported"] == [8]
+    assert folded_verdict["not_addressed"] == [5, 6, 7, 10]
+
+
+def test_label_findings_edge_cases_fail_open_and_preserve_contradiction_precedence(
+    monkeypatch,
+):
+    assert (
+        team._support_from_facts([{"fact": "weight 44 kg", "status": "differs"}])[
+            "support"
+        ]
+        == "unchecked"
+    )
+
+    unresolved = team._resolve_references([99], [], answer="Claim [99].", blocks=[])
+    assert unresolved[0]["support"] == "unchecked"
+    grounded_unresolved = asyncio.run(
+        team._ground_references(None, "G", "Claim [99].", unresolved, [])
+    )
+    assert grounded_unresolved[0]["support"] == "unchecked"
+
+    async def truncated_chat(*_args, **_kwargs):
+        return {
+            "content": json.dumps(
+                {"pairs": [{"facts": [{"fact": "71 kg", "status": "found"}]}]}
+            )
+        }
+
+    monkeypatch.setattr(team, "_chat", truncated_chat)
+    short_verdicts = asyncio.run(
+        team._entailment_verdicts(
+            None,
+            "G",
+            [("71 kg", "Weight 71 kg."), ("500 cells/uL", "CD4 500 cells/uL.")],
+        )
+    )
+    assert [v["support"] for v in short_verdicts] == ["unchecked", "unchecked"]
+
+    async def malformed_not_addressed_chat(*_args, **_kwargs):
+        return {
+            "content": json.dumps(
+                {"flag": [], "issues": "", "unsupported": [1], "not_addressed": "bad"}
+            )
+        }
+
+    monkeypatch.setattr(team, "_chat", malformed_not_addressed_chat)
+    bad_folded = asyncio.run(
+        team._validate_indepth_verdict(
+            None,
+            "R",
+            chart="[1] weight",
+            gathered="",
+            answer_text="Answer [1].",
+            claims=["Claim [1]."],
+            max_tokens=None,
+            temperature=0,
+            repeat_penalty=None,
+            dry=None,
+            citation_support=True,
+        )
+    )
+    assert "unsupported" not in bad_folded
+    assert "not_addressed" not in bad_folded

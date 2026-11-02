@@ -16,10 +16,10 @@
       "source_indices": [1, 3],
       "source": "[1] 2026-01-26 Drug order: Nevirapine. Action: NEW. Urgency: ROUTINE\n[3] 2026-01-26 Drug order: Stavudine. Action: NEW. Urgency: ROUTINE",
       "statement": "The patient's current regimen includes Nevirapine and Stavudine, which requires consistent use to ensure clinical efficacy.",
-      "expected": true,
+      "expected": "supported",
       "facts": [
-        {"fact": "Nevirapine", "found": true},
-        {"fact": "Stavudine", "found": true}
+        {"fact": "Nevirapine", "status": "found"},
+        {"fact": "Stavudine", "status": "found"}
       ]
     },
     {
@@ -27,9 +27,9 @@
       "source_indices": [20],
       "source": "[20] 2026-01-26 Current WHO HIV stage: WHO stage 3 adult",
       "statement": "The patient is currently classified at WHO stage 3 adult, which indicates a need for continued antiretroviral therapy to manage disease progression.",
-      "expected": true,
+      "expected": "supported",
       "facts": [
-        {"fact": "WHO stage 3 adult", "found": true}
+        {"fact": "WHO stage 3 adult", "status": "found"}
       ]
     },
     {
@@ -37,9 +37,9 @@
       "source_indices": [72],
       "source": "[72] 2025-12-15 Drug order: Efavirenz. Action: NEW. Urgency: ROUTINE",
       "statement": "The patient's current regimen includes Efavirenz, which requires consistent adherence to maintain viral suppression and prevent drug resistance.",
-      "expected": true,
+      "expected": "supported",
       "facts": [
-        {"fact": "Efavirenz", "found": true}
+        {"fact": "Efavirenz", "status": "found"}
       ]
     },
     {
@@ -47,9 +47,9 @@
       "source_indices": [1],
       "source": "[1] 2026-01-26 Drug order: Nevirapine. Action: NEW. Urgency: ROUTINE",
       "statement": "The patient's current regimen includes Nevirapine, which is a standard component of ART for managing her condition.",
-      "expected": true,
+      "expected": "supported",
       "facts": [
-        {"fact": "Nevirapine", "found": true}
+        {"fact": "Nevirapine", "status": "found"}
       ]
     },
     {
@@ -57,9 +57,9 @@
       "source_indices": [1],
       "source": "[1] 2026-05-20 Program: Tuberculosis treatment program. Status: Active. Current state: GROUP TB",
       "statement": "Weight monitoring is standard practice in patients with advanced immunosuppression to assess nutritional status and treatment tolerance.",
-      "expected": false,
+      "expected": "not_addressed",
       "facts": [
-        {"fact": "Weight monitoring in advanced immunosuppression", "found": false}
+        {"fact": "Weight monitoring in advanced immunosuppression", "status": "not_found"}
       ]
     },
     {
@@ -67,9 +67,9 @@
       "source_indices": [2],
       "source": "[2] 2026-01-07 Drug order: Trimethoprim and sulfamethoxazole. Action: NEW. Urgency: ROUTINE",
       "statement": "The patient's current weight of 41 kg on 2026-01-07 is notably lower than the baseline recorded on 2025-10-22.",
-      "expected": false,
+      "expected": "not_addressed",
       "facts": [
-        {"fact": "weight 41 kg on 2026-01-07", "found": false}
+        {"fact": "weight 41 kg on 2026-01-07", "status": "not_found"}
       ]
     },
     {
@@ -77,10 +77,10 @@
       "source_indices": [33, 1],
       "source": "[33] 2025-12-31 Condition: Fever. Status: ACTIVE. Onset: 2025-12-31\n[1] 2026-05-20 Program: Tuberculosis treatment program. Status: Active. Current state: GROUP TB",
       "statement": "Given the concurrent reports of fever on 2025-12-31, as well as a productive cough reported on 2025-10-22, this rapid weight loss warrants investigation for active infection.",
-      "expected": false,
+      "expected": "not_addressed",
       "facts": [
-        {"fact": "fever on 2025-12-31", "found": true},
-        {"fact": "productive cough on 2025-10-22", "found": false}
+        {"fact": "fever on 2025-12-31", "status": "found"},
+        {"fact": "productive cough on 2025-10-22", "status": "not_found"}
       ]
     },
     {
@@ -88,9 +88,9 @@
       "source_indices": [21],
       "source": "[21] 2026-01-07 Weight (kg): 41 kg",
       "statement": "The patient's weight was 44 kg on 2026-01-07, which suggests malnutrition.",
-      "expected": false,
+      "expected": "contradicted",
       "facts": [
-        {"fact": "weight 44 kg on 2026-01-07", "found": false}
+        {"fact": "weight 44 kg on 2026-01-07", "status": "differs", "source_value": "41 kg"}
       ]
     },
     {
@@ -98,9 +98,9 @@
       "source_indices": [367],
       "source": "[367] KnowledgeReference: WHO HIV guidelines. Start antiretroviral therapy for everyone living with HIV regardless of WHO clinical stage or CD4 count, and continue treatment for life.",
       "statement": "Per the treat-all strategy, patients should remain on ART after diagnosis and continue treatment regardless of their WHO clinical stage.",
-      "expected": true,
+      "expected": "supported",
       "facts": [
-        {"fact": "continue ART regardless of WHO clinical stage", "found": true}
+        {"fact": "continue ART regardless of WHO clinical stage", "status": "found"}
       ]
     },
     {
@@ -108,9 +108,9 @@
       "source_indices": [367],
       "source": "[367] KnowledgeReference: WHO HIV guidelines. Start antiretroviral therapy for everyone living with HIV regardless of WHO clinical stage or CD4 count.",
       "statement": "Patients should never double a dose to make up for a missed one.",
-      "expected": false,
+      "expected": "not_addressed",
       "facts": [
-        {"fact": "never double a dose for a missed one", "found": false}
+        {"fact": "never double a dose for a missed one", "status": "not_found"}
       ]
     }
   ]

@@ -723,7 +723,9 @@ def test_grounding_batches_split_against_the_actual_chat_budget():
                 "choices": [
                     {
                         "message": {
-                            "content": json.dumps({"verdicts": ["YES"] * self.count})
+                            "content": json.dumps(
+                                {"pairs": [{"facts": [{"fact": "f", "status": "found"}]}] * self.count}
+                            )
                         }
                     }
                 ]
@@ -754,9 +756,9 @@ def test_grounding_batches_split_against_the_actual_chat_budget():
     finally:
         team.reset_chat_budget(token)
 
-    assert verdicts == [True] * 5
-    assert client.batch_sizes == [2, 3]
-    assert [item["input_tokens"] for item in policy.measurements] == [50, 20, 30]
+    assert [v["support"] for v in verdicts] == ["supported"] * len(verdicts) and len(verdicts) == 5
+    assert client.batch_sizes == [2, 2, 1]  # batches of four, split once more to fit
+    assert [item["input_tokens"] for item in policy.measurements] == [40, 20, 20, 10]
 
 
 def test_team_derived_context_triggers_exact_answer_context_reselection():

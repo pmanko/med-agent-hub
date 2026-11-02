@@ -33,6 +33,8 @@ _RESERVED_REVIEW_ACTIONS = {"apply", "redo"}
 # How cited records are checked against their sentences: a separate entailment call, a verdict
 # folded into the review, or not at all.
 _GROUNDING_POLICIES = {"separate", "folded", "off"}
+# What the confidence sections carry: a graded level, or only the checks' findings.
+_CONFIDENCE_POLICIES = {"levels", "findings"}
 _ALLOWED_STAGES = {
     "context",
     "gather",
@@ -436,7 +438,7 @@ def _review_policy(profile: Profile) -> Optional[str]:
         raise ValueError(
             f"profile {profile.id!r} must declare policies.review with action and grounding"
         )
-    unknown = sorted(set(review) - {"action", "grounding"})
+    unknown = sorted(set(review) - {"action", "grounding", "confidence"})
     if unknown:
         raise ValueError(f"profile {profile.id!r} review policy has unknown keys {unknown}")
     action = str(review.get("action") or "")
@@ -446,6 +448,11 @@ def _review_policy(profile: Profile) -> Optional[str]:
         )
     if action not in _REVIEW_ACTIONS:
         raise ValueError(f"profile {profile.id!r} has invalid review action {action!r}")
+    confidence = str(review.get("confidence") or "levels")
+    if confidence not in _CONFIDENCE_POLICIES:
+        raise ValueError(
+            f"profile {profile.id!r} has invalid review confidence {confidence!r}"
+        )
     grounding = str(review.get("grounding") or "")
     if grounding not in _GROUNDING_POLICIES:
         raise ValueError(

@@ -322,7 +322,7 @@ def _stub_indepth(monkeypatch, claims, indepth_verdict):
         return dict(indepth_verdict)
 
     async def entailment(_client, model, pairs, **kwargs):
-        calls.append(("entailment", model, kwargs.get("attribution_only", False)))
+        calls.append(("entailment", model, "facts-first"))
         return [True for _pair in pairs]
 
     monkeypatch.setattr(team, "_synthesize_indepth", fake_claims)
@@ -348,8 +348,7 @@ def test_separate_grounding_checks_in_depth_citations_for_what_they_attribute(mo
 
     _names, final = _final(_full_profile("separate"))
 
-    assert ("entailment", "G", False) in calls
-    assert ("entailment", "G", True) in calls
+    assert calls.count(("entailment", "G", "facts-first")) == 2
     assert _indepth_statuses(final) == {2: "verified"}
     assert final["inDepth"]["validation"]["status"] == "checked"
 
@@ -368,7 +367,7 @@ def test_folded_grounding_takes_in_depth_citation_verdicts_from_the_review(monke
     assert _indepth_statuses(final) == {1: "verified", 2: "unsupported"}
     validation = final["inDepth"]["validation"]
     assert validation["marked"] == [2]
-    assert "does not support" in final["inDepth"]["answer"].splitlines()[1]
+    assert "states something different" in final["inDepth"]["answer"].splitlines()[1]
 
 
 def test_off_grounding_leaves_in_depth_citations_unchecked_and_unmarked(monkeypatch):
@@ -386,34 +385,21 @@ def test_off_grounding_leaves_in_depth_citations_unchecked_and_unmarked(monkeypa
     assert "Check:" not in final["inDepth"]["answer"]
 
 
-def test_attribution_check_asks_only_what_the_claim_attributes_to_its_record(monkeypatch):
+def test_every_citation_check_lists_the_facts_first(monkeypatch):
     prompts = []
 
-    async def fake_chat(_client, _model, messages, **kwargs):
+    async def fake_chat(_client, _model, messages, **_kwargs):
         prompts.append(messages[-1]["content"])
-        if kwargs.get("response_format") == team._ATTRIBUTION_RF:
-            return {
-                "content": json.dumps(
-                    {
-                        "pairs": [
-                            {
-                                "facts": [{"fact": "Temperature 39.7 C", "found": True}],
-                                "verdict": "YES",
-                            }
-                        ]
-                    }
-                )
-            }
-        return {"content": json.dumps({"verdicts": ["YES"]})}
+        return {"content": json.dumps({"pairs": [{"facts": [{"fact": "39.7 C", "status": "found"}]}]})}
 
     monkeypatch.setattr(team, "_chat", fake_chat)
     pair = [("[20] Temperature 39.7 C", "Temperature 39.7 C indicates a febrile state.")]
 
-    assert asyncio.run(team._entailment_verdicts(None, "G", pair, attribution_only=True)) == [True]
-    assert asyncio.run(team._entailment_verdicts(None, "G", pair)) == [True]
+    verdicts = asyncio.run(team._entailment_verdicts(None, "G", pair))
 
     assert prompts[0].startswith(team._ATTRIBUTION_SYSTEM_PROMPT)
-    assert prompts[1].startswith(team._ENTAILMENT_SYSTEM_PROMPT)
+    assert "PAIR 1:" in prompts[0]
+    assert verdicts[0]["support"] == "supported"
 
 
 @pytest.mark.parametrize("bad_unsupported", [None, "", {}, [999], ["bad"], False])
@@ -504,7 +490,7 @@ def test_folded_grounding_preserves_structured_cell_citations_and_reused_source_
     _names, reused_final = _final(_profile("folded"))
     checks = reused_final["references"][0]["groundingChecks"]
     assert [check["status"] for check in checks] == ["verified", "unsupported"]
-    assert reused_final["references"][0]["groundingStatus"] == "mixed"
+    assert reused_final["references"][0]["groundingStatus"] == "unsupported"
 
     metadata = profile_metadata(_full_profile("folded"), available=True)
     assert set(metadata["role_prompt_digests"]["review"]["system_prompt_sha256"]) >= {
@@ -534,3 +520,18 @@ def test_uncited_indepth_patient_fact_remains_marked_while_general_guidance_is_t
     assert final["inDepth"]["validation"]["marked"] == [1]
     assert final["confidence"]["in_depth"]["level"] == "yellow"
     assert "patient fact, not cited" in final["inDepth"]["answer"]
+
+
+def test_folded_grounding_distinguishes_absent_medication_from_contradiction(monkeypatch):
+    _stub(
+        monkeypatch,
+        "The patient takes aspirin [1].",
+        {"answer_ok": True, "errors": [], "citations": {1: False}},
+    )
+
+    _names, final = _final(_profile("folded"))
+
+    assert final["references"][0]["support"] == "not_addressed"
+    assert final["references"][0]["groundingStatus"] == "unchecked"
+    assert final["answerValidation"]["status"] == "checked"
+    assert final["answerValidation"]["issues"][0]["id"] == "citation_not_addressed"
