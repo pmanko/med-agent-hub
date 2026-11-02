@@ -2110,7 +2110,7 @@ def verified_series_endpoints(
 _TREND_CHECK_IDS = {"single_point_trend", "trend_direction"}
 _NO_TREND_CLAIM_RE = re.compile(
     r"\b(?:insufficient|not enough|cannot|can't|unable|too few)\b[^.;!?]{0,60}\btrend\b|"
-    r"\btrend\b[^.;!?]{0,40}\b(?:cannot|can't|unable|not)\b|"
+    r"\btrend\b[^.;!?]{0,40}\b(?:cannot|can't|unable|not\s+(?:established|shown|supported|clear|demonstrated|evident|possible|determined|assessable))\b|"
     r"\bno\s+(?:clear\s+|established\s+|specific\s+(?:[a-z0-9]+\s+){0,4})?trend\b",
     re.I,
 )

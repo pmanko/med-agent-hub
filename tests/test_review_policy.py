@@ -501,10 +501,18 @@ def test_folded_grounding_preserves_structured_cell_citations_and_reused_source_
     }
 
 
+@pytest.mark.parametrize(
+    "claim",
+    [
+        "CD4 was 500 cells/uL.",
+        "The patient has diabetes.",
+        "The patient is HIV positive.",
+    ],
+)
 def test_uncited_indepth_patient_fact_remains_marked_while_general_guidance_is_tagged(
-    monkeypatch,
+    monkeypatch, claim
 ):
-    _stub_indepth(monkeypatch, ["CD4 was 500 cells/uL."], {"flag": [], "issues": ""})
+    _stub_indepth(monkeypatch, [claim], {"flag": [], "issues": ""})
 
     _names, final = _final(_full_profile("separate"))
 

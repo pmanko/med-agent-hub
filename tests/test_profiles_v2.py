@@ -569,6 +569,13 @@ def test_cross_family_checked_answer_arms_pass_checker_temperature_to_grounding(
     from server import engine, team
 
     profile = get_profile(profile_id)
+    default_sampling = engine._sampling(
+        engine.ExecutionRequest(
+            profile=get_profile("single-12b-checked"),
+            messages=[{"role": "user", "content": "What was the weight?"}],
+        )
+    )
+    assert default_sampling["grounding_temperature"] is None
     sampling = engine._sampling(
         engine.ExecutionRequest(
             profile=profile,
