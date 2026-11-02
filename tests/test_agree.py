@@ -443,3 +443,34 @@ def test_verifier_review_retains_checked_entries_in_verdict_and_step(monkeypatch
         {"question": "What was the weight?", "chart": "71 kg [1]"}
     ]
 
+    async def fake_indepth_chat(_client, _model, _messages, **_kwargs):
+        return {
+            "content": json.dumps(
+                {
+                    "flag": [],
+                    "issues": "",
+                    "checked": [{"question": "Was weight 71 kg?", "chart": "71 kg [1]"}],
+                }
+            )
+        }
+
+    monkeypatch.setattr(team, "_chat", fake_indepth_chat)
+    indepth_verdict = asyncio.run(
+        team._validate_indepth_verdict(
+            httpx.AsyncClient(),
+            "R",
+            chart="[1] 2026-01-26 | Weight: 71 kg",
+            gathered="",
+            answer_text="Weight was 71 kg [1].",
+            claims=["Weight was 71 kg [1]."],
+            max_tokens=512,
+            temperature=0.0,
+            repeat_penalty=None,
+            dry=0.0,
+            validation_prompt="validation-verify",
+        )
+    )
+    assert indepth_verdict.get("checked") == [
+        {"question": "Was weight 71 kg?", "chart": "71 kg [1]"}
+    ]
+
