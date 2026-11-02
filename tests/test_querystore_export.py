@@ -110,7 +110,9 @@ def test_export_rejects_blank_patient_or_nonpositive_nonfinite_timeout(bad_argv)
 def test_export_refuses_without_querystore_configuration(monkeypatch, capsys):
     monkeypatch.setattr(querystore_export, "querystore_config", QueryStoreConfig(base_url=""))
     assert querystore_export.main(["--patient", "p1"]) == 1
-    assert "not configured" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "not configured" in err
+    assert "QUERYSTORE_USERNAME" in err and "QUERYSTORE_PASSWORD" in err
 
 
 def _local_server_modules(source_text: str) -> set[str]:
