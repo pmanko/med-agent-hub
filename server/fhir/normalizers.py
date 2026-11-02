@@ -534,11 +534,12 @@ def annotate_immunization_anomalies(
             first_date = str(ordered[0].get("date") or "")
             second_date = str(ordered[1].get("date") or "")
             age_first = _age_in_years(birth_date_iso, first_date)
+            d1_d2_days: Optional[int]
             try:
                 d1_d2_days = (date.fromisoformat(second_date[:10]) - date.fromisoformat(first_date[:10])).days
             except ValueError:
-                d1_d2_days = 180
-            if age_first is not None and age_first < 15.0 and d1_d2_days >= 150:
+                d1_d2_days = None
+            if age_first is not None and age_first < 15.0 and d1_d2_days is not None and d1_d2_days >= 150:
                 last_uuid = str(ordered[-1].get("resourceUuid") or "")
                 dates_list = ", ".join(str(x.get("date") or "") for x in ordered)
                 if last_uuid and last_uuid not in notes:

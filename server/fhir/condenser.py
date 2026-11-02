@@ -869,14 +869,19 @@ def build_tier_items(
     redacted_uuids: Set[str] = set()
     source_items: List[ClinicalItem] = []
     for it in extracted.items:
-        if sharing_posture == "external_share" and it.sensitivity == "SDOH/PRIVACY-SENSITIVE":
+        eff_sens = it.sensitivity or (
+            classify_sensitivity(it.code, f"{it.display} {it.text}")
+            if sharing_posture == "external_share"
+            else None
+        )
+        if sharing_posture == "external_share" and eff_sens == "SDOH/PRIVACY-SENSITIVE":
             redacted.append(
                 {
                     "resourceType": it.resource_type,
                     "resourceUuid": it.resource_uuid,
                     "date": it.date,
                     "display": "Redacted privacy-sensitive SDOH record",
-                    "sensitivity": it.sensitivity,
+                    "sensitivity": eff_sens,
                 }
             )
             if it.resource_uuid:
@@ -1750,6 +1755,7 @@ def _condense_lossless_structural(
     from .normalizers import classify_sensitivity
 
     redacted: List[Dict[str, Any]] = []
+    redacted_uuids: Set[str] = set()
     clean_items: List[ClinicalItem] = []
     for raw_it in extracted.items:
         eff_sens = raw_it.sensitivity or (
@@ -1767,10 +1773,24 @@ def _condense_lossless_structural(
                     "sensitivity": eff_sens,
                 }
             )
+            if raw_it.resource_uuid:
+                redacted_uuids.add(raw_it.resource_uuid)
+            for m_uuid in raw_it.member_uuids:
+                if m_uuid:
+                    redacted_uuids.add(m_uuid)
             continue
         clean_items.append(_strip_prebaked_tags(raw_it))
 
-    trajectories = _build_lab_trajectories(extracted.numeric_points, max_analytes=24)
+    allowed_numeric_points = [
+        pt
+        for pt in extracted.numeric_points
+        if pt.resource_uuid not in redacted_uuids
+        and not (
+            sharing_posture == "external_share"
+            and classify_sensitivity(pt.code, pt.concept, [pt.category]) == "SDOH/PRIVACY-SENSITIVE"
+        )
+    ]
+    trajectories = _build_lab_trajectories(allowed_numeric_points, max_analytes=24)
 
     mandatory_items = [it for it in clean_items if it.mandatory]
     optional_raw = [it for it in clean_items if not it.mandatory] + trajectories

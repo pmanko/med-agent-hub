@@ -727,13 +727,13 @@ def compile_profile(profile: Profile) -> Profile:
             raise ValueError(
                 f"profile {profile.id!r} ground_verdicts must run after review"
             )
-        if "review" in stages and stages.index("final_resolve_refs") < stages.index(
-            "review"
-        ):
+    if "final_resolve_refs" in stages:
+        final_resolve = stages.index("final_resolve_refs")
+        if "review" in stages and final_resolve < stages.index("review"):
             raise ValueError(
                 f"profile {profile.id!r} final_resolve_refs must run after review"
             )
-        if stages.index("final_resolve_refs") < max(
+        if "gate" in stages and final_resolve < max(
             index for index, stage in enumerate(stages) if stage == "gate"
         ):
             raise ValueError(

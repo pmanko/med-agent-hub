@@ -33,7 +33,7 @@ def _sanitize_raw_fhir_for_browser(obj: Any) -> Any:
     if isinstance(obj, Mapping):
         out: Dict[str, Any] = {}
         for k, v in obj.items():
-            if k == "data" and isinstance(v, str) and len(v) > 120:
+            if k == "data" and isinstance(v, str) and v:
                 out[k] = f"[Base64 payload ({len(v)} chars) — full decoded text shown above]"
             elif k == "div" and isinstance(v, str) and len(v) > 240:
                 out[k] = v[:240] + "... [XHTML narrative truncated]"
@@ -520,7 +520,7 @@ def build_fhir_browser_index(
     kept_rows.extend(sorted(note_rows, key=_by_date_desc, reverse=True)[:20])
     kept_rows.extend(sorted(hist_med_rows, key=_by_date_desc, reverse=True)[:30])
     kept_rows.extend(sorted(visit_rows, key=_by_date_desc, reverse=True)[:35])
-    kept_rows.extend(sorted(obs_rows, key=_by_date_desc, reverse=True)[:55])
+    kept_rows.extend(sorted(obs_rows, key=_by_date_desc, reverse=True)[:max_observations])
     kept_rows.extend(admin_rows[:max_admin_claims])
     kept_rows.sort(
         key=lambda r: (

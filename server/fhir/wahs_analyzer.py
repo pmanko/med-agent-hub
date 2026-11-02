@@ -59,7 +59,10 @@ def _ensure_extracted_and_condensed(
         extracted = bundle_or_extracted
     else:
         if condense_mode == "lossless_structural":
-            extracted = extract_bundle_lossless(bundle_or_extracted)
+            extracted = extract_bundle_lossless(
+                bundle_or_extracted,
+                enable_privacy_classification=True,
+            )
         else:
             extracted = extract_bundle(bundle_or_extracted)
 

@@ -152,7 +152,7 @@ def build_demo_patients_payload(
         for ds_key, ds_label, b_map in ds_variants:
             combo_id = f"{p}_{ds_key}"
             bundle = b_map[p]
-            extracted = extract_bundle_lossless(bundle)
+            extracted = extract_bundle_lossless(bundle, enable_privacy_classification=True)
             postures_data: Dict[str, Any] = {}
             for posture in ("patient_self", "external_share"):
                 cond_8k = condense_bundle_to_budget(

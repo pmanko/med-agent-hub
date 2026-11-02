@@ -310,7 +310,7 @@ def evaluate_cohort(source_dir: Path, eval_dir: Path) -> Dict[str, Any]:
         posture = str(case.get("sharing_posture") or "patient_self")
         budget = int(case.get("target_tokens") or 8192)
         question_text = str(case.get("question") or case.get("prompt") or "")
-        extracted = extract_bundle_lossless(bundle)
+        extracted = extract_bundle_lossless(bundle, enable_privacy_classification=True)
         condensed = condense_bundle_to_budget(
             extracted,
             target_tokens=budget,

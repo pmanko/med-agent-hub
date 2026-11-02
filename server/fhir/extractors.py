@@ -260,8 +260,6 @@ def _format_obs_value(obs: Mapping[str, Any]) -> Tuple[str, Optional[float], str
                 _, vc_disp = _coding_pair(comp.get("valueCodeableConcept"))
                 if vc_disp:
                     comp_parts.append(f"{c_disp or c_code}: {vc_disp}")
-        if sbp is not None and dbp is not None:
-            return f"{_format_num(sbp)}/{_format_num(dbp)} {bp_unit}".strip(), sbp, bp_unit
         if comp_parts:
             return "; ".join(comp_parts), None, ""
 
@@ -510,12 +508,16 @@ def extract_bundle(
 
     def resolve_source_org(res: Mapping[str, Any]) -> Optional[str]:
         rid = str(res.get("id") or "")
-        # Check explicit performer / serviceProvider / recorder first
-        sp = res.get("serviceProvider")
-        if isinstance(sp, Mapping):
-            sp_disp = str(sp.get("display") or orgs_by_id.get(_strip_urn(sp.get("reference"))) or "").strip()
-            if sp_disp:
-                return sp_disp
+        # Check explicit serviceProvider / recorder / asserter / requester / performer first
+        for role_field in ("serviceProvider", "recorder", "asserter", "requester"):
+            role_obj = res.get(role_field)
+            if isinstance(role_obj, Mapping):
+                r_ref = _strip_urn(role_obj.get("reference"))
+                r_disp = str(
+                    role_obj.get("display") or orgs_by_id.get(r_ref) or pracs_by_id.get(r_ref) or ""
+                ).strip()
+                if r_disp:
+                    return r_disp
         for perf in res.get("performer") or []:
             if isinstance(perf, Mapping):
                 actor = perf.get("actor") or perf
@@ -723,6 +725,8 @@ def extract_bundle(
             details.append(f"onset: {c['onset']}")
         if c["abatement"]:
             details.append(f"resolved: {c['abatement']}")
+        if c["source_org"]:
+            details.append(f"source: {c['source_org']}")
         if c["code"]:
             details.append(f"SNOMED: {c['code']}")
         suffix = ""
@@ -1012,8 +1016,8 @@ def extract_bundle(
                             "source_org": resolve_source_org(res),
                             "member_uuids": [rid],
                         }
-        elif rtype == "DiagnosticReport" and not (res.get("result") or []):
-            # Note-wrapper DiagnosticReport with presentedForm[]
+        elif rtype == "DiagnosticReport" and (res.get("presentedForm") or []):
+            # DiagnosticReport with presentedForm[] (with or without result[])
             n_date = _iso_date(res.get("effectiveDateTime") or res.get("issued"))
             _, n_type = _coding_pair(res.get("code"))
             for pf in res.get("presentedForm") or []:
@@ -1056,7 +1060,11 @@ def extract_bundle(
             if len(distinct_dates) > 1
             else ""
         )
-        note_sens = classify_sensitivity("", f"{note_info['title']} {note_info['decoded']} {snippet}")
+        note_sens = (
+            classify_sensitivity("", f"{note_info['title']} {note_info['decoded']} {snippet}")
+            if enable_privacy_classification
+            else None
+        )
         sens_suffix = " [sensitivity: SDOH/PRIVACY-SENSITIVE]" if note_sens == "SDOH/PRIVACY-SENSITIVE" else ""
         items.append(
             ClinicalItem(
@@ -1085,6 +1093,50 @@ def extract_bundle(
         )
 
     # 7. Extract DiagnosticReport Lab & Survey Panels (and track claimed child Observations)
+    def _extract_obs_components(
+        obs_res: Mapping[str, Any],
+        obs_uuid: str,
+        obs_date: str,
+        obs_cat: str,
+        obs_cats: Sequence[str],
+    ) -> Tuple[List[NumericPoint], List[str]]:
+        pts: List[NumericPoint] = []
+        comp_sens: List[str] = []
+        for comp in obs_res.get("component") or []:
+            if not isinstance(comp, Mapping):
+                continue
+            c_code, c_disp = _coding_pair(comp.get("code"))
+            vq = comp.get("valueQuantity")
+            c_val_str = ""
+            if isinstance(vq, Mapping) and vq.get("value") is not None:
+                c_cmp = str(vq.get("comparator") or "").strip()
+                c_unit = str(vq.get("unit") or vq.get("code") or "").strip()
+                c_val_str = f"{c_cmp}{_format_num(vq.get('value'))} {c_unit}".strip()
+                if obs_date and not c_cmp:
+                    try:
+                        c_num = float(vq["value"])
+                        pts.append(
+                            NumericPoint(
+                                resource_uuid=obs_uuid,
+                                date=obs_date,
+                                code=c_code or c_disp,
+                                concept=c_disp or c_code,
+                                value=c_num,
+                                unit=c_unit,
+                                category=obs_cat,
+                            )
+                        )
+                    except (TypeError, ValueError):
+                        pass
+            else:
+                _, vc_disp = _coding_pair(comp.get("valueCodeableConcept"))
+                c_val_str = vc_disp
+            if enable_privacy_classification:
+                cs = classify_sensitivity(c_code, f"{c_disp} {c_val_str}", obs_cats)
+                if cs:
+                    comp_sens.append(cs)
+        return pts, comp_sens
+
     claimed_obs_ids: Set[str] = set()
     for res in resources:
         if res.get("resourceType") != "DiagnosticReport":
@@ -1118,6 +1170,12 @@ def extract_bundle(
             o_code, o_disp = _coding_pair(child_obs.get("code"))
             val_str, num_val, unit = _format_obs_value(child_obs)
             o_cats = _categories(child_obs)
+            o_date_raw = child_obs.get("effectiveDateTime") or child_obs.get("issued")
+            o_date = (
+                (_iso_timestamp(o_date_raw) if preserve_intraday_timestamps else _iso_date(o_date_raw))
+                or p_date
+            )
+            o_primary_cat = o_cats[0] if o_cats else ("survey" if is_survey else "laboratory")
             o_sens = (
                 classify_sensitivity(o_code, f"{o_disp} {val_str}", o_cats)
                 if enable_privacy_classification
@@ -1128,24 +1186,24 @@ def extract_bundle(
             short_label = o_disp or o_code or "item"
             if val_str:
                 child_parts.append(f"{short_label}: {val_str}")
-            if num_val is not None:
-                o_date_raw = child_obs.get("effectiveDateTime") or child_obs.get("issued")
-                o_date = (
-                    (_iso_timestamp(o_date_raw) if preserve_intraday_timestamps else _iso_date(o_date_raw))
-                    or p_date
+            if child_obs.get("component"):
+                comp_pts, comp_sens = _extract_obs_components(
+                    child_obs, oid, o_date, o_primary_cat, o_cats
                 )
-                if o_date:
-                    numeric_points.append(
-                        NumericPoint(
-                            resource_uuid=oid,
-                            date=o_date,
-                            code=o_code or short_label,
-                            concept=short_label,
-                            value=num_val,
-                            unit=unit,
-                            category=o_cats[0] if o_cats else ("survey" if is_survey else "laboratory"),
-                        )
+                numeric_points.extend(comp_pts)
+                child_sensitivities.extend(comp_sens)
+            elif num_val is not None and o_date:
+                numeric_points.append(
+                    NumericPoint(
+                        resource_uuid=oid,
+                        date=o_date,
+                        code=o_code or short_label,
+                        concept=short_label,
+                        value=num_val,
+                        unit=unit,
+                        category=o_primary_cat,
                     )
+                )
 
         panel_sens = (
             (
@@ -1202,28 +1260,13 @@ def extract_bundle(
 
         primary_cat = cats[0] if cats else "observation"
         has_components = bool(res.get("component"))
-        if has_components and o_date:
-            for comp in res.get("component") or []:
-                if isinstance(comp, Mapping):
-                    c_code, c_disp = _coding_pair(comp.get("code"))
-                    vq = comp.get("valueQuantity")
-                    if isinstance(vq, Mapping) and vq.get("value") is not None and not str(vq.get("comparator") or "").strip():
-                        try:
-                            c_num = float(vq["value"])
-                            c_unit = str(vq.get("unit") or vq.get("code") or "").strip()
-                            numeric_points.append(
-                                NumericPoint(
-                                    resource_uuid=rid,
-                                    date=o_ts or o_date,
-                                    code=c_code or c_disp,
-                                    concept=c_disp or c_code,
-                                    value=c_num,
-                                    unit=c_unit,
-                                    category=primary_cat,
-                                )
-                            )
-                        except (TypeError, ValueError):
-                            pass
+        if has_components:
+            comp_pts, comp_sens = _extract_obs_components(res, rid, o_ts or o_date, primary_cat, cats)
+            numeric_points.extend(comp_pts)
+            if "SDOH/PRIVACY-SENSITIVE" in comp_sens:
+                sens = "SDOH/PRIVACY-SENSITIVE"
+            elif not sens and comp_sens:
+                sens = comp_sens[0]
         elif num_val is not None and o_date:
             numeric_points.append(
                 NumericPoint(

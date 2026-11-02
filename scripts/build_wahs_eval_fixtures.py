@@ -469,7 +469,7 @@ NATURAL_ANOMALIES_BY_PATIENT: Dict[str, List[Dict[str, Any]]] = {
 
 
 def build_eval_cases() -> List[Dict[str, Any]]:
-    """Return the 32 structured evaluation cases covering Use Cases A, B-1, B-2, and B-3."""
+    """Return the 33 structured evaluation cases covering Use Cases A, B-1, B-2, and B-3."""
     cases: List[Dict[str, Any]] = []
 
     reconcile_facts_by_anomaly: Dict[str, List[str]] = {
@@ -1398,6 +1398,9 @@ def generate_wahs_eval_suite(source_dir: Path, output_dir: Path) -> Dict[str, An
             perturbed_bundle, patient_stem
         )
 
+        staged_files[f"{patient_stem}.json"] = (
+            json.dumps(natural_bundle, indent=2, sort_keys=False) + "\n"
+        )
         staged_files[f"{patient_stem}_multisource.json"] = (
             json.dumps(perturbed_bundle, indent=2, sort_keys=False) + "\n"
         )
@@ -1523,13 +1526,33 @@ def generate_wahs_eval_suite(source_dir: Path, output_dir: Path) -> Dict[str, An
     }
     staged_files["ground_truth.json"] = json.dumps(ground_truth, indent=2) + "\n"
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(dir=str(output_dir)) as tmp_dir:
-        tmp_root = Path(tmp_dir)
+    import shutil
+
+    parent_dir = output_dir.resolve().parent
+    parent_dir.mkdir(parents=True, exist_ok=True)
+    tmp_root = Path(tempfile.mkdtemp(prefix=f".{output_dir.name}.stage-", dir=str(parent_dir)))
+    backup_root: Optional[Path] = None
+    try:
+        if output_dir.exists():
+            for existing in output_dir.iterdir():
+                if existing.name not in staged_files and existing.is_file():
+                    (tmp_root / existing.name).write_bytes(existing.read_bytes())
         for fname, content in staged_files.items():
-            tmp_file = tmp_root / fname
-            tmp_file.write_text(content, encoding="utf-8")
-            tmp_file.replace(output_dir / fname)
+            (tmp_root / fname).write_text(content, encoding="utf-8")
+        if output_dir.exists():
+            backup_root = Path(tempfile.mktemp(prefix=f".{output_dir.name}.bak-", dir=str(parent_dir)))
+            output_dir.replace(backup_root)
+        try:
+            tmp_root.replace(output_dir)
+        except Exception:
+            if backup_root is not None and backup_root.exists() and not output_dir.exists():
+                backup_root.replace(output_dir)
+            raise
+    finally:
+        if tmp_root.exists():
+            shutil.rmtree(tmp_root, ignore_errors=True)
+        if backup_root is not None and backup_root.exists():
+            shutil.rmtree(backup_root, ignore_errors=True)
 
     return ground_truth
 

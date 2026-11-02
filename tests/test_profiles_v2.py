@@ -579,6 +579,13 @@ def test_cross_family_checked_answer_arms_pass_checker_temperature_to_grounding(
     from server import engine, team
 
     profile = get_profile(profile_id)
+    default_sampling = engine._sampling(
+        engine.ExecutionRequest(
+            profile=get_profile("single-12b-checked"),
+            messages=[{"role": "user", "content": "What was the weight?"}],
+        )
+    )
+    assert default_sampling["grounding_temperature"] is None
     sampling = engine._sampling(
         engine.ExecutionRequest(
             profile=profile,
@@ -601,6 +608,7 @@ def test_cross_family_checked_answer_arms_pass_checker_temperature_to_grounding(
             None,
             profile.models.get("grounding") or profile.models["review"],
             [("2026-01-01 Weight: 71 kg", "Weight was 71 kg.")],
+            temperature=sampling["grounding_temperature"],
         )
     )
     assert verdicts[0]["support"] == "supported"

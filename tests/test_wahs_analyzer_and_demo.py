@@ -802,6 +802,35 @@ def test_wahs_review_regressions_privacy_negation_lvef_and_api_validation() -> N
     assert r_chat_tiered.status_code == 200
     assert r_chat_tiered.json()["tier_info"]["condense_mode"] == "tiered"
 
+    # 7. Short Base64 data payload sanitization and max_observations cap in fhir_browser
+    from server.fhir.fhir_browser import _sanitize_raw_fhir_for_browser, build_fhir_browser_index
+
+    sanitized_short = _sanitize_raw_fhir_for_browser({"attachment": {"data": "SGVsbG8="}})
+    assert sanitized_short["attachment"]["data"].startswith("[Base64 payload (8 chars)")
+
+    browser_capped = build_fhir_browser_index(
+        {
+            "resourceType": "Bundle",
+            "entry": [
+                {
+                    "resource": {
+                        "resourceType": "Observation",
+                        "id": f"obs-{i}",
+                        "status": "final",
+                        "code": {"text": f"Obs {i}"},
+                        "effectiveDateTime": f"2025-01-{(i % 28) + 1:02d}",
+                        "valueQuantity": {"value": i, "unit": "mg/dL"},
+                    }
+                }
+                for i in range(10)
+            ],
+        },
+        max_observations=3,
+    )
+    assert len(browser_capped["resources"]) == 3
+    assert browser_capped["omitted_bulk_observation_count"] == 7
+
+
 
 
 

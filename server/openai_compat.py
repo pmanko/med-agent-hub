@@ -509,10 +509,20 @@ async def _execute_wahs_chat_completion(
             headers["Authorization"] = f"Bearer {llm_config.api_key}"
 
     sys_prompt = load_prompt(str(profile.prompts["answer"])).strip()
+    caller_sys_parts = [
+        str(m.get("content") or "").strip()
+        for m in req.messages
+        if str(m.get("role") or "").lower() == "system" and str(m.get("content") or "").strip()
+    ]
+    combined_sys_prompt = (
+        f"{sys_prompt}\n\n{chr(10).join(caller_sys_parts)}"
+        if caller_sys_parts
+        else sys_prompt
+    )
     user_messages = [
         m for m in req.messages if str(m.get("role") or "").lower() != "system"
     ]
-    upstream_messages = [{"role": "system", "content": sys_prompt}, *user_messages]
+    upstream_messages = [{"role": "system", "content": combined_sys_prompt}, *user_messages]
 
     answer_knobs = dict(profile.knobs.get("answer") or {})
     temperature = (
@@ -554,6 +564,11 @@ async def _execute_wahs_chat_completion(
             ),
             "",
         )
+        review_context = (
+            f"{chr(10).join(caller_sys_parts)}\n\n{last_user}".strip()
+            if caller_sys_parts
+            else last_user
+        )
         rev_payload = {
             "model": rev_model,
             "messages": [
@@ -561,7 +576,7 @@ async def _execute_wahs_chat_completion(
                 {
                     "role": "user",
                     "content": (
-                        f"CHART & QUESTION CONTEXT:\n{last_user}\n\n"
+                        f"CHART & QUESTION CONTEXT:\n{review_context}\n\n"
                         f"WRITER DRAFT ANSWER:\n{draft_answer}"
                     ),
                 },
