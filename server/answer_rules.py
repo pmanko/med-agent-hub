@@ -271,52 +271,99 @@ def _demographics_marks(claim: str, records: Dict[int, Dict[str, Any]]) -> List[
     return out
 
 
+_DIAG_STOP_TOKENS = {
+    "a", "an", "the", "any", "of", "in", "on", "to", "for", "with", "by",
+    "is", "are", "was", "were", "has", "have", "been",
+    "documented", "recorded", "stated", "noted", "explicit", "primary",
+    "specific", "main", "clear", "known", "formal", "definitive", "confirmed",
+    "active", "current", "care", "program", "programme", "treatment", "disease",
+}
+
+
+def _condition_tokens(condition: str) -> set:
+    words = [
+        w
+        for w in re.split(r"[^a-z0-9]+", (condition or "").lower())
+        if len(w) >= 2 and w not in _DIAG_STOP_TOKENS
+    ]
+    tokens = set(words)
+    alpha_words = [w for w in words if w[0].isalpha()]
+    if len(alpha_words) >= 2:
+        tokens.add("".join(w[0] for w in alpha_words))
+    if "tuberculosis" in tokens or "tb" in tokens:
+        tokens.update({"tuberculosis", "tb"})
+    if "hiv" in tokens or {"human", "immunodeficiency", "virus"} <= tokens:
+        tokens.update({"hiv", "human", "immunodeficiency", "virus"})
+    return tokens
+
+
+def _record_diagnosis(record: Dict[str, Any]) -> Optional[str]:
+    cls = str(record.get("cls") or "")
+    cls_lower = cls.lower()
+    body_str = str(record.get("body") or "")
+    body_lower = body_str.lower()
+    condition: Optional[str] = None
+    if cls == "Program" and "status: active" in body_lower:
+        condition = body_str.split(":", 1)[-1].split(". ", 1)[0].strip()
+    elif cls_lower == "condition" or "diagnos" in cls_lower or "problem" in cls_lower:
+        if re.search(r"\bstatus:\s*(?:inactive|resolved|refuted|entered-in-error)\b", body_lower):
+            return None
+        condition = body_str.split(":", 1)[-1].split(". ", 1)[0].strip()
+    elif cls == "Drug order" and "action: discontinue" not in body_lower:
+        ind_match = re.search(
+            r"\b(?:order\s+reason|indication|diagnosis|reason)\s*:\s*([^.;\n]+)",
+            body_str,
+            re.I,
+        )
+        if ind_match:
+            condition = ind_match.group(1).strip()
+        else:
+            head = body_str.split(":", 1)[-1].split(". ", 1)[0].strip()
+            for_match = re.search(r"\bfor\s+([a-z][a-z0-9\s()-]{2,})$", head, re.I)
+            if for_match:
+                condition = for_match.group(1).strip()
+    if not condition:
+        return None
+    if re.search(
+        r"^\s*(?:no|not|none|negative|without|absent|ruled out|unknown|unspecified)\b",
+        condition,
+        re.I,
+    ):
+        return None
+    return condition
+
+
 def _diagnosis_marks(claim: str, records: Dict[int, Dict[str, Any]]) -> List[Dict[str, Any]]:
     if not _DIAGNOSIS_DENIAL_RE.search(claim):
         return []
     specific_match = re.search(
-        r"\bdiagnos[ie]s\s+of\s+([a-z][a-z0-9\s-]{2,}?)(?:\s+(?:is|are|was|were|has|have|in|on)\b|[.,;:\[]|$)",
+        r"\bdiagnos[ie]s\s+of\s+([a-z0-9][a-z0-9\s-]{1,}?)(?:\s+(?:is|are|was|were|has|have|in|on)\b|[.,;:\[]|$)",
         claim,
         re.I,
     )
-    specific_tokens = (
-        {
-            w
-            for w in re.split(r"[^a-z0-9]+", specific_match.group(1).lower())
-            if len(w) >= 4 and w not in {"documented", "recorded", "stated", "noted", "explicit"}
-        }
-        if specific_match
-        else set()
-    )
-    named = []
+    specific_tokens = _condition_tokens(specific_match.group(1)) if specific_match else set()
+    if specific_match and not specific_tokens:
+        return []
+    named: List[Tuple[Dict[str, Any], str]] = []
     for r in records.values():
-        cls_lower = str(r.get("cls") or "").lower()
-        body_str = str(r.get("body") or "")
-        if not (
-            (r.get("cls") == "Program" and "status: active" in body_str.lower())
-            or "diagnos" in cls_lower
-            or "problem" in cls_lower
-        ):
-            continue
-        condition = body_str.split(":", 1)[-1].split(". ", 1)[0].strip()
-        if re.search(r"^\s*(?:no|not|none|negative|without|absent|ruled out)\b", condition, re.I):
+        condition = _record_diagnosis(r)
+        if not condition:
             continue
         if specific_tokens:
-            cond_tokens = set(re.split(r"[^a-z0-9]+", condition.lower()))
+            cond_tokens = _condition_tokens(condition)
             if not (cond_tokens & specific_tokens):
                 continue
-        named.append(r)
+        named.append((r, condition))
     if not named:
         return []
-    first = min(named, key=lambda r: r["index"])
-    condition = str(first.get("body") or "").split(":", 1)[-1].split(". ", 1)[0].strip()
+    first, condition = min(named, key=lambda item: item[0]["index"])
     return [
         _finding(
             "diagnosis_presence",
             "fail",
             claim,
             f"[{first['index']}] records {condition}",
-            [r["index"] for r in named],
+            [r["index"] for r, _c in named],
         )
     ]
 
@@ -445,6 +492,23 @@ def _window_edits(
         )
         return lead + " " + text, blocks, findings
 
+    def _prune_row_old_refs(value: Any) -> None:
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if key == "refs" and isinstance(child, list):
+                    kept_refs = []
+                    for i in child:
+                        if isinstance(i, int) and _all_before([i], records, start):
+                            dropped.append(i)
+                        else:
+                            kept_refs.append(i)
+                    value[key] = kept_refs
+                else:
+                    _prune_row_old_refs(child)
+        elif isinstance(value, list):
+            for child in value:
+                _prune_row_old_refs(child)
+
     new_blocks = copy.deepcopy(blocks)
     for block in new_blocks if isinstance(new_blocks, list) else []:
         rows = block.get("rows") if isinstance(block, dict) else None
@@ -456,6 +520,10 @@ def _window_edits(
             if _all_before(refs, records, start):
                 dropped.extend(refs)
             else:
+                if refs:
+                    _prune_row_old_refs(row)
+                    if not _row_refs(row):
+                        continue
                 kept.append(row)
         block["rows"] = kept
 
@@ -655,8 +723,49 @@ def _reading(point: Dict[str, Any]) -> str:
 def _asserts_steady_for_series(
     text: str, series: Dict[str, Any], series_list: Sequence[Dict[str, Any]], shared: set
 ) -> bool:
+    series_indices = {
+        p["index"]
+        for p in series.get("points") or []
+        if isinstance(p.get("index"), int)
+    }
+    active_series_is_target = False
     for clause in re.split(r"[.;!?]+|\n+", text or ""):
         if not clause.strip():
+            continue
+        names_target = _names_series(clause, series, shared)
+        names_other = any(
+            _names_series(clause, other, shared)
+            for other in series_list
+            if other is not series
+        )
+        clause_cites = set(_cites(clause))
+        cites_target = bool(clause_cites & series_indices)
+        has_target_values = bool(temporal._series_value_candidates(clause, series))
+        refers_to_target = (names_target or cites_target or has_target_values) and not (
+            names_other and not names_target
+        )
+        is_continuation = (
+            active_series_is_target
+            and not names_other
+            and not (clause_cites - series_indices)
+            and bool(
+                re.search(
+                    r"\b(?:it|this|they|these|the\s+(?:trend|series|readings?|values?|measurements?|levels?|counts?))\b",
+                    clause,
+                    re.I,
+                )
+            )
+            and not re.search(
+                r"\b(?:took|taking|takes|adher\w*|regimen|medications?|drugs?|therapy|treatment|prescribed|ordered|visits?|appointments?)\b",
+                clause,
+                re.I,
+            )
+        )
+        if names_target:
+            active_series_is_target = True
+        elif names_other:
+            active_series_is_target = False
+        if not (refers_to_target or is_continuation):
             continue
         for match in _STEADY_RE.finditer(clause):
             prefix = clause[max(0, match.start() - 30) : match.start()]
@@ -665,13 +774,6 @@ def _asserts_steady_for_series(
                 prefix,
                 re.I,
             ):
-                continue
-            names_other = any(
-                _names_series(clause, other, shared)
-                for other in series_list
-                if other is not series
-            )
-            if names_other and not _names_series(clause, series, shared):
                 continue
             return True
     return False
@@ -752,7 +854,12 @@ def _series_edits(question: str, text: str, facts: Dict[str, Any]) -> Tuple[str,
                 )
         last = series.get("most_recent") or {}
         last_date = _date(last.get("date"))
-        if last_date and not _GAP_STATED_RE.search(text) and _overdue(series, reference):
+        if (
+            last_date
+            and (reference - last_date).days > 90
+            and not _GAP_STATED_RE.search(text)
+            and _overdue(series, reference)
+        ):
             stale_by_date.setdefault(last["date"], []).append(series)
     for date, group in sorted(stale_by_date.items()):
         last_date = _date(date)

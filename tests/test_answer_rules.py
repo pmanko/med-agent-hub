@@ -403,12 +403,61 @@ def test_rule_scoping_table_cells_and_boundary_cases():
 
     # Specific diagnosis denial is not contradicted by an unrelated program or negative record
     assert answer_rules.claim_marks("No diagnosis of tuberculosis is documented [11].", facts) == []
+    assert answer_rules.claim_marks("No diagnosis of HIV is documented.", facts) == []
+    assert answer_rules.claim_marks("No diagnosis of TB is documented.", facts) == []
 
-    # Steady wording on another measurement or negated steady wording is not flagged
+    # Condition and linked Drug order records count as diagnosis evidence
+    cond_facts = build_temporal_facts(
+        "Patient records (most recent first):\n"
+        "[1] (2026-06-01) Condition: Hypertension. Status: ACTIVE\n",
+        "2026-06-20",
+    )
+    cond_marks = answer_rules.claim_marks("The record does not state any diagnosis.", cond_facts)
+    assert _ids(cond_marks) == ["rule_diagnosis_presence"] and "Hypertension" in cond_marks[0]["reason"]
+
+    linked_order_facts = build_temporal_facts(
+        "Patient records (most recent first):\n"
+        "[1] (2026-06-01) Drug order: Metformin. Indication: Type 2 diabetes mellitus. Action: NEW\n",
+        "2026-06-20",
+    )
+    order_marks = answer_rules.claim_marks("The record does not state any diagnosis.", linked_order_facts)
+    assert _ids(order_marks) == ["rule_diagnosis_presence"] and "Type 2 diabetes mellitus" in order_marks[0]["reason"]
+
+    # Mixed-age table row drops old cell refs and keeps in-window cell refs
+    mixed_blocks = [{"kind": "table", "rows": [{"cells": {"drug": {"text": "Metformin", "refs": [1, 3]}}}]}]
+    m_text, m_cites, m_blocks, m_findings = answer_rules.apply_answer_rules(
+        "Show medication orders in the past 1 month as a table.",
+        "Orders are shown below.",
+        [1, 3],
+        mixed_blocks,
+        facts,
+    )
+    assert m_blocks[0]["rows"][0]["cells"]["drug"]["refs"] == [1]
+    assert m_cites == [1]
+    assert _ids(m_findings, "info") == ["rule_window"]
+
+    # Monthly series last measured < 90 days ago is not marked rule_stale
+    recent_overdue_facts = build_temporal_facts(
+        "Patient records (most recent first):\n"
+        "[1] (2026-05-06) Weight (kg): 70 kg\n"
+        "[2] (2026-04-20) Weight (kg): 70 kg\n"
+        "[3] (2026-04-05) Weight (kg): 70 kg\n",
+        "2026-06-20",
+    )
+    _rt, _rc, _rb, r_findings = answer_rules.apply_answer_rules(
+        "What is the patient's weight?", "Weight was 70 kg [1].", [1], [], recent_overdue_facts
+    )
+    assert "rule_stale" not in _ids(r_findings)
+
+    # Steady wording on another measurement, drug adherence, or negated steady wording is not flagged
     for q, ans in (
         (
             "How have weight and systolic blood pressure changed?",
             "Weight fell from 70 kg [6] to 68 kg [5] then rose to 72 kg [4]. Systolic blood pressure stayed steady at 120 mmHg [7][8][9].",
+        ),
+        (
+            "How has weight changed?",
+            "Weight fell from 70 kg [6] to 68 kg [5] then rose to 72 kg [4]. The patient consistently took amlodipine [2].",
         ),
         (
             "How has weight changed?",

@@ -94,7 +94,7 @@ def test_empty_indepth_cannot_report_checked_or_complete():
     assert result["claims"] == []
 
 
-def test_unsafe_patch_cannot_replace_claim_with_uncited_different_series():
+def test_uncited_value_mismatch_is_flagged_without_introducing_patch_citations():
     claim = "The CD4 count was 300 cells/uL on 2006-04-04."
     result = gate_indepth_claims([claim], MULTI_COUNT_FACTS, mode="enforce")
 
@@ -105,17 +105,16 @@ def test_unsafe_patch_cannot_replace_claim_with_uncited_different_series():
     assert check["patch_citations"] == [178]
 
 
-def test_risk_and_outcome_words_are_not_read_as_the_patients_trend():
-    claims = [
-        "The low CD4 count reflects a severely compromised immune status, increasing the risk of infection.",
-        "Antiretroviral therapy should start regardless of the CD4 count to improve outcomes.",
-        "A single CD4 count of 341 cells/uL [178] is insufficient to establish a trend.",
-    ]
+def test_single_point_cd4_trend_claim_targets_only_cited_cd4_series():
+    claim = "The CD4 count was 341 cells/uL on 2006-04-04 [178] and shows a declining trend."
+    result = gate_indepth_claims([claim], MULTI_COUNT_FACTS, mode="warn")
 
-    result = gate_indepth_claims(claims, MULTI_COUNT_FACTS, mode="enforce")
-
-    assert result["flagged"] == []
-    assert _flags(result) == []
+    assert result["status"] == "needs_review"
+    assert result["claims"] == [claim]
+    assert result["flagged"] == [1]
+    check = result["checks"][0]["gate"]
+    assert check["patch_citations"] == [178]
+    assert {index for item in check["checks"] for index in item["source_indices"]} == {178}
 
 
 def test_safe_patch_must_stay_within_original_claim_citations():
@@ -613,6 +612,12 @@ def test_trend_denial_is_scoped_to_its_own_series_and_clause():
     assert other_warn["status"] == "needs_review"
     assert other_warn["flagged"] == [1]
     assert _flags(other_warn) == ["single_point_trend:fail"]
+
+    contrast_trend = "The CD4 count shows a declining trend, not a stable one [3]."
+    contrast_warn = gate_indepth_claims([contrast_trend], facts, mode="warn")
+    assert contrast_warn["status"] == "needs_review"
+    assert contrast_warn["flagged"] == [1]
+    assert _flags(contrast_warn) == ["single_point_trend:fail"]
 
 
 def test_measurement_explicitly_placed_at_last_visit_is_checked_against_last_encounter():
