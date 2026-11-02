@@ -374,6 +374,7 @@ def _resolve_references(
                 {
                     "index": c,
                     "resolutionStatus": "unresolved",
+                    "support": UNCHECKED,
                     "groundingStatus": "unchecked",
                     "grounded": None,
                     "usage": _reference_usages(
@@ -638,8 +639,16 @@ def _support_from_facts(facts: List[Dict[str, Any]]) -> Dict[str, Any]:
         if isinstance(fact, dict) and str(fact.get("fact") or "").strip()
     ]
     statuses = {fact["status"] for fact in clean}
-    if "differs" in statuses:
+    valid_differs = [
+        f for f in clean if f["status"] == "differs" and f.get("source_value")
+    ]
+    malformed_differs = any(
+        f["status"] == "differs" and not f.get("source_value") for f in clean
+    )
+    if valid_differs:
         support = CONTRADICTED
+    elif malformed_differs:
+        support = UNCHECKED
     elif "not_found" in statuses:
         support = NOT_ADDRESSED
     elif clean and statuses <= {"found"}:
@@ -651,17 +660,16 @@ def _support_from_facts(facts: List[Dict[str, Any]]) -> Dict[str, Any]:
         "facts": clean,
         "not_found": "; ".join(f["fact"] for f in clean if f["status"] == "not_found") or None,
         "chart_value": "; ".join(
-            f"{f['fact']}: the record states {f['source_value']}" if f.get("source_value") else f["fact"]
-            for f in clean
-            if f["status"] == "differs"
+            f"{f['fact']}: the record states {f['source_value']}"
+            for f in valid_differs
         )
         or None,
     }
 
 
-def _default_grounding_temperature(model: str) -> float:
+def _default_grounding_temperature(model: str) -> Optional[float]:
     """Default entailment-grounding temperature when no explicit profile knob is passed."""
-    return 0.7 if "qwen3" in (model or "").lower() else 0.0
+    return 0.7 if "qwen3" in (model or "").lower() else None
 
 
 async def _entailment_verdicts(
@@ -690,19 +698,23 @@ async def _entailment_verdicts(
         if temperature is None
         else float(temperature)
     )
+    chat_kwargs: Dict[str, Any] = {
+        "response_format": _ATTRIBUTION_RF,
+        "dry_multiplier": 0.0,
+    }
+    if effective_temperature is not None:
+        chat_kwargs["temperature"] = effective_temperature
     try:
         msg = await _chat(
             client,
             model,
             [{"role": "user", "content": user}],
-            temperature=effective_temperature,
-            response_format=_ATTRIBUTION_RF,
-            dry_multiplier=0.0,
+            **chat_kwargs,
         )
         obj = json.loads(_message_text(msg))
         entries = obj.get("pairs") if isinstance(obj, dict) else None
-        if not isinstance(entries, list):
-            raise ValueError("attribution response missing a 'pairs' array")
+        if not isinstance(entries, list) or len(entries) < len(pairs):
+            raise ValueError("attribution response missing or truncated 'pairs' array")
     except InsufficientContextError:
         raise
     except Exception:
@@ -1121,6 +1133,9 @@ async def _ground_references(
     for i, ref in enumerate(references or []):
         out = dict(ref)
         if out.get("resolutionStatus") == "unresolved":
+            out["support"] = UNCHECKED
+            out["groundingStatus"] = _GROUNDING_STATUS_FOR_SUPPORT[UNCHECKED]
+            out["grounded"] = None
             grounded_refs.append(out)
             continue
         grounding_checks = []
@@ -1814,6 +1829,16 @@ _INDEPTH_VERDICT_RF = {
             "properties": {
                 "flag": {"type": "array", "items": {"type": "integer"}},
                 "issues": {"type": "string"},
+                "checked": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "question": {"type": "string"},
+                            "chart": {"type": "string"},
+                        },
+                    },
+                },
             },
             "required": ["flag"],
         },
@@ -2620,19 +2645,39 @@ async def _validate_indepth_verdict(
         (verdict.get("issues") or "")[:120],
     )
     result: Dict[str, Any] = {"flag": flag, "issues": verdict.get("issues", "")}
+    if isinstance(verdict.get("checked"), list):
+        checked = [
+            {
+                "question": str(item.get("question") or "").strip(),
+                "chart": str(item.get("chart") or "").strip(),
+            }
+            for item in verdict["checked"]
+            if isinstance(item, dict)
+            and (
+                str(item.get("question") or "").strip()
+                or str(item.get("chart") or "").strip()
+            )
+        ]
+        result["checked"] = checked
     if citation_support:
         raw_unsupported = verdict.get("unsupported")
-        if isinstance(raw_unsupported, list) and all(
+        valid_unsupported = isinstance(raw_unsupported, list) and all(
             isinstance(d, int) and not isinstance(d, bool) and 1 <= d <= len(claims)
             for d in raw_unsupported
-        ):
-            result["unsupported"] = sorted(set(raw_unsupported))
+        )
+        has_not_addressed = "not_addressed" in verdict
         raw_not_addressed = verdict.get("not_addressed")
-        if isinstance(raw_not_addressed, list) and all(
-            isinstance(d, int) and not isinstance(d, bool) and 1 <= d <= len(claims)
-            for d in raw_not_addressed
-        ):
-            result["not_addressed"] = sorted(set(raw_not_addressed))
+        valid_not_addressed = not has_not_addressed or (
+            isinstance(raw_not_addressed, list)
+            and all(
+                isinstance(d, int) and not isinstance(d, bool) and 1 <= d <= len(claims)
+                for d in raw_not_addressed
+            )
+        )
+        if valid_unsupported and valid_not_addressed:
+            result["unsupported"] = sorted(set(raw_unsupported))
+            if isinstance(raw_not_addressed, list):
+                result["not_addressed"] = sorted(set(raw_not_addressed))
     return result
 
 
@@ -3100,16 +3145,17 @@ async def _gen_indepth(
     except Exception as e:
         logger.warning("indepth-validator call failed: %s", e)
         verdict = {"flag": [], "issues": "In-Depth review unavailable.", "unavailable": True}
-    steps.append(
-        {
-            "role": "indepth_validator",
-            "model": validator_model,
-            "status": "unavailable" if verdict.get("unavailable") else "checked",
-            "flag": verdict.get("flag") or [],
-            "issues": verdict.get("issues", ""),
-            "claims_in": len(claims),
-        }
-    )
+    validator_step: Dict[str, Any] = {
+        "role": "indepth_validator",
+        "model": validator_model,
+        "status": "unavailable" if verdict.get("unavailable") else "checked",
+        "flag": verdict.get("flag") or [],
+        "issues": verdict.get("issues", ""),
+        "claims_in": len(claims),
+    }
+    if isinstance(verdict.get("checked"), list):
+        validator_step["checked"] = list(verdict["checked"])
+    steps.append(validator_step)
     if verdict.get("unavailable"):
         return claims, {
             "level": "yellow",
@@ -3119,6 +3165,8 @@ async def _gen_indepth(
     flagged = list(verdict.get("flag") or [])
     # Folded grounding: the review's citation verdicts travel with its labels to the In-Depth gate.
     support: Dict[str, Any] = {}
+    if isinstance(verdict.get("checked"), list):
+        support["checked"] = list(verdict["checked"])
     if citation_support and isinstance(verdict.get("unsupported"), list):
         support["citation_unsupported"] = list(verdict["unsupported"])
         if isinstance(verdict.get("not_addressed"), list):
