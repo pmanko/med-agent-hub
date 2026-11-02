@@ -608,6 +608,7 @@ def test_cross_family_checked_answer_arms_pass_checker_temperature_to_grounding(
             None,
             profile.models.get("grounding") or profile.models["review"],
             [("2026-01-01 Weight: 71 kg", "Weight was 71 kg.")],
+            temperature=sampling["grounding_temperature"],
         )
     )
     assert verdicts[0]["support"] == "supported"
