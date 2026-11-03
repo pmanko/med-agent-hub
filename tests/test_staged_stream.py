@@ -3373,3 +3373,77 @@ def test_indepth_claim_whose_citation_could_not_be_checked_is_shown_with_a_cauti
     assert final["confidence"]["in_depth"]["level"] == "yellow"
     checks = final["inDepth"]["validation"]["citation_checks"]
     assert [check["status"] for check in checks] == ["warn"]
+
+
+def test_answer_json_delta_extractor_streams_decoded_answer_chars_across_chunks():
+    extractor = team._AnswerJsonDeltaExtractor()
+    raw_chunks = [
+        '{"blocks": ["b1"], ',
+        '"ans',
+        'wer": "Line 1\\nQuote \\"ok\\" and \\u2014 ',
+        'cited [1].", "citations": [1]}',
+    ]
+    emitted = []
+    for chunk in raw_chunks:
+        delta = extractor.feed(chunk)
+        if delta:
+            emitted.append(delta)
+
+    assert "".join(emitted) == 'Line 1\nQuote "ok" and \u2014 cited [1].'
+    assert len(emitted) == 2
+
+
+def test_staged_stream_emits_answer_delta_events_before_answer_done(monkeypatch):
+    _stub_common(monkeypatch)
+
+    async def fake_stream_chunks(*_args, **_kwargs):
+        for piece in (
+            '{"answer": "Observed ',
+            'data ',
+            '[1].", "citations": [1], "blocks": ["Observed data [1]."]}',
+        ):
+            yield piece
+
+    async def unchanged(_client, **kwargs):
+        return (
+            kwargs["answer_text"],
+            kwargs["citations"],
+            kwargs["blocks"],
+            {"level": "green", "note": ""},
+        )
+
+    monkeypatch.setattr(team, "_stream_chat_chunks", fake_stream_chunks)
+    monkeypatch.setattr(team, "_ensure_substantive_answer", unchanged)
+
+    async def _run():
+        out = []
+        async for name, data in stream_profile(
+            _product_profile(review_model="V"),
+            [{"role": "user", "content": "q?"}],
+            patient="p",
+            context={"temporal": False},
+            model_label="lvl",
+            source_registry=_TEST_SOURCE,
+            stream_answer=True,
+        ):
+            out.append((name, json.loads(data)))
+        return out
+
+    events = asyncio.run(_run())
+    names = [name for name, _ in events]
+    assert names == [
+        "answer_delta",
+        "answer_delta",
+        "answer_delta",
+        "answer_done",
+        "answer_validation",
+        "indepth_pending",
+        "indepth_done",
+        "done",
+    ]
+    deltas = [payload["delta"] for name, payload in events if name == "answer_delta"]
+    assert "".join(deltas) == "Observed data [1]."
+    answer_done = next(payload for name, payload in events if name == "answer_done")
+    assert answer_done["answer"] == "Observed data [1]."
+    assert answer_done["references"][0]["index"] == 1
+
