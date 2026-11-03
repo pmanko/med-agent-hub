@@ -3447,3 +3447,35 @@ def test_staged_stream_emits_answer_delta_events_before_answer_done(monkeypatch)
     assert answer_done["answer"] == "Observed data [1]."
     assert answer_done["references"][0]["index"] == 1
 
+
+def test_router_concurrency_semaphore_allows_bounded_parallel_slots(monkeypatch):
+    monkeypatch.setenv("MED_AGENT_ROUTER_CONCURRENCY", "2")
+    lock = team.configure_router_concurrency()
+    try:
+        assert isinstance(lock, asyncio.BoundedSemaphore)
+
+        async def _exercise():
+            active = 0
+            peak = 0
+            gate = asyncio.Event()
+
+            async def _worker():
+                nonlocal active, peak
+                async with team._ROUTER_LOCK:
+                    active += 1
+                    peak = max(peak, active)
+                    if peak == 2:
+                        gate.set()
+                    await gate.wait()
+                    await asyncio.sleep(0.01)
+                    active -= 1
+
+            await asyncio.gather(_worker(), _worker(), _worker())
+            return peak
+
+        assert asyncio.run(_exercise()) == 2
+    finally:
+        monkeypatch.delenv("MED_AGENT_ROUTER_CONCURRENCY", raising=False)
+        team.configure_router_concurrency(1)
+
+

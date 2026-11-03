@@ -1446,16 +1446,39 @@ def _latest_assistant_text(messages: List[Dict[str, Any]]) -> str:
     return ""
 
 
-# Serialize ALL calls to the LLM backend hub-wide. The llama.cpp router (build 9430) has an
+# Serialize or bound calls to the LLM backend hub-wide. The llama.cpp router (build 9430) has an
 # unfixed TOCTOU race in models-max eviction (ggml-org/llama.cpp#20137, closed "not planned"):
 # concurrent requests bypass the load gate, so a request can land on a model the router is
 # evicting -> it force-kills that child after DEFAULT_STOP_TIMEOUT (hardcoded 10s) -> the call
-# fails with "Failed to read connection" (also #18063 on stream:false). The issue's own
-# recommendation is to QUEUE requests instead of letting them bypass; since the router won't,
-# we serialize client-side: exactly one model request in flight at a time, so the router only
-# ever loads/evicts ONE model with no concurrent request to race -> clean sequential loading
-# (the single-GPU host serves one model at a time regardless, so this costs no real throughput).
-_ROUTER_LOCK = asyncio.Lock()
+# fails with "Failed to read connection" (also #18063 on stream:false). On a single-slot local
+# router, default MED_AGENT_ROUTER_CONCURRENCY=1 serializes client-side with an asyncio.Lock().
+# On multi-slot GPU serving (e.g. llama-server --parallel N, vLLM, or LiteLLM), setting
+# MED_AGENT_ROUTER_CONCURRENCY=N uses an asyncio.BoundedSemaphore(N) so N clinical turns can
+# execute concurrently while bounding in-flight requests to the configured slot budget.
+def _make_router_lock(
+    concurrency: Optional[int] = None,
+) -> asyncio.Lock | asyncio.BoundedSemaphore:
+    if concurrency is None:
+        raw = os.getenv("MED_AGENT_ROUTER_CONCURRENCY", "1").strip()
+        try:
+            concurrency = int(raw)
+        except ValueError:
+            concurrency = 1
+    if concurrency <= 1:
+        return asyncio.Lock()
+    return asyncio.BoundedSemaphore(concurrency)
+
+
+_ROUTER_LOCK: asyncio.Lock | asyncio.BoundedSemaphore = _make_router_lock()
+
+
+def configure_router_concurrency(
+    concurrency: Optional[int] = None,
+) -> asyncio.Lock | asyncio.BoundedSemaphore:
+    """Reconfigure hub-wide LLM router concurrency (1 -> Lock, >1 -> BoundedSemaphore)."""
+    global _ROUTER_LOCK
+    _ROUTER_LOCK = _make_router_lock(concurrency)
+    return _ROUTER_LOCK
 
 
 @dataclass
