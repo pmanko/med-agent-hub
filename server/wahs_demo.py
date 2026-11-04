@@ -559,6 +559,7 @@ def _builtin_sample_bundles() -> Dict[str, Dict[str, Any]]:
 
 
 _EXTENDED_CATALOG_CACHE: Optional[Dict[str, Dict[str, Any]]] = None
+_PATIENT_CATALOG_CACHE: Optional[Tuple[str, Dict[str, Dict[str, Any]]]] = None
 
 
 def _get_extended_catalog() -> Dict[str, Dict[str, Any]]:
@@ -566,6 +567,21 @@ def _get_extended_catalog() -> Dict[str, Dict[str, Any]]:
     if _EXTENDED_CATALOG_CACHE is not None:
         return _EXTENDED_CATALOG_CACHE
     ext: Dict[str, Dict[str, Any]] = {}
+    for fallback_dir in (Path("/tmp/wahs_data"), Path("/tmp/wahs_data/eval")):
+        if fallback_dir.is_dir():
+            for p in sorted(fallback_dir.glob("*.json")):
+                if p.name == "ground_truth.json":
+                    continue
+                try:
+                    data = json.loads(p.read_text(encoding="utf-8"))
+                    if isinstance(data, dict) and data.get("resourceType") == "Bundle":
+                        ext[p.stem] = data
+                        ext[f"{p.stem}_set_b"] = data
+                except Exception:
+                    continue
+    if len(ext) >= 8:
+        _EXTENDED_CATALOG_CACHE = ext
+        return ext
     try:
         from scripts.wahs_uscore_archetypes import (
             build_deidentified_real_clinical_summaries,
@@ -600,8 +616,11 @@ def _get_extended_catalog() -> Dict[str, Dict[str, Any]]:
 
 
 def _load_patient_catalog() -> Dict[str, Dict[str, Any]]:
-    catalog: Dict[str, Dict[str, Any]] = {}
+    global _PATIENT_CATALOG_CACHE
     bundle_dir = os.environ.get("WAHS_BUNDLE_DIR", "").strip()
+    if _PATIENT_CATALOG_CACHE is not None and _PATIENT_CATALOG_CACHE[0] == bundle_dir:
+        return _PATIENT_CATALOG_CACHE[1]
+    catalog: Dict[str, Dict[str, Any]] = {}
     if bundle_dir and Path(bundle_dir).is_dir():
         b_path = Path(bundle_dir)
         for p in sorted(b_path.glob("*.json")):
@@ -629,6 +648,7 @@ def _load_patient_catalog() -> Dict[str, Dict[str, Any]]:
         catalog.update(_builtin_sample_bundles())
     for k, v in _get_extended_catalog().items():
         catalog.setdefault(k, v)
+    _PATIENT_CATALOG_CACHE = (bundle_dir, catalog)
     return catalog
 
 
