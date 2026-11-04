@@ -375,10 +375,15 @@ profiles:
     context: {window: 24576, reserved_output_tokens: 4096, exact_tokenizer: true, supplemental_sources: [knowledge-base]}
     knobs: {answer: {temperature: 0}}
 
-  # Washington Health Summary (WAHS+) profiles (workflow: wahs).
+  # Washington Health Summary (WAHS+) single-family simple profiles (workflow: wahs, topology: single).
+  # Every single-family model has a matched pair of simple profiles:
+  #   -kb  : wahs-kb-guided prompt + Step 2 condensed FHIR chart + 4-Layer Clinical KB findings
+  #   -raw : wahs-raw-unhinted prompt + Step 2 condensed FHIR chart alone (no KB hints)
   # Exposed via GET /v1/models?workflow=wahs and executed via POST /v1/chat/completions.
+
+  # --- Family 1: Google Gemma 4 (E2B, E4B Q4/Q8, 12B Q4/Q8, 26B-A4B MoE, 31B) ---
   wahs-12b-kb:
-    label: "WAHS+ Checked Synthesis — Gemma 4 12B + 4-Layer Clinical KB"
+    label: "Gemma 4 12B (Q8) — + 4-Layer Clinical KB"
     workflow: wahs
     topology: single
     stages: [context, answer, gate]
@@ -386,19 +391,22 @@ profiles:
     prompts: {answer: wahs-kb-guided}
     policies:
       provider: local
+      model_family: gemma-4
+      parameter_size: "12B"
+      quantization: "Q8_0"
       include_kb_findings: true
       overflow_lookup_tools: true
       citation_grounding: enforce
-      description: "Default WAHS+ profile: combines the Step 2 Condensed FHIR Chart Ledger with 4-Layer Clinical KB Findings (RxNorm, SNOMED, LOINC, CVX/ACIP) and enforces [N] citation grounding + safety abstention."
+      description: "Default WAHS+ profile: pairs Google Gemma 4 12B (Q8_0) with the Step 2 Condensed FHIR Chart Ledger and 4-Layer Clinical KB Findings."
     knobs:
-      answer: {temperature: 0.1, dry: 0.0, maxTokens: 900}
+      answer: {temperature: 0.1, dry: 0.0, maxTokens: 4096}
     visibility: product
     default: true
     selection_priority: 10
     context: {window: 24576, reserved_output_tokens: 2048, exact_tokenizer: true}
 
   wahs-12b-raw:
-    label: "WAHS+ Unhinted Control — Gemma 4 12B (Condensed Chart Only, No KB Hints)"
+    label: "Gemma 4 12B (Q8) — Raw Condensed Chart Only"
     workflow: wahs
     topology: single
     stages: [context, answer, gate]
@@ -406,38 +414,109 @@ profiles:
     prompts: {answer: wahs-raw-unhinted}
     policies:
       provider: local
+      model_family: gemma-4
+      parameter_size: "12B"
+      quantization: "Q8_0"
       include_kb_findings: false
       overflow_lookup_tools: false
       citation_grounding: enforce
-      description: "Ablation control profile: passes ONLY the Step 2 Condensed FHIR Chart Ledger without 4-Layer Clinical KB hints, testing raw LLM medication/staging/note reconciliation across 8k vs 1k budgets."
+      description: "Unhinted control for Gemma 4 12B (Q8_0): passes ONLY the Step 2 Condensed FHIR Chart Ledger without 4-Layer Clinical KB hints."
     knobs:
-      answer: {temperature: 0.1, dry: 0.0, maxTokens: 900}
+      answer: {temperature: 0.1, dry: 0.0, maxTokens: 4096}
     visibility: product
-    selection_priority: 20
+    selection_priority: 11
     context: {window: 24576, reserved_output_tokens: 2048, exact_tokenizer: true}
 
-  wahs-12b-xcheck:
-    label: "WAHS+ Cross-Checked — Gemma 4 12B Writer + Qwen 3.5 9B Verifier"
+  wahs-12b-q4-kb:
+    label: "Gemma 4 12B (Q4) — + 4-Layer Clinical KB"
     workflow: wahs
-    topology: xcheck
-    stages: [context, answer, review, gate]
-    models: {answer: gemma-4-12b, review: qwen3.5-9b}
-    prompts: {answer: wahs-kb-guided, review: wahs-xcheck-review}
+    topology: single
+    stages: [context, answer, gate]
+    models: {answer: gemma-4-12b-q4}
+    prompts: {answer: wahs-kb-guided}
     policies:
       provider: local
+      model_family: gemma-4
+      parameter_size: "12B"
+      quantization: "Q4_K_M"
       include_kb_findings: true
       overflow_lookup_tools: true
       citation_grounding: enforce
-      description: "Two-stage cross-family verification: Gemma 4 12B synthesizes the answer and Qwen 3.5 9B audits [N] citations, hold/stop safety alerts, and budget fidelity."
+      description: "Quantization control: Google Gemma 4 12B at Q4_K_M with 4-Layer Clinical KB Findings."
     knobs:
-      answer: {temperature: 0.1, dry: 0.0, maxTokens: 900}
-      review: {temperature: 0.0, dry: 0.0, maxTokens: 350}
+      answer: {temperature: 0.1, dry: 0.0, maxTokens: 4096}
     visibility: product
-    selection_priority: 30
+    selection_priority: 12
+    context: {window: 24576, reserved_output_tokens: 2048, exact_tokenizer: true}
+
+  wahs-12b-q4-raw:
+    label: "Gemma 4 12B (Q4) — Raw Condensed Chart Only"
+    workflow: wahs
+    topology: single
+    stages: [context, answer, gate]
+    models: {answer: gemma-4-12b-q4}
+    prompts: {answer: wahs-raw-unhinted}
+    policies:
+      provider: local
+      model_family: gemma-4
+      parameter_size: "12B"
+      quantization: "Q4_K_M"
+      include_kb_findings: false
+      overflow_lookup_tools: false
+      citation_grounding: enforce
+      description: "Unhinted quantization control: Google Gemma 4 12B at Q4_K_M on the Condensed FHIR Chart Ledger alone."
+    knobs:
+      answer: {temperature: 0.1, dry: 0.0, maxTokens: 4096}
+    visibility: product
+    selection_priority: 13
+    context: {window: 24576, reserved_output_tokens: 2048, exact_tokenizer: true}
+
+  wahs-e2b-kb:
+    label: "Gemma 4 E2B (Q4) — + 4-Layer Clinical KB"
+    workflow: wahs
+    topology: single
+    stages: [context, answer, gate]
+    models: {answer: gemma-e2b}
+    prompts: {answer: wahs-kb-guided}
+    policies:
+      provider: local
+      model_family: gemma-4
+      parameter_size: "E2B"
+      quantization: "Q4_K_M"
+      include_kb_findings: true
+      overflow_lookup_tools: true
+      citation_grounding: enforce
+      description: "Ultra-compact edge profile (~3 GB): Google Gemma 4 E2B paired with the 4-Layer Clinical KB."
+    knobs:
+      answer: {temperature: 0.1, dry: 0.0, maxTokens: 4096}
+    visibility: product
+    selection_priority: 14
+    context: {window: 24576, reserved_output_tokens: 2048, exact_tokenizer: true}
+
+  wahs-e2b-raw:
+    label: "Gemma 4 E2B (Q4) — Raw Condensed Chart Only"
+    workflow: wahs
+    topology: single
+    stages: [context, answer, gate]
+    models: {answer: gemma-e2b}
+    prompts: {answer: wahs-raw-unhinted}
+    policies:
+      provider: local
+      model_family: gemma-4
+      parameter_size: "E2B"
+      quantization: "Q4_K_M"
+      include_kb_findings: false
+      overflow_lookup_tools: false
+      citation_grounding: enforce
+      description: "Unhinted ultra-compact edge control: Google Gemma 4 E2B on the Condensed FHIR Chart Ledger alone."
+    knobs:
+      answer: {temperature: 0.1, dry: 0.0, maxTokens: 4096}
+    visibility: product
+    selection_priority: 15
     context: {window: 24576, reserved_output_tokens: 2048, exact_tokenizer: true}
 
   wahs-e4b-kb:
-    label: "WAHS+ Fast Edge — Gemma 4 E4B + 4-Layer Clinical KB"
+    label: "Gemma 4 E4B (Q4) — + 4-Layer Clinical KB"
     workflow: wahs
     topology: single
     stages: [context, answer, gate]
@@ -445,18 +524,131 @@ profiles:
     prompts: {answer: wahs-kb-guided}
     policies:
       provider: local
+      model_family: gemma-4
+      parameter_size: "E4B"
+      quantization: "Q4_K_M"
       include_kb_findings: true
       overflow_lookup_tools: true
       citation_grounding: enforce
-      description: "Compact edge profile (~5 GB RAM): pairs Gemma 4 E4B with the 4-Layer Clinical KB to test sub-second TTFT and small-model reasoning on 8k vs 1k charts."
+      description: "Compact edge profile (~5 GB): pairs Google Gemma 4 E4B (Q4_K_M) with the 4-Layer Clinical KB."
     knobs:
-      answer: {temperature: 0.1, dry: 0.0, maxTokens: 800}
+      answer: {temperature: 0.1, dry: 0.0, maxTokens: 4096}
     visibility: product
-    selection_priority: 40
+    selection_priority: 16
+    context: {window: 24576, reserved_output_tokens: 2048, exact_tokenizer: true}
+
+  wahs-e4b-raw:
+    label: "Gemma 4 E4B (Q4) — Raw Condensed Chart Only"
+    workflow: wahs
+    topology: single
+    stages: [context, answer, gate]
+    models: {answer: gemma-e4b}
+    prompts: {answer: wahs-raw-unhinted}
+    policies:
+      provider: local
+      model_family: gemma-4
+      parameter_size: "E4B"
+      quantization: "Q4_K_M"
+      include_kb_findings: false
+      overflow_lookup_tools: false
+      citation_grounding: enforce
+      description: "Unhinted compact edge control: Google Gemma 4 E4B (Q4_K_M) on the Condensed FHIR Chart Ledger alone."
+    knobs:
+      answer: {temperature: 0.1, dry: 0.0, maxTokens: 4096}
+    visibility: product
+    selection_priority: 17
+    context: {window: 24576, reserved_output_tokens: 2048, exact_tokenizer: true}
+
+  wahs-e4b-q8-kb:
+    label: "Gemma 4 E4B (Q8) — + 4-Layer Clinical KB"
+    workflow: wahs
+    topology: single
+    stages: [context, answer, gate]
+    models: {answer: gemma-e4b-q8}
+    prompts: {answer: wahs-kb-guided}
+    policies:
+      provider: local
+      model_family: gemma-4
+      parameter_size: "E4B"
+      quantization: "Q8_0"
+      include_kb_findings: true
+      overflow_lookup_tools: true
+      citation_grounding: enforce
+      description: "High-precision edge profile (~8 GB): Google Gemma 4 E4B at Q8_0 with the 4-Layer Clinical KB."
+    knobs:
+      answer: {temperature: 0.1, dry: 0.0, maxTokens: 4096}
+    visibility: product
+    selection_priority: 18
+    context: {window: 24576, reserved_output_tokens: 2048, exact_tokenizer: true}
+
+  wahs-e4b-q8-raw:
+    label: "Gemma 4 E4B (Q8) — Raw Condensed Chart Only"
+    workflow: wahs
+    topology: single
+    stages: [context, answer, gate]
+    models: {answer: gemma-e4b-q8}
+    prompts: {answer: wahs-raw-unhinted}
+    policies:
+      provider: local
+      model_family: gemma-4
+      parameter_size: "E4B"
+      quantization: "Q8_0"
+      include_kb_findings: false
+      overflow_lookup_tools: false
+      citation_grounding: enforce
+      description: "Unhinted high-precision edge control: Google Gemma 4 E4B at Q8_0 on the Condensed FHIR Chart Ledger alone."
+    knobs:
+      answer: {temperature: 0.1, dry: 0.0, maxTokens: 4096}
+    visibility: product
+    selection_priority: 19
+    context: {window: 24576, reserved_output_tokens: 2048, exact_tokenizer: true}
+
+  wahs-26b-kb:
+    label: "Gemma 4 26B-A4B MoE — + 4-Layer Clinical KB"
+    workflow: wahs
+    topology: single
+    stages: [context, answer, gate]
+    models: {answer: gemma-26b}
+    prompts: {answer: wahs-kb-guided}
+    policies:
+      provider: local
+      model_family: gemma-4
+      parameter_size: "26B-A4B"
+      quantization: "Q4_K_M"
+      include_kb_findings: true
+      overflow_lookup_tools: true
+      citation_grounding: enforce
+      description: "Sparse MoE profile (26B total / 4B active): Google Gemma 4 26B-A4B with the 4-Layer Clinical KB."
+    knobs:
+      answer: {temperature: 0.1, dry: 0.0, maxTokens: 4096}
+    visibility: product
+    selection_priority: 20
+    context: {window: 24576, reserved_output_tokens: 2048, exact_tokenizer: true}
+
+  wahs-26b-raw:
+    label: "Gemma 4 26B-A4B MoE — Raw Condensed Chart Only"
+    workflow: wahs
+    topology: single
+    stages: [context, answer, gate]
+    models: {answer: gemma-26b}
+    prompts: {answer: wahs-raw-unhinted}
+    policies:
+      provider: local
+      model_family: gemma-4
+      parameter_size: "26B-A4B"
+      quantization: "Q4_K_M"
+      include_kb_findings: false
+      overflow_lookup_tools: false
+      citation_grounding: enforce
+      description: "Unhinted sparse MoE control: Google Gemma 4 26B-A4B on the Condensed FHIR Chart Ledger alone."
+    knobs:
+      answer: {temperature: 0.1, dry: 0.0, maxTokens: 4096}
+    visibility: product
+    selection_priority: 21
     context: {window: 24576, reserved_output_tokens: 2048, exact_tokenizer: true}
 
   wahs-31b-kb:
-    label: "WAHS+ High-Capacity Local — Gemma 4 31B + 4-Layer Clinical KB"
+    label: "Gemma 4 31B (Q4) — + 4-Layer Clinical KB"
     workflow: wahs
     topology: single
     stages: [context, answer, gate]
@@ -464,18 +656,177 @@ profiles:
     prompts: {answer: wahs-kb-guided}
     policies:
       provider: local
+      model_family: gemma-4
+      parameter_size: "31B"
+      quantization: "Q4_K_M"
       include_kb_findings: true
       overflow_lookup_tools: true
       citation_grounding: enforce
-      description: "High-capacity local profile: runs Gemma 4 31B with the 4-Layer Clinical KB for deep multi-clinic synthesis."
+      description: "High-capacity dense local profile: Google Gemma 4 31B with the 4-Layer Clinical KB."
     knobs:
-      answer: {temperature: 0.1, dry: 0.0, maxTokens: 1024}
+      answer: {temperature: 0.1, dry: 0.0, maxTokens: 4096}
     visibility: product
-    selection_priority: 50
+    selection_priority: 22
+    context: {window: 24576, reserved_output_tokens: 2048, exact_tokenizer: true}
+
+  wahs-31b-raw:
+    label: "Gemma 4 31B (Q4) — Raw Condensed Chart Only"
+    workflow: wahs
+    topology: single
+    stages: [context, answer, gate]
+    models: {answer: gemma-31b}
+    prompts: {answer: wahs-raw-unhinted}
+    policies:
+      provider: local
+      model_family: gemma-4
+      parameter_size: "31B"
+      quantization: "Q4_K_M"
+      include_kb_findings: false
+      overflow_lookup_tools: false
+      citation_grounding: enforce
+      description: "Unhinted high-capacity dense local control: Google Gemma 4 31B on the Condensed FHIR Chart Ledger alone."
+    knobs:
+      answer: {temperature: 0.1, dry: 0.0, maxTokens: 4096}
+    visibility: product
+    selection_priority: 23
+    context: {window: 24576, reserved_output_tokens: 2048, exact_tokenizer: true}
+
+  # --- Family 2: Google MedGemma (1.5 4B Q8, 27B Text IT Q4) ---
+  wahs-medgemma-4b-kb:
+    label: "MedGemma 1.5 4B (Q8) — + 4-Layer Clinical KB"
+    workflow: wahs
+    topology: single
+    stages: [context, answer, gate]
+    models: {answer: medgemma-1.5-4b-q8}
+    prompts: {answer: wahs-kb-guided}
+    policies:
+      provider: local
+      model_family: medgemma
+      parameter_size: "4B"
+      quantization: "Q8_0"
+      include_kb_findings: true
+      overflow_lookup_tools: true
+      citation_grounding: enforce
+      description: "Biomedical-tuned small model: Google MedGemma 1.5 4B (Q8_0) paired with the 4-Layer Clinical KB."
+    knobs:
+      answer: {temperature: 0.1, dry: 0.0, maxTokens: 4096}
+    visibility: product
+    selection_priority: 30
+    context: {window: 24576, reserved_output_tokens: 2048, exact_tokenizer: true}
+
+  wahs-medgemma-4b-raw:
+    label: "MedGemma 1.5 4B (Q8) — Raw Condensed Chart Only"
+    workflow: wahs
+    topology: single
+    stages: [context, answer, gate]
+    models: {answer: medgemma-1.5-4b-q8}
+    prompts: {answer: wahs-raw-unhinted}
+    policies:
+      provider: local
+      model_family: medgemma
+      parameter_size: "4B"
+      quantization: "Q8_0"
+      include_kb_findings: false
+      overflow_lookup_tools: false
+      citation_grounding: enforce
+      description: "Unhinted biomedical small-model control: Google MedGemma 1.5 4B (Q8_0) on the Condensed FHIR Chart Ledger alone."
+    knobs:
+      answer: {temperature: 0.1, dry: 0.0, maxTokens: 4096}
+    visibility: product
+    selection_priority: 31
+    context: {window: 24576, reserved_output_tokens: 2048, exact_tokenizer: true}
+
+  wahs-medgemma-27b-kb:
+    label: "MedGemma 27B Text IT (Q4) — + 4-Layer Clinical KB"
+    workflow: wahs
+    topology: single
+    stages: [context, answer, gate]
+    models: {answer: medgemma-27b}
+    prompts: {answer: wahs-kb-guided}
+    policies:
+      provider: local
+      model_family: medgemma
+      parameter_size: "27B"
+      quantization: "Q4_K_M"
+      include_kb_findings: true
+      overflow_lookup_tools: true
+      citation_grounding: enforce
+      description: "Biomedical-tuned high-capacity model: Google MedGemma 27B Text IT paired with the 4-Layer Clinical KB."
+    knobs:
+      answer: {temperature: 0.1, dry: 0.0, maxTokens: 4096}
+    visibility: product
+    selection_priority: 32
+    context: {window: 24576, reserved_output_tokens: 2048, exact_tokenizer: true}
+
+  wahs-medgemma-27b-raw:
+    label: "MedGemma 27B Text IT (Q4) — Raw Condensed Chart Only"
+    workflow: wahs
+    topology: single
+    stages: [context, answer, gate]
+    models: {answer: medgemma-27b}
+    prompts: {answer: wahs-raw-unhinted}
+    policies:
+      provider: local
+      model_family: medgemma
+      parameter_size: "27B"
+      quantization: "Q4_K_M"
+      include_kb_findings: false
+      overflow_lookup_tools: false
+      citation_grounding: enforce
+      description: "Unhinted biomedical high-capacity control: Google MedGemma 27B Text IT on the Condensed FHIR Chart Ledger alone."
+    knobs:
+      answer: {temperature: 0.1, dry: 0.0, maxTokens: 4096}
+    visibility: product
+    selection_priority: 33
+    context: {window: 24576, reserved_output_tokens: 2048, exact_tokenizer: true}
+
+  # --- Family 3: Alibaba Qwen (Qwen3 4B, Qwen3.5 9B Q8, Qwen2.5 14B, Qwen3 14B, Qwen3.6 35B-A3B) ---
+  wahs-qwen3-4b-kb:
+    label: "Qwen 3 4B (Q4) — + 4-Layer Clinical KB"
+    workflow: wahs
+    topology: single
+    stages: [context, answer, gate]
+    models: {answer: qwen3-4b}
+    prompts: {answer: wahs-kb-guided}
+    policies:
+      provider: local
+      model_family: qwen
+      parameter_size: "4B"
+      quantization: "Q4_K_M"
+      include_kb_findings: true
+      overflow_lookup_tools: true
+      citation_grounding: enforce
+      description: "Compact Qwen 3 4B profile paired with the 4-Layer Clinical KB."
+    knobs:
+      answer: {temperature: 0.1, dry: 0.0, maxTokens: 4096}
+    visibility: product
+    selection_priority: 40
+    context: {window: 24576, reserved_output_tokens: 2048, exact_tokenizer: true}
+
+  wahs-qwen3-4b-raw:
+    label: "Qwen 3 4B (Q4) — Raw Condensed Chart Only"
+    workflow: wahs
+    topology: single
+    stages: [context, answer, gate]
+    models: {answer: qwen3-4b}
+    prompts: {answer: wahs-raw-unhinted}
+    policies:
+      provider: local
+      model_family: qwen
+      parameter_size: "4B"
+      quantization: "Q4_K_M"
+      include_kb_findings: false
+      overflow_lookup_tools: false
+      citation_grounding: enforce
+      description: "Unhinted Qwen 3 4B control on the Condensed FHIR Chart Ledger alone."
+    knobs:
+      answer: {temperature: 0.1, dry: 0.0, maxTokens: 4096}
+    visibility: product
+    selection_priority: 41
     context: {window: 24576, reserved_output_tokens: 2048, exact_tokenizer: true}
 
   wahs-qwen35-9b-kb:
-    label: "WAHS+ Cross-Family — Qwen 3.5 9B + 4-Layer Clinical KB"
+    label: "Qwen 3.5 9B (Q8) — + 4-Layer Clinical KB"
     workflow: wahs
     topology: single
     stages: [context, answer, gate]
@@ -483,126 +834,350 @@ profiles:
     prompts: {answer: wahs-kb-guided}
     policies:
       provider: local
+      model_family: qwen
+      parameter_size: "9B"
+      quantization: "Q8_0"
       include_kb_findings: true
       overflow_lookup_tools: true
       citation_grounding: enforce
-      description: "Cross-family comparison profile: runs Qwen 3.5 9B with the identical WAHS+ KB prompt to compare model-family behavior on the same condensed chart."
+      description: "Mid-size Qwen 3.5 9B (Q8_0) profile paired with the 4-Layer Clinical KB."
     knobs:
-      answer: {temperature: 0.1, dry: 0.0, maxTokens: 900}
+      answer: {temperature: 0.1, dry: 0.0, maxTokens: 4096}
+    visibility: product
+    selection_priority: 42
+    context: {window: 24576, reserved_output_tokens: 2048, exact_tokenizer: true}
+
+  wahs-qwen35-9b-raw:
+    label: "Qwen 3.5 9B (Q8) — Raw Condensed Chart Only"
+    workflow: wahs
+    topology: single
+    stages: [context, answer, gate]
+    models: {answer: qwen3.5-9b}
+    prompts: {answer: wahs-raw-unhinted}
+    policies:
+      provider: local
+      model_family: qwen
+      parameter_size: "9B"
+      quantization: "Q8_0"
+      include_kb_findings: false
+      overflow_lookup_tools: false
+      citation_grounding: enforce
+      description: "Unhinted Qwen 3.5 9B (Q8_0) control on the Condensed FHIR Chart Ledger alone."
+    knobs:
+      answer: {temperature: 0.1, dry: 0.0, maxTokens: 4096}
+    visibility: product
+    selection_priority: 43
+    context: {window: 24576, reserved_output_tokens: 2048, exact_tokenizer: true}
+
+  wahs-qwen25-14b-kb:
+    label: "Qwen 2.5 14B Instruct (Q4) — + 4-Layer Clinical KB"
+    workflow: wahs
+    topology: single
+    stages: [context, answer, gate]
+    models: {answer: qwen2.5-14b}
+    prompts: {answer: wahs-kb-guided}
+    policies:
+      provider: local
+      model_family: qwen
+      parameter_size: "14B"
+      quantization: "Q4_K_M"
+      include_kb_findings: true
+      overflow_lookup_tools: true
+      citation_grounding: enforce
+      description: "Dense 14B Qwen 2.5 Instruct profile paired with the 4-Layer Clinical KB."
+    knobs:
+      answer: {temperature: 0.1, dry: 0.0, maxTokens: 4096}
+    visibility: product
+    selection_priority: 44
+    context: {window: 24576, reserved_output_tokens: 2048, exact_tokenizer: true}
+
+  wahs-qwen25-14b-raw:
+    label: "Qwen 2.5 14B Instruct (Q4) — Raw Condensed Chart Only"
+    workflow: wahs
+    topology: single
+    stages: [context, answer, gate]
+    models: {answer: qwen2.5-14b}
+    prompts: {answer: wahs-raw-unhinted}
+    policies:
+      provider: local
+      model_family: qwen
+      parameter_size: "14B"
+      quantization: "Q4_K_M"
+      include_kb_findings: false
+      overflow_lookup_tools: false
+      citation_grounding: enforce
+      description: "Unhinted dense 14B Qwen 2.5 Instruct control on the Condensed FHIR Chart Ledger alone."
+    knobs:
+      answer: {temperature: 0.1, dry: 0.0, maxTokens: 4096}
+    visibility: product
+    selection_priority: 45
+    context: {window: 24576, reserved_output_tokens: 2048, exact_tokenizer: true}
+
+  wahs-qwen3-14b-kb:
+    label: "Qwen 3 14B (Q4) — + 4-Layer Clinical KB"
+    workflow: wahs
+    topology: single
+    stages: [context, answer, gate]
+    models: {answer: qwen3-14b}
+    prompts: {answer: wahs-kb-guided}
+    policies:
+      provider: local
+      model_family: qwen
+      parameter_size: "14B"
+      quantization: "Q4_K_M"
+      include_kb_findings: true
+      overflow_lookup_tools: true
+      citation_grounding: enforce
+      description: "Dense 14B Qwen 3 (non-thinking) profile paired with the 4-Layer Clinical KB."
+    knobs:
+      answer: {temperature: 0.1, dry: 0.0, maxTokens: 4096}
+    visibility: product
+    selection_priority: 46
+    context: {window: 24576, reserved_output_tokens: 2048, exact_tokenizer: true}
+
+  wahs-qwen3-14b-raw:
+    label: "Qwen 3 14B (Q4) — Raw Condensed Chart Only"
+    workflow: wahs
+    topology: single
+    stages: [context, answer, gate]
+    models: {answer: qwen3-14b}
+    prompts: {answer: wahs-raw-unhinted}
+    policies:
+      provider: local
+      model_family: qwen
+      parameter_size: "14B"
+      quantization: "Q4_K_M"
+      include_kb_findings: false
+      overflow_lookup_tools: false
+      citation_grounding: enforce
+      description: "Unhinted dense 14B Qwen 3 (non-thinking) control on the Condensed FHIR Chart Ledger alone."
+    knobs:
+      answer: {temperature: 0.1, dry: 0.0, maxTokens: 4096}
+    visibility: product
+    selection_priority: 47
+    context: {window: 24576, reserved_output_tokens: 2048, exact_tokenizer: true}
+
+  wahs-qwen36-35b-kb:
+    label: "Qwen 3.6 35B-A3B MoE (Q4) — + 4-Layer Clinical KB"
+    workflow: wahs
+    topology: single
+    stages: [context, answer, gate]
+    models: {answer: qwen3.6-35b}
+    prompts: {answer: wahs-kb-guided}
+    policies:
+      provider: local
+      model_family: qwen
+      parameter_size: "35B-A3B"
+      quantization: "Q4_K_M"
+      include_kb_findings: true
+      overflow_lookup_tools: true
+      citation_grounding: enforce
+      description: "Sparse MoE Qwen 3.6 35B-A3B (non-thinking) profile paired with the 4-Layer Clinical KB."
+    knobs:
+      answer: {temperature: 0.1, dry: 0.0, maxTokens: 4096}
+    visibility: product
+    selection_priority: 48
+    context: {window: 24576, reserved_output_tokens: 2048, exact_tokenizer: true}
+
+  wahs-qwen36-35b-raw:
+    label: "Qwen 3.6 35B-A3B MoE (Q4) — Raw Condensed Chart Only"
+    workflow: wahs
+    topology: single
+    stages: [context, answer, gate]
+    models: {answer: qwen3.6-35b}
+    prompts: {answer: wahs-raw-unhinted}
+    policies:
+      provider: local
+      model_family: qwen
+      parameter_size: "35B-A3B"
+      quantization: "Q4_K_M"
+      include_kb_findings: false
+      overflow_lookup_tools: false
+      citation_grounding: enforce
+      description: "Unhinted sparse MoE Qwen 3.6 35B-A3B control on the Condensed FHIR Chart Ledger alone."
+    knobs:
+      answer: {temperature: 0.1, dry: 0.0, maxTokens: 4096}
+    visibility: product
+    selection_priority: 49
+    context: {window: 24576, reserved_output_tokens: 2048, exact_tokenizer: true}
+
+  # --- Family 4: Meta Llama (Llama 3.1 8B Instruct Q4) ---
+  wahs-llama31-8b-kb:
+    label: "Meta Llama 3.1 8B Instruct (Q4) — + 4-Layer Clinical KB"
+    workflow: wahs
+    topology: single
+    stages: [context, answer, gate]
+    models: {answer: llama-3.1-8b}
+    prompts: {answer: wahs-kb-guided}
+    policies:
+      provider: local
+      model_family: llama
+      parameter_size: "8B"
+      quantization: "Q4_K_M"
+      include_kb_findings: true
+      overflow_lookup_tools: true
+      citation_grounding: enforce
+      description: "Meta Llama 3.1 8B Instruct paired with the 4-Layer Clinical KB."
+    knobs:
+      answer: {temperature: 0.1, dry: 0.0, maxTokens: 4096}
+    visibility: product
+    selection_priority: 50
+    context: {window: 24576, reserved_output_tokens: 2048, exact_tokenizer: true}
+
+  wahs-llama31-8b-raw:
+    label: "Meta Llama 3.1 8B Instruct (Q4) — Raw Condensed Chart Only"
+    workflow: wahs
+    topology: single
+    stages: [context, answer, gate]
+    models: {answer: llama-3.1-8b}
+    prompts: {answer: wahs-raw-unhinted}
+    policies:
+      provider: local
+      model_family: llama
+      parameter_size: "8B"
+      quantization: "Q4_K_M"
+      include_kb_findings: false
+      overflow_lookup_tools: false
+      citation_grounding: enforce
+      description: "Unhinted Meta Llama 3.1 8B Instruct control on the Condensed FHIR Chart Ledger alone."
+    knobs:
+      answer: {temperature: 0.1, dry: 0.0, maxTokens: 4096}
+    visibility: product
+    selection_priority: 51
+    context: {window: 24576, reserved_output_tokens: 2048, exact_tokenizer: true}
+
+  # --- Family 5: Mistral AI (Mistral Nemo 12B Instruct Q4) ---
+  wahs-mistral-nemo-12b-kb:
+    label: "Mistral Nemo 12B Instruct (Q4) — + 4-Layer Clinical KB"
+    workflow: wahs
+    topology: single
+    stages: [context, answer, gate]
+    models: {answer: mistral-nemo-12b}
+    prompts: {answer: wahs-kb-guided}
+    policies:
+      provider: local
+      model_family: mistral
+      parameter_size: "12B"
+      quantization: "Q4_K_M"
+      include_kb_findings: true
+      overflow_lookup_tools: true
+      citation_grounding: enforce
+      description: "Mistral Nemo 12B Instruct (2407) paired with the 4-Layer Clinical KB."
+    knobs:
+      answer: {temperature: 0.1, dry: 0.0, maxTokens: 4096}
     visibility: product
     selection_priority: 60
     context: {window: 24576, reserved_output_tokens: 2048, exact_tokenizer: true}
 
-  wahs-openrouter-gemma-3-27b-kb:
-    label: "OpenRouter — Google Gemma 3 27B IT + 4-Layer Clinical KB"
+  wahs-mistral-nemo-12b-raw:
+    label: "Mistral Nemo 12B Instruct (Q4) — Raw Condensed Chart Only"
     workflow: wahs
     topology: single
     stages: [context, answer, gate]
-    models: {answer: google/gemma-3-27b-it}
-    prompts: {answer: wahs-kb-guided}
-    policies:
-      provider: openrouter
-      include_kb_findings: true
-      overflow_lookup_tools: true
-      citation_grounding: enforce
-      description: "Cloud comparison via OpenRouter: runs Google Gemma 3 27B IT with the WAHS+ 4-Layer Clinical KB prompt."
-    knobs:
-      answer: {temperature: 0.1, dry: 0.0, maxTokens: 1024}
-    visibility: product
-    selection_priority: 110
-    context: {window: 32768, reserved_output_tokens: 2048, exact_tokenizer: false}
-
-  wahs-openrouter-qwen-2.5-72b-kb:
-    label: "OpenRouter — Qwen 2.5 72B Instruct + 4-Layer Clinical KB"
-    workflow: wahs
-    topology: single
-    stages: [context, answer, gate]
-    models: {answer: qwen/qwen-2.5-72b-instruct}
-    prompts: {answer: wahs-kb-guided}
-    policies:
-      provider: openrouter
-      include_kb_findings: true
-      overflow_lookup_tools: true
-      citation_grounding: enforce
-      description: "Cloud comparison via OpenRouter: runs Qwen 2.5 72B Instruct with the WAHS+ 4-Layer Clinical KB prompt."
-    knobs:
-      answer: {temperature: 0.1, dry: 0.0, maxTokens: 1024}
-    visibility: product
-    selection_priority: 120
-    context: {window: 32768, reserved_output_tokens: 2048, exact_tokenizer: false}
-
-  wahs-openrouter-llama-3.3-70b-kb:
-    label: "OpenRouter — Meta Llama 3.3 70B Instruct + 4-Layer Clinical KB"
-    workflow: wahs
-    topology: single
-    stages: [context, answer, gate]
-    models: {answer: meta-llama/llama-3.3-70b-instruct}
-    prompts: {answer: wahs-kb-guided}
-    policies:
-      provider: openrouter
-      include_kb_findings: true
-      overflow_lookup_tools: true
-      citation_grounding: enforce
-      description: "Cloud comparison via OpenRouter: runs Meta Llama 3.3 70B Instruct with the WAHS+ 4-Layer Clinical KB prompt."
-    knobs:
-      answer: {temperature: 0.1, dry: 0.0, maxTokens: 1024}
-    visibility: product
-    selection_priority: 130
-    context: {window: 32768, reserved_output_tokens: 2048, exact_tokenizer: false}
-
-  wahs-openrouter-gemini-2.5-flash-kb:
-    label: "OpenRouter — Google Gemini 2.5 Flash + 4-Layer Clinical KB"
-    workflow: wahs
-    topology: single
-    stages: [context, answer, gate]
-    models: {answer: google/gemini-2.5-flash}
-    prompts: {answer: wahs-kb-guided}
-    policies:
-      provider: openrouter
-      include_kb_findings: true
-      overflow_lookup_tools: true
-      citation_grounding: enforce
-      description: "Frontier cloud comparison via OpenRouter: runs Google Gemini 2.5 Flash with the WAHS+ 4-Layer Clinical KB prompt."
-    knobs:
-      answer: {temperature: 0.1, dry: 0.0, maxTokens: 1024}
-    visibility: product
-    selection_priority: 140
-    context: {window: 32768, reserved_output_tokens: 2048, exact_tokenizer: false}
-
-  wahs-openrouter-gemini-2.5-flash-raw:
-    label: "OpenRouter — Google Gemini 2.5 Flash (Unhinted Control, No KB Hints)"
-    workflow: wahs
-    topology: single
-    stages: [context, answer, gate]
-    models: {answer: google/gemini-2.5-flash}
+    models: {answer: mistral-nemo-12b}
     prompts: {answer: wahs-raw-unhinted}
     policies:
-      provider: openrouter
+      provider: local
+      model_family: mistral
+      parameter_size: "12B"
+      quantization: "Q4_K_M"
       include_kb_findings: false
       overflow_lookup_tools: false
       citation_grounding: enforce
-      description: "Frontier cloud ablation control via OpenRouter: runs Google Gemini 2.5 Flash on the Condensed Chart Ledger alone without 4-Layer KB hints."
+      description: "Unhinted Mistral Nemo 12B Instruct control on the Condensed FHIR Chart Ledger alone."
     knobs:
-      answer: {temperature: 0.1, dry: 0.0, maxTokens: 1024}
+      answer: {temperature: 0.1, dry: 0.0, maxTokens: 4096}
     visibility: product
-    selection_priority: 145
-    context: {window: 32768, reserved_output_tokens: 2048, exact_tokenizer: false}
+    selection_priority: 61
+    context: {window: 24576, reserved_output_tokens: 2048, exact_tokenizer: true}
 
-  wahs-openrouter-claude-sonnet-kb:
-    label: "OpenRouter — Anthropic Claude 3.7 Sonnet + 4-Layer Clinical KB"
+  # --- Family 6: IBM Granite (Granite 3.3 8B Instruct Q4) ---
+  wahs-granite33-8b-kb:
+    label: "IBM Granite 3.3 8B Instruct (Q4) — + 4-Layer Clinical KB"
     workflow: wahs
     topology: single
     stages: [context, answer, gate]
-    models: {answer: anthropic/claude-3.7-sonnet}
+    models: {answer: granite-3.3-8b}
     prompts: {answer: wahs-kb-guided}
     policies:
-      provider: openrouter
+      provider: local
+      model_family: granite
+      parameter_size: "8B"
+      quantization: "Q4_K_M"
       include_kb_findings: true
       overflow_lookup_tools: true
       citation_grounding: enforce
-      description: "Frontier cloud comparison via OpenRouter: runs Anthropic Claude 3.7 Sonnet with the WAHS+ 4-Layer Clinical KB prompt."
+      description: "IBM Granite 3.3 8B Instruct paired with the 4-Layer Clinical KB."
     knobs:
-      answer: {temperature: 0.1, dry: 0.0, maxTokens: 1024}
+      answer: {temperature: 0.1, dry: 0.0, maxTokens: 4096}
     visibility: product
-    selection_priority: 150
-    context: {window: 32768, reserved_output_tokens: 2048, exact_tokenizer: false}
+    selection_priority: 70
+    context: {window: 24576, reserved_output_tokens: 2048, exact_tokenizer: true}
+
+  wahs-granite33-8b-raw:
+    label: "IBM Granite 3.3 8B Instruct (Q4) — Raw Condensed Chart Only"
+    workflow: wahs
+    topology: single
+    stages: [context, answer, gate]
+    models: {answer: granite-3.3-8b}
+    prompts: {answer: wahs-raw-unhinted}
+    policies:
+      provider: local
+      model_family: granite
+      parameter_size: "8B"
+      quantization: "Q4_K_M"
+      include_kb_findings: false
+      overflow_lookup_tools: false
+      citation_grounding: enforce
+      description: "Unhinted IBM Granite 3.3 8B Instruct control on the Condensed FHIR Chart Ledger alone."
+    knobs:
+      answer: {temperature: 0.1, dry: 0.0, maxTokens: 4096}
+    visibility: product
+    selection_priority: 71
+    context: {window: 24576, reserved_output_tokens: 2048, exact_tokenizer: true}
+
+  # --- Family 7: Liquid AI LFM2 (LFM2 8B-A1B Hybrid MoE Q4) ---
+  wahs-lfm2-8b-kb:
+    label: "Liquid LFM2 8B-A1B MoE (Q4) — + 4-Layer Clinical KB"
+    workflow: wahs
+    topology: single
+    stages: [context, answer, gate]
+    models: {answer: lfm2-8b-a1b}
+    prompts: {answer: wahs-kb-guided}
+    policies:
+      provider: local
+      model_family: lfm2
+      parameter_size: "8B-A1B"
+      quantization: "Q4_K_M"
+      include_kb_findings: true
+      overflow_lookup_tools: true
+      citation_grounding: enforce
+      description: "Liquid AI LFM2 8B-A1B hybrid MoE paired with the 4-Layer Clinical KB."
+    knobs:
+      answer: {temperature: 0.1, dry: 0.0, maxTokens: 4096}
+    visibility: product
+    selection_priority: 80
+    context: {window: 24576, reserved_output_tokens: 2048, exact_tokenizer: true}
+
+  wahs-lfm2-8b-raw:
+    label: "Liquid LFM2 8B-A1B MoE (Q4) — Raw Condensed Chart Only"
+    workflow: wahs
+    topology: single
+    stages: [context, answer, gate]
+    models: {answer: lfm2-8b-a1b}
+    prompts: {answer: wahs-raw-unhinted}
+    policies:
+      provider: local
+      model_family: lfm2
+      parameter_size: "8B-A1B"
+      quantization: "Q4_K_M"
+      include_kb_findings: false
+      overflow_lookup_tools: false
+      citation_grounding: enforce
+      description: "Unhinted Liquid AI LFM2 8B-A1B hybrid MoE control on the Condensed FHIR Chart Ledger alone."
+    knobs:
+      answer: {temperature: 0.1, dry: 0.0, maxTokens: 4096}
+    visibility: product
+    selection_priority: 81
+    context: {window: 24576, reserved_output_tokens: 2048, exact_tokenizer: true}
+

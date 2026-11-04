@@ -14,7 +14,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Sequ
 
 import httpx
 
-from . import answer_rules, drug_safety, temporal
+from . import answer_rules, drug_safety, model_provisioner, temporal
 from .config import EXPERT_DRY_MULTIPLIER, llm_config, resolve_hub_build_revision
 from .context_sources import (
     CHART_MARKER,
@@ -1595,6 +1595,7 @@ async def _chat(
     if slot_evidence is not None:
         slot_evidence.acquired()
     try:
+        await model_provisioner.ensure_local_model_provisioned(model)
         router_timeout = (
             llm_config.request_timeout_seconds
             if request_timeout is _REQUEST_TIMEOUT_UNSET

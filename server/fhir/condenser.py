@@ -1681,16 +1681,33 @@ def _pack_items_to_token_budget(
             mandatory_items = compressed_mandatory
 
     accepted_optional: List[ClinicalItem] = []
-    for opt in ranked_optional:
-        trial_body = mandatory_items + accepted_optional + [opt]
-        _, _, _, _, trial_toks = render_candidate(trial_body)
-        if trial_toks <= target_tokens:
-            accepted_optional.append(opt)
-
-    accepted_optional.sort(key=lambda x: _date_sort_key(x.date), reverse=True)
-    ordered, manifest_dict, c_text, c_maps, final_toks = render_candidate(
-        mandatory_items + accepted_optional
-    )
+    if len(ranked_optional) > 60 or target_tokens > 4096:
+        _, _, _, _, running_toks = render_candidate(mandatory_items)
+        for opt in ranked_optional:
+            est_opt = max(6, token_counter(opt.text) + 5)
+            if running_toks + est_opt <= target_tokens:
+                accepted_optional.append(opt)
+                running_toks += est_opt
+        ordered, manifest_dict, c_text, c_maps, final_toks = render_candidate(
+            mandatory_items + sorted(accepted_optional, key=lambda x: _date_sort_key(x.date), reverse=True)
+        )
+        while final_toks > target_tokens and accepted_optional:
+            # Drop several items at once if far over budget, otherwise 1 by 1
+            drop_n = max(1, (final_toks - target_tokens) // 35)
+            del accepted_optional[-drop_n:]
+            ordered, manifest_dict, c_text, c_maps, final_toks = render_candidate(
+                mandatory_items + sorted(accepted_optional, key=lambda x: _date_sort_key(x.date), reverse=True)
+            )
+    else:
+        for opt in ranked_optional:
+            trial_body = mandatory_items + accepted_optional + [opt]
+            _, _, _, _, trial_toks = render_candidate(trial_body)
+            if trial_toks <= target_tokens:
+                accepted_optional.append(opt)
+        accepted_optional.sort(key=lambda x: _date_sort_key(x.date), reverse=True)
+        ordered, manifest_dict, c_text, c_maps, final_toks = render_candidate(
+            mandatory_items + accepted_optional
+        )
     if final_toks > target_tokens:
         raise ValueError(
             f"target_tokens ({target_tokens}) is too small to fit mandatory clinical safety core ({final_toks} tokens required)"
@@ -1818,7 +1835,22 @@ def _condense_lossless_structural(
         "procedure_routine": 15,
         "encounter_routine": 16,
     }
-    scale = 1.6 if target_tokens >= 12000 else (1.0 if target_tokens >= 6000 else (0.45 if target_tokens >= 3000 else 0.20))
+    if target_tokens >= 192000:
+        scale = 16.0
+    elif target_tokens >= 96000:
+        scale = 8.0
+    elif target_tokens >= 48000:
+        scale = 4.0
+    elif target_tokens >= 24000:
+        scale = 2.5
+    elif target_tokens >= 12000:
+        scale = 1.6
+    elif target_tokens >= 6000:
+        scale = 1.0
+    elif target_tokens >= 3000:
+        scale = 0.45
+    else:
+        scale = 0.20
     primary_window_caps = {
         "lab_trajectory": max(6, int(24 * scale)),
         "immunization": max(3, int(24 * scale)),

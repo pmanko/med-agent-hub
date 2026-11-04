@@ -474,12 +474,16 @@ def test_w17_script_modularity_archetypes_and_demo_exporter(tmp_path: Any) -> No
     )
 
     assert build_archetypes_direct is build_deidentified_real_clinical_summaries
-    assert len(PRIMARY_PERSONA_IDS) == 6
+    assert len(PRIMARY_PERSONA_IDS) == 10
     assert set(PERSONA_BIOS.keys()) == {
         "Maurice742_Auer97",
+        "MIMIC_10014354_ICU_Heme_Cardiorenal",
+        "MIMIC_10019003_ICU_Hepatopulmonary",
         "Elena_Rostova_Cardiorenal",
         "Arthur_Pendelton_Anticoag",
         "Margaret_Chen_Polypharmacy",
+        "Sofia_Alvarez_Maternal_Endocrine",
+        "Marcus_Vance_Oncology_Immunotherapy",
         "Lamar193_Beer512",
         "Byron202_Emard19",
     }

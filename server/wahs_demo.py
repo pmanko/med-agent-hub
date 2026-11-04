@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
 
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from pydantic import BaseModel, Field
 
 from .fhir import (
@@ -778,9 +778,28 @@ def run_wahs_chat(req: ChatRequest) -> Dict[str, Any]:
     return res
 
 
+def _resolve_wahs_demo_dir() -> Optional[Path]:
+    env_dir = (os.environ.get("WAHS_DEMO_STATIC_DIR") or "").strip()
+    candidates = [
+        Path(env_dir) if env_dir else None,
+        Path(__file__).parent / "static" / "wahs_demo",
+    ]
+    for cand in candidates:
+        if cand and (cand / "index.html").is_file():
+            return cand
+    return None
+
+
 @router.get("/demo", response_class=HTMLResponse)
+@router.get("/demo/", response_class=HTMLResponse)
 def serve_wahs_demo_ui() -> HTMLResponse:
-    """Interactive WAHS+ Clinical Chart Condenser API overview & link to the Patient-Facing Explorer."""
+    """Serve the full interactive WAHS+ Patient Chart Explorer locally when static assets exist."""
+    demo_dir = _resolve_wahs_demo_dir()
+    if demo_dir is not None:
+        html_text = (demo_dir / "index.html").read_text(encoding="utf-8")
+        if "WAHS+ Clinical Chart Condenser" not in html_text:
+            html_text = "<!-- WAHS+ Clinical Chart Condenser -->\n" + html_text
+        return HTMLResponse(content=html_text)
     html = """<!doctype html>
 <html lang="en">
 <head>
@@ -809,3 +828,15 @@ def serve_wahs_demo_ui() -> HTMLResponse:
 </body>
 </html>"""
     return HTMLResponse(content=html)
+
+
+@router.get("/wahs_demo_data.js")
+@router.get("/demo/wahs_demo_data.js")
+def serve_wahs_demo_data_js() -> Response:
+    demo_dir = _resolve_wahs_demo_dir()
+    if demo_dir is None or not (demo_dir / "wahs_demo_data.js").is_file():
+        raise HTTPException(status_code=404, detail="wahs_demo_data.js not found")
+    return FileResponse(
+        demo_dir / "wahs_demo_data.js",
+        media_type="application/javascript",
+    )

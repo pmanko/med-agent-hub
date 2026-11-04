@@ -473,15 +473,33 @@ def test_w19_wahs_profiles_discovery_and_execution_surface(monkeypatch) -> None:
     validated = validate_wahs_profiles()
     ids = wahs_profile_ids()
     assert len(validated) == len(ids)
+    assert all(p.topology == "single" for p in validated)
     assert "wahs-12b-kb" in ids
     assert "wahs-12b-raw" in ids
-    assert "wahs-12b-xcheck" in ids
-    assert "wahs-openrouter-gemini-2.5-flash-kb" in ids
+    assert "wahs-medgemma-4b-kb" in ids
+    assert "wahs-medgemma-4b-raw" in ids
+    assert "wahs-qwen35-9b-kb" in ids
+    assert "wahs-qwen35-9b-raw" in ids
+    assert "wahs-llama31-8b-kb" in ids
+    assert "wahs-llama31-8b-raw" in ids
+    assert "wahs-mistral-nemo-12b-kb" in ids
+    assert "wahs-granite33-8b-kb" in ids
+    assert "wahs-lfm2-8b-kb" in ids
+    assert not any(pid.startswith("wahs-openrouter-") for pid in ids)
 
     kb_prof = get_wahs_profile("wahs-12b-kb")
     raw_prof = get_wahs_profile("wahs-12b-raw")
     assert kb_prof.policies["include_kb_findings"] is True
     assert raw_prof.policies["include_kb_findings"] is False
+
+    # Dynamic zero-friction WAHS profiles compile on demand
+    dyn_kb = get_wahs_profile("wahs-kb:gemma-e2b")
+    dyn_raw = get_wahs_profile("wahs-raw:llama-3.1-8b")
+    assert dyn_kb.topology == "single"
+    assert dyn_kb.models["answer"] == "gemma-e2b"
+    assert dyn_kb.policies["include_kb_findings"] is True
+    assert dyn_raw.models["answer"] == "llama-3.1-8b"
+    assert dyn_raw.policies["include_kb_findings"] is False
 
     # Verify condensation_matrix cells include retained_uuids
     bundle = _make_synthetic_wahs_bundle()
@@ -496,7 +514,7 @@ def test_w19_wahs_profiles_discovery_and_execution_surface(monkeypatch) -> None:
     )
     client = TestClient(app)
 
-    # Without OpenRouter key: local profiles with loaded models are available, OpenRouter profiles are unavailable
+    # Without OpenRouter key: local profiles with loaded models are available, unloaded models are unavailable
     r_models = client.get("/v1/models?workflow=wahs")
     assert r_models.status_code == 200
     body = r_models.json()
@@ -504,17 +522,20 @@ def test_w19_wahs_profiles_discovery_and_execution_surface(monkeypatch) -> None:
     by_id = {m["id"]: m for m in body["data"]}
     assert by_id["wahs-12b-kb"]["available"] is True
     assert by_id["wahs-12b-raw"]["available"] is True
-    assert by_id["wahs-12b-xcheck"]["available"] is True
+    assert by_id["wahs-qwen35-9b-kb"]["available"] is True
+    assert by_id["wahs-qwen35-9b-raw"]["available"] is True
+    assert by_id["wahs-12b-kb"]["model_family"] == "gemma-4"
     assert "SUMMARY:" in by_id["wahs-12b-kb"]["system_prompts"]["answer"]
-    assert by_id["wahs-openrouter-gemini-2.5-flash-kb"]["available"] is False
+    assert by_id["wahs-llama31-8b-kb"]["available"] is False
 
-    # With X-OpenRouter-Key header: OpenRouter profiles become available
+    # With X-OpenRouter-Key header: all profiles become available via OpenRouter connection
     r_or = client.get(
         "/v1/models?workflow=wahs", headers={"X-OpenRouter-Key": "sk-or-test-key"}
     )
     assert r_or.status_code == 200
     by_id_or = {m["id"]: m for m in r_or.json()["data"]}
-    assert by_id_or["wahs-openrouter-gemini-2.5-flash-kb"]["available"] is True
+    assert by_id_or["wahs-llama31-8b-kb"]["available"] is True
+    assert by_id_or["wahs-llama31-8b-kb"]["openrouter_model"] == "meta-llama/llama-3.3-70b-instruct"
 
     # Test POST /v1/chat/completions execution for a WAHS profile
     captured_calls = []
@@ -829,6 +850,63 @@ def test_wahs_review_regressions_privacy_negation_lvef_and_api_validation() -> N
     )
     assert len(browser_capped["resources"]) == 3
     assert browser_capped["omitted_bulk_observation_count"] == 7
+
+
+def test_w20_hub_auto_provisions_missing_pinned_gguf_models(tmp_path, monkeypatch) -> None:
+    import asyncio
+    import hashlib
+    from server import model_provisioner
+
+    model_dir = tmp_path / "models"
+    model_dir.mkdir()
+    manifest = tmp_path / "models.tsv"
+    payload = b"GGUF-fake-llama-3.1-8b-weights"
+    sha = hashlib.sha256(payload).hexdigest()
+    manifest.write_text(
+        f"llama-3.1-8b\tMeta-Llama-3.1-8B-Instruct-Q4_K_M.gguf\t{sha}\t"
+        "https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF/resolve/"
+        "bf5b95e96dac0462e2a09145ec66cae9a3f12067/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("LLAMA_MODEL_DIR", str(model_dir))
+    monkeypatch.setenv("LLAMA_MODELS_MANIFEST", str(manifest))
+
+    assert model_provisioner.is_model_pinned("llama-3.1-8b") is True
+    assert model_provisioner.is_model_file_present("llama-3.1-8b") is False
+
+    class FakeStreamResp:
+        def raise_for_status(self):
+            return None
+
+        async def aiter_bytes(self, chunk_size=1024):
+            yield payload
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def stream(self, method, url):
+            return FakeStreamResp()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+    monkeypatch.setattr(model_provisioner.httpx, "AsyncClient", FakeClient)
+
+    ok = asyncio.run(model_provisioner.ensure_local_model_provisioned("llama-3.1-8b"))
+    assert ok is True
+    assert (model_dir / "llama-3.1-8b.gguf").read_bytes() == payload
+    assert model_provisioner.is_model_file_present("llama-3.1-8b") is True
+
 
 
 
