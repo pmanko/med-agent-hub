@@ -982,10 +982,25 @@ def _ensure_patient_chart_cache() -> None:
             build_extended_longitudinal_demo_archetypes,
         )
 
-        for pid, raw_b in build_deidentified_real_clinical_summaries().items():
-            _register_bundle(raw_b, pid)
-        for pid, raw_b in build_extended_longitudinal_demo_archetypes().items():
-            _register_bundle(raw_b, pid)
+        for pid, val in build_deidentified_real_clinical_summaries().items():
+            raw_b = val[0] if isinstance(val, tuple) else val
+            if isinstance(raw_b, dict):
+                _register_bundle(raw_b, pid.replace(".json", ""))
+        for pid, val in build_extended_longitudinal_demo_archetypes().items():
+            raw_b = val[0] if isinstance(val, tuple) else val
+            if isinstance(raw_b, dict):
+                _register_bundle(raw_b, pid.replace(".json", ""))
+    except Exception:
+        pass
+
+    # 2b. Load from scripts.wahs_mimic_fhir_loader (Julian Mercer MIMIC-IV #10014354, Clara Hollis MIMIC-IV #10019003)
+    try:
+        from scripts.wahs_mimic_fhir_loader import build_mimic_fhir_patient_bundles
+
+        for pid, val in build_mimic_fhir_patient_bundles().items():
+            raw_b = val[0] if isinstance(val, tuple) else val
+            if isinstance(raw_b, dict):
+                _register_bundle(raw_b, pid.replace(".json", ""))
     except Exception:
         pass
 
