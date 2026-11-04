@@ -302,7 +302,7 @@ OPENROUTER_MODEL_MAP: Dict[str, str] = {
 }
 
 
-WAHS_RECOMMENDED_LIMIT_URL = "/reports/2026-11-02-wahs-simple-profiles-multi-family-eval/index.html"
+WAHS_RECOMMENDED_LIMIT_URL = "https://reports.openclinai.org/2026-11-03-wahs-huge-context-and-hub-graph-eval/index.html"
 
 WAHS_MODEL_CONTEXT_SPECS: Dict[str, Tuple[int, int]] = {
     "gemma-26b": (262144, 32768),

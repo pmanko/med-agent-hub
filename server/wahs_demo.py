@@ -558,6 +558,47 @@ def _builtin_sample_bundles() -> Dict[str, Dict[str, Any]]:
     }
 
 
+_EXTENDED_CATALOG_CACHE: Optional[Dict[str, Dict[str, Any]]] = None
+
+
+def _get_extended_catalog() -> Dict[str, Dict[str, Any]]:
+    global _EXTENDED_CATALOG_CACHE
+    if _EXTENDED_CATALOG_CACHE is not None:
+        return _EXTENDED_CATALOG_CACHE
+    ext: Dict[str, Dict[str, Any]] = {}
+    try:
+        from scripts.wahs_uscore_archetypes import (
+            build_deidentified_real_clinical_summaries,
+            build_extended_longitudinal_demo_archetypes,
+        )
+
+        for builder in (
+            build_deidentified_real_clinical_summaries,
+            build_extended_longitudinal_demo_archetypes,
+        ):
+            for fname, val in builder().items():
+                bundle = val[0] if isinstance(val, tuple) else val
+                if isinstance(bundle, dict) and bundle.get("resourceType") == "Bundle":
+                    stem = fname[:-5] if fname.endswith(".json") else fname
+                    ext[stem] = bundle
+                    ext[f"{stem}_set_b"] = bundle
+    except Exception:
+        pass
+    try:
+        from scripts.wahs_mimic_fhir_loader import build_mimic_fhir_patient_bundles
+
+        for fname, val in build_mimic_fhir_patient_bundles().items():
+            bundle = val[0] if isinstance(val, tuple) else val
+            if isinstance(bundle, dict) and bundle.get("resourceType") == "Bundle":
+                stem = fname[:-5] if fname.endswith(".json") else fname
+                ext[stem] = bundle
+                ext[f"{stem}_set_b"] = bundle
+    except Exception:
+        pass
+    _EXTENDED_CATALOG_CACHE = ext
+    return ext
+
+
 def _load_patient_catalog() -> Dict[str, Dict[str, Any]]:
     catalog: Dict[str, Dict[str, Any]] = {}
     bundle_dir = os.environ.get("WAHS_BUNDLE_DIR", "").strip()
@@ -586,6 +627,8 @@ def _load_patient_catalog() -> Dict[str, Dict[str, Any]]:
 
     if not catalog:
         catalog.update(_builtin_sample_bundles())
+    for k, v in _get_extended_catalog().items():
+        catalog.setdefault(k, v)
     return catalog
 
 
@@ -606,7 +649,7 @@ class AnalyzeRequest(BaseModel):
     target_tokens: int = Field(
         default=8192,
         ge=512,
-        le=65536,
+        le=262144,
         description="Target token budget for progressive 5-Tier condensation.",
     )
     sharing_posture: str = Field(
