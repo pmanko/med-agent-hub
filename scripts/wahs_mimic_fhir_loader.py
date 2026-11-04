@@ -27,6 +27,7 @@ import base64
 import copy
 import gzip
 import json
+import os
 from pathlib import Path
 import re
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -142,7 +143,14 @@ STREAM_FILTERED_FILES = (
 def ensure_mimic_fhir_cache(cache_dir: Path) -> bool:
     """Ensure core and patient-filtered MIMIC-IV-FHIR Demo 2.0 NDJSON files are cached in `cache_dir`.
     Returns True if all required cache files are available, or False if offline and uncached."""
-    cache_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        return False
+    if (
+        os.environ.get("K_SERVICE") or os.environ.get("WAHS_SKIP_REMOTE_MIMIC_DOWNLOAD") == "1"
+    ) and not (cache_dir / "Patient.ndjson").exists():
+        return False
     target_uuids = {spec["patient_uuid"] for spec in MIMIC_PATIENT_SPECS.values()}
 
     try:
@@ -746,8 +754,14 @@ def build_mimic_fhir_patient_bundles(
     (`MIMIC_10014354_ICU_Heme_Cardiorenal.json` and `MIMIC_10019003_ICU_Hepatopulmonary.json`),
     optionally writing them to `eval_output_dir`."""
     if cache_dir is None:
-        repo_root = Path(__file__).resolve().parents[3]
-        cache_dir = repo_root / "work" / "wahs_data" / "mimic_fhir"
+        parents = Path(__file__).resolve().parents
+        repo_root = parents[3] if len(parents) > 3 else parents[-1]
+        cand = repo_root / "work" / "wahs_data" / "mimic_fhir"
+        try:
+            cand.mkdir(parents=True, exist_ok=True)
+            cache_dir = cand
+        except Exception:
+            cache_dir = Path("/tmp/wahs_data/mimic_fhir")
 
     has_cache = ensure_mimic_fhir_cache(cache_dir)
 

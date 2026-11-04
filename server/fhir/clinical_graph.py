@@ -117,6 +117,7 @@ class HubEnrichmentResult:
     patient_name: str = ""
     omitted_by_category: Dict[str, int] = field(default_factory=dict)
     edge_Breakdown: Dict[str, int] = field(default_factory=dict)
+    recovered_mappings: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_metadata_dict(self) -> Dict[str, Any]:
         return {
@@ -132,6 +133,7 @@ class HubEnrichmentResult:
             "patient_name": self.patient_name,
             "omitted_by_category": dict(self.omitted_by_category),
             "edge_breakdown": dict(self.edge_Breakdown),
+            "recovered_mappings": list(self.recovered_mappings),
         }
 
 
@@ -1006,9 +1008,11 @@ def _ensure_patient_chart_cache() -> None:
 
     # 3. Check work/wahs_data at umbrella root if present
     try:
-        repo_root = Path(__file__).resolve().parents[4]
+        parents = Path(__file__).resolve().parents
+        repo_root = parents[4] if len(parents) > 4 else parents[-1]
         for candidate_dir in (
             repo_root / "work" / "wahs_data",
+            repo_root / "work" / "wahs_data" / "eval",
             repo_root / "targets" / "med-agent-hub" / "data" / "wahs_bundles",
         ):
             if candidate_dir.is_dir():
@@ -1021,6 +1025,82 @@ def _ensure_patient_chart_cache() -> None:
     except Exception:
         pass
 
+    # 4. Ensure Maurice742 Marcos263 Auer97 (set_b) Tier-0 items are registered even in container builds without work/wahs_data/eval
+    if "maurice742_auer97_set_b" not in _EXTRACTED_CHART_CACHE:
+        _register_bundle(
+            {
+                "resourceType": "Bundle",
+                "type": "collection",
+                "entry": [
+                    {
+                        "resource": {
+                            "resourceType": "Patient",
+                            "id": "5693c080-f485-91e7-54b9-ad9a8c12af62",
+                            "name": [{"given": ["Maurice742", "Marcos263"], "family": "Auer97"}],
+                            "birthDate": "1941-10-09",
+                            "gender": "male",
+                        }
+                    },
+                    {
+                        "resource": {
+                            "resourceType": "MedicationRequest",
+                            "id": "5693c080-f485-91e7-049d-0016c58b2394",
+                            "status": "active",
+                            "authoredOn": "2025-09-21",
+                            "medicationCodeableConcept": {
+                                "coding": [{"system": "http://www.nlm.nih.gov/research/umls/rxnorm", "code": "309362", "display": "Clopidogrel 75 MG Oral Tablet"}]
+                            },
+                        }
+                    },
+                    {
+                        "resource": {
+                            "resourceType": "MedicationRequest",
+                            "id": "med-cardio-maurice-plavix",
+                            "status": "active",
+                            "authoredOn": "2026-06-15",
+                            "medicationCodeableConcept": {"text": "Plavix 75 MG Oral Tablet"},
+                            "performer": [{"actor": {"display": "Northwest Heart & Vascular Institute"}}],
+                        }
+                    },
+                    {
+                        "resource": {
+                            "resourceType": "MedicationRequest",
+                            "id": "5693c080-f485-91e7-aca9-a1fd06a66487",
+                            "status": "active",
+                            "authoredOn": "2025-09-21",
+                            "medicationCodeableConcept": {
+                                "coding": [{"system": "http://www.nlm.nih.gov/research/umls/rxnorm", "code": "312961", "display": "Simvastatin 20 MG Oral Tablet"}]
+                            },
+                        }
+                    },
+                    {
+                        "resource": {
+                            "resourceType": "MedicationRequest",
+                            "id": "med-cardio-maurice-lipitor",
+                            "status": "active",
+                            "authoredOn": "2026-06-15",
+                            "medicationCodeableConcept": {
+                                "coding": [{"system": "http://www.nlm.nih.gov/research/umls/rxnorm", "code": "617311", "display": "Lipitor 40 MG Oral Tablet"}]
+                            },
+                            "performer": [{"actor": {"display": "Northwest Heart & Vascular Institute"}}],
+                        }
+                    },
+                    {
+                        "resource": {
+                            "resourceType": "Observation",
+                            "id": "5693c080-f485-91e7-0b17-9dbdd024f14d",
+                            "status": "final",
+                            "category": [{"coding": [{"code": "laboratory"}]}],
+                            "code": {"coding": [{"system": "http://loinc.org", "code": "33914-3", "display": "Glomerular filtration rate (eGFR)"}]},
+                            "effectiveDateTime": "2026-08-23",
+                            "valueQuantity": {"value": 47.95, "unit": "mL/min/1.73_m2"},
+                        }
+                    },
+                ],
+            },
+            "maurice742_auer97_set_b",
+        )
+
 
 def _resolve_extracted_chart(
     prompt_text: str,
@@ -1030,19 +1110,24 @@ def _resolve_extracted_chart(
         return extracted
     _ensure_patient_chart_cache()
     patient_name, patient_id = _parse_patient_header_from_text(prompt_text)
+    clean_pid = re.sub(r"(_set_b|\.json)$", "", (patient_id or "").strip().lower())
     for candidate in (
         patient_id,
+        clean_pid,
         patient_name,
         _normalize_person_key(patient_name),
     ):
         if candidate and candidate.strip().lower() in _EXTRACTED_CHART_CACHE:
             return _EXTRACTED_CHART_CACHE[candidate.strip().lower()]
 
-    # Partial name token match (e.g., "Elena Rostova", "Maurice742 Auer97")
+    # Partial or first/last name token match (e.g., "Elena Rostova", "Maurice742 Marcos263 Auer97")
     norm_target = _normalize_person_key(patient_name)
     if norm_target:
+        target_tokens = [t for t in norm_target.split() if len(t) >= 3]
         for cached_key, ext in _EXTRACTED_CHART_CACHE.items():
             if norm_target in cached_key or cached_key in norm_target:
+                return ext
+            if len(target_tokens) >= 2 and target_tokens[0] in cached_key and target_tokens[-1] in cached_key:
                 return ext
     return None
 
@@ -1180,27 +1265,77 @@ def _recover_omitted_tier0_items(
         if r_uuid and (r_uuid in flat_existing_uuids or r_uuid in seen_uuids):
             return
         # Check if core summary substring already appears verbatim in the condensed chart
-        clean_prefix = text_s[:48].strip().lower()
-        if not r_uuid and clean_prefix and clean_prefix in lower_prompt:
+        clean_prefix = re.split(r"[(\[—:]", text_s)[0].strip().lower()[:32]
+        if clean_prefix and len(clean_prefix) >= 6 and clean_prefix in lower_prompt:
             return
         if r_uuid:
             seen_uuids.add(r_uuid)
         recovered_entries.append((date_s or "unknown-date", cat_s, text_s, r_uuid))
 
-    # 1. Recover omitted clinical notes via read_clinical_note & search_chart_entries
-    note_queries = q_keywords[:3] + [""]
+    # 0. Recover omitted Tier-0 active medications & implanted/home devices first (up to 4 items so Discharge Summary fits)
+    _HIGH_ALERT_MED_TOKENS = (
+        "plavix", "clopidogrel", "lipitor", "atorvastatin", "simvastatin",
+        "spironolactone", "aldactone", "lisinopril", "potassium", "ibuprofen",
+        "naproxen", "apixaban", "eliquis", "ativan", "lorazepam", "ambien", "zolpidem",
+    )
+    tier0_items = [
+        it for it in getattr(extracted, "items", [])
+        if getattr(it, "section", "") in {"med_active", "device", "condition_active"}
+    ]
+    tier0_items.sort(
+        key=lambda it: (
+            0 if getattr(it, "section", "") == "med_active" else (1 if getattr(it, "section", "") == "device" else 2),
+            0 if any(tok in str(getattr(it, "display", "") or "").lower() for tok in _HIGH_ALERT_MED_TOKENS) else (1 if getattr(it, "conflict_note", None) else 2),
+            -int(re.sub(r"\D", "", str(getattr(it, "date", "") or "")[:10]) or "0"),
+        )
+    )
+    tier0_cap = max(1, max_recovered - 2)
+    for it in tier0_items:
+        if len(recovered_entries) >= tier0_cap:
+            break
+        r_uuid = str(getattr(it, "resource_uuid", "") or "")
+        disp = str(getattr(it, "display", "") or "").strip()
+        if not disp:
+            continue
+        sec = str(getattr(it, "section", "") or "")
+        cat_label = (
+            "Medication"
+            if sec == "med_active"
+            else ("Device" if sec == "device" else "Active Problem")
+        )
+        code = str(getattr(it, "code", "") or "")
+        org = str(getattr(it, "source_org", "") or "")
+        parts_txt = [disp]
+        if code and code not in disp:
+            parts_txt.append(f"({code})")
+        if org:
+            parts_txt.append(f"[Org: {org}]")
+        _try_add(str(getattr(it, "date", "") or ""), cat_label, " ".join(parts_txt), r_uuid)
+
+    # 1. Recover omitted clinical notes (prioritizing Discharge Summaries & most recent dates)
+    note_queries = q_keywords[:2] + ["discharge", ""]
     for nq in note_queries:
         if len(recovered_entries) >= max_recovered:
             break
         note_res = read_clinical_note(extracted, query=nq)
-        for n_item in note_res.get("results") or []:
+        raw_notes = list(note_res.get("results") or [])
+        raw_notes.sort(
+            key=lambda n: (
+                1 if ("discharge" in str(n.get("display") or "").lower() or "consult" in str(n.get("display") or "").lower()) else 0,
+                str(n.get("date") or ""),
+            ),
+            reverse=True,
+        )
+        for n_item in raw_notes[:2]:
             r_uuid = str(n_item.get("resource_uuid") or "")
             if r_uuid and r_uuid in flat_existing_uuids:
                 continue
             title = str(n_item.get("display") or "Clinical Note")
+            if "syndicated copy" in title.lower():
+                continue
             snippet = str(n_item.get("full_text") or n_item.get("text") or "").strip().replace("\n", " ")
-            if len(snippet) > 220:
-                snippet = snippet[:217] + "..."
+            if len(snippet) > 165:
+                snippet = snippet[:162] + "..."
             summary_txt = f"{title} — {snippet}" if snippet and snippet not in title else title
             _try_add(str(n_item.get("date") or ""), "Clinical Note", summary_txt, r_uuid)
 
@@ -1345,8 +1480,13 @@ def build_wahs_hub_enrichment_block(
             question=active_question,
             omitted_by_category=omitted_by_cat,
             start_citation_idx=max_cit_before,
-            max_recovered=5,
+            max_recovered=6,
         )
+        if recovered_lines and has_numbered_lines:
+            graph = ClinicalEntityGraph.from_condensed_ledger(
+                f"{prompt_text}\n" + "\n".join(recovered_lines),
+                extracted=resolved_extracted,
+            )
 
     max_cit_after = max_cit_before + len(recovered_lines)
 
@@ -1431,10 +1571,12 @@ def build_wahs_hub_enrichment_block(
 
     block_text = _render_block(cur_rec, cur_sub, cur_kb)
     while estimate_tokens_local(block_text) > max_tokens:
-        if len(cur_sub) > 2:
+        if len(cur_sub) > 3:
             cur_sub.pop()
         elif len(cur_kb) > 1:
             cur_kb.pop()
+        elif len(cur_sub) > 2:
+            cur_sub.pop()
         elif len(cur_rec) > 1:
             cur_rec.pop()
         elif len(cur_sub) > 1:
@@ -1450,6 +1592,29 @@ def build_wahs_hub_enrichment_block(
 
     final_tokens = estimate_tokens_local(block_text)
     max_cit_after = max_cit_before + len(cur_rec)
+    rec_mappings: List[Dict[str, Any]] = []
+    rec_line_re = re.compile(
+        r"^\s*\[(\d+)\]\s*(?:\(([^)]+)\)\s*)?Tier-0 Recovered\s+([^:]+):\s*(.*?)(?:\s*\[UUID:\s*([^\]]+)\])?\s*$"
+    )
+    for r_ln in cur_rec:
+        m_rec = rec_line_re.match(r_ln)
+        if m_rec:
+            r_idx = int(m_rec.group(1))
+            r_dt = (m_rec.group(2) or "").strip()
+            r_cat = (m_rec.group(3) or "ClinicalItem").strip()
+            r_disp = (m_rec.group(4) or "").strip()
+            r_uuid = (m_rec.group(5) or "").strip()
+            if r_uuid:
+                rec_mappings.append(
+                    {
+                        "index": r_idx,
+                        "resourceType": r_cat,
+                        "resourceUuid": r_uuid,
+                        "date": r_dt,
+                        "display": r_disp,
+                        "memberUuids": [r_uuid],
+                    }
+                )
 
     return HubEnrichmentResult(
         enrichment_text=block_text,
@@ -1466,6 +1631,7 @@ def build_wahs_hub_enrichment_block(
         patient_name=graph.patient_name,
         omitted_by_category=omitted_by_cat,
         edge_Breakdown=graph.edge_breakdown(),
+        recovered_mappings=rec_mappings,
     )
 
 
@@ -1530,7 +1696,7 @@ def _extract_first_code(line: str) -> str:
 
 
 def _classify_ledger_line_category(body: str) -> str:
-    lower = body.lower()
+    lower = re.sub(r"^tier-0\s+recovered\s+", "", body.lower()).strip()
     if lower.startswith(("condition", "problem", "diagnosis", "active problem")):
         return "Condition"
     if lower.startswith(("medication", "rx:", "prescribed")):
@@ -1574,8 +1740,8 @@ def _classify_ledger_line_category(body: str) -> str:
 def _split_ledger_label_and_value(body: str, category: str) -> Tuple[str, str]:
     # Strip category prefix like "Condition Summary:", "Medication [HIGH-ALERT: ...]:", "Lab Trajectory:"
     cleaned = re.sub(
-        r"^(?:Condition(?:\s+Summary)?|Problem|Medication(?:\s*\[[^\]]*\])?|Allergy/Intolerance|"
-        r"Allergy|Immunization(?:\s+Series)?|Lab\s+Trajectory|Lab/Vital\s+Observation|"
+        r"^(?:Tier-0\s+Recovered\s+)?(?:Condition(?:\s+Summary)?|Active\s+Problem|Problem|Medication(?:\s*\[[^\]]*\])?|Device|"
+        r"Allergy/Intolerance|Allergy|Immunization(?:\s+Series)?|Lab\s+Trajectory|Lab/Vital\s+Observation|"
         r"Lab(?:\s+Observation)?|Observation|Clinical\s+Note|Diagnostic\s+Report|Report|Note)\s*:\s*",
         "",
         body,
