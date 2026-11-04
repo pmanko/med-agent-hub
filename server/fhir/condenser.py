@@ -666,12 +666,15 @@ def _build_completeness_manifest(
     for it in included_items:
         if it.resource_uuid:
             covered_uuids.add(it.resource_uuid)
-        for m in it.member_uuids:
-            if m:
-                covered_uuids.add(m)
+        if it.section != "lab_trajectory":
+            for m in it.member_uuids:
+                if m:
+                    covered_uuids.add(m)
 
     omitted_by_section: Dict[str, int] = {}
     for src_it in extracted.items:
+        if src_it.section == "patient":
+            continue
         item_uuids = {src_it.resource_uuid} | set(src_it.member_uuids)
         if not (item_uuids & covered_uuids):
             omitted_by_section[src_it.section] = omitted_by_section.get(src_it.section, 0) + 1
@@ -747,6 +750,7 @@ def _build_completeness_manifest(
         "redacted_for_privacy_count": redacted_count,
         "omitted_clinical_items_count": omitted_clinical_count,
         "omitted_by_section": omitted_by_section,
+        "omitted_section_counts": dict(omitted_by_section),
     }
     return manifest_item, manifest_dict
 
@@ -1906,8 +1910,12 @@ def _condense_lossless_structural(
 
     def render_structural(
         cand_body: Sequence[ClinicalItem],
-        omitted_by_sec: Dict[str, int],
+        _legacy_omitted_by_sec: Dict[str, int],
     ) -> Tuple[List[ClinicalItem], Dict[str, Any], str, List[Dict[str, Any]], int]:
+        _, probe_manifest = _build_completeness_manifest(
+            extracted, 0, "Lossless Structural Ledger", cand_body, len(redacted)
+        )
+        omitted_by_sec = dict(probe_manifest.get("omitted_by_section") or {})
         tier_num = 0 if not omitted_by_sec else (1 if target_tokens >= 8192 else (2 if target_tokens >= 4096 else 3))
         tier_label = (
             "Lossless Structural Ledger"

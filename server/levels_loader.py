@@ -302,6 +302,43 @@ OPENROUTER_MODEL_MAP: Dict[str, str] = {
 }
 
 
+WAHS_RECOMMENDED_LIMIT_URL = "/reports/2026-11-02-wahs-simple-profiles-multi-family-eval/index.html"
+
+WAHS_MODEL_CONTEXT_SPECS: Dict[str, Tuple[int, int]] = {
+    "gemma-26b": (262144, 32768),
+    "gemma-31b": (262144, 32768),
+    "qwen3.6-35b": (262144, 32768),
+    "gemma-4-12b": (262144, 24576),
+    "gemma-4-12b-q4": (262144, 24576),
+    "qwen3-14b": (262144, 24576),
+    "medgemma-27b": (131072, 24576),
+    "qwen2.5-14b": (131072, 24576),
+    "mistral-nemo-12b": (131072, 24576),
+    "gemma-e4b": (131072, 16384),
+    "gemma-e4b-q8": (131072, 16384),
+    "qwen3.5-9b": (131072, 16384),
+    "llama-3.1-8b": (131072, 16384),
+    "granite-3.3-8b": (131072, 16384),
+    "lfm2-8b-a1b": (65536, 16384),
+    "gemma-e2b": (131072, 12288),
+    "medgemma-1.5-4b-q8": (131072, 12288),
+    "qwen3-4b": (131072, 12288),
+    "google/gemini-2.5-flash": (1048576, 65536),
+    "google/gemma-3-27b-it": (131072, 32768),
+    "google/gemma-3-12b-it": (131072, 24576),
+    "qwen/qwen-2.5-72b-instruct": (131072, 32768),
+    "meta-llama/llama-3.3-70b-instruct": (131072, 32768),
+    "mistralai/mistral-nemo": (131072, 24576),
+}
+
+
+def resolve_wahs_model_context_spec(model_id: str, fallback_window: int = 0) -> Tuple[int, int]:
+    clean = str(model_id or "").strip()
+    if clean in WAHS_MODEL_CONTEXT_SPECS:
+        return WAHS_MODEL_CONTEXT_SPECS[clean]
+    return (131072, fallback_window or 24576)
+
+
 def resolve_openrouter_model(model_id: str) -> str:
     clean = str(model_id or "").strip()
     if "/" in clean:
@@ -428,6 +465,9 @@ def wahs_profile_metadata(
     family = str(
         profile.policies.get("model_family") or _infer_model_family(ans_model)
     )
+    ctx_length, rec_limit = resolve_wahs_model_context_spec(
+        ans_model, fallback_window=profile.context_window
+    )
     return {
         "id": profile.id,
         "label": profile.label,
@@ -453,7 +493,10 @@ def wahs_profile_metadata(
         "system_prompts": system_prompts,
         "profile_configuration_digest": _profile_configuration_digest(profile),
         "role_prompt_digests": _role_prompt_digests(profile),
-        "context_window": profile.context_window or None,
+        "context_window": profile.context_window or rec_limit,
+        "context_length": ctx_length,
+        "recommended_limit_tokens": rec_limit,
+        "recommended_limit_url": WAHS_RECOMMENDED_LIMIT_URL,
         "exact_tokenizer": profile.exact_tokenizer,
         "unavailable_reasons": unavailable_reasons,
     }
