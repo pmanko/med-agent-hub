@@ -2,6 +2,14 @@
 
 from __future__ import annotations
 
+from .clinical_graph import (
+    ClinicalEdge,
+    ClinicalEntityGraph,
+    ClinicalNode,
+    HubEnrichmentResult,
+    build_wahs_hub_enrichment_block,
+    parse_omitted_clinical_items,
+)
 from .condenser import (
     CondensedChartResult,
     build_tier_items,
@@ -37,7 +45,11 @@ from .normalizers import (
     is_clinic_room_equipment,
     normalize_drug_ingredient,
 )
-from .source import FhirBundleContextSource, ResilientTokenCounter
+try:
+    from .source import FhirBundleContextSource, ResilientTokenCounter
+except ModuleNotFoundError:  # pragma: no cover - optional when running offline stdlib-only scripts
+    FhirBundleContextSource = None  # type: ignore[assignment,misc]
+    ResilientTokenCounter = None  # type: ignore[assignment,misc]
 from .wahs_analyzer import (
     analyze_data_quality_and_conflicts,
     analyze_duplicates_and_bloat,
@@ -61,10 +73,14 @@ from .wahs_tools import (
 
 __all__ = [
     "ChartFinding",
+    "ClinicalEdge",
+    "ClinicalEntityGraph",
     "ClinicalItem",
+    "ClinicalNode",
     "CondensedChartResult",
     "ExtractedChart",
     "FhirBundleContextSource",
+    "HubEnrichmentResult",
     "NumericPoint",
     "ResilientTokenCounter",
     "analyze_data_quality_and_conflicts",
@@ -76,6 +92,7 @@ __all__ = [
     "build_fhir_browser_index",
     "build_patient_skills_and_condensation_matrix",
     "build_tier_items",
+    "build_wahs_hub_enrichment_block",
     "classify_sensitivity",
     "classify_vaccine_group",
     "condense_bundle_to_budget",
@@ -92,6 +109,7 @@ __all__ = [
     "is_clinic_room_equipment",
     "items_to_querystore_records",
     "normalize_drug_ingredient",
+    "parse_omitted_clinical_items",
     "read_clinical_note",
     "resolve_condition_code",
     "resolve_immunization_code",

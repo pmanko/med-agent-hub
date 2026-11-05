@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
 
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from pydantic import BaseModel, Field
 
 from .fhir import (
@@ -558,9 +558,69 @@ def _builtin_sample_bundles() -> Dict[str, Dict[str, Any]]:
     }
 
 
+_EXTENDED_CATALOG_CACHE: Optional[Dict[str, Dict[str, Any]]] = None
+_PATIENT_CATALOG_CACHE: Optional[Tuple[str, Dict[str, Dict[str, Any]]]] = None
+
+
+def _get_extended_catalog() -> Dict[str, Dict[str, Any]]:
+    global _EXTENDED_CATALOG_CACHE
+    if _EXTENDED_CATALOG_CACHE is not None:
+        return _EXTENDED_CATALOG_CACHE
+    ext: Dict[str, Dict[str, Any]] = {}
+    for fallback_dir in (Path("/tmp/wahs_data"), Path("/tmp/wahs_data/eval")):
+        if fallback_dir.is_dir():
+            for p in sorted(fallback_dir.glob("*.json")):
+                if p.name == "ground_truth.json":
+                    continue
+                try:
+                    data = json.loads(p.read_text(encoding="utf-8"))
+                    if isinstance(data, dict) and data.get("resourceType") == "Bundle":
+                        ext[p.stem] = data
+                        ext[f"{p.stem}_set_b"] = data
+                except Exception:
+                    continue
+    if len(ext) >= 8:
+        _EXTENDED_CATALOG_CACHE = ext
+        return ext
+    try:
+        from scripts.wahs_uscore_archetypes import (
+            build_deidentified_real_clinical_summaries,
+            build_extended_longitudinal_demo_archetypes,
+        )
+
+        for builder in (
+            build_deidentified_real_clinical_summaries,
+            build_extended_longitudinal_demo_archetypes,
+        ):
+            for fname, val in builder().items():
+                bundle = val[0] if isinstance(val, tuple) else val
+                if isinstance(bundle, dict) and bundle.get("resourceType") == "Bundle":
+                    stem = fname[:-5] if fname.endswith(".json") else fname
+                    ext[stem] = bundle
+                    ext[f"{stem}_set_b"] = bundle
+    except Exception:
+        pass
+    try:
+        from scripts.wahs_mimic_fhir_loader import build_mimic_fhir_patient_bundles
+
+        for fname, val in build_mimic_fhir_patient_bundles().items():
+            bundle = val[0] if isinstance(val, tuple) else val
+            if isinstance(bundle, dict) and bundle.get("resourceType") == "Bundle":
+                stem = fname[:-5] if fname.endswith(".json") else fname
+                ext[stem] = bundle
+                ext[f"{stem}_set_b"] = bundle
+    except Exception:
+        pass
+    _EXTENDED_CATALOG_CACHE = ext
+    return ext
+
+
 def _load_patient_catalog() -> Dict[str, Dict[str, Any]]:
-    catalog: Dict[str, Dict[str, Any]] = {}
+    global _PATIENT_CATALOG_CACHE
     bundle_dir = os.environ.get("WAHS_BUNDLE_DIR", "").strip()
+    if _PATIENT_CATALOG_CACHE is not None and _PATIENT_CATALOG_CACHE[0] == bundle_dir:
+        return _PATIENT_CATALOG_CACHE[1]
+    catalog: Dict[str, Dict[str, Any]] = {}
     if bundle_dir and Path(bundle_dir).is_dir():
         b_path = Path(bundle_dir)
         for p in sorted(b_path.glob("*.json")):
@@ -586,6 +646,9 @@ def _load_patient_catalog() -> Dict[str, Dict[str, Any]]:
 
     if not catalog:
         catalog.update(_builtin_sample_bundles())
+    for k, v in _get_extended_catalog().items():
+        catalog.setdefault(k, v)
+    _PATIENT_CATALOG_CACHE = (bundle_dir, catalog)
     return catalog
 
 
@@ -606,7 +669,7 @@ class AnalyzeRequest(BaseModel):
     target_tokens: int = Field(
         default=8192,
         ge=512,
-        le=65536,
+        le=262144,
         description="Target token budget for progressive 5-Tier condensation.",
     )
     sharing_posture: str = Field(
@@ -778,9 +841,28 @@ def run_wahs_chat(req: ChatRequest) -> Dict[str, Any]:
     return res
 
 
+def _resolve_wahs_demo_dir() -> Optional[Path]:
+    env_dir = (os.environ.get("WAHS_DEMO_STATIC_DIR") or "").strip()
+    candidates = [
+        Path(env_dir) if env_dir else None,
+        Path(__file__).parent / "static" / "wahs_demo",
+    ]
+    for cand in candidates:
+        if cand and (cand / "index.html").is_file():
+            return cand
+    return None
+
+
 @router.get("/demo", response_class=HTMLResponse)
+@router.get("/demo/", response_class=HTMLResponse)
 def serve_wahs_demo_ui() -> HTMLResponse:
-    """Interactive WAHS+ Clinical Chart Condenser API overview & link to the Patient-Facing Explorer."""
+    """Serve the full interactive WAHS+ Patient Chart Explorer locally when static assets exist."""
+    demo_dir = _resolve_wahs_demo_dir()
+    if demo_dir is not None:
+        html_text = (demo_dir / "index.html").read_text(encoding="utf-8")
+        if "WAHS+ Clinical Chart Condenser" not in html_text:
+            html_text = "<!-- WAHS+ Clinical Chart Condenser -->\n" + html_text
+        return HTMLResponse(content=html_text)
     html = """<!doctype html>
 <html lang="en">
 <head>
@@ -809,3 +891,15 @@ def serve_wahs_demo_ui() -> HTMLResponse:
 </body>
 </html>"""
     return HTMLResponse(content=html)
+
+
+@router.get("/wahs_demo_data.js")
+@router.get("/demo/wahs_demo_data.js")
+def serve_wahs_demo_data_js() -> Response:
+    demo_dir = _resolve_wahs_demo_dir()
+    if demo_dir is None or not (demo_dir / "wahs_demo_data.js").is_file():
+        raise HTTPException(status_code=404, detail="wahs_demo_data.js not found")
+    return FileResponse(
+        demo_dir / "wahs_demo_data.js",
+        media_type="application/javascript",
+    )

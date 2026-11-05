@@ -25,9 +25,13 @@ from server.fhir import (
 
 PRIMARY_PERSONA_IDS: List[str] = [
     "Maurice742_Auer97_set_b",
+    "MIMIC_10014354_ICU_Heme_Cardiorenal_set_b",
+    "MIMIC_10019003_ICU_Hepatopulmonary_set_b",
     "Elena_Rostova_Cardiorenal_set_b",
     "Arthur_Pendelton_Anticoag_set_b",
     "Margaret_Chen_Polypharmacy_set_b",
+    "Sofia_Alvarez_Maternal_Endocrine_set_b",
+    "Marcus_Vance_Oncology_Immunotherapy_set_b",
     "Lamar193_Beer512_set_b",
     "Byron202_Emard19_set_b",
 ]
@@ -65,6 +69,38 @@ QUESTIONS_BY_PATIENT: Dict[str, List[str]] = {
         "Summarize my most recent hospital, emergency, or high-acuity procedural encounter.",
         "Does this patient have a documented Penicillin allergy or recent colonoscopy?",
     ],
+    "Sofia_Alvarez_Maternal_Endocrine": [
+        "Why did the postpartum discharge summary instruct to hold Ibuprofen, and what were Sofia's blood pressure and eGFR trends?",
+        "Why are both Amlodipine 5 MG and Norvasc 5 MG listed as active on Sofia's medication list?",
+        "Why does Sofia's chart list both Prediabetes and Type 2 Diabetes alongside CKD Stage 2 and Stage 3A?",
+        "Provide a safe external sharing summary that redacts sensitive environmental safety findings.",
+        "Summarize my most recent hospital, emergency, or high-acuity procedural encounter.",
+        "Does this patient have a documented Penicillin allergy or recent colonoscopy?",
+    ],
+    "Marcus_Vance_Oncology_Immunotherapy": [
+        "Why did the cardio-oncology consult note say to stop Naproxen and hold lisinopril, and what are Marcus's eGFR and NT-proBNP trends?",
+        "What duplicate statin or anticoagulant-NSAID hazards are active on Marcus's medication list?",
+        "Why does Marcus's problem list show both CKD Stage 2 and CKD Stage 3B?",
+        "Summarize Marcus's cardio-oncology admission, implanted venous port/cardiac monitor, and longitudinal heart failure labs.",
+        "Provide a safe external sharing summary that protects sensitive alcohol use screening records.",
+        "Does this patient have a documented Penicillin allergy or recent colonoscopy?",
+    ],
+    "MIMIC_10014354_ICU_Heme_Cardiorenal": [
+        "Why did the BIDMC discharge summary instruct to hold lisinopril and spironolactone and stop simvastatin, and what are Julian's potassium and eGFR trends?",
+        "What duplicate statin (Lipitor vs Simvastatin) or antiplatelet (Plavix vs Clopidogrel) orders are active across BIDMC and primary care?",
+        "Summarize Julian's 20 BIDMC hospital admissions, 4 ICU stays, B-cell chronic lymphocytic leukemia (C91.10), and cardiac pacemaker history.",
+        "Why does Julian's chart list both CKD Stage 2 and CKD Stage 3B as active?",
+        "What microbiology cultures and serial renal/electrolyte labs were recorded across his ICU stays?",
+        "Does this patient have a documented Penicillin allergy or recent colonoscopy?",
+    ],
+    "MIMIC_10019003_ICU_Hepatopulmonary": [
+        "Why did the BIDMC Medical ICU discharge summary instruct to hold spironolactone, potassium chloride, and ibuprofen and discontinue Ambien and lorazepam?",
+        "What duplicate sedative-hypnotic (Ativan + Ambien) or potassium/NSAID hazards are on Clara's active medication list?",
+        "Summarize Clara's 8 BIDMC hospital admissions, 3 ICU stays, NASH cirrhosis (K75.81), and COPD acute hypoxic respiratory failure (J96.01).",
+        "Why does Clara's chart show conflicting Prediabetes vs Type 2 Diabetes and CKD Stage 2 vs CKD Stage 3B?",
+        "What serial hemoglobin, platelet, creatinine, and microbiology results were recorded across her BIDMC admissions?",
+        "Does this patient have a documented latex allergy or recent colonoscopy?",
+    ],
 }
 
 PERSONA_BIOS: Dict[str, Dict[str, str]] = {
@@ -73,53 +109,89 @@ PERSONA_BIOS: Dict[str, Dict[str, str]] = {
         "persona_bio": (
             "Older adult following triple coronary bypass (CABG) surgery with chronic kidney disease, "
             "multi-clinic prescriptions (brand vs. generic Plavix/clopidogrel, duplicate statins), "
-            "1,599 raw FHIR entries, and clinic room-equipment export artifacts."
+            "7,099 raw FHIR entries, and clinic room-equipment export artifacts."
         ),
-        "key_highlights": "CABG Surgery • CKD Stages 1–3 • Brand/Generic Plavix • 1,599 Raw FHIR Entries",
+        "key_highlights": "CABG Surgery • CKD Stages 1–3 • Brand/Generic Plavix • 7,099 Raw FHIR Entries",
     },
     "Elena_Rostova_Cardiorenal": {
-        "short_tag": "Heart Failure & Cardiorenal Hospital Discharge",
+        "short_tag": "Heart Failure & Cardiorenal Hospital Discharge (454 Entries)",
         "persona_bio": (
-            "73-year-old woman after a heart failure & kidney admission where the hospital discharge note "
-            "instructed to HOLD spironolactone and potassium due to high potassium (5.8 mEq/L), "
-            "while outpatient clinic orders still list both pills as active."
+            "71-year-old woman with 5 years of cardiorenal follow-up (454 FHIR entries) after a heart failure "
+            "& hyperkalemia admission where the discharge note instructed to HOLD spironolactone, potassium, "
+            "and lisinopril while outpatient orders still list them as active."
         ),
-        "key_highlights": "Discharge Note 'Hold' Mismatch • Hyperkalemia Risk • CKD Stage 3a vs 3b",
+        "key_highlights": "Discharge Note 'Hold' Mismatch • Hyperkalemia Risk • 5-Year eGFR/K+ Series",
     },
     "Arthur_Pendelton_Anticoag": {
-        "short_tag": "Mechanical Heart Valve, GI Bleed & Blood Thinners",
+        "short_tag": "Mechanical Heart Valve, GI Bleed & Blood Thinners (447 Entries)",
         "persona_bio": (
-            "67-year-old man with a mechanical aortic valve and recent upper GI bleed hospitalization "
-            "whose multi-clinic medication list carries overlapping blood thinners (Eliquis + Warfarin) "
-            "alongside an active NSAID (Naproxen)."
+            "78-year-old man with a mechanical aortic valve, 5 years of INR/hemoglobin longitudinal monitoring "
+            "(447 FHIR entries), and a recent upper GI bleed hospitalization whose multi-clinic list carries "
+            "overlapping blood thinners (Eliquis + Warfarin) plus an active NSAID (Naproxen)."
         ),
         "key_highlights": "Eliquis + Warfarin + Naproxen • Mechanical Valve • GI Bleed Status Conflict",
     },
     "Margaret_Chen_Polypharmacy": {
-        "short_tag": "Geriatric Fall Risk, Diabetes & Privacy-Sensitive Care",
+        "short_tag": "Geriatric Fall Risk, Diabetes & Privacy-Sensitive Care (448 Entries)",
         "persona_bio": (
-            "80-year-old woman evaluated after a fall with two overlapping sedative-hypnotic prescriptions "
-            "(Ativan + Ambien), concurrent Prediabetes and Type 2 Diabetes on her problem list, "
+            "82-year-old woman with 5 years of geriatric & metabolic follow-up (448 FHIR entries) evaluated "
+            "after a fall with overlapping sedative-hypnotics (Ativan + Ambien), concurrent Prediabetes + T2DM, "
             "duplicate registry vaccines, and sensitive social-safety records."
         ),
-        "key_highlights": "Ativan + Ambien Fall Risk • Prediabetes + T2DM • Sensitive SDOH Preview",
+        "key_highlights": "Ativan + Ambien Fall Risk • Prediabetes + T2DM • Sensitive SDOH Redaction",
+    },
+    "Sofia_Alvarez_Maternal_Endocrine": {
+        "short_tag": "High-Risk Postpartum Preeclampsia & Cardiometabolic Care (436 Entries)",
+        "persona_bio": (
+            "34-year-old woman with 5 years of OB/GYN, Maternal-Fetal Medicine, and Endocrine records (436 FHIR entries) "
+            "following a postpartum preeclampsia & AKI admission where the discharge note instructed to HOLD Ibuprofen "
+            "and reconcile duplicate Norvasc vs. Amlodipine bottles."
+        ),
+        "key_highlights": "Postpartum Preeclampsia • Norvasc/Amlodipine Dup • Hold Ibuprofen Note Mismatch",
+    },
+    "Marcus_Vance_Oncology_Immunotherapy": {
+        "short_tag": "Cardio-Oncology, 56 Infusion Cycles & Myocarditis (1,612 Entries)",
+        "persona_bio": (
+            "64-year-old man with 56 longitudinal thoracic oncology & cardio-oncology infusion/telemetry cycles "
+            "(1,612 FHIR entries, 80.4k lossless tokens), checkpoint-inhibitor myocarditis/HFrEF and atrial fibrillation "
+            "on Eliquis + Naproxen, duplicate Lipitor + Simvastatin statins, and a consult note instructing to STOP Naproxen and HOLD lisinopril."
+        ),
+        "key_highlights": "56 Chemo-Immunotherapy Cycles • 80.4k Lossless Tokens • Eliquis + Naproxen",
+    },
+    "MIMIC_10014354_ICU_Heme_Cardiorenal": {
+        "short_tag": "MIMIC-IV #10014354 • 20 Admissions, 4 ICU Stays & CLL (4,048 Entries)",
+        "persona_bio": (
+            "Real PhysioNet MIMIC-IV-FHIR Demo 2.0 hospital/ICU chart (Subject #10014354, 4,048 FHIR entries, 198.6k lossless tokens) "
+            "spanning 20 Beth Israel Deaconess Medical Center admissions and 4 ICU stays for B-cell chronic lymphocytic leukemia (C91.10), "
+            "coronary stent/pacemaker, paroxysmal atrial fibrillation, hyperkalemia, and multi-clinic discharge medication conflicts."
+        ),
+        "key_highlights": "PhysioNet MIMIC-IV-FHIR 2.0 • 20 Admissions & 4 ICU Stays • 198.6k Lossless Tokens",
+    },
+    "MIMIC_10019003_ICU_Hepatopulmonary": {
+        "short_tag": "MIMIC-IV #10019003 • 8 Admissions, 3 ICU Stays, NASH & COPD (2,661 Entries)",
+        "persona_bio": (
+            "Real PhysioNet MIMIC-IV-FHIR Demo 2.0 hospital/ICU chart (Subject #10019003, 2,661 FHIR entries, 126.3k lossless tokens) "
+            "spanning 8 BIDMC admissions and 3 ICU stays for NASH cirrhosis (K75.81), COPD acute hypoxic respiratory failure (J96.01), "
+            "acute kidney injury (N17.9), and ICU step-down diuretic/sedative reconciliation conflicts."
+        ),
+        "key_highlights": "PhysioNet MIMIC-IV-FHIR 2.0 • 8 Admissions & 3 ICU Stays • 126.3k Lossless Tokens",
     },
     "Lamar193_Beer512": {
-        "short_tag": "Adult Preventive Care, Sinusitis & Multi-Clinic Records",
+        "short_tag": "Adult Preventive Care, Sinusitis & Multi-Clinic HIE (892 Entries)",
         "persona_bio": (
-            "Middle-aged adult with longitudinal primary-care and urgent-care visits, cross-clinic "
+            "Middle-aged adult with 892 FHIR entries (3.1 MB) across primary-care and urgent-care visits, cross-clinic "
             "chronic sinusitis status discrepancies, NSAID + ACE-inhibitor prescriptions, and "
             "state immunization registry sync entries."
         ),
-        "key_highlights": "Active vs. Resolved Sinusitis • Lisinopril + Ibuprofen • WA IIS Sync",
+        "key_highlights": "Active vs. Resolved Sinusitis • Lisinopril + Ibuprofen • 892 Raw FHIR Entries",
     },
     "Byron202_Emard19": {
-        "short_tag": "Adolescent / Young Adult Well-Child & Vaccine Series",
+        "short_tag": "Adolescent / Young Adult Well-Child & Vaccine Series (480 Entries)",
         "persona_bio": (
-            "Young patient with longitudinal pediatric/adolescent growth curves, multi-dose vaccine "
-            "series (HPV, Influenza), repeated wellness panels, and social/school readiness records."
+            "Young patient with 480 FHIR entries (1.6 MB) covering longitudinal pediatric/adolescent growth curves, "
+            "multi-dose vaccine series (HPV, Influenza), repeated wellness panels, and social/school readiness records."
         ),
-        "key_highlights": "HPV & Flu Vaccine Series • Pediatric Growth Trends • School Readiness",
+        "key_highlights": "HPV & Flu Vaccine Series • Pediatric Growth Trends • 480 Raw FHIR Entries",
     },
 }
 
@@ -229,15 +301,24 @@ def build_demo_patients_payload(
                 if ds_key == "set_b"
                 else None
             )
+            is_mimic_fhir = p.startswith("MIMIC_")
             demo_patients[combo_id] = {
                 "id": combo_id,
                 "patient_id": p,
                 "patient_name": extracted.patient_name,
                 "birth_date": extracted.birth_date,
                 "reference_date": extracted.reference_date,
-                "cohort_type": "us_core_archetype" if is_us_core else "ehignite_synthea",
+                "cohort_type": (
+                    "mimic_iv_fhir_2_0"
+                    if is_mimic_fhir
+                    else ("us_core_archetype" if is_us_core else "ehignite_synthea")
+                ),
                 "dataset_key": ds_key,
-                "dataset_label": ds_label,
+                "dataset_label": (
+                    "PhysioNet MIMIC-IV-FHIR Demo 2.0 (Hospital & ICU)"
+                    if is_mimic_fhir
+                    else ds_label
+                ),
                 "short_tag": p_bio.get("short_tag", ds_label),
                 "persona_bio": p_bio.get("persona_bio", ""),
                 "key_highlights": p_bio.get("key_highlights", ""),

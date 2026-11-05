@@ -203,13 +203,23 @@ def _dynamic_profile(profile_id: str) -> Optional[Profile]:
     return None
 
 
+_DOCUMENT_CACHE: Dict[Tuple[str, int, int], Dict[str, Any]] = {}
+
+
 def _load_document() -> Dict[str, Any]:
     try:
+        st = _PATH.stat()
+        cache_key = (str(_PATH), st.st_mtime_ns, st.st_size)
+        cached = _DOCUMENT_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
         document = yaml.safe_load(_PATH.read_text(encoding="utf-8")) or {}
     except FileNotFoundError as exc:
         raise FileNotFoundError(f"profiles file not found at {_PATH}") from exc
     if not isinstance(document, dict):
         raise ValueError(f"{_PATH} must contain an object")
+    _DOCUMENT_CACHE.clear()
+    _DOCUMENT_CACHE[cache_key] = document
     return document
 
 
@@ -261,11 +271,145 @@ def wahs_profile_ids() -> List[str]:
     return ids
 
 
+def is_wahs_profile_id(profile_id: str) -> bool:
+    if profile_id in wahs_profile_ids():
+        return True
+    if profile_id.startswith(("wahs-kb:", "wahs-raw:")):
+        _, _, model_id = profile_id.partition(":")
+        return bool(model_id.strip())
+    return False
+
+
+OPENROUTER_MODEL_MAP: Dict[str, str] = {
+    "gemma-e2b": "google/gemma-3-4b-it",
+    "gemma-e4b": "google/gemma-3-4b-it",
+    "gemma-e4b-q8": "google/gemma-3-4b-it",
+    "gemma-4-12b": "google/gemma-3-12b-it",
+    "gemma-4-12b-q4": "google/gemma-3-12b-it",
+    "gemma-26b": "google/gemma-3-27b-it",
+    "gemma-31b": "google/gemma-3-27b-it",
+    "medgemma-1.5-4b-q8": "google/gemma-3-27b-it",
+    "medgemma-27b": "google/gemma-3-27b-it",
+    "qwen3-4b": "qwen/qwen-2.5-72b-instruct",
+    "qwen3.5-9b": "qwen/qwen-2.5-72b-instruct",
+    "qwen2.5-14b": "qwen/qwen-2.5-72b-instruct",
+    "qwen3-14b": "qwen/qwen-2.5-72b-instruct",
+    "qwen3.6-35b": "qwen/qwen-2.5-72b-instruct",
+    "llama-3.1-8b": "meta-llama/llama-3.3-70b-instruct",
+    "mistral-nemo-12b": "mistralai/mistral-nemo",
+    "granite-3.3-8b": "ibm-granite/granite-3.3-8b-instruct",
+    "lfm2-8b-a1b": "liquid/lfm-7b",
+}
+
+
+WAHS_RECOMMENDED_LIMIT_URL = "https://reports.openclinai.org/2026-11-03-wahs-huge-context-and-hub-graph-eval/index.html"
+
+WAHS_MODEL_CONTEXT_SPECS: Dict[str, Tuple[int, int]] = {
+    "gemma-26b": (262144, 32768),
+    "gemma-31b": (262144, 32768),
+    "qwen3.6-35b": (262144, 32768),
+    "gemma-4-12b": (262144, 24576),
+    "gemma-4-12b-q4": (262144, 24576),
+    "qwen3-14b": (262144, 24576),
+    "medgemma-27b": (131072, 24576),
+    "qwen2.5-14b": (131072, 24576),
+    "mistral-nemo-12b": (131072, 24576),
+    "gemma-e4b": (131072, 16384),
+    "gemma-e4b-q8": (131072, 16384),
+    "qwen3.5-9b": (131072, 16384),
+    "llama-3.1-8b": (131072, 16384),
+    "granite-3.3-8b": (131072, 16384),
+    "lfm2-8b-a1b": (65536, 16384),
+    "gemma-e2b": (131072, 12288),
+    "medgemma-1.5-4b-q8": (131072, 12288),
+    "qwen3-4b": (131072, 12288),
+    "google/gemini-2.5-flash": (1048576, 65536),
+    "google/gemma-3-27b-it": (131072, 32768),
+    "google/gemma-3-12b-it": (131072, 24576),
+    "qwen/qwen-2.5-72b-instruct": (131072, 32768),
+    "meta-llama/llama-3.3-70b-instruct": (131072, 32768),
+    "mistralai/mistral-nemo": (131072, 24576),
+}
+
+
+def resolve_wahs_model_context_spec(model_id: str, fallback_window: int = 0) -> Tuple[int, int]:
+    clean = str(model_id or "").strip()
+    if clean in WAHS_MODEL_CONTEXT_SPECS:
+        return WAHS_MODEL_CONTEXT_SPECS[clean]
+    return (131072, fallback_window or 24576)
+
+
+def resolve_openrouter_model(model_id: str) -> str:
+    clean = str(model_id or "").strip()
+    if "/" in clean:
+        return clean
+    return OPENROUTER_MODEL_MAP.get(clean, clean)
+
+
+def _infer_model_family(model_id: str) -> str:
+    low = model_id.lower()
+    if "medgemma" in low:
+        return "medgemma"
+    if "gemini" in low:
+        return "gemini"
+    if "gemma-3" in low or "gemma3" in low:
+        return "gemma-3"
+    if "gemma" in low:
+        return "gemma-4"
+    if "qwen" in low:
+        return "qwen"
+    if "llama" in low:
+        return "llama"
+    if "mistral" in low or "nemo" in low:
+        return "mistral"
+    if "granite" in low:
+        return "granite"
+    if "lfm" in low or "liquid" in low:
+        return "lfm2"
+    if "claude" in low:
+        return "claude"
+    return low.split("-", 1)[0].split("/", 1)[0]
+
+
 def get_wahs_profile(profile_id: str) -> Profile:
     raw = _load_raw()
-    if profile_id not in wahs_profile_ids():
-        raise ModelNotFoundError(profile_id, wahs_profile_ids())
-    return _from_spec(profile_id, raw[profile_id] or {})
+    if profile_id in wahs_profile_ids():
+        return _from_spec(profile_id, raw[profile_id] or {})
+    if profile_id.startswith(("wahs-kb:", "wahs-raw:")):
+        prefix, _, raw_model = profile_id.partition(":")
+        model_id = raw_model.strip()
+        if not model_id:
+            raise ModelNotFoundError(profile_id, wahs_profile_ids())
+        include_kb = prefix == "wahs-kb"
+        provider = "openrouter" if "/" in model_id else "local"
+        family = _infer_model_family(model_id)
+        mode_label = "+ 4-Layer Clinical KB" if include_kb else "Raw Condensed Chart Only"
+        return compile_profile(
+            Profile(
+                id=profile_id,
+                label=f"{model_id} — {mode_label} (Dynamic)",
+                topology="single",
+                stages=("context", "answer", "gate"),
+                models={"answer": model_id},
+                prompts={
+                    "answer": "wahs-kb-guided" if include_kb else "wahs-raw-unhinted"
+                },
+                policies={
+                    "provider": provider,
+                    "model_family": family,
+                    "include_kb_findings": include_kb,
+                    "overflow_lookup_tools": include_kb,
+                    "citation_grounding": "enforce",
+                },
+                workflow="wahs",
+                knobs={"answer": {"temperature": 0.1, "dry": 0.0, "maxTokens": 4096}},
+                visibility="evaluation",
+                context_window=32768 if provider == "openrouter" else 24576,
+                reserved_output_tokens=2048,
+                exact_tokenizer=(provider == "local"),
+            )
+        )
+    raise ModelNotFoundError(profile_id, wahs_profile_ids())
 
 
 def validate_wahs_profiles() -> Tuple[Profile, ...]:
@@ -280,7 +424,11 @@ def wahs_profile_metadata(
     openrouter_configured: bool = False,
     effective_default: bool = False,
 ) -> Dict[str, Any]:
+    from . import model_provisioner
+
     provider = str(profile.policies.get("provider") or "local").lower()
+    model_provisioned = True
+    auto_downloadable = False
     if provider == "openrouter":
         available = bool(openrouter_configured)
         unavailable_reasons = (
@@ -295,19 +443,44 @@ def wahs_profile_metadata(
                 for model in sorted(set(profile.models.values()) - backend_models)
             ]
         )
+        for model in sorted(set(profile.models.values())):
+            present = model_provisioner.is_model_file_present(model)
+            pinned = model_provisioner.is_model_pinned(model)
+            if present is False:
+                model_provisioned = False
+                if pinned:
+                    auto_downloadable = True
+                else:
+                    unavailable_reasons.append(f"model_weights_missing:{model}")
+        if openrouter_configured and unavailable_reasons:
+            provider = "openrouter"
+            unavailable_reasons = []
         available = not unavailable_reasons
 
     system_prompts: Dict[str, str] = {}
     for role, p_name in sorted(profile.prompts.items()):
         system_prompts[str(role)] = load_prompt(str(p_name)).strip()
 
+    ans_model = str(profile.models.get("answer") or "")
+    family = str(
+        profile.policies.get("model_family") or _infer_model_family(ans_model)
+    )
+    ctx_length, rec_limit = resolve_wahs_model_context_spec(
+        ans_model, fallback_window=profile.context_window
+    )
     return {
         "id": profile.id,
         "label": profile.label,
         "workflow": profile.workflow,
         "topology": profile.topology,
         "provider": provider,
+        "openrouter_model": resolve_openrouter_model(ans_model),
+        "model_family": family,
+        "parameter_size": str(profile.policies.get("parameter_size") or ""),
+        "quantization": str(profile.policies.get("quantization") or ""),
         "available": available,
+        "model_provisioned": model_provisioned,
+        "auto_downloadable": auto_downloadable,
         "default": bool(effective_default or profile.default),
         "selection_priority": profile.selection_priority,
         "visibility": profile.visibility,
@@ -320,7 +493,10 @@ def wahs_profile_metadata(
         "system_prompts": system_prompts,
         "profile_configuration_digest": _profile_configuration_digest(profile),
         "role_prompt_digests": _role_prompt_digests(profile),
-        "context_window": profile.context_window or None,
+        "context_window": profile.context_window or rec_limit,
+        "context_length": ctx_length,
+        "recommended_limit_tokens": rec_limit,
+        "recommended_limit_url": WAHS_RECOMMENDED_LIMIT_URL,
         "exact_tokenizer": profile.exact_tokenizer,
         "unavailable_reasons": unavailable_reasons,
     }
