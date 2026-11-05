@@ -1532,9 +1532,20 @@ def extract_bundle(
         active_med_items = [it for it in items if it.section == "med_active"]
         note_items = [it for it in items if it.section in {"clinical_note", "note"}]
         hold_re = re.compile(
-            r"\b(hold|stop|discontinue|held|stopped|discontinued|do\s+not\s+take)\s+([a-z][a-z0-9-]{2,25})\b",
+            r"\b(?:hold|stop|discontinue|held|stopped|discontinued|do\s+not\s+take|holding)\b([^.;\n]{1,90})",
             re.IGNORECASE,
         )
+        continue_split_re = re.compile(
+            r"\b(?:while\s+continuing|and\s+continue|but\s+continue|continuing|continue|"
+            r"resuming|resume|starting|start|and\s+reconcile|reconciling|reconcile|"
+            r"and\s+consolidate|consolidating|consolidate|and\s+retire|retiring|retire|"
+            r"due\s+to|given|because\s+of|because|secondary\s+to|in\s+the\s+setting\s+of|to\s+prevent)\b",
+            re.IGNORECASE,
+        )
+        form_stopwords = {
+            "oral", "tablet", "tablets", "capsule", "capsules", "extended", "release",
+            "delayed", "solution", "suspension", "injection", "daily", "twice",
+        }
         negation_prefix_re = re.compile(
             r"\b(?:do\s+not|don't|never|not\s+to|not|without|no\s+need\s+to|avoid)\s+$",
             re.IGNORECASE,
@@ -1545,19 +1556,23 @@ def extract_bundle(
         )
         for n_item in note_items:
             note_txt = n_item.text or ""
-            for clause in re.split(r"[.;|\n]+", note_txt):
-                if conditional_clause_re.search(clause):
+            contradicted_med_displays: List[str] = []
+            for raw_clause in re.split(r"[.;|\n]+", note_txt):
+                if conditional_clause_re.search(raw_clause):
                     continue
-                for match in hold_re.finditer(clause):
-                    prefix = clause[: match.start()]
+                for match in hold_re.finditer(raw_clause):
+                    prefix = raw_clause[: match.start()]
                     if negation_prefix_re.search(prefix):
                         continue
-                    raw_drug = match.group(2)
-                    norm_ing = normalize_drug_ingredient(raw_drug)
-                    if not norm_ing or norm_ing in {"on", "the", "all", "any", "medication", "medications", "therapy"}:
-                        continue
+                    clause = continue_split_re.split(match.group(1).lower())[0]
                     for m_item in active_med_items:
-                        if m_item.ingredient_key == norm_ing or norm_ing in m_item.display.lower():
+                        m_ing = (m_item.ingredient_key or normalize_drug_ingredient(m_item.display)).lower()
+                        m_disp_tokens = [
+                            t
+                            for t in re.split(r"[^a-z0-9]+", m_item.display.lower())
+                            if len(t) >= 4 and not t.isdigit() and t not in form_stopwords
+                        ]
+                        if (m_ing and m_ing in clause) or any(tok in clause for tok in m_disp_tokens[:2]):
                             msg = (
                                 f"note_medication_contradiction: Clinical note ({n_item.clinical_date or 'recent'}) "
                                 f"instructs to hold/discontinue {m_item.display}, but structured MedicationRequest remains ACTIVE"
@@ -1578,12 +1593,19 @@ def extract_bundle(
                             if m_item.resource_uuid not in c_meds:
                                 c_meds.append(m_item.resource_uuid)
                                 n_item.metadata["contradicted_med_uuids"] = c_meds
-                            if not n_item.conflict_note:
-                                n_item.conflict_note = msg
-                                n_item.mandatory = True
-                            elif msg not in n_item.conflict_note:
-                                n_item.conflict_note = f"{n_item.conflict_note}; {msg}"
-                                n_item.mandatory = True
+                            if m_item.display not in contradicted_med_displays:
+                                contradicted_med_displays.append(m_item.display)
+            if contradicted_med_displays:
+                note_msg = (
+                    f"note_medication_contradiction: Clinical note ({n_item.clinical_date or 'recent'}) "
+                    f"instructs to hold/discontinue {', '.join(contradicted_med_displays)}, "
+                    f"but structured MedicationRequest remains ACTIVE"
+                )
+                if not n_item.conflict_note:
+                    n_item.conflict_note = note_msg
+                elif note_msg not in n_item.conflict_note:
+                    n_item.conflict_note = f"{n_item.conflict_note}; {note_msg}"
+                n_item.mandatory = True
 
     return ExtractedChart(
         patient_id=patient_id,

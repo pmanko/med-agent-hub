@@ -556,3 +556,45 @@ def test_ensure_patient_chart_cache_registers_direct_bundle_dicts_from_catalog()
         cg_mod._CACHE_INITIALIZED = orig_init
 
 
+def test_w29_clause_scoped_note_contradiction_and_question_intent_gating() -> None:
+    """Verify W29.1-W29.4:
+    1. Stop simvastatin and reconcile Lipitor 40 MG vs Simvastatin 20 MG only flags Simvastatin as stopped.
+    2. Narrow historical lookup / abstention queries do not surface unrelated conflict edges or wildcard recoveries.
+    3. Tier-0 overflow recovery checks only numbered [N] ledger lines (not Stage 2 KB text) and preserves Assessment and Plan.
+    """
+    ledger_with_reconcile_note = "\n".join(
+        [
+            "[1] (2026-01-26) Patient: Julian Mercer, DOB: 1954-10-08, Gender: male",
+            "[2] (2026-01-26) Completeness Manifest: Tier 1 | omitted_clinical_items=0",
+            "[12] (2026-01-25) Medication: Lipitor 40 MG Oral Tablet [atorvastatin] (status: active, RxNorm: 617311) [UUID: med-lip]",
+            "[13] (2025-10-12) Medication: Simvastatin 20 MG Oral Tablet (status: active, RxNorm: 312961) [UUID: med-sim]",
+            "[19] (2026-01-26) Clinical Note — Discharge Summary: Assessment and Plan: Stop simvastatin immediately and reconcile duplicate Lipitor 40 MG [atorvastatin] vs Simvastatin 20 MG lipid orders. [UUID: note-disch]",
+        ]
+    )
+    graph = ClinicalEntityGraph.from_condensed_ledger(ledger_with_reconcile_note)
+    note_edges = [
+        e for e in graph.edges if e.edge_type == "CONTRADICTED_OR_MODIFIED_BY_NOTE"
+    ]
+    assert len(note_edges) == 1
+    assert "Simvastatin" in graph.nodes[note_edges[0].source_id].label
+    assert "Lipitor" not in graph.nodes[note_edges[0].source_id].label
+
+    dup_edges = [
+        e for e in graph.edges if e.edge_type == "CONTRAINDICATED_OR_DOSE_ADJUST_IN"
+    ]
+    assert len(dup_edges) == 1
+
+    # Broad reconciliation query surfaces both edges
+    broad_lines = graph.format_subgraph_lines(
+        question="Please audit my active medications for duplicate statins and discharge hold instructions."
+    )
+    assert len(broad_lines) == 2
+
+    # Narrow unrelated abstention query surfaces zero conflict edges
+    narrow_lines = graph.format_subgraph_lines(
+        question="What were the exact results of my coronary artery calcium CT Agatston score and Factor V Leiden genetic panel?"
+    )
+    assert narrow_lines == []
+
+
+

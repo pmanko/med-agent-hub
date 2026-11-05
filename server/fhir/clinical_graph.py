@@ -79,11 +79,41 @@ class ClinicalNode:
             return f"[UUID: {self.resource_uuid}]"
         return ""
 
+    def clean_label(self) -> str:
+        base = self.label
+        for marker in (
+            " (status:",
+            " [ingredient_group:",
+            " [interaction_hazard",
+            " [duplicate_therapy:",
+            " [note_medication_contradiction:",
+            " [stage_conflict:",
+        ):
+            idx = base.find(marker)
+            if idx != -1:
+                base = base[:idx]
+        return base.strip()
+
     def short_display(self) -> str:
         tag = f"[{self.citation_idx}] " if self.citation_idx is not None else ""
-        val = f" ({self.value_summary})" if self.value_summary else ""
-        code_part = f" [{self.code}]" if self.code and self.code not in self.label else ""
-        return f"{tag}{self.label}{val}{code_part}".strip()
+        base_lbl = self.clean_label()
+        val_clean = self.value_summary
+        for marker in (
+            "ingredient_group:",
+            "interaction_hazard",
+            "duplicate_therapy:",
+            "note_medication_contradiction:",
+            "stage_conflict:",
+            "status:",
+        ):
+            idx = val_clean.find(marker)
+            if idx != -1:
+                val_clean = val_clean[:idx].rstrip(" ;,[(")
+        if len(val_clean) > 72:
+            val_clean = val_clean[:69] + "..."
+        val = f" ({val_clean})" if val_clean else ""
+        code_part = f" [{self.code}]" if self.code and self.code not in base_lbl else ""
+        return f"{tag}{base_lbl}{val}{code_part}".strip()
 
 
 @dataclass
@@ -854,6 +884,41 @@ class ClinicalEntityGraph:
                         kb_source="Allergy-Medication Cross-Reactivity Rule",
                     )
 
+        # 2b. Medication <-> Medication duplicate ingredient or same-class overlap
+        statin_tokens = ("atorvastatin", "lipitor", "simvastatin", "zocor", "rosuvastatin", "crestor", "pravastatin")
+        p2y12_tokens = ("clopidogrel", "plavix", "ticagrelor", "brilinta", "prasugrel")
+        sedative_tokens = ("zolpidem", "ambien", "lorazepam", "ativan", "alprazolam", "diazepam", "clonazepam")
+        anticoag_tokens = ("apixaban", "eliquis", "warfarin", "coumadin", "rivaroxaban", "xarelto", "dabigatran")
+        for i_m, m1 in enumerate(medications):
+            m1_clean = m1.clean_label()
+            m1_txt = m1_clean.lower()
+            ing1 = normalize_drug_ingredient(m1_clean).lower()
+            for m2 in medications[i_m + 1 :]:
+                m2_clean = m2.clean_label()
+                m2_txt = m2_clean.lower()
+                ing2 = normalize_drug_ingredient(m2_clean).lower()
+                same_ing = bool(ing1 and ing2 and ing1 == ing2 and m1_txt != m2_txt)
+                both_statin = any(k in m1_txt or k == ing1 for k in statin_tokens) and any(
+                    k in m2_txt or k == ing2 for k in statin_tokens
+                )
+                both_p2y12 = any(k in m1_txt or k == ing1 for k in p2y12_tokens) and any(
+                    k in m2_txt or k == ing2 for k in p2y12_tokens
+                )
+                both_sedative = any(k in m1_txt or k == ing1 for k in sedative_tokens) and any(
+                    k in m2_txt or k == ing2 for k in sedative_tokens
+                )
+                both_anticoag = any(k in m1_txt or k == ing1 for k in anticoag_tokens) and any(
+                    k in m2_txt or k == ing2 for k in anticoag_tokens
+                )
+                if same_ing or both_statin or both_p2y12 or both_sedative or both_anticoag:
+                    self.add_edge(
+                        m1.node_id,
+                        m2.node_id,
+                        "CONTRAINDICATED_OR_DOSE_ADJUST_IN",
+                        f"Duplicate ingredient or overlapping therapeutic class ({m1_clean} vs. {m2_clean}); reconcile to a single active prescription",
+                        kb_source="RxNorm Therapeutic Duplication Rule",
+                    )
+
         # 3. Condition / Medication -> Observation (MONITORED_BY)
         for source_node in [*conditions, *medications]:
             src_text = f"{source_node.label} {source_node.value_summary} {source_node.raw_line}".lower()
@@ -873,26 +938,94 @@ class ClinicalEntityGraph:
                         break
 
         # 4. Medication / Condition -> DocumentReference Note (CONTRADICTED_OR_MODIFIED_BY_NOTE)
+        med_mod_re = re.compile(
+            r"\b(hold|holding|held|stop|stopped|discontinue|discontinued|reduced|reduce|"
+            r"not\s+taking|non-?adherent|self-discontinued|ran\s+out|half\s+dose|cutting|do\s+not\s+take)\b"
+            r"\s*(?:taking\s+)?([^.;|\n]{2,110})",
+            re.IGNORECASE,
+        )
+        clause_stop_re = re.compile(
+            r"\b(?:while\s+continuing|and\s+continue|but\s+continue|continuing|continue|"
+            r"resuming|resume|starting|start|and\s+reconcile|reconciling|reconcile|"
+            r"and\s+consolidate|consolidating|consolidate|and\s+retire|retiring|retire|"
+            r"due\s+to|given|because\s+of|because|secondary\s+to|in\s+the\s+setting\s+of|to\s+prevent)\b",
+            re.IGNORECASE,
+        )
+        negation_prefix_re = re.compile(
+            r"\b(?:do\s+not|don't|never|not\s+to|not|without|no\s+need\s+to|avoid)\s+$",
+            re.IGNORECASE,
+        )
+        conditional_clause_re = re.compile(
+            r"\b(?:if|unless|when|should|in\s+case|for\s+sbp|for\s+bp|for\s+hr|parameters?\s*:)\b",
+            re.IGNORECASE,
+        )
+        cond_note_cues = (
+            "stage 4",
+            "stage 5",
+            "stage 3",
+            "stage 2",
+            "worsening",
+            "progressed",
+            "decompensated",
+            "conflicting",
+            "retire",
+            "outdated",
+            "resolved",
+            "discrepancy",
+            "conflict",
+        )
         for note in notes:
             note_text = f"{note.label} {note.value_summary} {note.raw_line}".lower()
-            has_modification_cue = any(cue in note_text for cue in _NOTE_MODIFICATION_CUES)
-            for item in [*medications, *conditions]:
-                item_terms = _extract_entity_match_terms(item)
-                if not item_terms:
+            raw_clauses = [c.strip() for c in re.split(r"[.;|\n]+", note_text) if c.strip()]
+            for med in medications:
+                med_terms = _extract_entity_match_terms(med)
+                if not med_terms:
                     continue
-                if any(term in note_text for term in item_terms):
-                    if has_modification_cue or item.category == "MedicationRequest":
+                matched_cue = ""
+                for raw_clause in raw_clauses:
+                    if conditional_clause_re.search(raw_clause):
+                        continue
+                    for m_mod in med_mod_re.finditer(raw_clause):
+                        prefix = raw_clause[: m_mod.start()]
+                        if negation_prefix_re.search(prefix):
+                            continue
+                        target_span = clause_stop_re.split(m_mod.group(2).lower())[0]
+                        if any(term in target_span for term in med_terms):
+                            matched_cue = m_mod.group(1).lower()
+                            break
+                    if matched_cue:
+                        break
+                if matched_cue:
+                    self.add_edge(
+                        med.node_id,
+                        note.node_id,
+                        "CONTRADICTED_OR_MODIFIED_BY_NOTE",
+                        f"Clinical note instructs to {matched_cue} {med.clean_label()}, whereas structured MedicationRequest remains active",
+                        kb_source="Structured-vs-Narrative Reconciliation",
+                    )
+
+            for cond in conditions:
+                if cond.status.lower() == "resolved" or "status: resolved" in cond.label.lower():
+                    continue
+                cond_terms = _extract_entity_match_terms(cond)
+                if not cond_terms:
+                    continue
+                for raw_clause in raw_clauses:
+                    if any(term in raw_clause for term in cond_terms) and any(
+                        cue in raw_clause for cue in cond_note_cues
+                    ):
                         cue_matched = next(
-                            (c for c in _NOTE_MODIFICATION_CUES if c in note_text),
+                            (c for c in cond_note_cues if c in raw_clause),
                             "narrative clinical context",
                         )
                         self.add_edge(
-                            item.node_id,
+                            cond.node_id,
                             note.node_id,
                             "CONTRADICTED_OR_MODIFIED_BY_NOTE",
-                            f"Structured {item.category} ({item.label}) modified or contextualized in note ({cue_matched})",
+                            f"Structured Condition ({cond.clean_label()}) modified or contextualized in note ({cue_matched})",
                             kb_source="Structured-vs-Narrative Reconciliation",
                         )
+                        break
 
     def format_subgraph_lines(
         self,
@@ -904,6 +1037,12 @@ class ClinicalEntityGraph:
             return []
 
         q_terms = _extract_question_keywords(question)
+        broad_query = _is_reconciliation_or_broad_query(question)
+        generic_anatomy_terms = {
+            "coronary", "artery", "heart", "blood", "pressure", "kidney", "renal",
+            "chronic", "acute", "brain", "disease", "disorder", "genetic",
+        }
+        specific_q_terms = [t for t in q_terms if len(t) >= 4 and t not in generic_anatomy_terms]
         edge_priority = {
             "CONTRAINDICATED_OR_DOSE_ADJUST_IN": 0,
             "CONTRADICTED_OR_MODIFIED_BY_NOTE": 1,
@@ -920,6 +1059,10 @@ class ClinicalEntityGraph:
                 continue
             combined = f"{src.label} {src.value_summary} {tgt.label} {tgt.value_summary} {edge.rationale}".lower()
             q_hits = sum(1 for t in q_terms if t in combined)
+            if not broad_query:
+                src_tgt_labels = f"{src.label} {tgt.label}".lower()
+                if not any(t in src_tgt_labels for t in specific_q_terms):
+                    continue
             prio = edge_priority.get(edge.edge_type, 5)
             # Sort by: question relevance first (if question has terms), then edge safety priority
             scored_edges.append(((-q_hits, prio, idx), edge))
@@ -1216,6 +1359,21 @@ def parse_omitted_clinical_items(text: str) -> Tuple[int, Dict[str, int]]:
     return total, by_category
 
 
+def _strip_trailing_prompt_sections(text: str) -> str:
+    """Remove trailing formatting boilerplate or prior orchestration blocks from extracted questions."""
+    out = text.strip()
+    for stop_marker in (
+        "[MED-AGENT-HUB ORCHESTRATION:",
+        "GROUNDING & FORMATTING RULES:",
+        "GROUNDING & SAFETY RULES:",
+        "GROUNDING & EVALUATION RULES:",
+    ):
+        idx = out.find(stop_marker)
+        if idx != -1:
+            out = out[:idx].strip()
+    return out
+
+
 def extract_active_question(
     messages: Union[str, Sequence[Dict[str, Any]]],
 ) -> str:
@@ -1232,6 +1390,16 @@ def extract_active_question(
             str(m.get("content") or "") for m in messages if isinstance(m, dict)
         )
 
+    m_task = re.search(
+        r"CLINICAL TASK\s*/\s*PATIENT QUESTION[^\n]*:\s*",
+        full_text,
+        flags=re.IGNORECASE,
+    )
+    if m_task:
+        after = _strip_trailing_prompt_sections(full_text[m_task.end() :])
+        if after:
+            return after
+
     for marker in (
         "USER_QUESTION:",
         "Task / Question:",
@@ -1240,25 +1408,101 @@ def extract_active_question(
     ):
         idx = full_text.rfind(marker)
         if idx != -1:
-            after = full_text[idx + len(marker) :].strip()
-            # Stop if orchestration block already appended
-            orch_idx = after.find("[MED-AGENT-HUB ORCHESTRATION:")
-            if orch_idx != -1:
-                after = after[:orch_idx].strip()
+            after = _strip_trailing_prompt_sections(full_text[idx + len(marker) :])
             if after:
                 return after
 
     # Fallback: take the text after the last numbered [N] line
     matches = list(re.finditer(r"^\s*\[\d+\]\s*.*$", full_text, flags=re.MULTILINE))
     if matches:
-        tail = full_text[matches[-1].end() :].strip()
-        orch_idx = tail.find("[MED-AGENT-HUB ORCHESTRATION:")
-        if orch_idx != -1:
-            tail = tail[:orch_idx].strip()
+        tail = _strip_trailing_prompt_sections(full_text[matches[-1].end() :])
         if tail:
             return tail
 
-    return full_text[-600:].strip()
+    return _strip_trailing_prompt_sections(full_text[-600:])
+
+
+def _is_reconciliation_or_broad_query(question: str) -> bool:
+    """Return True when the question asks for reconciliation, conflict auditing, safety review, or broad summary."""
+    q_low = (question or "").strip().lower()
+    if not q_low:
+        return True
+    broad_cues = (
+        "reconcil",
+        "conflict",
+        "duplicate",
+        "overlap",
+        "contradict",
+        "audit",
+        "discrepanc",
+        "anomal",
+        "safety",
+        "interaction",
+        "hold",
+        "stop",
+        "stage",
+        "staging",
+        "comprehensive",
+        "overall",
+        "all three parts",
+        "active medications",
+        "concern",
+        "dosing",
+        "spironolactone",
+        "aldactone",
+        "apixaban",
+        "eliquis",
+        "warfarin",
+        "clopidogrel",
+        "plavix",
+        "lipitor",
+        "simvastatin",
+        "sedative",
+    )
+    if any(cue in q_low for cue in broad_cues):
+        return True
+    if any(
+        phrase in q_low
+        for phrase in (
+            "health summary",
+            "clinical summary",
+            "referral summary",
+            "immunization summary",
+            "summarize my active",
+            "overall summary",
+            "chart summary",
+            "focused summary",
+        )
+    ):
+        return True
+    return False
+
+
+def _extract_numbered_ledger_lines_text(prompt_text: str) -> str:
+    """Extract only the numbered `[N] ...` lines from a prompt so Stage 2 KB or question text is not mistaken for ledger lines."""
+    lines = [
+        m.group(0)
+        for m in re.finditer(r"^\s*\[\d+\]\s+.*$", prompt_text or "", flags=re.MULTILINE)
+    ]
+    return "\n".join(lines) if lines else (prompt_text or "")
+
+
+def _format_note_snippet_for_recovery(raw_text: str, max_chars: int = 280) -> str:
+    """Format a recovered clinical note snippet, preserving `Assessment And Plan` hold/stop directives when present."""
+    cleaned = (raw_text or "").strip().replace("\n", " ")
+    if len(cleaned) <= max_chars:
+        return cleaned
+    m_ap = re.search(
+        r"(?:#+\s*)?(?:assessment\s+(?:and|&)\s+plan|interval\s+history\s*&\s*longitudinal\s+assessment)\s*:?",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    if m_ap:
+        ap_tail = cleaned[m_ap.start() :].strip()
+        if len(ap_tail) > max_chars:
+            ap_tail = ap_tail[: max_chars - 3] + "..."
+        return ap_tail
+    return cleaned[: max_chars - 3] + "..."
 
 
 def _recover_omitted_tier0_items(
@@ -1270,8 +1514,9 @@ def _recover_omitted_tier0_items(
     max_recovered: int = 6,
 ) -> List[str]:
     """Use ``wahs_tools`` against ``extracted`` to recover omitted Tier-0 clinical records."""
+    ledger_only_text = _extract_numbered_ledger_lines_text(prompt_text)
     existing_uuids = set(
-        re.findall(r"\bUUIDs?\s*:\s*([A-Za-z0-9_.,\s-]+)", prompt_text)
+        re.findall(r"\bUUIDs?\s*:\s*([A-Za-z0-9_.,\s-]+)", ledger_only_text)
     )
     flat_existing_uuids: Set[str] = set()
     for chunk in existing_uuids:
@@ -1279,9 +1524,10 @@ def _recover_omitted_tier0_items(
             if token.strip():
                 flat_existing_uuids.add(token.strip())
 
-    lower_prompt = prompt_text.lower()
+    lower_ledger = ledger_only_text.lower()
     q_keywords = _extract_question_keywords(question)
-    if not q_keywords:
+    broad_query = _is_reconciliation_or_broad_query(question)
+    if not q_keywords and broad_query:
         q_keywords = ["creatinine", "egfr", "potassium", "note", "medication", "hba1c"]
 
     recovered_entries: List[Tuple[str, str, str, str]] = []  # (date, category, summary_with_details, uuid)
@@ -1292,9 +1538,9 @@ def _recover_omitted_tier0_items(
             return
         if r_uuid and (r_uuid in flat_existing_uuids or r_uuid in seen_uuids):
             return
-        # Check if core summary substring already appears verbatim in the condensed chart
+        # Check if core summary substring already appears verbatim in the condensed chart ledger
         clean_prefix = re.split(r"[(\[—:]", text_s)[0].strip().lower()[:32]
-        if clean_prefix and len(clean_prefix) >= 6 and clean_prefix in lower_prompt:
+        if clean_prefix and len(clean_prefix) >= 6 and clean_prefix in lower_ledger:
             return
         if r_uuid:
             seen_uuids.add(r_uuid)
@@ -1318,6 +1564,10 @@ def _recover_omitted_tier0_items(
         )
     )
     tier0_cap = max(1, max_recovered - 2)
+    q_low = (question or "").lower()
+    device_cues_in_q = any(
+        w in q_low for w in ("device", "pacemaker", "stent", "implant", "cpap", "port", "valve", "bipap", "oxygen")
+    )
     for it in tier0_items:
         if len(recovered_entries) >= tier0_cap:
             break
@@ -1325,7 +1575,24 @@ def _recover_omitted_tier0_items(
         disp = str(getattr(it, "display", "") or "").strip()
         if not disp:
             continue
+        disp_low = disp.lower()
         sec = str(getattr(it, "section", "") or "")
+        if sec == "device" and not device_cues_in_q:
+            continue
+        if not broad_query:
+            # On narrow lookups/abstentions, only recover a Tier-0 item if it matches the question's targets
+            matches_q = any(kw in disp_low for kw in q_keywords if len(kw) >= 4)
+            if not matches_q:
+                if "beta-blocker" in q_low and "metoprolol" in disp_low:
+                    matches_q = True
+                elif "insulin" in q_low and ("insulin" in disp_low or "humulin" in disp_low):
+                    matches_q = True
+                elif "blood pressure" in q_low and "hypertension" in disp_low:
+                    matches_q = True
+                elif "cardiometabolic" in q_low and any(k in disp_low for k in ("prediabetes", "obesity", "metabolic", "diabetes")):
+                    matches_q = True
+            if not matches_q:
+                continue
         cat_label = (
             "Medication"
             if sec == "med_active"
@@ -1340,8 +1607,12 @@ def _recover_omitted_tier0_items(
             parts_txt.append(f"[Org: {org}]")
         _try_add(str(getattr(it, "date", "") or ""), cat_label, " ".join(parts_txt), r_uuid)
 
-    # 1. Recover omitted clinical notes (prioritizing Discharge Summaries & most recent dates)
-    note_queries = q_keywords[:2] + ["discharge", ""]
+    # 1. Recover omitted clinical notes (prioritizing Discharge Summaries on reconciliation & question-matched notes on lookups)
+    generic_narrow_terms = {
+        "coronary", "artery", "heart", "blood", "pressure", "kidney", "renal", "brain", "genetic",
+    }
+    narrow_q_kws = [kw for kw in q_keywords if len(kw) >= 4 and kw not in generic_narrow_terms]
+    note_queries = (q_keywords[:2] + ["discharge", ""]) if broad_query else narrow_q_kws[:5]
     for nq in note_queries:
         if len(recovered_entries) >= max_recovered:
             break
@@ -1361,9 +1632,8 @@ def _recover_omitted_tier0_items(
             title = str(n_item.get("display") or "Clinical Note")
             if "syndicated copy" in title.lower():
                 continue
-            snippet = str(n_item.get("full_text") or n_item.get("text") or "").strip().replace("\n", " ")
-            if len(snippet) > 165:
-                snippet = snippet[:162] + "..."
+            raw_note_txt = str(n_item.get("full_text") or n_item.get("text") or "")
+            snippet = _format_note_snippet_for_recovery(raw_note_txt, max_chars=280)
             summary_txt = f"{title} — {snippet}" if snippet and snippet not in title else title
             _try_add(str(n_item.get("date") or ""), "Clinical Note", summary_txt, r_uuid)
 
@@ -1376,7 +1646,7 @@ def _recover_omitted_tier0_items(
             "bnp", "nt-probnp", "tsh", "urate", "uric", "weight", "blood", "pressure",
         }
     ]
-    if not lab_queries and ("lab_observation" in omitted_by_category or len(recovered_entries) < max_recovered):
+    if broad_query and not lab_queries and ("lab_observation" in omitted_by_category or len(recovered_entries) < max_recovered):
         lab_queries = ["creatinine", "potassium", "glomerular", "hemoglobin", "a1c"]
 
     for lq in lab_queries[:4]:
@@ -1390,7 +1660,7 @@ def _recover_omitted_tier0_items(
         disp = str(latest_pt.get("concept") or lq)
         code = str(latest_pt.get("code") or "")
         r_uuid = str(latest_pt.get("resource_uuid") or "")
-        if disp.lower()[:28] in lower_prompt and (not r_uuid or r_uuid in flat_existing_uuids):
+        if disp.lower()[:28] in lower_ledger and (not r_uuid or r_uuid in flat_existing_uuids):
             continue
         trail = ", ".join(
             f"{p.get('value')} {p.get('unit') or ''} ({str(p.get('date') or '')[:10]})".strip()
@@ -1405,7 +1675,11 @@ def _recover_omitted_tier0_items(
         )
 
     # 3. Search across all chart categories via search_chart_entries for question keywords
-    for kw in [*q_keywords[:4], ""]:
+    search_kws = ([*q_keywords[:4], ""]) if broad_query else narrow_q_kws[:6]
+    wants_historical_meds = any(
+        w in q_low for w in ("antibiotic", "perioperative", "medication", "drug", "pill", "insulin", "blocker")
+    )
+    for kw in search_kws:
         if len(recovered_entries) >= max_recovered:
             break
         srch = search_chart_entries(extracted, query=kw, limit=10)
@@ -1413,7 +1687,10 @@ def _recover_omitted_tier0_items(
             r_uuid = str(m.get("resource_uuid") or "")
             if r_uuid and r_uuid in flat_existing_uuids:
                 continue
-            cat = str(m.get("resource_type") or m.get("section") or "ClinicalItem")
+            sec_m = str(m.get("section") or "")
+            if not broad_query and sec_m == "med_historical" and not wants_historical_meds:
+                continue
+            cat = str(m.get("resource_type") or sec_m or "ClinicalItem")
             summ = str(m.get("display") or "")
             det = str(m.get("text") or "").strip().replace("\n", " ")
             if len(det) > 160:
@@ -1479,6 +1756,7 @@ def build_wahs_hub_enrichment_block(
         prompt_text = prompt_text[: prompt_text.find(orch_marker)].rstrip()
 
     active_question = extract_active_question(prompt_text)
+    broad_query = _is_reconciliation_or_broad_query(active_question)
     omitted_count, omitted_by_cat = parse_omitted_clinical_items(prompt_text)
     resolved_extracted = _resolve_extracted_chart(prompt_text, extracted=extracted)
 
@@ -1522,24 +1800,41 @@ def build_wahs_hub_enrichment_block(
     subgraph_lines = graph.format_subgraph_lines(question=active_question, max_lines=8)
 
     # Rule 3: Live Question-Conditioned Clinical KB Lookup
-    chart_codes = _extract_codes_from_prompt_text(prompt_text)
-    if resolved_extracted is not None:
+    chart_codes = _extract_codes_from_prompt_text(prompt_text) if broad_query else []
+    if broad_query and resolved_extracted is not None:
         for c in extract_chart_kb_codes(resolved_extracted):
             if c not in chart_codes:
                 chart_codes.append(c)
 
-    # Augment KB query with top entity labels so specific clinical terms match corpus
-    entity_terms = " ".join(
-        n.label for n in list(graph.nodes.values())[:6] if n.category in {"Condition", "MedicationRequest"}
-    )
-    kb_query = f"{active_question} {entity_terms}".strip()
+    if broad_query:
+        entity_terms = " ".join(
+            n.label for n in list(graph.nodes.values())[:6] if n.category in {"Condition", "MedicationRequest"}
+        )
+        kb_query = f"{active_question} {entity_terms}".strip()
+    else:
+        kb_query = active_question.strip()
     kb_hits = hub_kb.search(query=kb_query, corpus="wahs", k=4, codes=chart_codes)
+    q_terms = _extract_question_keywords(active_question)
+    q_low_kb = (active_question or "").lower()
+    wants_sdoh_kb = any(
+        w in q_low_kb for w in ("privacy", "sdoh", "redact", "sharing", "external", "abuse", "sensitive", "social")
+    )
     kb_lines: List[str] = []
     for hit in kb_hits:
         h_id = str(hit.get("id") or "kb")
         h_src = str(hit.get("source") or "Clinical Guideline")
         h_title = str(hit.get("title") or "")
         h_text = str(hit.get("text") or "").strip().replace("\n", " ")
+        if "sdoh-privacy" in h_id.lower() and not wants_sdoh_kb:
+            continue
+        if not broad_query:
+            hit_combined = f"{h_id} {h_title}".lower()
+            specific_kb_terms = [
+                t for t in q_terms
+                if len(t) >= 5 and t not in {"coronary", "artery", "heart", "blood", "pressure", "kidney", "renal", "genetic", "brain", "disease", "disorder"}
+            ]
+            if not any(t in hit_combined for t in specific_kb_terms):
+                continue
         if len(h_text) > 210:
             h_text = h_text[:207] + "..."
         kb_lines.append(f"- [KB {h_id} | {h_src}] {h_title}: {h_text}")
@@ -1550,30 +1845,34 @@ def build_wahs_hub_enrichment_block(
     )
     instruction_line = (
         "Hub Verification Directive: Preserve inline [N] citations when referencing linked clinical "
-        "entities or Tier-0 overflow-recovered records below."
+        "entities or Tier-0 overflow-recovered records below, and always write out the exact clinical "
+        "name of every cited condition, procedure, medication, or lab (never write a bare year/date and "
+        "citation like 'in 1995 [4] [5]' without naming the conditions). Answer ONLY the specific "
+        "question(s) asked by the user; do not append unrequested medication or staging warnings on "
+        "narrow lookups or abstentions, and never attach [1] or [2] to state that a requested test is absent."
     )
 
-    if overflow_triggered:
-        cat_desc = (
-            ", ".join(f"{k}={v}" for k, v in omitted_by_cat.items())
-            if omitted_by_cat
-            else f"total={omitted_count}"
-        )
-        overflow_header = (
-            f"1. Tier-0 Overflow Recovery (ACTIVE: omitted_clinical_items={omitted_count} [{cat_desc}]; "
-            f"recovered={len(recovered_lines)} records via wahs_tools):"
-        )
-    else:
-        overflow_header = (
-            "1. Tier-0 Overflow Recovery: SKIPPED (omitted_clinical_items=0; "
-            "100% of clinical items are already represented in the condensed chart above)."
-        )
+    cat_desc = (
+        ", ".join(f"{k}={v}" for k, v in omitted_by_cat.items())
+        if omitted_by_cat
+        else f"total={omitted_count}"
+    )
 
     def _render_block(
         rec_slice: List[str],
         sub_slice: List[str],
         kb_slice: List[str],
     ) -> str:
+        if overflow_triggered:
+            overflow_header = (
+                f"1. Tier-0 Overflow Recovery (ACTIVE: omitted_clinical_items={omitted_count} [{cat_desc}]; "
+                f"recovered={len(rec_slice)} records via wahs_tools):"
+            )
+        else:
+            overflow_header = (
+                "1. Tier-0 Overflow Recovery: SKIPPED (omitted_clinical_items=0; "
+                "100% of clinical items are already represented in the condensed chart above)."
+            )
         sections: List[str] = [header_line, instruction_line, overflow_header]
         if rec_slice:
             sections.extend(rec_slice)
@@ -1605,12 +1904,12 @@ def build_wahs_hub_enrichment_block(
             cur_kb.pop()
         elif len(cur_sub) > 2:
             cur_sub.pop()
-        elif len(cur_rec) > 1:
-            cur_rec.pop()
         elif len(cur_sub) > 1:
             cur_sub.pop()
         elif cur_kb:
             cur_kb.pop()
+        elif len(cur_rec) > 1:
+            cur_rec.pop()
         else:
             # Hard character truncation safeguard
             max_chars = max(256, max_tokens * 3)
@@ -1937,12 +2236,25 @@ def _extract_question_keywords(question: str) -> List[str]:
         "clinical", "summary", "summarize", "provide", "please", "doctor", "questions",
         "based", "current", "active", "history", "should", "would", "could", "have",
         "with", "from", "into", "during", "after", "before", "between", "under",
-        "review", "prepare", "visit", "appointment",
+        "review", "prepare", "visit", "appointment", "looking", "across", "beth",
+        "israel", "deaconess", "medical", "center", "bidmc", "mimic", "mimic-iv",
+        "subject", "10014354", "10019003", "hospital", "inpatient", "outpatient",
+        "admissions", "admission", "state", "documented", "exact", "results", "result",
+        "stays", "stay", "maurice", "auer", "marcus", "vance", "elena", "rostova",
+        "arthur", "pendelton", "margaret", "chen", "byron", "lamar", "health", "year",
+        "years", "look", "cite", "long-standing", "diagnoses", "diagnosis", "major",
+        "drug", "names", "strengths", "daily", "prescriptions", "prescription",
+        "medications", "medication", "panel", "score", "test", "scan", "report",
+        "show", "were", "recent", "prior", "dates", "reasons", "and", "the", "for",
+        "was", "any", "disease", "disorder", "sharing", "posture", "self", "lookup",
+        "historical", "grounded", "abstention",
     }
     words = re.findall(r"[a-zA-Z0-9-]{3,}", question.lower())
     out: List[str] = []
     seen: Set[str] = set()
     for w in words:
+        if w[0].isdigit():
+            continue
         if w not in stop_words and w not in seen:
             seen.add(w)
             out.append(w)

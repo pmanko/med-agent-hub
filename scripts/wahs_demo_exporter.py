@@ -273,7 +273,7 @@ def build_demo_patients_payload(
                                 "resourceUuid": m.get("resourceUuid"),
                                 "memberCount": len(m.get("memberUuids") or []),
                             }
-                            for m in cond_8k.mappings[:120]
+                            for m in cond_8k.mappings[:500]
                         ],
                         "redacted_count": len(cond_8k.redacted_for_privacy),
                     },

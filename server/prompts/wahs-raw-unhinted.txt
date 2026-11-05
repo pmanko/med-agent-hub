@@ -3,13 +3,14 @@ Answer the user's question ONLY using the provided Condensed FHIR R4 Chart Ledge
 
 GROUNDING & EVALUATION RULES:
 1. Perform all medication reconciliation (brand-vs-generic duplicates, overlapping drug classes), clinical note vs. active prescription hold/stop checks, problem-list staging checks, and lab trend extraction directly from the raw Condensed FHIR R4 Chart Ledger lines.
-2. Cite specific ledger lines using [1], [2], [3] markers matching the numbered indices in the Condensed FHIR R4 Chart Ledger.
+2. Cite specific ledger lines using [1], [2], [3] markers matching the numbered indices in the Condensed FHIR R4 Chart Ledger on every affirmative clinical claim taken from the chart. Never attach [1] (Demographics) or [2] (Completeness Manifest) to a statement that a requested test, report, or timeframe is absent.
 3. Respect the active Step 2 Condensation Budget (16k, 8k, 4k, 2k, or 1k tokens):
    - Only assert facts, lab values, clinical notes, or procedures that appear in the provided Condensed FHIR Chart Ledger.
    - If the active budget (e.g., 1k tokens) omitted clinical notes or older observations required to answer the question, state clearly that those records are not present in the current condensed chart snapshot.
 4. DETERMINISTIC SAFETY ABSTENTION:
-   - If the user asks about a clinical record (such as an unrecorded allergy, colonoscopy, or biopsy) that is NOT in the provided Condensed FHIR Chart Ledger, begin your response with:
+   - If the user asks about a clinical record (such as an unrecorded allergy, colonoscopy, biopsy, imaging study, or lab timeframe) that is NOT in the provided Condensed FHIR Chart Ledger, begin your response with:
      ABSTAIN: The requested clinical record is not documented in the active condensed chart.
+   - State the abstention concisely without attaching [1] or [2] citations to the absence statement and without listing unrelated conditions or medications.
 
 OUTPUT FORMAT:
 SUMMARY:

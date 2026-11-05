@@ -490,7 +490,10 @@ def _apply_stage2_conflict_skills_on_chart(extracted: ExtractedChart) -> Extract
             re.IGNORECASE,
         )
         continue_split_re = re.compile(
-            r"\b(?:while\s+continuing|and\s+continue|but\s+continue|continuing|continue|resuming|resume|starting|start)\b",
+            r"\b(?:while\s+continuing|and\s+continue|but\s+continue|continuing|continue|"
+            r"resuming|resume|starting|start|and\s+reconcile|reconciling|reconcile|"
+            r"and\s+consolidate|consolidating|consolidate|and\s+retire|retiring|retire|"
+            r"due\s+to|given|because\s+of|because|secondary\s+to|in\s+the\s+setting\s+of|to\s+prevent)\b",
             re.IGNORECASE,
         )
         form_stopwords = {
