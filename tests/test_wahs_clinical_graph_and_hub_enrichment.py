@@ -495,3 +495,64 @@ def test_openai_compat_wahs_streaming_first_chunk_and_header_enrichment() -> Non
         second_data = json.loads(chunks[1].strip()[5:].strip())
         assert "hub_enrichment" not in second_data
 
+
+def test_allergy_matching_avoids_metadata_false_positives_and_catches_true_conflicts() -> None:
+    # 1. Extracted chart: Penicillin allergy + non-beta-lactam meds (Metformin, Spironolactone, Apixaban)
+    bundle = _build_cardiorenal_test_bundle()
+    extracted = extract_bundle(bundle)
+    graph = ClinicalEntityGraph.from_extracted_chart(extracted)
+    allergy_edges = [
+        e for e in graph.edges
+        if e.edge_type == "CONTRAINDICATED_OR_DOSE_ADJUST_IN"
+        and graph.nodes[e.target_id].category == "AllergyIntolerance"
+    ]
+    assert allergy_edges == [], f"Expected zero false-positive allergy edges on non-beta-lactams, got: {allergy_edges}"
+
+    # 2. Condensed ledger: Penicillin allergy + Metformin (no edge) vs Amoxicillin (true beta-lactam edge)
+    ledger = "\n".join(
+        [
+            "[1] (2026-01-19) Patient: Elena Rostova, DOB: 1954-04-12, Gender: female",
+            "[2] (2023-05-10) Allergy: Penicillin (status: active, verification: confirmed, criticality: high, category: medication, reaction: Anaphylaxis (severe)) [UUID: alg-pen-1]",
+            "[3] (2025-12-01) Medication: Metformin hydrochloride 1000 MG Oral Tablet (status: active, category: medication) [UUID: med-met-1]",
+            "[4] (2025-12-01) Medication: Amoxicillin 500 MG Oral Capsule (status: active, category: medication) [UUID: med-amox-1]",
+        ]
+    )
+    ledger_graph = ClinicalEntityGraph.from_condensed_ledger(ledger)
+    ledger_allergy_edges = [
+        e for e in ledger_graph.edges
+        if e.edge_type == "CONTRAINDICATED_OR_DOSE_ADJUST_IN"
+        and ledger_graph.nodes[e.target_id].category == "AllergyIntolerance"
+    ]
+    assert len(ledger_allergy_edges) == 1
+    assert "Amoxicillin" in ledger_graph.nodes[ledger_allergy_edges[0].source_id].label
+
+
+def test_ensure_patient_chart_cache_registers_direct_bundle_dicts_from_catalog() -> None:
+    import server.fhir.clinical_graph as cg_mod
+
+    sample_bundle = _build_cardiorenal_test_bundle()
+    custom_bundle = json.loads(json.dumps(sample_bundle))
+    for entry in custom_bundle.get("entry", []):
+        res = entry.get("resource", {})
+        if res.get("resourceType") == "Patient":
+            res["id"] = "catalog-direct-bundle-patient-99"
+            res["name"] = [{"family": "CatalogTest", "given": ["DirectBundle"]}]
+
+    orig_cache = dict(cg_mod._EXTRACTED_CHART_CACHE)
+    orig_init = cg_mod._CACHE_INITIALIZED
+    try:
+        cg_mod._EXTRACTED_CHART_CACHE.clear()
+        cg_mod._CACHE_INITIALIZED = False
+        with patch(
+            "server.wahs_demo._load_patient_catalog",
+            return_value={"catalog_direct_key": custom_bundle},
+        ):
+            cg_mod._ensure_patient_chart_cache()
+            assert "catalog_direct_key" in cg_mod._EXTRACTED_CHART_CACHE
+            assert cg_mod._EXTRACTED_CHART_CACHE["catalog_direct_key"].patient_id == "catalog-direct-bundle-patient-99"
+    finally:
+        cg_mod._EXTRACTED_CHART_CACHE.clear()
+        cg_mod._EXTRACTED_CHART_CACHE.update(orig_cache)
+        cg_mod._CACHE_INITIALIZED = orig_init
+
+

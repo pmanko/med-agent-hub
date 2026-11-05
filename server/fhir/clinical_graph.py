@@ -812,17 +812,40 @@ class ClinicalEntityGraph:
                         )
                         break
 
-            # Check against Allergies
+            # Check against Allergies (match strictly on allergen substance tokens + class cross-reactivity,
+            # never on generic clinical/status metadata words from value_summary or raw_line).
+            med_label_clean = re.sub(r"([(\[][^)\]]*[)\]])", " ", med.label).lower()
+            med_drug_text = f"{med_label_clean} {ing}".strip()
+            med_drug_words = set(re.findall(r"[a-z]{4,}", med_drug_text))
             for alg in allergies:
-                alg_text = f"{alg.label} {alg.value_summary} {alg.raw_line}".lower()
-                alg_tokens = [
-                    w for w in re.findall(r"[a-z]{4,}", alg_text)
-                    if w not in {"allergy", "intolerance", "high", "low", "active", "criticality", "reaction", "severe", "moderate", "mild"}
-                ]
-                if any(tok in med_text for tok in alg_tokens) or (
-                    "penicillin" in alg_text
-                    and any(p in med_text for p in ("amoxicillin", "ampicillin", "piperacillin", "penicillin"))
-                ):
+                alg_substance_text, alg_tokens = _extract_allergen_substance_tokens(alg.label)
+                direct_match = bool(alg_tokens and any(tok in med_drug_words or tok == ing for tok in alg_tokens))
+                penicillin_match = any(
+                    k in alg_substance_text
+                    for k in ("penicillin", "amoxicillin", "ampicillin", "piperacillin", "beta-lactam", "betalactam", "augmentin", "unasyn", "zosyn")
+                ) and any(
+                    p in med_drug_text
+                    for p in (
+                        "penicillin", "amoxicillin", "ampicillin", "piperacillin", "nafcillin",
+                        "oxacillin", "dicloxacillin", "augmentin", "unasyn", "zosyn",
+                        "cephalexin", "cefazolin", "ceftriaxone", "cefepime", "cefdinir", "cefuroxime",
+                    )
+                )
+                sulfa_match = any(
+                    k in alg_substance_text
+                    for k in ("sulfa", "sulfonamide", "sulfamethoxazole", "bactrim", "septra", "cotrimoxazole")
+                ) and any(
+                    s in med_drug_text
+                    for s in ("sulfamethoxazole", "trimethoprim-sulfamethoxazole", "bactrim", "septra", "cotrimoxazole", "sulfasalazine", "sulfadiazine")
+                )
+                nsaid_match = any(
+                    k in alg_substance_text
+                    for k in ("nsaid", "aspirin", "ibuprofen", "naproxen", "ketorolac", "diclofenac", "meloxicam", "celecoxib", "indomethacin")
+                ) and any(
+                    n in med_drug_text
+                    for n in ("aspirin", "ibuprofen", "naproxen", "ketorolac", "diclofenac", "meloxicam", "celecoxib", "indomethacin", "piroxicam", "nabumetone")
+                )
+                if direct_match or penicillin_match or sulfa_match or nsaid_match:
                     self.add_edge(
                         med.node_id,
                         alg.node_id,
@@ -971,7 +994,12 @@ def _ensure_patient_chart_cache() -> None:
 
         catalog = _load_patient_catalog()
         for pid, entry in catalog.items():
-            raw_b = entry.get("raw_bundle")
+            if isinstance(entry, tuple) and entry:
+                raw_b = entry[0]
+            elif isinstance(entry, dict) and isinstance(entry.get("raw_bundle"), dict):
+                raw_b = entry["raw_bundle"]
+            else:
+                raw_b = entry
             if isinstance(raw_b, dict):
                 _register_bundle(raw_b, pid)
     except Exception:
@@ -1754,6 +1782,10 @@ def _split_ledger_label_and_value(body: str, category: str) -> Tuple[str, str]:
     if category == "Observation" and ":" in cleaned_no_uuid:
         head, tail = cleaned_no_uuid.split(":", 1)
         return head.strip(), tail.strip()[:160]
+    if category == "AllergyIntolerance":
+        m_qual = re.match(r"^([^(\[]+?)\s*([(\[](?:status|criticality|reaction|verification|category)\b.*)$", cleaned_no_uuid, flags=re.IGNORECASE)
+        if m_qual:
+            return m_qual.group(1).strip()[:120], m_qual.group(2).strip("()[] ")[:160]
     if "—" in cleaned_no_uuid:
         head, tail = cleaned_no_uuid.split("—", 1)
         return head.strip(), tail.strip()[:160]
@@ -1761,6 +1793,40 @@ def _split_ledger_label_and_value(body: str, category: str) -> Tuple[str, str]:
         head, tail = cleaned_no_uuid.split("|", 1)
         return head.strip(), tail.strip()[:160]
     return cleaned_no_uuid[:120], ""
+
+
+_ALLERGEN_METADATA_STOP_WORDS = {
+    "allergy", "allergic", "intolerance", "substance", "medication", "drug", "agent",
+    "food", "environment", "biologic", "category", "status", "active", "inactive",
+    "resolved", "verification", "confirmed", "unconfirmed", "refuted", "entered",
+    "error", "criticality", "high", "low", "unable", "assess", "reaction", "severe",
+    "moderate", "mild", "anaphylaxis", "rash", "hives", "urticaria", "itching",
+    "nausea", "vomiting", "diarrhea", "dyspnea", "bronchospasm", "angioedema",
+    "swelling", "history", "known", "unspecified", "other", "snomed", "rxnorm",
+    "loinc", "icd10", "uuid", "oral", "tablet", "capsule", "sodium", "potassium",
+    "hydrochloride", "calcium", "magnesium", "sulfate", "acetate", "tartrate",
+    "succinate", "besylate", "maleate", "fumarate", "citrate", "finding", "disorder",
+}
+
+
+def _extract_allergen_substance_tokens(alg_label: str) -> Tuple[str, List[str]]:
+    """Extract normalized allergen substance text and specific substance tokens from an allergy label."""
+    if not alg_label:
+        return "", []
+    # Strip trailing qualifier blocks such as (status: active, ...) or [status: active; ...]
+    substance_head = re.sub(
+        r"\s*[(\[][^)\]]*\b(?:status|criticality|reaction|verification|category|snomed|rxnorm)\b[^)\]]*[)\]]",
+        " ",
+        alg_label,
+        flags=re.IGNORECASE,
+    )
+    substance_head = re.sub(r"\b(?:allergy|intolerance)\s+to\b", " ", substance_head, flags=re.IGNORECASE)
+    substance_text = " ".join(substance_head.lower().split())
+    tokens = [
+        w for w in re.findall(r"[a-z]{4,}", substance_text)
+        if w not in _ALLERGEN_METADATA_STOP_WORDS
+    ]
+    return substance_text, tokens
 
 
 def _extract_org_name_from_text(text: str) -> str:
