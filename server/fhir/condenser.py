@@ -1611,7 +1611,11 @@ def _pack_items_to_token_budget(
                     key_q = (m.status or "active", dosage_str, m.conflict_note or "")
                     by_med_qual.setdefault(key_q, []).append(m)
 
-                def _build_ultra_med_text(include_dosage: bool, max_med_names: Optional[int] = None) -> str:
+                def _build_ultra_med_text(
+                    include_dosage: bool,
+                    max_med_names: Optional[int] = None,
+                    compact_conflicts: bool = False,
+                ) -> str:
                     group_strs: List[str] = []
                     for (st, dos, conf), mgroup in by_med_qual.items():
                         _, g_span = _span_phrase([x.date for x in mgroup])
@@ -1630,14 +1634,20 @@ def _pack_items_to_token_budget(
                         else:
                             names_joined = ", ".join(short_names)
                         quals: List[str] = []
-                        if g_span:
+                        if g_span and not compact_conflicts:
                             quals.append(g_span)
                         if st and st != "active":
                             quals.append(f"status: {st}")
                         if include_dosage and dos:
                             quals.append(f"dosage: {dos}")
                         q_str = f" ({', '.join(quals)})" if quals else ""
-                        c_str = f" [{conf}]" if conf else ""
+                        if conf and compact_conflicts:
+                            short_conf = "; ".join(
+                                p.split(":", 1)[0].strip() for p in conf.split(";") if p.strip()
+                            )
+                            c_str = f" [{short_conf}]"
+                        else:
+                            c_str = f" [{conf}]" if conf else ""
                         group_strs.append(f"{names_joined}{q_str}{c_str}")
                     return f"Medication (status: active): {'; '.join(group_strs)}"
 
@@ -1680,6 +1690,25 @@ def _pack_items_to_token_budget(
                         member_uuids=_merge_uuids(all_imms),
                     )
                 )
+            if other_meds:
+                _, _, _, _, ultra_toks = render_candidate(ultra)
+                if ultra_toks > target_tokens:
+                    for idx_u, u_it in enumerate(ultra):
+                        if u_it.code == "active-meds-ultra":
+                            ultra[idx_u] = ClinicalItem(
+                                resource_type=u_it.resource_type,
+                                resource_uuid=u_it.resource_uuid,
+                                date=u_it.date,
+                                clinical_date=u_it.clinical_date,
+                                date_kind=u_it.date_kind,
+                                section=u_it.section,
+                                code=u_it.code,
+                                display=u_it.display,
+                                text=_build_ultra_med_text(include_dosage=False, compact_conflicts=True),
+                                mandatory=True,
+                                member_uuids=u_it.member_uuids,
+                            )
+                            break
             mandatory_items = ultra
         else:
             mandatory_items = compressed_mandatory
