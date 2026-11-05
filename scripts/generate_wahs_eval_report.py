@@ -37,6 +37,8 @@ try:
         build_demo_patients_payload,
         write_wahs_demo_data_js,
     )
+    from scripts.wahs_mimic_fhir_loader import build_mimic_fhir_patient_bundles
+    from scripts.wahs_uscore_archetypes import build_extended_longitudinal_demo_archetypes
 except ImportError:  # pragma: no cover
     from wahs_demo_exporter import (  # type: ignore[no-redef]
         PERSONA_BIOS,
@@ -44,6 +46,12 @@ except ImportError:  # pragma: no cover
         QUESTIONS_BY_PATIENT,
         build_demo_patients_payload,
         write_wahs_demo_data_js,
+    )
+    from wahs_mimic_fhir_loader import (  # type: ignore[no-redef]
+        build_mimic_fhir_patient_bundles,
+    )
+    from wahs_uscore_archetypes import (  # type: ignore[no-redef]
+        build_extended_longitudinal_demo_archetypes,
     )
 
 
@@ -236,9 +244,30 @@ def evaluate_cohort(source_dir: Path, eval_dir: Path) -> Dict[str, Any]:
         bundles_set_b[p] = b_obj
         bundles_set_c[p] = b_obj
 
+    extended_us_core_patients: List[str] = []
+    for ext_fname, (ext_bundle, _ext_anoms) in build_extended_longitudinal_demo_archetypes().items():
+        ext_pid = ext_fname.replace(".json", "")
+        extended_us_core_patients.append(ext_pid)
+        ext_raw_text = json.dumps(ext_bundle, indent=2)
+        raw_bytes_a[ext_pid] = len(ext_raw_text.encode("utf-8"))
+        raw_tokens_a[ext_pid] = estimate_tokens_local(ext_raw_text)
+        bundles_set_a[ext_pid] = ext_bundle
+        bundles_set_b[ext_pid] = ext_bundle
+        bundles_set_c[ext_pid] = ext_bundle
 
-    # 1. Code coverage audit across all 6 bundles
-    all_six_bundles = list(bundles_set_a.values()) + list(bundles_set_b.values())
+    for mimic_fname, (mimic_bundle, _mimic_anoms) in build_mimic_fhir_patient_bundles(eval_output_dir=eval_dir).items():
+        mimic_pid = mimic_fname.replace(".json", "")
+        extended_us_core_patients.append(mimic_pid)
+        mimic_raw_text = json.dumps(mimic_bundle, indent=2)
+        raw_bytes_a[mimic_pid] = len(mimic_raw_text.encode("utf-8"))
+        raw_tokens_a[mimic_pid] = estimate_tokens_local(mimic_raw_text)
+        bundles_set_a[mimic_pid] = mimic_bundle
+        bundles_set_b[mimic_pid] = mimic_bundle
+        bundles_set_c[mimic_pid] = mimic_bundle
+
+    # 1. Code coverage audit across all 6 core evaluation bundles
+    core_eval_pids = synthea_patients + us_core_patients
+    all_six_bundles = [bundles_set_a[p] for p in core_eval_pids] + [bundles_set_b[p] for p in core_eval_pids]
     total_inst = 0
     resolved_inst = 0
     for b in all_six_bundles:
@@ -349,10 +378,10 @@ def evaluate_cohort(source_dir: Path, eval_dir: Path) -> Dict[str, Any]:
             }
         )
 
-    # 4. Build precomputed interactive demo payload for all 6 patients (Set B, Set C Messy, & Set A)
+    # 4. Build precomputed interactive demo payload for all 8 patients (Set B, Set C Messy, & Set A)
     demo_patients = build_demo_patients_payload(
         synthea_patients=synthea_patients,
-        us_core_patients=us_core_patients,
+        us_core_patients=us_core_patients + extended_us_core_patients,
         bundles_set_a=bundles_set_a,
         bundles_set_b=bundles_set_b,
         bundles_set_c=bundles_set_c,

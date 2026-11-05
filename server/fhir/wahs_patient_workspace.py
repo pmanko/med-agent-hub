@@ -18,6 +18,7 @@ from .condenser import (
 )
 from .extractors import (
     ClinicalItem,
+    extract_bundle,
     extract_bundle_lossless,
 )
 from .fhir_browser import build_fhir_browser_index
@@ -29,6 +30,30 @@ from .wahs_analyzer import (
     analyze_duplicates_and_bloat,
     analyze_patterns_and_summaries,
 )
+
+CONDENSATION_BUDGETS: tuple[int, ...] = (
+    262144,
+    131072,
+    65536,
+    32768,
+    16384,
+    8192,
+    4096,
+    2048,
+    1024,
+)
+
+BUDGET_LABELS: Dict[int, str] = {
+    262144: "256k",
+    131072: "128k",
+    65536: "64k",
+    32768: "32k",
+    16384: "16k",
+    8192: "8k",
+    4096: "4k",
+    2048: "2k",
+    1024: "1k",
+}
 
 
 def _extract_human_summary_from_condensed(
@@ -78,27 +103,40 @@ def _extract_human_summary_from_condensed(
         } or clean_line.startswith("Clinical Note"):
             notes_and_visits.append(f"{prefix_date}{clean_line}")
 
-    omitted = condensed.completeness_manifest.get("omitted_sections") or {}
+    omitted = (
+        condensed.completeness_manifest.get("omitted_by_section")
+        or condensed.completeness_manifest.get("omitted_section_counts")
+        or condensed.completeness_manifest.get("omitted_sections")
+        or {}
+    )
     omitted_total = sum(int(v) for v in omitted.values()) if isinstance(omitted, Mapping) else 0
     budget = condensed.target_tokens
-    if budget >= 8192:
+    mode_disp = "Lossless Structural" if condense_mode == "lossless_structural" else "Hierarchical Grouped"
+    if omitted_total == 0:
         lever_note = (
-            f"At {budget // 1024}k tokens ({'Lossless Structural' if condense_mode == 'lossless_structural' else 'Hierarchical Grouped'}), "
+            f"At {budget // 1024}k tokens ({mode_disp}), "
             f"100% of active conditions, medications, allergies, clinical notes, and multi-year lab history fit in context "
-            f"({len(condensed.records)} clinical ledger lines; {omitted_total} items omitted)."
+            f"({len(condensed.records)} clinical ledger lines; 0 clinical items trimmed)."
+        )
+    elif budget >= 8192:
+        lever_note = (
+            f"At {budget // 1024}k tokens ({mode_disp}), "
+            f"100% of the IPS Safety Core (allergies, active conditions, active meds, implants) and recent clinical history fit in context "
+            f"({len(condensed.records)} clinical ledger lines), while {omitted_total} older clinical items are trimmed from the in-context prompt "
+            f"(logged in the Completeness Manifest and recoverable via Tier 0 chart lookup)."
         )
     elif budget >= 4096:
         lever_note = (
-            f"At 4k tokens ({'Lossless Structural' if condense_mode == 'lossless_structural' else 'Hierarchical Grouped'}), "
+            f"At 4k tokens ({mode_disp}), "
             f"all active safety records, recent notes, and core lab series remain in context ({len(condensed.records)} lines), "
-            f"while {omitted_total} older routine observations/visits are trimmed to fit the 1-page visit budget."
+            f"while {omitted_total} older routine clinical items are trimmed to fit the 1-page visit budget (logged in the Completeness Manifest)."
         )
     else:
         lever_note = (
-            f"At {budget // 1024}k tokens ({'Lossless Structural' if condense_mode == 'lossless_structural' else 'Hierarchical Grouped'}), "
-            f"the chart is compressed to an emergency/compact capsule ({len(condensed.records)} lines). "
-            f"The IPS Safety Core (allergies, active conditions, active meds) is preserved first, while {omitted_total} "
-            f"older notes, procedures, and historical labs are omitted from the in-context prompt (recoverable via on-demand chart lookup)."
+            f"At {budget // 1024}k tokens ({mode_disp}), "
+            f"the chart is compressed to an emergency micro-capsule ({len(condensed.records)} lines). "
+            f"High-priority safety records are prioritized first, while {omitted_total} "
+            f"clinical items are trimmed to fit the tight {budget // 1024}k budget (logged in the Completeness Manifest and recoverable via Tier 0 chart lookup)."
         )
 
     return {
@@ -169,8 +207,30 @@ def build_patient_skills_and_condensation_matrix(
         it for it in extracted_lossless.items if it.sensitivity == "SDOH/PRIVACY-SENSITIVE"
     ]
 
+    extracted_for_modes = {
+        "lossless_structural": extract_bundle(
+            bundle,
+            include_conflict_annotations=False,
+            enable_privacy_classification=False,
+            preserve_intraday_timestamps=True,
+            preserve_all_note_sections=True,
+            filter_room_equipment_devices=False,
+        ),
+        "hierarchical": extract_bundle(
+            bundle,
+            filter_room_equipment_devices=True,
+        ),
+    }
+    full_lossless_ref = condense_bundle_to_budget(
+        extracted_for_modes["lossless_structural"],
+        target_tokens=262144,
+        condense_mode="lossless_structural",
+    )
+    full_clinical_tokens = max(1, int(full_lossless_ref.actual_tokens))
+
     prep_lever_summary = {
         "raw_json_tokens": raw_json_tokens,
+        "clinical_chart_tokens": full_clinical_tokens,
         "total_bundle_entries": extracted_lossless.total_bundle_entries,
         "core_clinical_items_count": len(extracted_lossless.items),
         "non_clinical_claims_count": claims_count,
@@ -180,7 +240,7 @@ def build_patient_skills_and_condensation_matrix(
         "sensitive_sdoh_count": len(sensitive_items),
     }
 
-    # 2. Interactive Condensation Matrix (2 modes x 5 budgets)
+    # 2. Interactive Condensation Matrix (2 modes x 9 budgets: 256k down to 1k)
     condensation_matrix: Dict[str, Dict[str, Any]] = {
         "lossless_structural": {},
         "hierarchical": {},
@@ -189,13 +249,30 @@ def build_patient_skills_and_condensation_matrix(
         ("lossless_structural", "lossless_structural"),
         ("hierarchical", "tiered"),
     ):
-        for b_tok in (16384, 8192, 4096, 2048, 1024):
+        mode_extracted = extracted_for_modes[mode_key]
+        built_by_budget: Dict[int, Dict[str, Any]] = {}
+        canonical_zero_omitted_budget: Optional[int] = None
+        canonical_zero_omitted_cell: Optional[Dict[str, Any]] = None
+
+        for b_tok in reversed(CONDENSATION_BUDGETS):
+            if canonical_zero_omitted_cell is not None and canonical_zero_omitted_budget is not None:
+                alias_cell = dict(canonical_zero_omitted_cell)
+                alias_cell["target_tokens"] = b_tok
+                alias_cell["budget_label"] = BUDGET_LABELS.get(b_tok, f"{b_tok // 1024}k")
+                alias_cell["alias_of_budget"] = str(canonical_zero_omitted_budget)
+                built_by_budget[b_tok] = alias_cell
+                continue
+
             c_res = condense_bundle_to_budget(
-                bundle,
+                mode_extracted,
                 target_tokens=b_tok,
                 condense_mode=internal_mode,
             )
-            red_pct = round((1.0 - (c_res.actual_tokens / max(1, raw_json_tokens))) * 100.0, 1)
+            if c_res.actual_tokens >= full_clinical_tokens:
+                red_pct = 0.0
+            else:
+                raw_red = round((1.0 - (c_res.actual_tokens / max(1, full_clinical_tokens))) * 100.0, 1)
+                red_pct = min(99.9, max(0.1, raw_red))
             retained_uuids: set[str] = set()
             for m_entry in c_res.mappings:
                 r_uuid = m_entry.get("resourceUuid")
@@ -204,7 +281,14 @@ def build_patient_skills_and_condensation_matrix(
                 for m_uuid in m_entry.get("memberUuids") or []:
                     if m_uuid:
                         retained_uuids.add(str(m_uuid))
-            condensation_matrix[mode_key][str(b_tok)] = {
+            omitted_sec = (
+                c_res.completeness_manifest.get("omitted_by_section")
+                or c_res.completeness_manifest.get("omitted_section_counts")
+                or c_res.completeness_manifest.get("omitted_sections")
+                or {}
+            )
+            omitted_total = sum(int(v or 0) for v in omitted_sec.values())
+            cell_payload: Dict[str, Any] = {
                 "condense_mode": mode_key,
                 "mode_label": (
                     "Lossless Structural (Verbatim Records, No Folding)"
@@ -212,18 +296,28 @@ def build_patient_skills_and_condensation_matrix(
                     else "Hierarchical Grouped & Trend-Summarized"
                 ),
                 "target_tokens": b_tok,
+                "budget_label": BUDGET_LABELS.get(b_tok, f"{b_tok // 1024}k"),
                 "actual_tokens": c_res.actual_tokens,
+                "clinical_chart_tokens": full_clinical_tokens,
                 "reduction_pct": red_pct,
                 "tier": c_res.tier,
                 "tier_name": c_res.tier_name,
                 "rendered_records": len(c_res.records),
+                "omitted_records_count": omitted_total,
                 "retained_uuids": sorted(retained_uuids),
-                "omitted_sections": c_res.completeness_manifest.get("omitted_sections", {}),
+                "omitted_sections": omitted_sec,
                 "chart_text": c_res.chart_text,
                 "human_summary": _extract_human_summary_from_condensed(
                     c_res, condense_mode=mode_key
                 ),
             }
+            built_by_budget[b_tok] = cell_payload
+            if omitted_total == 0 and c_res.tier == 0:
+                canonical_zero_omitted_budget = b_tok
+                canonical_zero_omitted_cell = cell_payload
+
+        for b_tok in CONDENSATION_BUDGETS:
+            condensation_matrix[mode_key][str(b_tok)] = built_by_budget[b_tok]
 
     # 3. Build the 9 Read-Only Patient-Facing Skills
     active_conds = [it for it in extracted_lossless.items if it.section == "condition_active"]

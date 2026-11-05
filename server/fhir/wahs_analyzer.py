@@ -489,6 +489,14 @@ def _apply_stage2_conflict_skills_on_chart(extracted: ExtractedChart) -> Extract
             r"\b(?:hold|stop|discontinue|held|stopped|discontinued|do\s+not\s+take)\s+([^.;\n]{3,90})",
             re.IGNORECASE,
         )
+        continue_split_re = re.compile(
+            r"\b(?:while\s+continuing|and\s+continue|but\s+continue|continuing|continue|resuming|resume|starting|start)\b",
+            re.IGNORECASE,
+        )
+        form_stopwords = {
+            "oral", "tablet", "tablets", "capsule", "capsules", "extended", "release",
+            "delayed", "solution", "suspension", "injection", "daily", "twice",
+        }
         negation_prefix_re = re.compile(
             r"\b(?:do\s+not|don't|never|not\s+to|not|without|no\s+need\s+to|avoid)\s+$",
             re.IGNORECASE,
@@ -506,11 +514,13 @@ def _apply_stage2_conflict_skills_on_chart(extracted: ExtractedChart) -> Extract
                     prefix = raw_clause[: match.start()]
                     if negation_prefix_re.search(prefix):
                         continue
-                    clause = match.group(1).lower()
+                    clause = continue_split_re.split(match.group(1).lower())[0]
                     for m_item in active_meds:
                         m_ing = (m_item.ingredient_key or normalize_drug_ingredient(m_item.display)).lower()
                         m_disp_tokens = [
-                            t for t in re.split(r"[^a-z0-9]+", m_item.display.lower()) if len(t) >= 4 and not t.isdigit()
+                            t
+                            for t in re.split(r"[^a-z0-9]+", m_item.display.lower())
+                            if len(t) >= 4 and not t.isdigit() and t not in form_stopwords
                         ]
                         if (m_ing and m_ing in clause) or any(tok in clause for tok in m_disp_tokens[:2]):
                             if m_item not in matched_meds_for_note:

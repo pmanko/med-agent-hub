@@ -666,12 +666,15 @@ def _build_completeness_manifest(
     for it in included_items:
         if it.resource_uuid:
             covered_uuids.add(it.resource_uuid)
-        for m in it.member_uuids:
-            if m:
-                covered_uuids.add(m)
+        if it.section != "lab_trajectory":
+            for m in it.member_uuids:
+                if m:
+                    covered_uuids.add(m)
 
     omitted_by_section: Dict[str, int] = {}
     for src_it in extracted.items:
+        if src_it.section == "patient":
+            continue
         item_uuids = {src_it.resource_uuid} | set(src_it.member_uuids)
         if not (item_uuids & covered_uuids):
             omitted_by_section[src_it.section] = omitted_by_section.get(src_it.section, 0) + 1
@@ -747,6 +750,7 @@ def _build_completeness_manifest(
         "redacted_for_privacy_count": redacted_count,
         "omitted_clinical_items_count": omitted_clinical_count,
         "omitted_by_section": omitted_by_section,
+        "omitted_section_counts": dict(omitted_by_section),
     }
     return manifest_item, manifest_dict
 
@@ -1681,16 +1685,33 @@ def _pack_items_to_token_budget(
             mandatory_items = compressed_mandatory
 
     accepted_optional: List[ClinicalItem] = []
-    for opt in ranked_optional:
-        trial_body = mandatory_items + accepted_optional + [opt]
-        _, _, _, _, trial_toks = render_candidate(trial_body)
-        if trial_toks <= target_tokens:
-            accepted_optional.append(opt)
-
-    accepted_optional.sort(key=lambda x: _date_sort_key(x.date), reverse=True)
-    ordered, manifest_dict, c_text, c_maps, final_toks = render_candidate(
-        mandatory_items + accepted_optional
-    )
+    if len(ranked_optional) > 60 or target_tokens > 4096:
+        _, _, _, _, running_toks = render_candidate(mandatory_items)
+        for opt in ranked_optional:
+            est_opt = max(6, token_counter(opt.text) + 5)
+            if running_toks + est_opt <= target_tokens:
+                accepted_optional.append(opt)
+                running_toks += est_opt
+        ordered, manifest_dict, c_text, c_maps, final_toks = render_candidate(
+            mandatory_items + sorted(accepted_optional, key=lambda x: _date_sort_key(x.date), reverse=True)
+        )
+        while final_toks > target_tokens and accepted_optional:
+            # Drop several items at once if far over budget, otherwise 1 by 1
+            drop_n = max(1, (final_toks - target_tokens) // 35)
+            del accepted_optional[-drop_n:]
+            ordered, manifest_dict, c_text, c_maps, final_toks = render_candidate(
+                mandatory_items + sorted(accepted_optional, key=lambda x: _date_sort_key(x.date), reverse=True)
+            )
+    else:
+        for opt in ranked_optional:
+            trial_body = mandatory_items + accepted_optional + [opt]
+            _, _, _, _, trial_toks = render_candidate(trial_body)
+            if trial_toks <= target_tokens:
+                accepted_optional.append(opt)
+        accepted_optional.sort(key=lambda x: _date_sort_key(x.date), reverse=True)
+        ordered, manifest_dict, c_text, c_maps, final_toks = render_candidate(
+            mandatory_items + accepted_optional
+        )
     if final_toks > target_tokens:
         raise ValueError(
             f"target_tokens ({target_tokens}) is too small to fit mandatory clinical safety core ({final_toks} tokens required)"
@@ -1818,7 +1839,22 @@ def _condense_lossless_structural(
         "procedure_routine": 15,
         "encounter_routine": 16,
     }
-    scale = 1.6 if target_tokens >= 12000 else (1.0 if target_tokens >= 6000 else (0.45 if target_tokens >= 3000 else 0.20))
+    if target_tokens >= 192000:
+        scale = 16.0
+    elif target_tokens >= 96000:
+        scale = 8.0
+    elif target_tokens >= 48000:
+        scale = 4.0
+    elif target_tokens >= 24000:
+        scale = 2.5
+    elif target_tokens >= 12000:
+        scale = 1.6
+    elif target_tokens >= 6000:
+        scale = 1.0
+    elif target_tokens >= 3000:
+        scale = 0.45
+    else:
+        scale = 0.20
     primary_window_caps = {
         "lab_trajectory": max(6, int(24 * scale)),
         "immunization": max(3, int(24 * scale)),
@@ -1874,8 +1910,12 @@ def _condense_lossless_structural(
 
     def render_structural(
         cand_body: Sequence[ClinicalItem],
-        omitted_by_sec: Dict[str, int],
+        _legacy_omitted_by_sec: Dict[str, int],
     ) -> Tuple[List[ClinicalItem], Dict[str, Any], str, List[Dict[str, Any]], int]:
+        _, probe_manifest = _build_completeness_manifest(
+            extracted, 0, "Lossless Structural Ledger", cand_body, len(redacted)
+        )
+        omitted_by_sec = dict(probe_manifest.get("omitted_by_section") or {})
         tier_num = 0 if not omitted_by_sec else (1 if target_tokens >= 8192 else (2 if target_tokens >= 4096 else 3))
         tier_label = (
             "Lossless Structural Ledger"

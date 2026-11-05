@@ -262,14 +262,24 @@ def run_medication_reconciliation_skill(
         r"\b(?:hold|stop|discontinue|held|stopped|do\s+not\s+take)\s+([^.;\n]{3,90})",
         re.IGNORECASE,
     )
+    continue_split_re = re.compile(
+        r"\b(?:while\s+continuing|and\s+continue|but\s+continue|continuing|continue|resuming|resume|starting|start)\b",
+        re.IGNORECASE,
+    )
+    form_stopwords = {
+        "oral", "tablet", "tablets", "capsule", "capsules", "extended", "release",
+        "delayed", "solution", "suspension", "injection", "daily", "twice",
+    }
     seen_note_med_pairs: set[Tuple[str, str]] = set()
     for n_item in note_items:
         for match in hold_re.finditer(n_item.text or ""):
-            clause = match.group(1).lower()
+            clause = continue_split_re.split(match.group(1).lower())[0]
             for m_item in active_meds:
                 m_ing = (m_item.ingredient_key or normalize_drug_ingredient(m_item.display)).lower()
                 m_disp_tokens = [
-                    t for t in re.split(r"[^a-z0-9]+", m_item.display.lower()) if len(t) >= 4 and not t.isdigit()
+                    t
+                    for t in re.split(r"[^a-z0-9]+", m_item.display.lower())
+                    if len(t) >= 4 and not t.isdigit() and t not in form_stopwords
                 ]
                 if (m_ing and m_ing in clause) or any(tok in clause for tok in m_disp_tokens[:2]):
                     pair_key = (m_item.resource_uuid, n_item.resource_uuid)
