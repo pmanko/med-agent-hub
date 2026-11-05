@@ -3479,3 +3479,89 @@ def test_router_concurrency_semaphore_allows_bounded_parallel_slots(monkeypatch)
         team.configure_router_concurrency(1)
 
 
+def test_stream_chat_chunks_falls_back_to_reasoning_content_only_when_content_empty():
+    class _FakeStreamResponse:
+        status_code = 200
+
+        def __init__(self, lines):
+            self._lines = lines
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return False
+
+        async def aiter_lines(self):
+            for line in self._lines:
+                yield line
+
+    class _FakeClient:
+        def __init__(self, lines):
+            self._lines = lines
+
+        def stream(self, *_args, **_kwargs):
+            return _FakeStreamResponse(self._lines)
+
+    # Case 1: Reasoning backend puts structured JSON in reasoning_content and leaves content empty
+    reasoning_only_lines = [
+        'data: {"choices":[{"delta":{"content":"","reasoning_content":"{\\"answer\\": \\"Qwen "}}]}',
+        'data: {"choices":[{"delta":{"content":"","reasoning_content":"streamed [1].\\", \\"citations\\": [1], \\"blocks\\": []}"}}]}',
+        "data: [DONE]",
+    ]
+
+    async def _run_reasoning_fallback():
+        events = []
+        async for kind, val in team._synthesize_answer_stream(
+            _FakeClient(reasoning_only_lines),
+            "qwen3-14b",
+            [{"role": "user", "content": "chart"}],
+            "Answer instruction",
+            "",
+            response_format={"type": "json_object"},
+            temperature=0.0,
+            max_tokens=200,
+            repeat_penalty=None,
+            dry=None,
+        ):
+            events.append((kind, val))
+        return events
+
+    fallback_events = asyncio.run(_run_reasoning_fallback())
+    deltas = [val for kind, val in fallback_events if kind == "delta"]
+    result_tuple = next(val for kind, val in fallback_events if kind == "result")
+    assert "".join(deltas) == "Qwen streamed [1]."
+    assert result_tuple == ("Qwen streamed [1].", [1], [])
+
+    # Case 2: Backend emits chain-of-thought in reasoning_content AND JSON in content -> ignore reasoning_content
+    mixed_lines = [
+        'data: {"choices":[{"delta":{"reasoning_content":"Thinking about {\"answer\": \"wrong\"}..."}}]}',
+        'data: {"choices":[{"delta":{"content":"{\\"answer\\": \\"Right [2].\\", \\"citations\\": [2], \\"blocks\\": []}"}}]}',
+        "data: [DONE]",
+    ]
+
+    async def _run_mixed():
+        events = []
+        async for kind, val in team._synthesize_answer_stream(
+            _FakeClient(mixed_lines),
+            "qwen3-14b",
+            [{"role": "user", "content": "chart"}],
+            "Answer instruction",
+            "",
+            response_format={"type": "json_object"},
+            temperature=0.0,
+            max_tokens=200,
+            repeat_penalty=None,
+            dry=None,
+        ):
+            events.append((kind, val))
+        return events
+
+    mixed_events = asyncio.run(_run_mixed())
+    mixed_deltas = [val for kind, val in mixed_events if kind == "delta"]
+    mixed_result = next(val for kind, val in mixed_events if kind == "result")
+    assert "".join(mixed_deltas) == "Right [2]."
+    assert mixed_result == ("Right [2].", [2], [])
+
+
+

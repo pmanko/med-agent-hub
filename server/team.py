@@ -1884,6 +1884,8 @@ async def _stream_chat_chunks(
                     body_bytes.decode("utf-8", errors="replace")[:800],
                 )
                 resp.raise_for_status()
+            saw_nonempty_content = False
+            reasoning_pieces: List[str] = []
             async for line in resp.aiter_lines():
                 stripped = line.strip()
                 if not stripped or not stripped.startswith("data:"):
@@ -1901,18 +1903,36 @@ async def _stream_chat_chunks(
                 if not choices or not isinstance(choices[0], Mapping):
                     continue
                 delta = choices[0].get("delta") or {}
+                msg = choices[0].get("message") or {}
                 piece = (
                     (delta.get("content") if isinstance(delta, Mapping) else None)
+                    or (msg.get("content") if isinstance(msg, Mapping) else None)
                     or ""
                 )
-                if not piece:
-                    msg = choices[0].get("message") or {}
-                    piece = (
-                        (msg.get("content") if isinstance(msg, Mapping) else None)
-                        or ""
+                reasoning_piece = (
+                    (
+                        delta.get("reasoning_content")
+                        if isinstance(delta, Mapping)
+                        else None
                     )
+                    or (
+                        msg.get("reasoning_content")
+                        if isinstance(msg, Mapping)
+                        else None
+                    )
+                    or ""
+                )
                 if piece:
-                    yield str(piece)
+                    piece_str = str(piece)
+                    if piece_str.strip():
+                        saw_nonempty_content = True
+                    yield piece_str
+                if reasoning_piece:
+                    reasoning_pieces.append(str(reasoning_piece))
+            if not saw_nonempty_content and reasoning_pieces:
+                for r_piece in reasoning_pieces:
+                    if r_piece:
+                        yield r_piece
     finally:
         _ROUTER_LOCK.release()
         if slot_evidence is not None:
