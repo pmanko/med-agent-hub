@@ -1593,6 +1593,40 @@ def test_value_binding_skips_unit_digits_and_change_amounts():
         assert not [c for c in gate["checks"] if c["id"] == "date_value_binding"], claim
 
 
+def test_value_binding_skips_threshold_comparators_and_accepts_between_date_intervals():
+    bp_gate = temporal.run_temporal_gate(
+        "Is that blood pressure normal?",
+        "The patient's most recent blood pressure of 110/60 mmHg on 2006-06-06 [17], [15] "
+        "is within a normal range, as typical systolic values are often below 120 mmHg "
+        "and diastolic values are below 80 mmHg.",
+        [17, 15],
+        _paired_blood_pressure_facts(),
+        "enforce",
+    )
+    assert not [c for c in bp_gate["checks"] if c["id"] == "date_value_binding"]
+
+    weight_facts = temporal.build_temporal_facts(_WEIGHT_YEAR_CHART, "2026-06-20")
+    range_gate = temporal.run_temporal_gate(
+        "What is her most recent weight, and has it changed?",
+        "The patient's most recent weight was 71 kg on 2026-01-26 [19]. Her weight has "
+        "fluctuated over time, ranging from a low of 71 kg to a high of 74 kg between "
+        "2025-10-13 and 2026-01-26.",
+        [19, 350],
+        weight_facts,
+        "enforce",
+    )
+    assert not [c for c in range_gate["checks"] if c["id"] == "date_value_binding"]
+
+    out_of_interval_gate = temporal.run_temporal_gate(
+        "What is her most recent weight, and has it changed?",
+        "Her weight ranged from 60 kg to 74 kg between 2025-10-13 and 2026-01-26.",
+        [19, 350, 400],
+        weight_facts,
+        "enforce",
+    )
+    assert any(c["id"] == "date_value_binding" for c in out_of_interval_gate["checks"])
+
+
 def test_gate_fails_exposed_internal_date_id():
     facts = temporal.build_temporal_facts(_CHART, "2006-06-01")
     gate = temporal.run_temporal_gate(

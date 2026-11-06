@@ -51,8 +51,11 @@ _TRAJECTORY_SUFFIX_RE = re.compile(
 _NUMBER_TOKEN_RE = re.compile(r"(?<![\[\d.-])([+-]?\d+(?:\.\d+)?)(?![\]\d.-])")
 _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+|\n+")
 _DELTA_PREFIX_RE = re.compile(
-    r"\b(?:(?:loss|gain|drop|decrease|increase|change|difference|reduction|fall|rise|decline)"
-    r"\s+of|by)\s+(?:about\s+|approximately\s+|~\s*)?$",
+    r"(?:\b(?:(?:loss|gain|drop|decrease|increase|change|difference|reduction|fall|rise|decline)"
+    r"\s+of|by)\s+(?:about\s+|approximately\s+|~\s*)?|"
+    r"\b(?:below|above|under|over|(?:less|more|greater|fewer|higher|lower)\s+than|at\s+(?:least|most)|up\s+to)"
+    r"\s+(?:the\s+|a\s+|an\s+)?(?:(?:normal|typical|target|reference|standard|recommended)\s+)?(?:(?:threshold|limit|cutoff|bound)\s+of\s+)?|"
+    r"[<>≤≥]=?\s*)$",
     re.I,
 )
 _UPCOMING_RE = re.compile(
@@ -1606,10 +1609,30 @@ def _segment(text: str, separators: Sequence[re.Match], start: int, end: int) ->
     return left, right
 
 
+def _between_date_intervals(
+    sentence: str, date_matches: Sequence[re.Match]
+) -> Dict[int, Tuple[str, str]]:
+    """Map date match start offsets to ``(start_iso, end_iso)`` for ``between D1 and D2`` spans."""
+    intervals: Dict[int, Tuple[str, str]] = {}
+    for prev, curr in zip(date_matches, date_matches[1:]):
+        if prev.start() in intervals or curr.start() in intervals:
+            continue
+        lead_prefix = sentence[max(0, prev.start() - 16) : prev.start()]
+        between = sentence[prev.end() : curr.start()]
+        if re.search(r"\bbetween\s+$", lead_prefix, re.I) and re.fullmatch(
+            r"\s+and\s+", between, re.I
+        ):
+            lo, hi = sorted((prev.group(), curr.group()))
+            intervals[prev.start()] = (lo, hi)
+            intervals[curr.start()] = (lo, hi)
+    return intervals
+
+
 def _coordinated_date_groups(
     sentence: str, date_matches: Sequence[re.Match]
 ) -> Tuple[Dict[int, List[re.Match]], List[Tuple[int, int]]]:
-    """Group dates joined directly in a coordinated list (e.g. 'on 2025-10-22 and 2026-01-07')."""
+    """Group dates joined directly in a coordinated list (e.g. 'on 2025-10-22 and 2026-01-07')
+    or in a 'between D1 and D2' interval."""
     if len(date_matches) < 2:
         return {d.start(): [d] for d in date_matches}, []
     groups: List[List[re.Match]] = [[date_matches[0]]]
@@ -1617,8 +1640,14 @@ def _coordinated_date_groups(
     for prev, curr in zip(date_matches, date_matches[1:]):
         between = sentence[prev.end() : curr.start()]
         group_lead_prefix = sentence[max(0, groups[-1][0].start() - 16) : groups[-1][0].start()]
-        if _COORDINATED_DATE_CONNECTOR_RE.match(between) and not re.search(
-            r"\b(?:between|from)\s+$", group_lead_prefix, re.I
+        is_between_pair = (
+            len(groups[-1]) == 1
+            and bool(re.search(r"\bbetween\s+$", group_lead_prefix, re.I))
+            and bool(re.fullmatch(r"\s+and\s+", between, re.I))
+        )
+        if is_between_pair or (
+            _COORDINATED_DATE_CONNECTOR_RE.match(between)
+            and not re.search(r"\b(?:between|from)\s+$", group_lead_prefix, re.I)
         ):
             groups[-1].append(curr)
             connector_spans.append((prev.end(), curr.start()))
@@ -1642,6 +1671,7 @@ def _value_date_bindings(
     """
     if re.search(r"\brespectively\b", sentence, re.I) and len(date_matches) == len(values):
         return list(zip(date_matches, values))
+    between_intervals = _between_date_intervals(sentence, date_matches)
     date_groups, connector_spans = _coordinated_date_groups(sentence, date_matches)
 
     def in_date_connector(m: re.Match) -> bool:
@@ -1665,6 +1695,24 @@ def _value_date_bindings(
                 )
                 bound_group = date_groups.get(nearest.start(), [nearest])
                 break
+        if bound_group is None and between_intervals:
+            for d in date_matches:
+                if (
+                    d.start() in between_intervals
+                    and d.start() >= value_match.end()
+                    and not any(
+                        value_match.end() <= other.start() < d.start()
+                        for other in date_matches
+                        if other.start() not in between_intervals
+                    )
+                    and not re.search(
+                        r"\b(?:versus|vs\.?|but|while|whereas)\b|;",
+                        sentence[value_match.end() : d.start()],
+                        re.I,
+                    )
+                ):
+                    bound_group = date_groups.get(d.start(), [d])
+                    break
         if bound_group is None and date_matches:
             lead_date = date_matches[0]
             strong_left, strong_right = _segment(
@@ -1739,12 +1787,18 @@ def _date_value_failures(
                 }
                 if failure not in out:
                     out.append(failure)
+        between_intervals = _between_date_intervals(clean_sentence, date_matches)
         bindings = _value_date_bindings(clean_sentence, date_matches, values)
         for date_match, (_nearest_match, val) in bindings:
             date = date_match.group()
             failure = None
             if val not in value_dates:
                 continue
+            interval = between_intervals.get(date_match.start())
+            if interval and date in by_date:
+                lo, hi = interval
+                if any(lo <= d <= hi for d in value_dates[val]):
+                    continue
             if date in by_date and val not in by_date[date]:
                 failure = {
                     "date": date,

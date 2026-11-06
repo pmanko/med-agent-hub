@@ -238,13 +238,60 @@ def _normalize_product_blocks(
         row_cells = [
             row.get("cells") if isinstance(row, dict) else None for row in (rows or [])
         ]
-        if base_valid and all(
-            isinstance(cells, dict)
-            and set(cells) == set(keys)
-            and all(valid_cell(cell) for cell in cells.values())
-            for cells in row_cells
-        ):
-            normalized.append(block)
+
+        def canonical_row_cells(cells: Any) -> Optional[Dict[str, Any]]:
+            if (
+                not isinstance(cells, dict)
+                or len(cells) != len(keys)
+                or not all(valid_cell(cell) for cell in cells.values())
+            ):
+                return None
+            if set(cells) == set(keys):
+                return cells
+            remapped: Dict[str, Any] = {}
+            used_cell_keys: set[str] = set()
+            for column, col_key in zip(columns or [], keys):
+                col_label = str((column or {}).get("label") or "").strip()
+                exact_candidates = [
+                    ck
+                    for ck in cells
+                    if ck not in used_cell_keys and ck in {col_key, col_label} and ck
+                ]
+                if len(exact_candidates) == 1:
+                    chosen = exact_candidates[0]
+                else:
+                    folded_targets = {t.casefold() for t in (col_key, col_label) if t}
+                    ci_candidates = [
+                        ck
+                        for ck in cells
+                        if ck not in used_cell_keys
+                        and str(ck).strip()
+                        and str(ck).strip().casefold() in folded_targets
+                    ]
+                    if len(ci_candidates) != 1:
+                        return None
+                    chosen = ci_candidates[0]
+                if not cell_matches_column(column, cells[chosen]):
+                    return None
+                used_cell_keys.add(chosen)
+                remapped[col_key] = cells[chosen]
+            return remapped if len(remapped) == len(keys) else None
+
+        canonical_cells = (
+            [canonical_row_cells(cells) for cells in row_cells]
+            if base_valid
+            else []
+        )
+        if base_valid and all(c is not None for c in canonical_cells):
+            if all(c == cells for c, cells in zip(canonical_cells, row_cells)):
+                normalized.append(block)
+            else:
+                repaired = dict(block)
+                repaired["rows"] = [
+                    {"cells": c}
+                    for c in canonical_cells
+                ]
+                normalized.append(repaired)
             continue
 
         repairable = (
