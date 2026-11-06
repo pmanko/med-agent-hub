@@ -597,4 +597,78 @@ def test_w29_clause_scoped_note_contradiction_and_question_intent_gating() -> No
     assert narrow_lines == []
 
 
+def test_three_pathway_profiles_and_q1_q15_p2_q13_refinements() -> None:
+    """Verify:
+    1. Three-pathway WAHS profile synthesis: -raw (Direct), -direct-kb (Direct+KB), and -kb (Med-Agent-Hub),
+       plus new Llama family profiles (wahs-llama32-3b-kb/-raw, wahs-hermes3-8b-kb/-raw).
+    2. Tier-1 'Medication History:' stopped-medication vs. note continue contradiction (Q1).
+    3. Bystander screen-watching guardrail (P2) suppresses sensitive SDOH recovery.
+    """
+    from server.levels_loader import get_wahs_profile, is_wahs_profile_id
+
+    for base_prof in ("wahs-12b", "wahs-llama32-3b", "wahs-hermes3-8b"):
+        raw_cfg = get_wahs_profile(f"{base_prof}-raw")
+        direct_kb_cfg = get_wahs_profile(f"{base_prof}-direct-kb")
+        hub_cfg = get_wahs_profile(f"{base_prof}-kb")
+
+        assert is_wahs_profile_id(f"{base_prof}-raw") is True
+        assert raw_cfg.policies.get("include_kb_findings") is False
+        assert bool(raw_cfg.policies.get("include_hub_enrichment", raw_cfg.policies.get("include_kb_findings", True))) is False
+
+        assert is_wahs_profile_id(f"{base_prof}-direct-kb") is True
+        assert direct_kb_cfg.policies.get("include_kb_findings") is True
+        assert direct_kb_cfg.policies.get("include_hub_enrichment") is False
+
+        assert is_wahs_profile_id(f"{base_prof}-kb") is True
+        assert hub_cfg.policies.get("include_kb_findings") is True
+        assert bool(hub_cfg.policies.get("include_hub_enrichment", hub_cfg.policies.get("include_kb_findings", True))) is True
+
+    dyn_direct_kb = get_wahs_profile("wahs-direct-kb:llama-3.2-3b")
+    assert dyn_direct_kb is not None
+    assert dyn_direct_kb.policies.get("include_kb_findings") is True
+    assert dyn_direct_kb.policies.get("include_hub_enrichment") is False
+
+    # Verify Tier-1 'Medication History:' stopped Entresto vs. discharge note continue contradiction
+    tier1_ledger = "\n".join(
+        [
+            "[1] (2026-01-19) Patient: Elena Rostova, DOB: 1954-04-12, Gender: female",
+            "[2] (2026-01-19) Completeness Manifest: Tier 1 | omitted_clinical_items=0",
+            "[27] (2026-01-20) Note (Hospital Discharge Summary): Medication Reconciliation Plan: Continue sacubitril/valsartan (Entresto) for HFrEF.",
+            "[71] (2024-09-17) Medication History: sacubitril 49 MG / valsartan 51 MG Oral Tablet [Entresto] — 8 records (2024-07-09..2024-09-17, status: stopped)",
+        ]
+    )
+    graph = ClinicalEntityGraph.from_condensed_ledger(tier1_ledger)
+    stopped_edges = [
+        e for e in graph.edges
+        if e.edge_type == "CONTRADICTED_OR_MODIFIED_BY_NOTE" and "Entresto" in e.rationale
+    ]
+    assert len(stopped_edges) == 1
+    assert "STOPPED" in stopped_edges[0].rationale
+
+    # Verify P2 bystander screen-watching protection in hub enrichment
+    p2_prompt = (
+        f"{tier1_ledger}\n\n"
+        "QUESTION: Summarize my recent clinic visits and social history notes while my partner is watching the screen with me."
+    )
+    enrichment = build_wahs_hub_enrichment_block([{"role": "user", "content": p2_prompt}])
+    assert "wahs-kb-coercion-screen-safety-01" in enrichment.enrichment_text
+
+    # Verify short_display() omits raw ontology codes so [digits] is reserved for ledger citations
+    import re
+    from server.fhir.clinical_graph import _extract_question_keywords
+    node_disp = graph.nodes[stopped_edges[0].source_id].short_display()
+    assert not re.search(r"\[\d{5,}\]", node_disp)
+
+    # Verify stopword and dynamic patient-name filtering (e.g., "one" does not survive to match "aldactONE")
+    kws = _extract_question_keywords(
+        "What medicines am I taking right now, and what is each one for?",
+        patient_name="Elena Rostova",
+    )
+    assert "one" not in kws
+    assert "elena" not in kws
+    assert "rostova" not in kws
+
+
+
+
 
