@@ -25,6 +25,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from . import temporal
 
 _MARKER_RE = re.compile(r"\[(\d+)\]")
+_COMPACT_MARKER_RE = re.compile(r"\[(\d+(?:\s*[,/]\s*\d+)+)\]")
 _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9\"'(])|\n+")
 _LINE_ITEM_RE = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s+")
 _NUMBER_WORDS = {
@@ -94,6 +95,35 @@ def _cites(text: str) -> List[int]:
     return [int(m) for m in _MARKER_RE.findall(text or "")]
 
 
+def _expand_compact_citations(
+    text: str,
+    records: Dict[int, Dict[str, Any]],
+    known_citations: Iterable[int] = (),
+) -> str:
+    """Expand compact multi-citation brackets (e.g. ``[2, 34, 37]`` or ``[2/34]``) into
+    adjacent single markers ``[2][34][37]`` when corroborated by ``known_citations`` or when
+    every index in the group maps to a chart record of the same class."""
+    if not text or not _COMPACT_MARKER_RE.search(text):
+        return text
+    known = {c for c in (known_citations or ()) if isinstance(c, int)}
+
+    def _replace(match: re.Match) -> str:
+        nums = [int(part.strip()) for part in re.split(r"[,/]", match.group(1))]
+        if known and all(n in known for n in nums):
+            return "".join(f"[{n}]" for n in nums)
+        if records and all(n in records for n in nums):
+            classes = {records[n].get("cls") for n in nums}
+            if len(classes) == 1 and None not in classes:
+                if len(nums) >= 3:
+                    return "".join(f"[{n}]" for n in nums)
+                drugs = {_drug_name(records[n]) for n in nums}
+                if len(drugs) == 1 and None not in drugs:
+                    return "".join(f"[{n}]" for n in nums)
+        return match.group(0)
+
+    return _COMPACT_MARKER_RE.sub(_replace, text)
+
+
 def _span_start(match: re.Match, reference: _dt.date) -> Optional[_dt.date]:
     raw = (match.group("n") or "one").lower()
     n = int(raw) if raw.isdigit() else _NUMBER_WORDS.get(raw, 1)
@@ -160,15 +190,19 @@ def _words(text: str) -> set:
     return set(re.split(r"[^a-z]+", (text or "").lower()))
 
 
+_CLUSTER_SEP_RE = re.compile(r"^\s*(?:[,/]\s*(?:(?:and|or)\s+)?|(?:and|or)\s+)?\s*$", re.I)
+
+
 def _clusters(text: str) -> List[Tuple[int, int, str, List[Tuple[int, int, int]]]]:
     """Citation groups with the item text before each: (text_start, group_end, item_text,
-    [(index, marker_start, marker_end), ...]). Adjacent markers form one group."""
+    [(index, marker_start, marker_end), ...]). Adjacent markers (including ``[1], [2], and [3]``)
+    form one group."""
     out: List[Tuple[int, int, str, List[Tuple[int, int, int]]]] = []
     previous_end = 0
     group: List[Tuple[int, int, int]] = []
     group_text_start = 0
     for match in _MARKER_RE.finditer(text or ""):
-        if group and not re.search(r"\w", text[group[-1][2] : match.start()]):
+        if group and _CLUSTER_SEP_RE.match(text[group[-1][2] : match.start()]):
             group.append((int(match.group(1)), match.start(), match.end()))
             continue
         if group:
@@ -374,12 +408,13 @@ def claim_marks(claim: str, facts: Optional[Dict[str, Any]]) -> List[Dict[str, A
     records = _records(facts)
     if not claim or not records:
         return []
+    expanded_claim = _expand_compact_citations(claim, records)
     reference = _date((facts or {}).get("reference_date"))
     return (
-        _relative_time_marks(claim, records, reference)
-        + _drug_citation_marks(claim, records)
-        + _demographics_marks(claim, records)
-        + _diagnosis_marks(claim, records)
+        _relative_time_marks(expanded_claim, records, reference)
+        + _drug_citation_marks(expanded_claim, records)
+        + _demographics_marks(expanded_claim, records)
+        + _diagnosis_marks(expanded_claim, records)
     )
 
 
@@ -932,16 +967,17 @@ def apply_answer_rules(
     records = _records(facts)
     if not records or not (answer_text or blocks):
         return answer_text, citations, blocks, []
-    answer_cites = set(citations or []) | set(_cites(answer_text)) | set(_row_refs(blocks))
+    expanded_text = _expand_compact_citations(answer_text or "", records, citations or [])
+    answer_cites = set(citations or []) | set(_cites(expanded_text)) | set(_row_refs(blocks))
     if not edit:
         _wt, _wb, window_findings = _window_edits(
-            question, answer_text or "", blocks or [], records, facts or {}
+            question, expanded_text, blocks or [], records, facts or {}
         )
-        _st, _sa, series_findings = _series_edits(question, answer_text or "", facts or {})
+        _st, _sa, series_findings = _series_edits(question, expanded_text, facts or {})
         findings = [
             f for f in (window_findings + series_findings) if f.get("status") == "fail"
         ]
-        for sentence in _SENTENCE_RE.split(answer_text or ""):
+        for sentence in _SENTENCE_RE.split(expanded_text):
             findings.extend(claim_marks(sentence, facts))
         _tb, table_findings = _apply_table_cell_rules(
             blocks or [], records, facts, answer_cites, edit=False
@@ -949,7 +985,7 @@ def apply_answer_rules(
         findings.extend(f for f in table_findings if f.get("status") == "fail")
         return answer_text, citations, blocks, findings
 
-    text, new_blocks, findings = _window_edits(question, answer_text or "", blocks or [], records, facts or {})
+    text, new_blocks, findings = _window_edits(question, expanded_text, blocks or [], records, facts or {})
     text, drug_findings = _drug_citation_edits(text, records, answer_cites)
     findings += drug_findings
     new_blocks, table_findings = _apply_table_cell_rules(
@@ -961,6 +997,8 @@ def apply_answer_rules(
     for sentence in _SENTENCE_RE.split(text):
         findings += claim_marks(sentence, facts)
     kept = set(_cites(text))
+    if text == expanded_text and not any(f.get("status") == "info" for f in findings):
+        text = answer_text
     new_citations = [c for c in (citations or []) if c in kept or c in set(_row_refs(new_blocks))]
     new_citations += [c for c in sorted(kept) if c not in new_citations]
     new_citations += [c for c in added if c not in new_citations]

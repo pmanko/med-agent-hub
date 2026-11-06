@@ -234,6 +234,12 @@ def _date_ledger(
     ]
 
 
+_NON_PATIENT_RECORD_RE = re.compile(
+    r"^(?:KnowledgeReference\b|Drug reference\b|Safety finding\b|Active drug order:)",
+    re.I,
+)
+
+
 def _record_class(body: str) -> str:
     """The leading class token of a record body: 'Finding — Weight: 41' -> 'Finding';
     'Program: TB Program...' -> 'Program'; 'Drug order: Lamivudine' -> 'Drug order'."""
@@ -260,6 +266,9 @@ def parse_events(chart: str) -> List[Dict[str, Any]]:
         if dm:
             last_date = dm.group(1)
             body = dm.group(2)
+        elif _NON_PATIENT_RECORD_RE.match(body):
+            last_date = None
+            continue
         if last_date is None:
             continue
         is_clinical_event = True
@@ -332,6 +341,9 @@ def parse_dated_observations(chart: str) -> List[Dict[str, Any]]:
         ):  # run leader carries the date; same-date follow-ons drop it -> carry forward
             last_date = dm.group(1)
             rest = dm.group(2)
+        elif _NON_PATIENT_RECORD_RE.match(rest):
+            last_date = None
+            continue
         date = last_date
         if date is None:
             continue  # record(s) before any dated line — no date to attribute
@@ -435,6 +447,9 @@ def parse_dated_date_observations(chart: str) -> List[Dict[str, Any]]:
         if dm:
             last_date = dm.group(1)
             rest = dm.group(2)
+        elif _NON_PATIENT_RECORD_RE.match(rest):
+            last_date = None
+            continue
         source_date = last_date
         if source_date is None:
             continue

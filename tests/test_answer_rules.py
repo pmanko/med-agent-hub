@@ -609,3 +609,53 @@ def test_stage_engine_streams_rule_findings_inline_indepth_reasons_and_edit_hist
     assert edited_done["answerValidation"]["status"] == "edited"
     assert edited_done["answerValidation"]["originalAnswer"] == "Amlodipine [2] was prescribed."
     assert edited_done["confidence"]["answer"]["findings"][0]["check"] == "rule"
+
+
+def test_compact_comma_and_slash_citation_groups_prune_older_refs_and_keep_in_window_items():
+    chart = """Patient records (most recent first):
+[2] (2026-06-15) Drug order: Sulfamethoxazole 400 MG / trimethoprim 80 MG Oral Tablet. Action: NEW. Urgency: ROUTINE
+[5] (2026-06-15) Drug order: Abacavir 600 MG / Lamivudine 300 MG / Dolutegravir 50 MG. Action: NEW. Urgency: ROUTINE
+[34] (2026-03-19) Drug order: Sulfamethoxazole 400 MG / trimethoprim 80 MG Oral Tablet. Action: NEW. Urgency: ROUTINE
+[37] (2026-02-19) Drug order: Sulfamethoxazole 400 MG / trimethoprim 80 MG Oral Tablet. Action: NEW. Urgency: ROUTINE
+[72] (2025-11-26) Drug order: Sulfamethoxazole 400 MG / trimethoprim 80 MG Oral Tablet. Action: NEW. Urgency: ROUTINE
+[114] (2025-07-10) Drug order: Sulfamethoxazole 400 MG / trimethoprim 80 MG Oral Tablet. Action: NEW. Urgency: ROUTINE
+[147] (2025-01-12) Drug order: Sulfamethoxazole 400 MG / trimethoprim 80 MG Oral Tablet. Action: NEW. Urgency: ROUTINE
+"""
+    facts = build_temporal_facts(chart, "2026-06-20")
+    draft = (
+        "The following medications were ordered in the past 6 months:\n"
+        "- **Sulfamethoxazole / Trimethoprim**: Ordered on multiple dates [2, 34, 37, 72, 114, 147].\n"
+        "- **Abacavir / Lamivudine / Dolutegravir**: Ordered on 2026-06-15 [5]."
+    )
+    text, cites, _b, findings = answer_rules.apply_answer_rules(
+        "What medications were ordered in the past 6 months?",
+        draft,
+        [2, 5, 34, 37, 72, 114, 147],
+        [],
+        facts,
+    )
+    assert "Sulfamethoxazole / Trimethoprim" in text
+    assert "[2][34][37]" in text
+    assert "[72]" not in text and "[114]" not in text and "[147]" not in text
+    assert sorted(cites) == [2, 5, 34, 37]
+    assert _ids(findings, "info") == ["rule_window"]
+    assert not _ids(findings, "fail")
+
+    conjunctive_draft = (
+        "Medications ordered in the past 6 months: "
+        "Sulfamethoxazole / Trimethoprim [2], [34], [37], and [72]; "
+        "Abacavir / Lamivudine / Dolutegravir [5]."
+    )
+    c_text, c_cites, _cb, c_findings = answer_rules.apply_answer_rules(
+        "What medications were ordered in the past 6 months?",
+        conjunctive_draft,
+        [2, 5, 34, 37, 72],
+        [],
+        facts,
+    )
+    assert "Sulfamethoxazole / Trimethoprim [2][34][37];" in c_text
+    assert "and [72]" not in c_text
+    assert sorted(c_cites) == [2, 5, 34, 37]
+    assert _ids(c_findings, "info") == ["rule_window"]
+
+

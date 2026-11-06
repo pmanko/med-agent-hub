@@ -2016,12 +2016,16 @@ def _is_substantive_answer(text: Optional[str]) -> bool:
     return "could not produce a complete answer" not in ans
 
 
+_COMPACT_CITATIONS_RE = re.compile(r"\[(\d+(?:\s*[,/]\s*\d+)+)\]")
+
+
 def _normalize_envelope(raw: str) -> str:
     """Post-process the synthesizer envelope JSON: (1) repair the section line breaks small
     models mangle — a literal backslash-n OR runs of backslashes ("**Answer**\\\\\\:") — into
-    real newlines, and (2) reconcile inline [N] chart-record markers into
-    `citations` so the count is not lost when the model cites in prose but leaves the array
-    empty. Returns `raw` unchanged if it is not parseable JSON."""
+    real newlines, (2) expand compact multi-citation brackets (e.g. ``[2, 34, 37]`` or ``[2/34]``)
+    corroborated by ``citations`` into adjacent single markers ``[2][34][37]``, and (3) reconcile
+    inline [N] chart-record markers into ``citations`` so the count is not lost when the model
+    cites in prose but leaves the array empty. Returns `raw` unchanged if it is not parseable JSON."""
     try:
         env = json.loads(raw)
     except (json.JSONDecodeError, TypeError):
@@ -2036,11 +2040,20 @@ def _normalize_envelope(raw: str) -> str:
         ans = re.sub(r"\\{2,}\s*:?\s*", "\n", ans)
         ans = ans.replace("\\n", "\n")
         ans = re.sub(r"\n{3,}", "\n\n", ans).strip()
+        existing = [c for c in (env.get("citations") or []) if isinstance(c, int)]
+        existing_set = set(existing)
+        if existing_set:
+            def _expand_group(match: re.Match) -> str:
+                nums = [int(part.strip()) for part in re.split(r"[,/]", match.group(1))]
+                if all(n in existing_set for n in nums):
+                    return "".join(f"[{n}]" for n in nums)
+                return match.group(0)
+
+            ans = _COMPACT_CITATIONS_RE.sub(_expand_group, ans)
         env["answer"] = ans
         inline = sorted({int(m) for m in re.findall(r"\[(\d+)\]", ans)})
         if inline:
-            existing = [c for c in (env.get("citations") or []) if isinstance(c, int)]
-            env["citations"] = sorted(set(existing) | set(inline))
+            env["citations"] = sorted(existing_set | set(inline))
     return json.dumps(env)
 
 
