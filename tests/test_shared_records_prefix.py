@@ -94,3 +94,24 @@ def test_a_stage_whose_prompt_does_not_fit_the_answers_records_selects_its_own()
     assert full == state.chart
     assert not [s for s in state.steps if s.get("mode") == "answer_records"]
     assert chart != state.chart
+
+
+def test_temporal_facts_prefix_is_invariant_to_appended_reference_or_safety_records():
+    from server.temporal import build_temporal_facts, render_temporal_facts
+
+    base_chart = (
+        "Patient records (most recent first):\n"
+        "[1] (2026-06-15) Weight (kg): 71 kg\n"
+        "[2] (2025-11-10) Drug order: Lamivudine 300 MG. Action: NEW\n"
+    )
+    with_supplemental = (
+        base_chart
+        + "[3] KnowledgeReference WHO HIV Guidelines: First-line ART guidance.\n"
+        + "[4] Drug reference — Lamivudine (3TC; NRTI). Standard dose: 300 mg daily.\n"
+        + "[5] Safety finding — Lamivudine: renal dose adjustment note.\n"
+        + "[6] Active drug order: Lamivudine 300 MG\n"
+    )
+    base_rendered = render_temporal_facts(build_temporal_facts(base_chart, "2026-06-20"))
+    supp_rendered = render_temporal_facts(build_temporal_facts(with_supplemental, "2026-06-20"))
+    assert base_rendered == supp_rendered
+

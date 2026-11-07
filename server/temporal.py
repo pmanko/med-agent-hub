@@ -51,8 +51,11 @@ _TRAJECTORY_SUFFIX_RE = re.compile(
 _NUMBER_TOKEN_RE = re.compile(r"(?<![\[\d.-])([+-]?\d+(?:\.\d+)?)(?![\]\d.-])")
 _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+|\n+")
 _DELTA_PREFIX_RE = re.compile(
-    r"\b(?:(?:loss|gain|drop|decrease|increase|change|difference|reduction|fall|rise|decline)"
-    r"\s+of|by)\s+(?:about\s+|approximately\s+|~\s*)?$",
+    r"(?:\b(?:(?:loss|gain|drop|decrease|increase|change|difference|reduction|fall|rise|decline)"
+    r"\s+of|by)\s+(?:about\s+|approximately\s+|~\s*)?|"
+    r"\b(?:below|above|under|over|(?:less|more|greater|fewer|higher|lower)\s+than|at\s+(?:least|most)|up\s+to)"
+    r"\s+(?:the\s+|a\s+|an\s+)?(?:(?:normal|typical|target|reference|standard|recommended)\s+)?(?:(?:threshold|limit|cutoff|bound)\s+of\s+)?|"
+    r"[<>≤≥]=?\s*)$",
     re.I,
 )
 _UPCOMING_RE = re.compile(
@@ -234,6 +237,12 @@ def _date_ledger(
     ]
 
 
+_NON_PATIENT_RECORD_RE = re.compile(
+    r"^(?:KnowledgeReference\b|Drug reference\b|Safety finding\b|Active drug order:)",
+    re.I,
+)
+
+
 def _record_class(body: str) -> str:
     """The leading class token of a record body: 'Finding — Weight: 41' -> 'Finding';
     'Program: TB Program...' -> 'Program'; 'Drug order: Lamivudine' -> 'Drug order'."""
@@ -260,6 +269,9 @@ def parse_events(chart: str) -> List[Dict[str, Any]]:
         if dm:
             last_date = dm.group(1)
             body = dm.group(2)
+        elif _NON_PATIENT_RECORD_RE.match(body):
+            last_date = None
+            continue
         if last_date is None:
             continue
         is_clinical_event = True
@@ -332,6 +344,9 @@ def parse_dated_observations(chart: str) -> List[Dict[str, Any]]:
         ):  # run leader carries the date; same-date follow-ons drop it -> carry forward
             last_date = dm.group(1)
             rest = dm.group(2)
+        elif _NON_PATIENT_RECORD_RE.match(rest):
+            last_date = None
+            continue
         date = last_date
         if date is None:
             continue  # record(s) before any dated line — no date to attribute
@@ -402,6 +417,14 @@ def parse_dated_observations(chart: str) -> List[Dict[str, Any]]:
             and traj_match.group("init_val")
             and traj_match.group("init_date") == date
         ):
+            for existing in reversed(out):
+                if (
+                    existing.get("concept") == concept
+                    and existing.get("date") == date
+                    and existing.get("index") != index
+                ):
+                    existing.setdefault("extra_indices", []).append(index)
+                    break
             continue
         seen.add(key)
         out.append(
@@ -435,6 +458,9 @@ def parse_dated_date_observations(chart: str) -> List[Dict[str, Any]]:
         if dm:
             last_date = dm.group(1)
             rest = dm.group(2)
+        elif _NON_PATIENT_RECORD_RE.match(rest):
+            last_date = None
+            continue
         source_date = last_date
         if source_date is None:
             continue
@@ -481,13 +507,16 @@ def _relation_to_anchor(date: str, anchor: Optional[str]) -> str:
 
 
 def _point(o: Dict[str, Any]) -> Dict[str, Any]:
-    return {
+    pt: Dict[str, Any] = {
         "index": o.get("index"),
         "date": o.get("date"),
         "effective_date_id": _date_id(o.get("date")),
         "value": o.get("value"),
         "unit": o.get("unit") or "",
     }
+    if o.get("extra_indices"):
+        pt["extra_indices"] = list(o["extra_indices"])
+    return pt
 
 
 def _series_direction(first: float, last: float) -> str:
@@ -510,8 +539,116 @@ def _summarize_events(
         "classes": sorted({e.get("cls") for e in same if e.get("cls")}),
     }
     if include_summaries:
-        out["summaries"] = [e.get("body") for e in same[:8] if e.get("body")]
+        out["summaries"] = [e.get("body") for e in same[:35] if e.get("body")]
     return out
+
+
+def _extract_active_conditions_and_programs(
+    events: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Return active Program, Condition/Diagnosis, and latest WHO stage records (most recent per concept)."""
+    out: List[Dict[str, Any]] = []
+    seen_keys: set = set()
+    for e in events:
+        cls = str(e.get("cls") or "").strip()
+        cls_lower = cls.lower()
+        body = str(e.get("body") or "").strip()
+        body_lower = body.lower()
+        if not body:
+            continue
+        is_active_program = cls == "Program" and "status: active" in body_lower
+        is_active_condition = (
+            cls_lower in {"condition", "diagnosis", "problem"}
+            and not re.search(
+                r"\bstatus:\s*(?:inactive|resolved|refuted|entered-in-error)\b",
+                body_lower,
+            )
+            and not re.search(
+                r":\s*(?:no|not|none|negative|without|absent|ruled out)\b",
+                body_lower,
+            )
+        )
+        is_who_stage = "current who hiv stage" in cls_lower or body_lower.startswith(
+            "current who hiv stage:"
+        )
+        if not (is_active_program or is_active_condition or is_who_stage):
+            continue
+        label = body.split(":", 1)[-1].split(". ", 1)[0].strip().lower()
+        key = (
+            "who_stage" if is_who_stage else cls_lower,
+            "who_stage" if is_who_stage else label,
+        )
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        out.append(
+            {
+                "index": e.get("index"),
+                "date": e.get("date"),
+                "cls": cls,
+                "summary": body,
+            }
+        )
+    return out
+
+
+def _extract_medication_order_summary(
+    events: List[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Summarize the latest medication order date's drugs and any earlier superseded drugs."""
+    drug_events = [
+        e
+        for e in events
+        if str(e.get("cls") or "") == "Drug order"
+        and "action: discontinue" not in str(e.get("body") or "").lower()
+    ]
+    if not drug_events:
+        return None
+    latest_date = max(str(e.get("date") or "") for e in drug_events)
+    latest_orders = [e for e in drug_events if str(e.get("date") or "") == latest_date]
+
+    def _drug_label(body: str) -> str:
+        name = body.split(":", 1)[1] if ":" in body else body
+        return name.split(". ", 1)[0].strip(" .")
+
+    latest_names = {
+        _drug_label(str(e.get("body") or "")).lower() for e in latest_orders
+    }
+    older_superseded: List[Dict[str, Any]] = []
+    seen_older: set = set()
+    for e in drug_events:
+        if str(e.get("date") or "") == latest_date:
+            continue
+        label = _drug_label(str(e.get("body") or ""))
+        norm = label.lower()
+        if not norm or norm in latest_names or norm in seen_older:
+            continue
+        seen_older.add(norm)
+        older_superseded.append(
+            {
+                "index": e.get("index"),
+                "date": e.get("date"),
+                "drug": label,
+                "summary": e.get("body"),
+            }
+        )
+    summary: Dict[str, Any] = {
+        "date": latest_date,
+        "indices": [
+            e.get("index") for e in latest_orders if e.get("index") is not None
+        ],
+        "orders": [
+            {
+                "index": e.get("index"),
+                "drug": _drug_label(str(e.get("body") or "")),
+                "summary": e.get("body"),
+            }
+            for e in latest_orders
+        ],
+    }
+    if older_superseded:
+        summary["older_superseded_orders"] = older_superseded
+    return summary
 
 
 def _clinical_encounter_events(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -682,6 +819,10 @@ def build_temporal_facts(
             if clinical_dates
             else None
         ),
+        "active_conditions_and_programs": _extract_active_conditions_and_programs(
+            events
+        ),
+        "latest_medication_orders": _extract_medication_order_summary(events),
         "clinical_dates": [
             _summarize_events(events, d, include_summaries=False)
             for d in clinical_dates
@@ -732,7 +873,7 @@ def _compact_event_summary_for_prompt(
             out["classes_sample"] = classes[:12]
     summaries = summary.get("summaries")
     if summaries:
-        out["summaries"] = summaries[:8]
+        out["summaries"] = summaries[:35]
     return out
 
 
@@ -760,6 +901,9 @@ def compact_temporal_facts_for_prompt(facts: Dict[str, Any]) -> Dict[str, Any]:
         "latest_clinical_activity": _compact_event_summary_for_prompt(
             facts.get("latest_clinical_activity"), include_classes=True
         ),
+        "active_conditions_and_programs": facts.get("active_conditions_and_programs")
+        or [],
+        "latest_medication_orders": facts.get("latest_medication_orders"),
         "clinical_dates": [
             _compact_event_summary_for_prompt(d, include_classes=False)
             for d in (facts.get("clinical_dates") or [])
@@ -1591,10 +1735,30 @@ def _segment(text: str, separators: Sequence[re.Match], start: int, end: int) ->
     return left, right
 
 
+def _between_date_intervals(
+    sentence: str, date_matches: Sequence[re.Match]
+) -> Dict[int, Tuple[str, str]]:
+    """Map date match start offsets to ``(start_iso, end_iso)`` for ``between D1 and D2`` spans."""
+    intervals: Dict[int, Tuple[str, str]] = {}
+    for prev, curr in zip(date_matches, date_matches[1:]):
+        if prev.start() in intervals or curr.start() in intervals:
+            continue
+        lead_prefix = sentence[max(0, prev.start() - 16) : prev.start()]
+        between = sentence[prev.end() : curr.start()]
+        if re.search(r"\bbetween\s+$", lead_prefix, re.I) and re.fullmatch(
+            r"\s+and\s+", between, re.I
+        ):
+            lo, hi = sorted((prev.group(), curr.group()))
+            intervals[prev.start()] = (lo, hi)
+            intervals[curr.start()] = (lo, hi)
+    return intervals
+
+
 def _coordinated_date_groups(
     sentence: str, date_matches: Sequence[re.Match]
 ) -> Tuple[Dict[int, List[re.Match]], List[Tuple[int, int]]]:
-    """Group dates joined directly in a coordinated list (e.g. 'on 2025-10-22 and 2026-01-07')."""
+    """Group dates joined directly in a coordinated list (e.g. 'on 2025-10-22 and 2026-01-07')
+    or in a 'between D1 and D2' interval."""
     if len(date_matches) < 2:
         return {d.start(): [d] for d in date_matches}, []
     groups: List[List[re.Match]] = [[date_matches[0]]]
@@ -1602,8 +1766,14 @@ def _coordinated_date_groups(
     for prev, curr in zip(date_matches, date_matches[1:]):
         between = sentence[prev.end() : curr.start()]
         group_lead_prefix = sentence[max(0, groups[-1][0].start() - 16) : groups[-1][0].start()]
-        if _COORDINATED_DATE_CONNECTOR_RE.match(between) and not re.search(
-            r"\b(?:between|from)\s+$", group_lead_prefix, re.I
+        is_between_pair = (
+            len(groups[-1]) == 1
+            and bool(re.search(r"\bbetween\s+$", group_lead_prefix, re.I))
+            and bool(re.fullmatch(r"\s+and\s+", between, re.I))
+        )
+        if is_between_pair or (
+            _COORDINATED_DATE_CONNECTOR_RE.match(between)
+            and not re.search(r"\b(?:between|from)\s+$", group_lead_prefix, re.I)
         ):
             groups[-1].append(curr)
             connector_spans.append((prev.end(), curr.start()))
@@ -1627,6 +1797,7 @@ def _value_date_bindings(
     """
     if re.search(r"\brespectively\b", sentence, re.I) and len(date_matches) == len(values):
         return list(zip(date_matches, values))
+    between_intervals = _between_date_intervals(sentence, date_matches)
     date_groups, connector_spans = _coordinated_date_groups(sentence, date_matches)
 
     def in_date_connector(m: re.Match) -> bool:
@@ -1650,6 +1821,24 @@ def _value_date_bindings(
                 )
                 bound_group = date_groups.get(nearest.start(), [nearest])
                 break
+        if bound_group is None and between_intervals:
+            for d in date_matches:
+                if (
+                    d.start() in between_intervals
+                    and d.start() >= value_match.end()
+                    and not any(
+                        value_match.end() <= other.start() < d.start()
+                        for other in date_matches
+                        if other.start() not in between_intervals
+                    )
+                    and not re.search(
+                        r"\b(?:versus|vs\.?|but|while|whereas)\b|;",
+                        sentence[value_match.end() : d.start()],
+                        re.I,
+                    )
+                ):
+                    bound_group = date_groups.get(d.start(), [d])
+                    break
         if bound_group is None and date_matches:
             lead_date = date_matches[0]
             strong_left, strong_right = _segment(
@@ -1724,12 +1913,18 @@ def _date_value_failures(
                 }
                 if failure not in out:
                     out.append(failure)
+        between_intervals = _between_date_intervals(clean_sentence, date_matches)
         bindings = _value_date_bindings(clean_sentence, date_matches, values)
         for date_match, (_nearest_match, val) in bindings:
             date = date_match.group()
             failure = None
             if val not in value_dates:
                 continue
+            interval = between_intervals.get(date_match.start())
+            if interval:
+                lo, hi = interval
+                if any(lo <= d <= hi for d in value_dates[val]):
+                    continue
             if date in by_date and val not in by_date[date]:
                 failure = {
                     "date": date,
