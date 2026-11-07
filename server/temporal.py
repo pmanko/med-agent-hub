@@ -417,6 +417,14 @@ def parse_dated_observations(chart: str) -> List[Dict[str, Any]]:
             and traj_match.group("init_val")
             and traj_match.group("init_date") == date
         ):
+            for existing in reversed(out):
+                if (
+                    existing.get("concept") == concept
+                    and existing.get("date") == date
+                    and existing.get("index") != index
+                ):
+                    existing.setdefault("extra_indices", []).append(index)
+                    break
             continue
         seen.add(key)
         out.append(
@@ -499,13 +507,16 @@ def _relation_to_anchor(date: str, anchor: Optional[str]) -> str:
 
 
 def _point(o: Dict[str, Any]) -> Dict[str, Any]:
-    return {
+    pt: Dict[str, Any] = {
         "index": o.get("index"),
         "date": o.get("date"),
         "effective_date_id": _date_id(o.get("date")),
         "value": o.get("value"),
         "unit": o.get("unit") or "",
     }
+    if o.get("extra_indices"):
+        pt["extra_indices"] = list(o["extra_indices"])
+    return pt
 
 
 def _series_direction(first: float, last: float) -> str:
@@ -528,8 +539,116 @@ def _summarize_events(
         "classes": sorted({e.get("cls") for e in same if e.get("cls")}),
     }
     if include_summaries:
-        out["summaries"] = [e.get("body") for e in same[:8] if e.get("body")]
+        out["summaries"] = [e.get("body") for e in same[:35] if e.get("body")]
     return out
+
+
+def _extract_active_conditions_and_programs(
+    events: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Return active Program, Condition/Diagnosis, and latest WHO stage records (most recent per concept)."""
+    out: List[Dict[str, Any]] = []
+    seen_keys: set = set()
+    for e in events:
+        cls = str(e.get("cls") or "").strip()
+        cls_lower = cls.lower()
+        body = str(e.get("body") or "").strip()
+        body_lower = body.lower()
+        if not body:
+            continue
+        is_active_program = cls == "Program" and "status: active" in body_lower
+        is_active_condition = (
+            cls_lower in {"condition", "diagnosis", "problem"}
+            and not re.search(
+                r"\bstatus:\s*(?:inactive|resolved|refuted|entered-in-error)\b",
+                body_lower,
+            )
+            and not re.search(
+                r":\s*(?:no|not|none|negative|without|absent|ruled out)\b",
+                body_lower,
+            )
+        )
+        is_who_stage = "current who hiv stage" in cls_lower or body_lower.startswith(
+            "current who hiv stage:"
+        )
+        if not (is_active_program or is_active_condition or is_who_stage):
+            continue
+        label = body.split(":", 1)[-1].split(". ", 1)[0].strip().lower()
+        key = (
+            "who_stage" if is_who_stage else cls_lower,
+            "who_stage" if is_who_stage else label,
+        )
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        out.append(
+            {
+                "index": e.get("index"),
+                "date": e.get("date"),
+                "cls": cls,
+                "summary": body,
+            }
+        )
+    return out
+
+
+def _extract_medication_order_summary(
+    events: List[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Summarize the latest medication order date's drugs and any earlier superseded drugs."""
+    drug_events = [
+        e
+        for e in events
+        if str(e.get("cls") or "") == "Drug order"
+        and "action: discontinue" not in str(e.get("body") or "").lower()
+    ]
+    if not drug_events:
+        return None
+    latest_date = max(str(e.get("date") or "") for e in drug_events)
+    latest_orders = [e for e in drug_events if str(e.get("date") or "") == latest_date]
+
+    def _drug_label(body: str) -> str:
+        name = body.split(":", 1)[1] if ":" in body else body
+        return name.split(". ", 1)[0].strip(" .")
+
+    latest_names = {
+        _drug_label(str(e.get("body") or "")).lower() for e in latest_orders
+    }
+    older_superseded: List[Dict[str, Any]] = []
+    seen_older: set = set()
+    for e in drug_events:
+        if str(e.get("date") or "") == latest_date:
+            continue
+        label = _drug_label(str(e.get("body") or ""))
+        norm = label.lower()
+        if not norm or norm in latest_names or norm in seen_older:
+            continue
+        seen_older.add(norm)
+        older_superseded.append(
+            {
+                "index": e.get("index"),
+                "date": e.get("date"),
+                "drug": label,
+                "summary": e.get("body"),
+            }
+        )
+    summary: Dict[str, Any] = {
+        "date": latest_date,
+        "indices": [
+            e.get("index") for e in latest_orders if e.get("index") is not None
+        ],
+        "orders": [
+            {
+                "index": e.get("index"),
+                "drug": _drug_label(str(e.get("body") or "")),
+                "summary": e.get("body"),
+            }
+            for e in latest_orders
+        ],
+    }
+    if older_superseded:
+        summary["older_superseded_orders"] = older_superseded
+    return summary
 
 
 def _clinical_encounter_events(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -700,6 +819,10 @@ def build_temporal_facts(
             if clinical_dates
             else None
         ),
+        "active_conditions_and_programs": _extract_active_conditions_and_programs(
+            events
+        ),
+        "latest_medication_orders": _extract_medication_order_summary(events),
         "clinical_dates": [
             _summarize_events(events, d, include_summaries=False)
             for d in clinical_dates
@@ -750,7 +873,7 @@ def _compact_event_summary_for_prompt(
             out["classes_sample"] = classes[:12]
     summaries = summary.get("summaries")
     if summaries:
-        out["summaries"] = summaries[:8]
+        out["summaries"] = summaries[:35]
     return out
 
 
@@ -778,6 +901,9 @@ def compact_temporal_facts_for_prompt(facts: Dict[str, Any]) -> Dict[str, Any]:
         "latest_clinical_activity": _compact_event_summary_for_prompt(
             facts.get("latest_clinical_activity"), include_classes=True
         ),
+        "active_conditions_and_programs": facts.get("active_conditions_and_programs")
+        or [],
+        "latest_medication_orders": facts.get("latest_medication_orders"),
         "clinical_dates": [
             _compact_event_summary_for_prompt(d, include_classes=False)
             for d in (facts.get("clinical_dates") or [])
@@ -1795,7 +1921,7 @@ def _date_value_failures(
             if val not in value_dates:
                 continue
             interval = between_intervals.get(date_match.start())
-            if interval and date in by_date:
+            if interval:
                 lo, hi = interval
                 if any(lo <= d <= hi for d in value_dates[val]):
                     continue

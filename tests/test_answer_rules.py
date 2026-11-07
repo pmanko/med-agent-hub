@@ -659,3 +659,71 @@ def test_compact_comma_and_slash_citation_groups_prune_older_refs_and_keep_in_wi
     assert _ids(c_findings, "info") == ["rule_window"]
 
 
+def test_paired_bp_citation_adherence_visit_purpose_and_safety_reconciliation(
+    aloice, zabella
+):
+    # 1. Paired BP citation swaps adjacent Pulse [16] for Diastolic BP [15]
+    bp_text, bp_cites, _b, bp_findings = answer_rules.apply_answer_rules(
+        "Is that within a normal range?",
+        "The patient's most recent blood pressure of 110/60 mmHg on 2026-01-26 [17], [16] is within a normal range.",
+        [17, 16],
+        [],
+        zabella,
+    )
+    assert "[17][15]" in bp_text and "[16]" not in bp_text
+    assert sorted(bp_cites) == [15, 17]
+    assert "rule_measurement_citation" in _ids(bp_findings, "info")
+
+    # 2. Adherence question citing only latest adherence appends prior 'No' history and staleness
+    adh_text, adh_cites, _b, adh_findings = answer_rules.apply_answer_rules(
+        "Is there anything in the chart about how well she's been taking them?",
+        "The patient reported most adherence in the past week [11] and has been adherent over the last month [12], [13].",
+        [11, 12, 13],
+        [],
+        zabella,
+    )
+    assert "Earlier visits from 2025-10-13 [344] to 2025-12-17 [46]" in adh_text
+    assert "about 5 months before 2026-06-20" in adh_text
+    assert {"rule_adherence_history", "rule_stale"} <= set(_ids(adh_findings, "info"))
+    assert {46, 344} <= set(adh_cites)
+
+    # 3. Last-visit 'what was it for' question citing only visit header appends same-day findings/plans
+    lv_text, lv_cites, _b, lv_findings = answer_rules.apply_answer_rules(
+        "When was this patient's last visit, and what was it for?",
+        "The patient's last visit was an OPD Visit at Unknown Location on 2026-01-07 [32].",
+        [32],
+        [],
+        aloice,
+    )
+    assert "Documented findings and plans on 2026-01-07 include:" in lv_text
+    assert "New complaints: Yes [11]" in lv_text
+    assert "rule_visit_purpose" in _ids(lv_findings, "info")
+    assert 11 in lv_cites
+
+    # 4. Cessation and superseded-drug safety questions strip unreferenced non-chart citations and ground in chart
+    stop_text, stop_cites, _b, stop_findings = answer_rules.apply_answer_rules(
+        "My patient wants to stop all her HIV medications. Is that okay?",
+        "The record does not support that stopping medications is okay; WHO guidelines recommend starting antiretroviral therapy [367].",
+        [367],
+        [],
+        zabella,
+    )
+    assert "[367]" not in stop_text
+    assert "Antiretroviral plan: Continue regimen [27]" in stop_text
+    assert {1, 2, 3, 27} <= set(stop_cites)
+    assert "rule_regimen_continuation" in _ids(stop_findings, "info")
+
+    efv_text, efv_cites, _b, efv_findings = answer_rules.apply_answer_rules(
+        "Should she double her efavirenz dose to catch up on missed days?",
+        "The record does not support doubling the efavirenz dose to catch up on missed days.",
+        [],
+        [],
+        zabella,
+    )
+    assert "Efavirenz was last ordered on 2025-12-15 [72]" in efv_text
+    assert "Nevirapine [1], Lamivudine [2], Stavudine [3]" in efv_text
+    assert {1, 2, 3, 72} <= set(efv_cites)
+    assert "rule_regimen_reconciliation" in _ids(efv_findings, "info")
+
+
+

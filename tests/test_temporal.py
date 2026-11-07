@@ -1626,6 +1626,28 @@ def test_value_binding_skips_threshold_comparators_and_accepts_between_date_inte
     )
     assert any(c["id"] == "date_value_binding" for c in out_of_interval_gate["checks"])
 
+    # When D1 in 'between D1 and D2' is a non-measurement chart date (e.g. program enrollment),
+    # values occurring inside [D1, D2] are still valid within the stated interval.
+    chart_with_program_start = (
+        "[34] (2025-09-09) Program: HIV Program. Status: Active\n" + _WEIGHT_YEAR_CHART
+    )
+    prog_weight_facts = temporal.build_temporal_facts(
+        chart_with_program_start, "2026-06-20"
+    )
+    prog_interval_gate = temporal.run_temporal_gate(
+        "What is her most recent weight, and has it changed?",
+        "The patient's most recent weight was 71 kg on 2026-01-26 [19]. Her weight has "
+        "fluctuated over time, ranging from a low of 71 kg to a high of 74 kg between "
+        "2025-09-09 and 2026-01-26.",
+        [19, 350],
+        prog_weight_facts,
+        "enforce",
+    )
+    assert not [
+        c for c in prog_interval_gate["checks"] if c["id"] == "date_value_binding"
+    ]
+    assert prog_weight_facts["active_conditions_and_programs"][0]["index"] == 34
+
 
 def test_gate_fails_exposed_internal_date_id():
     facts = temporal.build_temporal_facts(_CHART, "2006-06-01")
