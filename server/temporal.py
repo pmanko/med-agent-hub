@@ -651,6 +651,77 @@ def _extract_medication_order_summary(
     return summary
 
 
+_CATEGORICAL_SERIES_CONCEPT_RE = re.compile(
+    r"\b(?:adherence|stage|staging|hospitalized|complaints?|plan)\b", re.I
+)
+
+
+def _extract_categorical_series(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Build longitudinal summaries for repeated categorical clinical observations (e.g. past-week
+    vs. last-month drug adherence, WHO staging, hospitalization status)."""
+    by_concept: Dict[str, List[Dict[str, Any]]] = {}
+    for e in events:
+        if _is_admin_event(e):
+            continue
+        cls_lower = str(e.get("cls") or "").strip().lower()
+        if cls_lower in _ENCOUNTER_CLASSES or cls_lower in {
+            "drug order",
+            "test order",
+            "condition",
+            "program",
+            "patient",
+        }:
+            continue
+        body = str(e.get("body") or "").strip()
+        if ":" not in body:
+            continue
+        concept, val = [part.strip() for part in body.split(":", 1)]
+        if not concept or not val or len(val) > 60:
+            continue
+        if _ISO_RE.fullmatch(val) or re.match(
+            r"^-?\d+(?:\.\d+)?(?:\s*[a-zA-Z%/^0-9._-]+)?$", val
+        ):
+            continue
+        if not _CATEGORICAL_SERIES_CONCEPT_RE.search(concept):
+            continue
+        by_concept.setdefault(concept, []).append(
+            {
+                "date": str(e.get("date") or ""),
+                "value": val,
+                "index": e.get("index"),
+            }
+        )
+    out: List[Dict[str, Any]] = []
+    for concept, raw_pts in sorted(by_concept.items()):
+        ordered = sorted(
+            raw_pts, key=lambda p: (p["date"], -(int(p["index"] or 0)))
+        )
+        deduped: List[Dict[str, Any]] = []
+        seen_date_val: set = set()
+        for p in ordered:
+            key = (p["date"], p["value"].lower())
+            if key in seen_date_val:
+                continue
+            seen_date_val.add(key)
+            deduped.append(p)
+        distinct_dates = {p["date"] for p in deduped if p["date"]}
+        if len(distinct_dates) < 2:
+            continue
+        counts: Dict[str, int] = {}
+        for p in deduped:
+            counts[p["value"]] = counts.get(p["value"], 0) + 1
+        out.append(
+            {
+                "concept": concept,
+                "n_points": len(deduped),
+                "value_counts": counts,
+                "most_recent": deduped[-1],
+                "points": deduped,
+            }
+        )
+    return out
+
+
 def _clinical_encounter_events(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Return only records that explicitly represent an encounter or visit."""
     return [
@@ -836,6 +907,7 @@ def build_temporal_facts(
             for d in admin_dates
         ],
         "numeric_series": numeric_series,
+        "categorical_series": _extract_categorical_series(events),
         "return_visit_dates": return_visit_dates,
         "appointment_candidates": candidates_by_relation,
         # The answer rules read the records; render_temporal_facts never shows them to a model.
@@ -913,6 +985,7 @@ def compact_temporal_facts_for_prompt(facts: Dict[str, Any]) -> Dict[str, Any]:
             for d in (facts.get("admin_dates") or [])
         ],
         "numeric_series": facts.get("numeric_series") or [],
+        "categorical_series": facts.get("categorical_series") or [],
         "return_visit_dates": facts.get("return_visit_dates") or [],
         "appointment_candidates": {
             "counts": {

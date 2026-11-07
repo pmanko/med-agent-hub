@@ -720,11 +720,28 @@ def _series_in_answer(question: str, answer: str, facts: Dict[str, Any]) -> List
     """The series the question asks about that the answer also mentions; none when the question
     is not about a measurement (an orders list that mentions a CD4 panel gets no series rule)."""
     shared = _shared_series_words(facts)
-    return [
+    selected = [
         series
         for series in temporal._selected_series(question, "", facts)
         if _names_series(question, series, shared) and _names_series(answer, series, shared)
     ]
+    if re.search(r"\b(?:grow(?:ing|th))\b", question or "", re.I):
+        all_series = facts.get("numeric_series") or []
+        anthro_series = [
+            s
+            for s in all_series
+            if any(
+                k in str(s.get("concept") or "").lower()
+                for k in ("weight", "height", "length", "head circumference")
+            )
+        ]
+        if any(_names_series(answer, s, shared) for s in anthro_series) or selected:
+            seen_concepts = {s.get("concept") for s in selected}
+            for s in anthro_series:
+                if s.get("concept") not in seen_concepts:
+                    selected.append(s)
+                    seen_concepts.add(s.get("concept"))
+    return selected
 
 
 def _overdue(series: Dict[str, Any], reference: _dt.date) -> bool:
@@ -829,6 +846,7 @@ def _series_edits(question: str, text: str, facts: Dict[str, Any]) -> Tuple[str,
     window = asked_window(question, facts)
     start = window[0] if window else None
     trend_question = bool(temporal._TREND_RE.search(question or ""))
+    is_growth_question = bool(re.search(r"\b(?:grow(?:ing|th))\b", question or "", re.I))
     appended: List[str] = []
     added: List[int] = []
     findings: List[Dict[str, Any]] = []
@@ -837,21 +855,24 @@ def _series_edits(question: str, text: str, facts: Dict[str, Any]) -> Tuple[str,
     for series in series_list:
         concept = str(series.get("concept") or "").split(" (")[0]
         points = _points_in_window(series, start, reference)
-        if trend_question and len(points) >= 3:
-            stated = {
-                round(float(m.group()), 3)
-                for m in re.finditer(r"(?<![\d.\[])\d+(?:\.\d+)?(?![\d\]])", re.sub(r"\d{4}-\d{2}-\d{2}", " ", text))
-            }
-            stated_points = [
-                p
-                for p in points
-                if isinstance(p.get("value"), (int, float))
-                and round(float(p["value"]), 3) in stated
-                and (
-                    p.get("index") in cites_in_text
-                    or (str(p.get("date") or "") and str(p.get("date")) in text)
-                )
-            ]
+        stated = {
+            round(float(m.group()), 3)
+            for m in re.finditer(r"(?<![\d.\[])\d+(?:\.\d+)?(?![\d\]])", re.sub(r"\d{4}-\d{2}-\d{2}", " ", text))
+        }
+        stated_points = [
+            p
+            for p in points
+            if isinstance(p.get("value"), (int, float))
+            and round(float(p["value"]), 3) in stated
+            and (
+                p.get("index") in cites_in_text
+                or (str(p.get("date") or "") and str(p.get("date")) in text)
+            )
+        ]
+        if trend_question and (
+            len(points) >= 3
+            or (is_growth_question and len(points) >= 2 and len(stated_points) == 0)
+        ):
             ordered = [float(p["value"]) for p in points]
             steps = [b - a for a, b in zip(ordered, ordered[1:]) if b != a]
             changes_direction = any(x * y < 0 for x, y in zip(steps, steps[1:]))
@@ -924,28 +945,29 @@ def _series_edits(question: str, text: str, facts: Dict[str, Any]) -> Tuple[str,
             and _overdue(series, reference)
         ):
             stale_by_date.setdefault(last["date"], []).append(series)
-    if (
-        re.search(r"\b(?:grow(?:ing|th)?|gaining\s+weight)\b", question or "", re.I)
-        and "failure to thrive" not in (text or "").lower()
-    ):
+    if re.search(r"\b(?:grow(?:ing|th)?|gaining\s+weight)\b", question or "", re.I):
         records_map = _records(facts)
-        growth_conds = [
-            r
-            for r in records_map.values()
-            if str(r.get("cls") or "").lower() in {"condition", "diagnosis", "problem"}
-            and "status: active" in str(r.get("body") or "").lower()
-            and re.search(
-                r"\b(?:failure to thrive|malnutrition|underweight|stunting|wasting)\b",
-                str(r.get("body") or ""),
-                re.I,
-            )
-            and r["index"] not in cites_in_text
-        ]
-        if growth_conds:
-            gc = min(growth_conds, key=lambda r: r["index"])
+        growth_conds = sorted(
+            (
+                r
+                for r in records_map.values()
+                if str(r.get("cls") or "").lower() in {"condition", "diagnosis", "problem"}
+                and "status: active" in str(r.get("body") or "").lower()
+                and re.search(
+                    r"\b(?:failure to thrive|delayed milestones|developmental delay|malnutrition|underweight|stunting|wasting)\b",
+                    str(r.get("body") or ""),
+                    re.I,
+                )
+                and r["index"] not in cites_in_text
+            ),
+            key=lambda r: r["index"],
+        )
+        for gc in growth_conds:
             cond_label = (
                 str(gc.get("body") or "").split(":", 1)[-1].split(". ", 1)[0].strip()
             )
+            if cond_label.lower() in (text or "").lower():
+                continue
             appended.append(
                 f"The chart also documents an active {cond_label} diagnosis ({gc.get('date')}) [{gc['index']}]."
             )
@@ -1074,8 +1096,6 @@ def _adherence_edits(
     if not cited_adh:
         return text, [], []
     latest_date = max(str(r.get("date") or "") for r in adh_records)
-    if any(str(r.get("date") or "") < latest_date for r in cited_adh):
-        return text, [], []
     prior_no = sorted(
         (
             r
@@ -1085,39 +1105,105 @@ def _adherence_edits(
         ),
         key=lambda r: (str(r.get("date") or ""), -r["index"]),
     )
+    cited_prior_no_dates = {
+        str(r.get("date") or "")
+        for r in cited_adh
+        if str(r.get("date") or "") < latest_date
+        and re.search(r":\s*(?:no|none|poor)\b", str(r.get("body") or ""), re.I)
+    }
     appended: List[str] = []
     added: List[int] = []
     findings: List[Dict[str, Any]] = []
-    if prior_no and not re.search(
-        r"\b(?:earlier|previous|prior)\b[^.]{0,60}\b(?:no|non-?adher|poor)\b",
-        text or "",
-        re.I,
-    ):
+    if prior_no:
         earliest_no = prior_no[0]
         latest_no = prior_no[-1]
         distinct_no_dates = sorted({str(r.get("date") or "") for r in prior_no})
-        if len(distinct_no_dates) >= 2:
-            appended.append(
-                f"Earlier visits from {earliest_no['date']} [{earliest_no['index']}] to "
-                f"{latest_no['date']} [{latest_no['index']}] ({len(distinct_no_dates)} visits) "
-                f"recorded '{latest_no['body']}'."
+        already_states_all_prior_no = bool(
+            re.search(
+                rf"\b{len(distinct_no_dates)}\s+(?:earlier\s+|prior\s+|previous\s+)?(?:visits?|dates?|encounters?|times?)\b",
+                text or "",
+                re.I,
             )
-            added.extend([earliest_no["index"], latest_no["index"]])
-        else:
-            appended.append(
-                f"An earlier visit on {earliest_no['date']} [{earliest_no['index']}] "
-                f"recorded '{earliest_no['body']}'."
-            )
-            added.append(earliest_no["index"])
-        findings.append(
-            _finding(
-                "adherence_history",
-                "info",
-                text,
-                f"added {len(distinct_no_dates)} earlier non-adherence visit(s)",
-                added,
+            or (
+                len(distinct_no_dates) == 1
+                and re.search(
+                    r"\b(?:earlier|previous|prior)\b[^.]{0,60}\b(?:no|non-?adher|poor)\b",
+                    text or "",
+                    re.I,
+                )
             )
         )
+        if (
+            len(cited_prior_no_dates) < len(distinct_no_dates)
+            and not already_states_all_prior_no
+        ):
+            if len(distinct_no_dates) >= 2:
+                appended.append(
+                    f"Earlier visits from {earliest_no['date']} [{earliest_no['index']}] to "
+                    f"{latest_no['date']} [{latest_no['index']}] ({len(distinct_no_dates)} visits) "
+                    f"recorded '{latest_no['body']}'."
+                )
+                added.extend([earliest_no["index"], latest_no["index"]])
+            else:
+                appended.append(
+                    f"An earlier visit on {earliest_no['date']} [{earliest_no['index']}] "
+                    f"recorded '{earliest_no['body']}'."
+                )
+                added.append(earliest_no["index"])
+            findings.append(
+                _finding(
+                    "adherence_history",
+                    "info",
+                    text,
+                    f"added {len(distinct_no_dates)} earlier non-adherence visit(s)",
+                    list(added),
+                )
+            )
+    prior_week_all = sorted(
+        (
+            r
+            for r in adh_records
+            if str(r.get("date") or "") < latest_date
+            and "past week" in str(r.get("body") or "").lower()
+            and re.search(r":\s*all\b", str(r.get("body") or ""), re.I)
+        ),
+        key=lambda r: (str(r.get("date") or ""), -r["index"]),
+    )
+    if prior_week_all:
+        distinct_all_dates = sorted({str(r.get("date") or "") for r in prior_week_all})
+        cited_prior_all_dates = {
+            str(r.get("date") or "")
+            for r in cited_adh
+            if str(r.get("date") or "") < latest_date
+            and "past week" in str(r.get("body") or "").lower()
+            and re.search(r":\s*all\b", str(r.get("body") or ""), re.I)
+        }
+        if (
+            len(distinct_all_dates) >= 2
+            and len(cited_prior_all_dates) < len(distinct_all_dates)
+            and not re.search(
+                r"\bpast\s+week\b[^.;]{0,50}\ball\b|\ball\b[^.;]{0,50}\bpast\s+week\b",
+                text or "",
+                re.I,
+            )
+        ):
+            earliest_all = prior_week_all[0]
+            latest_all = prior_week_all[-1]
+            appended.append(
+                f"Across earlier visits from {earliest_all['date']} [{earliest_all['index']}] to "
+                f"{latest_all['date']} [{latest_all['index']}] ({len(distinct_all_dates)} visits), "
+                f"'{latest_all['body']}' was recorded."
+            )
+            added.extend([earliest_all["index"], latest_all["index"]])
+            findings.append(
+                _finding(
+                    "adherence_history",
+                    "info",
+                    text,
+                    f"added {len(distinct_all_dates)} earlier past-week All adherence visit(s)",
+                    [earliest_all["index"], latest_all["index"]],
+                )
+            )
     reference = _date(facts.get("reference_date"))
     last_dt = _date(latest_date)
     adh_dates = sorted({_date(r.get("date")) for r in adh_records if _date(r.get("date"))})
@@ -1135,19 +1221,21 @@ def _adherence_edits(
         and not _GAP_STATED_RE.search(text)
     ):
         months = round((reference - last_dt).days / 30.44 * 2) / 2
-        latest_cited_idx = min(r["index"] for r in cited_adh)
+        latest_idx = min(
+            r["index"] for r in adh_records if str(r.get("date") or "") == latest_date
+        )
         appended.append(
-            f"The latest adherence records in the chart are from {latest_date} [{latest_cited_idx}], "
+            f"The latest adherence records in the chart are from {latest_date} [{latest_idx}], "
             f"about {temporal._format_value(months)} months before {reference.isoformat()}."
         )
-        added.append(latest_cited_idx)
+        added.append(latest_idx)
         findings.append(
             _finding(
                 "stale",
                 "info",
                 text,
                 f"the latest adherence record is from {latest_date}, {temporal._format_value(months)} months before the reference date",
-                [latest_cited_idx],
+                [latest_idx],
             )
         )
     if appended:
@@ -1162,8 +1250,7 @@ def _last_visit_purpose_edits(
     facts: Dict[str, Any],
 ) -> Tuple[str, List[int], List[Dict[str, Any]]]:
     """When asked when the last visit was and what it was for, append the visit's documented
-    complaints, abnormal findings, hospitalization, and treatment plans if the answer cites only
-    the Encounter/Visit header."""
+    complaints, abnormal findings, hospitalization, and treatment plans that are not yet cited."""
     if not re.search(
         r"\blast\s+(?:visit|encounter)\b.*\bwhat\s+was\s+it\s+for\b",
         question or "",
@@ -1174,12 +1261,12 @@ def _last_visit_purpose_edits(
     if not isinstance(last_enc, dict) or not last_enc.get("date"):
         return text, [], []
     enc_date = str(last_enc["date"])
-    cites_in_text = [i for i in _cites(text) if i in records]
-    if cites_in_text and not all(
-        str(records[i].get("cls") or "").lower() in {"encounter", "visit"}
-        for i in cites_in_text
-    ):
-        return text, [], []
+    cites_set = {i for i in _cites(text) if i in records}
+    has_cited_drug_order = any(
+        records[i].get("cls") == "Drug order"
+        and str(records[i].get("date") or "") == enc_date
+        for i in cites_set
+    )
     same_day = sorted(
         (
             r
@@ -1193,22 +1280,38 @@ def _last_visit_purpose_edits(
         return text, [], []
     highlights: List[str] = []
     added: List[int] = []
+    has_uncited_acute = False
     for r in same_day:
+        idx = r["index"]
+        if idx in cites_set:
+            continue
         body = str(r.get("body") or "").strip()
         body_lower = body.lower()
-        idx = r["index"]
-        if (
-            body_lower in {"scheduled visit: no", "new complaints: yes"}
+        is_acute_or_plan = (
+            body_lower
+            in {
+                "scheduled visit: no",
+                "new complaints: yes",
+                "new who/cdc staging criteria met: yes",
+            }
             or "hospitalized location:" in body_lower
             or "temperature" in body_lower
             or "pulse:" in body_lower
             or "blood pressure:" in body_lower
             or "plan: continue regimen" in body_lower
-            or r.get("cls") == "Drug order"
-        ):
+        )
+        is_context = (
+            "adherence in past week:" in body_lower
+            or "adherence in last month:" in body_lower
+            or "weight" in body_lower
+            or "who hiv stage:" in body_lower
+            or (r.get("cls") == "Drug order" and not has_cited_drug_order)
+        )
+        if is_acute_or_plan or is_context:
             highlights.append(f"{body} [{idx}]")
             added.append(idx)
-    if not highlights:
+            has_uncited_acute = has_uncited_acute or is_acute_or_plan
+    if not highlights or not has_uncited_acute:
         return text, [], []
     summary_sentence = (
         f"Documented findings and plans on {enc_date} include: "
@@ -1226,6 +1329,61 @@ def _last_visit_purpose_edits(
                 question,
                 f"added {len(highlights[:12])} same-day clinical findings/plans for {enc_date}",
                 added[:12],
+            )
+        ],
+    )
+
+
+def _missed_return_visit_edits(
+    question: str,
+    text: str,
+    facts: Dict[str, Any],
+) -> Tuple[str, List[int], List[Dict[str, Any]]]:
+    """When asked about upcoming/scheduled appointments and only past return-visit date
+    observations exist in the chart, state that no return visit date after reference_date is
+    documented in the chart and cite the latest past return-visit date."""
+    if not re.search(
+        r"\b(?:upcoming|next|future|scheduled)\s+(?:appointments?|visits?|return\s+visits?)\b"
+        r"|\b(?:any\s+appointments?|return\s+visit\s+date)\b",
+        question or "",
+        re.I,
+    ):
+        return text, [], []
+    appt = (facts or {}).get("appointment_candidates") or {}
+    if appt.get("future") or appt.get("today"):
+        return text, [], []
+    past = [c for c in (appt.get("past") or []) if c.get("date") and isinstance(c.get("index"), int)]
+    if not past:
+        return text, [], []
+    latest_past = max(past, key=lambda c: (str(c.get("date") or ""), -int(c.get("index") or 0)))
+    past_date = str(latest_past.get("date") or "")
+    past_idx = int(latest_past["index"])
+    if past_date in (text or "") and re.search(r"\b(?:documented|chart|records?)\b", text or "", re.I):
+        return text, [], []
+    ref_iso = str((facts or {}).get("reference_date") or "")
+    source_date = str(latest_past.get("source_date") or "")
+    last_enc_date = str(((facts or {}).get("last_clinical_encounter") or {}).get("date") or "")
+    source_clause = f" (recorded on {source_date})" if source_date else ""
+    if last_enc_date and last_enc_date < past_date:
+        tail = f"which has passed with no subsequent encounter documented after {last_enc_date}."
+    else:
+        tail = "which has already passed."
+    addition = (
+        f"In the chart records, no return visit date after {ref_iso} is documented; "
+        f"the latest documented return visit date was {past_date} [{past_idx}]{source_clause}, "
+        f"{tail}"
+    )
+    text = text.rstrip() + " " + addition
+    return (
+        text,
+        [past_idx],
+        [
+            _finding(
+                "missed_return_visit",
+                "info",
+                question,
+                f"added latest past return visit date {past_date} [{past_idx}]",
+                [past_idx],
             )
         ],
     )
@@ -1436,6 +1594,11 @@ def apply_answer_rules(
     )
     added += visit_added
     findings += visit_findings
+    text, appt_added, appt_findings = _missed_return_visit_edits(
+        question, text, facts or {}
+    )
+    added += appt_added
+    findings += appt_findings
     text, safety_added, safety_findings = _medication_safety_reconciliation_edits(
         question, text, records
     )

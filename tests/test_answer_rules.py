@@ -726,4 +726,83 @@ def test_paired_bp_citation_adherence_visit_purpose_and_safety_reconciliation(
     assert "rule_regimen_reconciliation" in _ids(efv_findings, "info")
 
 
+def test_categorical_series_partial_adherence_partial_visit_missed_return_and_growth_series(
+    aloice, zabella
+):
+    cat_by_concept = {c["concept"]: c for c in zabella["categorical_series"]}
+    assert "Antiretroviral adherence in past week" in cat_by_concept
+    assert "Overall drug adherence in last month" in cat_by_concept
+    assert cat_by_concept["Overall drug adherence in last month"]["value_counts"]["No"] == 8
+
+    # 1. Adherence draft citing one prior date ([45], [46]) still gets full 8-visit history + staleness
+    adh_text, adh_cites, _b, adh_findings = answer_rules.apply_answer_rules(
+        "Is there anything in the chart about how well she's been taking them?",
+        "On 2026-01-26 she reported taking most doses in the past week [11] and overall adherence in the last month [12], following non-adherence on 2025-12-17 [45][46].",
+        [11, 12, 45, 46],
+        [],
+        zabella,
+    )
+    assert "Earlier visits from 2025-10-13 [344] to 2025-12-17 [46] (8 visits) recorded 'Overall drug adherence in last month: No'." in adh_text
+    assert "Across earlier visits from 2025-10-13 [343] to 2025-12-17 [45] (8 visits), 'Antiretroviral adherence in past week: All' was recorded." in adh_text
+    assert "about 5 months before 2026-06-20" in adh_text
+    assert {"rule_adherence_history", "rule_stale"} <= set(_ids(adh_findings, "info"))
+    assert {343, 344} <= set(adh_cites)
+
+    # 2. Last-visit purpose draft citing partial observations ([11], [2]) still gets uncited acute vitals/hospitalization
+    lv_text, lv_cites, _b, lv_findings = answer_rules.apply_answer_rules(
+        "When was his last visit and what was it for?",
+        "His last visit was on 2026-01-07 [1] for new complaints [11] and medication continuation [2].",
+        [1, 2, 11],
+        [],
+        aloice,
+    )
+    assert "Temperature (C): 39.7 C [20]" in lv_text
+    assert "Patient hospitalized location: Moi teaching and referral hospital [24]" in lv_text
+    assert "rule_visit_purpose" in _ids(lv_findings, "info")
+    assert {20, 24} <= set(lv_cites)
+
+    # 3. Upcoming-appointments draft gets chart-documented framing and latest past return-visit date
+    appt_text, appt_cites, _b, appt_findings = answer_rules.apply_answer_rules(
+        "Does she have any upcoming appointments?",
+        "The patient does not have any upcoming appointments scheduled after 2026-06-20 [22].",
+        [22],
+        [],
+        zabella,
+    )
+    assert "no return visit date after 2026-06-20 is documented" in appt_text
+    assert "the latest documented return visit date was 2026-02-23 [22] (recorded on 2026-01-26)" in appt_text
+    assert "rule_missed_return_visit" in _ids(appt_findings, "info")
+    assert 22 in appt_cites
+
+    # 4. Growth question where draft only names weight still appends height, head circumference, Delayed milestones, and staleness
+    evan_chart = """Patient records (most recent first):
+[18] (2025-12-23) Weight (kg): 10 kg
+[20] (2025-12-23) Height (cm): 67 cm
+[53] (2025-11-28) Weight (kg): 11 kg
+[54] (2025-11-28) Height (cm): 66 cm
+[70] (2025-01-26) Head circumference: 46 cm
+[131] (2025-11-21) Condition: Failure to thrive. Status: Active
+[132] (2025-11-21) Condition: Delayed milestones. Status: Active
+[218] (2025-10-08) Weight (kg): 6.1 kg
+[252] (2025-01-04) Head circumference: 45 cm
+[253] (2025-10-04) Height (cm): 65.5 cm
+"""
+    evan = build_temporal_facts(evan_chart, REFERENCE)
+    gr_text, gr_cites, _b, gr_findings = answer_rules.apply_answer_rules(
+        "How is he growing?",
+        "The patient's weight dropped from 11 kg on 2025-11-28 [53] to 10 kg on 2025-12-23 [18], with an active diagnosis of Failure to thrive [131].",
+        [18, 53, 131],
+        [],
+        evan,
+    )
+    assert "Recorded weight readings:" in gr_text
+    assert "Recorded height readings:" in gr_text
+    assert "Recorded head circumference readings:" in gr_text
+    assert "Delayed milestones diagnosis (2025-11-21) [132]" in gr_text
+    assert "The latest height and weight in the chart are from 2025-12-23 [20][18], about 6 months before 2026-06-20." in gr_text or "The latest weight and height in the chart are from 2025-12-23 [18][20], about 6 months before 2026-06-20." in gr_text
+    assert {20, 70, 132, 252, 253} <= set(gr_cites)
+    assert {"rule_series", "rule_stale"} <= set(_ids(gr_findings, "info"))
+
+
+
 
