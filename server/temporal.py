@@ -985,7 +985,6 @@ def compact_temporal_facts_for_prompt(facts: Dict[str, Any]) -> Dict[str, Any]:
             for d in (facts.get("admin_dates") or [])
         ],
         "numeric_series": facts.get("numeric_series") or [],
-        "categorical_series": facts.get("categorical_series") or [],
         "return_visit_dates": facts.get("return_visit_dates") or [],
         "appointment_candidates": {
             "counts": {

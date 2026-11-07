@@ -1114,6 +1114,35 @@ def _adherence_edits(
     appended: List[str] = []
     added: List[int] = []
     findings: List[Dict[str, Any]] = []
+    has_any_past_week_no = any(
+        "past week" in str(r.get("body") or "").lower()
+        and re.search(r":\s*(?:no|none|poor)\b", str(r.get("body") or ""), re.I)
+        for r in adh_records
+    )
+    cited_past_week_all = [
+        r
+        for r in cited_adh
+        if "past week" in str(r.get("body") or "").lower()
+        and re.search(r":\s*all\b", str(r.get("body") or ""), re.I)
+    ]
+    if cited_past_week_all and not has_any_past_week_no:
+        repaired_text, n_subs = re.subn(
+            r"\bno(\s+(?:antiretroviral\s+)?adherence(?:\s+to\s+[^.;,]+?)?\s+in\s+the\s+past\s+week)\b",
+            r"all\1",
+            text,
+            flags=re.I,
+        )
+        if n_subs:
+            text = repaired_text
+            findings.append(
+                _finding(
+                    "adherence_value",
+                    "info",
+                    text,
+                    "repaired 'no ... adherence in the past week' to 'all' per cited past-week All record",
+                    [r["index"] for r in cited_past_week_all],
+                )
+            )
     if prior_no:
         earliest_no = prior_no[0]
         latest_no = prior_no[-1]
@@ -1358,21 +1387,35 @@ def _missed_return_visit_edits(
     latest_past = max(past, key=lambda c: (str(c.get("date") or ""), -int(c.get("index") or 0)))
     past_date = str(latest_past.get("date") or "")
     past_idx = int(latest_past["index"])
-    if past_date in (text or "") and re.search(r"\b(?:documented|chart|records?)\b", text or "", re.I):
-        return text, [], []
     ref_iso = str((facts or {}).get("reference_date") or "")
     source_date = str(latest_past.get("source_date") or "")
     last_enc_date = str(((facts or {}).get("last_clinical_encounter") or {}).get("date") or "")
-    source_clause = f" (recorded on {source_date})" if source_date else ""
-    if last_enc_date and last_enc_date < past_date:
-        tail = f"which has passed with no subsequent encounter documented after {last_enc_date}."
+    if (
+        past_date in (text or "")
+        and (not source_date or source_date in (text or ""))
+        and re.search(r"\b(?:documented|chart|records?)\b", text or "", re.I)
+    ):
+        return text, [], []
+    if past_date in (text or "") and re.search(r"\b(?:documented|chart|records?)\b", text or "", re.I):
+        enc_tail = (
+            f", and no subsequent encounter is documented in the chart after {last_enc_date}."
+            if last_enc_date and last_enc_date < past_date
+            else "."
+        )
+        addition = (
+            f"That return visit date ({past_date} [{past_idx}]) was recorded at the {source_date} encounter{enc_tail}"
+        )
     else:
-        tail = "which has already passed."
-    addition = (
-        f"In the chart records, no return visit date after {ref_iso} is documented; "
-        f"the latest documented return visit date was {past_date} [{past_idx}]{source_clause}, "
-        f"{tail}"
-    )
+        source_clause = f" (recorded on {source_date})" if source_date else ""
+        if last_enc_date and last_enc_date < past_date:
+            tail = f"which has passed with no subsequent encounter documented after {last_enc_date}."
+        else:
+            tail = "which has already passed."
+        addition = (
+            f"In the chart records, no return visit date after {ref_iso} is documented; "
+            f"the latest documented return visit date was {past_date} [{past_idx}]{source_clause}, "
+            f"{tail}"
+        )
     text = text.rstrip() + " " + addition
     return (
         text,
