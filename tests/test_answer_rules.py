@@ -729,7 +729,11 @@ def test_paired_bp_citation_adherence_visit_purpose_and_safety_reconciliation(
 def test_categorical_series_partial_adherence_partial_visit_missed_return_and_growth_series(
     aloice, zabella
 ):
-    cat_by_concept = {c["concept"]: c for c in zabella["categorical_series"]}
+    from server.temporal import _extract_categorical_series
+
+    cat_by_concept = {
+        c["concept"]: c for c in _extract_categorical_series(zabella["records"])
+    }
     assert "Antiretroviral adherence in past week" in cat_by_concept
     assert "Overall drug adherence in last month" in cat_by_concept
     assert cat_by_concept["Overall drug adherence in last month"]["value_counts"]["No"] == 8

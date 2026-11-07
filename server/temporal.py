@@ -629,7 +629,6 @@ def _extract_medication_order_summary(
                 "index": e.get("index"),
                 "date": e.get("date"),
                 "drug": label,
-                "summary": e.get("body"),
             }
         )
     summary: Dict[str, Any] = {
@@ -641,7 +640,6 @@ def _extract_medication_order_summary(
             {
                 "index": e.get("index"),
                 "drug": _drug_label(str(e.get("body") or "")),
-                "summary": e.get("body"),
             }
             for e in latest_orders
         ],
@@ -907,7 +905,6 @@ def build_temporal_facts(
             for d in admin_dates
         ],
         "numeric_series": numeric_series,
-        "categorical_series": _extract_categorical_series(events),
         "return_visit_dates": return_visit_dates,
         "appointment_candidates": candidates_by_relation,
         # The answer rules read the records; render_temporal_facts never shows them to a model.
