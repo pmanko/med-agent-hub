@@ -446,3 +446,48 @@ def test_product_table_contract_does_not_guess_reversed_flat_cell_order():
 
     assert normalized == []
     assert issues[0]["id"] == "table_contract"
+
+
+def test_product_table_contract_remaps_row_cells_keyed_by_column_label():
+    blocks = [
+        {
+            "kind": "table",
+            "title": "Weight Measurements Over the Past Year",
+            "columns": [
+                {"key": "Date", "label": "Date"},
+                {"key": "Weight", "label": "Weight (kg)"},
+            ],
+            "rows": [
+                {
+                    "cells": {
+                        "Date": {"text": "2026-01-26", "refs": [19]},
+                        "Weight (kg)": {"text": "71 kg", "refs": [19]},
+                    }
+                },
+                {
+                    "cells": {
+                        "Date": {"text": "2025-12-17", "refs": [52]},
+                        "Weight (kg)": {"text": "73 kg", "refs": [52]},
+                    }
+                },
+            ],
+        }
+    ]
+
+    normalized, issues = team._normalize_product_blocks(blocks)
+
+    assert issues == []
+    assert normalized[0]["rows"] == [
+        {
+            "cells": {
+                "Date": {"text": "2026-01-26", "refs": [19]},
+                "Weight": {"text": "71 kg", "refs": [19]},
+            }
+        },
+        {
+            "cells": {
+                "Date": {"text": "2025-12-17", "refs": [52]},
+                "Weight": {"text": "73 kg", "refs": [52]},
+            }
+        },
+    ]

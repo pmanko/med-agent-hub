@@ -68,7 +68,7 @@ def test_the_answer_profile_is_a_product_profile_without_review_or_in_depth():
 
     assert answer.visibility == "product" and answer.output_mode == "product"
     assert list(answer.stages) == [
-        "context", "answer", "gate", "resolve_refs", "final_resolve_refs", "ground_verdicts"
+        "context", "answer", "gate", "resolve_refs", "final_resolve_refs"
     ]
-    assert answer.models == {role: checked.models[role] for role in ("answer", "grounding")}
+    assert answer.models == {"answer": checked.models["answer"]}
     assert not answer.default

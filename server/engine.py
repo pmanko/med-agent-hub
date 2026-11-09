@@ -67,6 +67,7 @@ class ExecutionRequest:
     patient: Optional[str] = None
     model_label: Optional[str] = None
     is_disconnected: Optional[Callable[[], Awaitable[bool]]] = None
+    stream_answer: bool = False
     source_registry: Optional[SourceRegistry] = None
     token_counter: Optional[TokenCounter] = None
     context_selector: Optional[ContextSelector] = None
@@ -1690,22 +1691,49 @@ async def _execute_stages(
                     continue
 
                 if stage == "answer":
-                    (
-                        state.answer_text,
-                        state.citations,
-                        state.blocks,
-                    ) = await stages._synthesize_answer(
-                        client,
-                        request.profile.models["answer"],
-                        state.messages,
-                        _prompt(request.profile, "answer", "synthesis-answer"),
-                        state.gathered,
-                        response_format=answer_response_format,
-                        temperature=sampling["answer_temperature"],
-                        max_tokens=request.max_tokens,
-                        repeat_penalty=sampling["answer_repeat_penalty"],
-                        dry=sampling["answer_dry"],
-                    )
+                    if (
+                        request.is_disconnected is not None or request.stream_answer
+                    ) and request.profile.output_mode == "product":
+                        state.answer_text, state.citations, state.blocks = "", [], []
+                        async for kind, value in stages._synthesize_answer_stream(
+                            client,
+                            request.profile.models["answer"],
+                            state.messages,
+                            _prompt(request.profile, "answer", "synthesis-answer"),
+                            state.gathered,
+                            response_format=answer_response_format,
+                            temperature=sampling["answer_temperature"],
+                            max_tokens=request.max_tokens,
+                            repeat_penalty=sampling["answer_repeat_penalty"],
+                            dry=sampling["answer_dry"],
+                        ):
+                            if kind == "delta" and value:
+                                yield ("answer_delta", json.dumps({"delta": value}))
+                                if await _disconnected(request):
+                                    return
+                            elif kind == "result":
+                                (
+                                    state.answer_text,
+                                    state.citations,
+                                    state.blocks,
+                                ) = value
+                    else:
+                        (
+                            state.answer_text,
+                            state.citations,
+                            state.blocks,
+                        ) = await stages._synthesize_answer(
+                            client,
+                            request.profile.models["answer"],
+                            state.messages,
+                            _prompt(request.profile, "answer", "synthesis-answer"),
+                            state.gathered,
+                            response_format=answer_response_format,
+                            temperature=sampling["answer_temperature"],
+                            max_tokens=request.max_tokens,
+                            repeat_penalty=sampling["answer_repeat_penalty"],
+                            dry=sampling["answer_dry"],
+                        )
                     state.initial_answer_text = state.answer_text
                     state.initial_answer_citations = list(state.citations)
                     state.initial_answer_blocks = copy.deepcopy(state.blocks)

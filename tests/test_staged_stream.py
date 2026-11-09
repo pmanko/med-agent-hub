@@ -3373,3 +3373,195 @@ def test_indepth_claim_whose_citation_could_not_be_checked_is_shown_with_a_cauti
     assert final["confidence"]["in_depth"]["level"] == "yellow"
     checks = final["inDepth"]["validation"]["citation_checks"]
     assert [check["status"] for check in checks] == ["warn"]
+
+
+def test_answer_json_delta_extractor_streams_decoded_answer_chars_across_chunks():
+    extractor = team._AnswerJsonDeltaExtractor()
+    raw_chunks = [
+        '{"blocks": ["b1"], ',
+        '"ans',
+        'wer": "Line 1\\nQuote \\"ok\\" and \\u2014 ',
+        'cited [1].", "citations": [1]}',
+    ]
+    emitted = []
+    for chunk in raw_chunks:
+        delta = extractor.feed(chunk)
+        if delta:
+            emitted.append(delta)
+
+    assert "".join(emitted) == 'Line 1\nQuote "ok" and \u2014 cited [1].'
+    assert len(emitted) == 2
+
+
+def test_staged_stream_emits_answer_delta_events_before_answer_done(monkeypatch):
+    _stub_common(monkeypatch)
+
+    async def fake_stream_chunks(*_args, **_kwargs):
+        for piece in (
+            '{"answer": "Observed ',
+            'data ',
+            '[1].", "citations": [1], "blocks": ["Observed data [1]."]}',
+        ):
+            yield piece
+
+    async def unchanged(_client, **kwargs):
+        return (
+            kwargs["answer_text"],
+            kwargs["citations"],
+            kwargs["blocks"],
+            {"level": "green", "note": ""},
+        )
+
+    monkeypatch.setattr(team, "_stream_chat_chunks", fake_stream_chunks)
+    monkeypatch.setattr(team, "_ensure_substantive_answer", unchanged)
+
+    async def _run():
+        out = []
+        async for name, data in stream_profile(
+            _product_profile(review_model="V"),
+            [{"role": "user", "content": "q?"}],
+            patient="p",
+            context={"temporal": False},
+            model_label="lvl",
+            source_registry=_TEST_SOURCE,
+            stream_answer=True,
+        ):
+            out.append((name, json.loads(data)))
+        return out
+
+    events = asyncio.run(_run())
+    names = [name for name, _ in events]
+    assert names == [
+        "answer_delta",
+        "answer_delta",
+        "answer_delta",
+        "answer_done",
+        "answer_validation",
+        "indepth_pending",
+        "indepth_done",
+        "done",
+    ]
+    deltas = [payload["delta"] for name, payload in events if name == "answer_delta"]
+    assert "".join(deltas) == "Observed data [1]."
+    answer_done = next(payload for name, payload in events if name == "answer_done")
+    assert answer_done["answer"] == "Observed data [1]."
+    assert answer_done["references"][0]["index"] == 1
+
+
+def test_router_concurrency_semaphore_allows_bounded_parallel_slots(monkeypatch):
+    monkeypatch.setenv("MED_AGENT_ROUTER_CONCURRENCY", "2")
+    lock = team.configure_router_concurrency()
+    try:
+        assert isinstance(lock, asyncio.BoundedSemaphore)
+
+        async def _exercise():
+            active = 0
+            peak = 0
+            gate = asyncio.Event()
+
+            async def _worker():
+                nonlocal active, peak
+                async with team._ROUTER_LOCK:
+                    active += 1
+                    peak = max(peak, active)
+                    if peak == 2:
+                        gate.set()
+                    await gate.wait()
+                    await asyncio.sleep(0.01)
+                    active -= 1
+
+            await asyncio.gather(_worker(), _worker(), _worker())
+            return peak
+
+        assert asyncio.run(_exercise()) == 2
+    finally:
+        monkeypatch.delenv("MED_AGENT_ROUTER_CONCURRENCY", raising=False)
+        team.configure_router_concurrency(1)
+
+
+def test_stream_chat_chunks_falls_back_to_reasoning_content_only_when_content_empty():
+    class _FakeStreamResponse:
+        status_code = 200
+
+        def __init__(self, lines):
+            self._lines = lines
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return False
+
+        async def aiter_lines(self):
+            for line in self._lines:
+                yield line
+
+    class _FakeClient:
+        def __init__(self, lines):
+            self._lines = lines
+
+        def stream(self, *_args, **_kwargs):
+            return _FakeStreamResponse(self._lines)
+
+    # Case 1: Reasoning backend puts structured JSON in reasoning_content and leaves content empty
+    reasoning_only_lines = [
+        'data: {"choices":[{"delta":{"content":"","reasoning_content":"{\\"answer\\": \\"Qwen "}}]}',
+        'data: {"choices":[{"delta":{"content":"","reasoning_content":"streamed [1].\\", \\"citations\\": [1], \\"blocks\\": []}"}}]}',
+        "data: [DONE]",
+    ]
+
+    async def _run_reasoning_fallback():
+        events = []
+        async for kind, val in team._synthesize_answer_stream(
+            _FakeClient(reasoning_only_lines),
+            "qwen3-14b",
+            [{"role": "user", "content": "chart"}],
+            "Answer instruction",
+            "",
+            response_format={"type": "json_object"},
+            temperature=0.0,
+            max_tokens=200,
+            repeat_penalty=None,
+            dry=None,
+        ):
+            events.append((kind, val))
+        return events
+
+    fallback_events = asyncio.run(_run_reasoning_fallback())
+    deltas = [val for kind, val in fallback_events if kind == "delta"]
+    result_tuple = next(val for kind, val in fallback_events if kind == "result")
+    assert "".join(deltas) == "Qwen streamed [1]."
+    assert result_tuple == ("Qwen streamed [1].", [1], [])
+
+    # Case 2: Backend emits chain-of-thought in reasoning_content AND JSON in content -> ignore reasoning_content
+    mixed_lines = [
+        'data: {"choices":[{"delta":{"reasoning_content":"Thinking about {\"answer\": \"wrong\"}..."}}]}',
+        'data: {"choices":[{"delta":{"content":"{\\"answer\\": \\"Right [2].\\", \\"citations\\": [2], \\"blocks\\": []}"}}]}',
+        "data: [DONE]",
+    ]
+
+    async def _run_mixed():
+        events = []
+        async for kind, val in team._synthesize_answer_stream(
+            _FakeClient(mixed_lines),
+            "qwen3-14b",
+            [{"role": "user", "content": "chart"}],
+            "Answer instruction",
+            "",
+            response_format={"type": "json_object"},
+            temperature=0.0,
+            max_tokens=200,
+            repeat_penalty=None,
+            dry=None,
+        ):
+            events.append((kind, val))
+        return events
+
+    mixed_events = asyncio.run(_run_mixed())
+    mixed_deltas = [val for kind, val in mixed_events if kind == "delta"]
+    mixed_result = next(val for kind, val in mixed_events if kind == "result")
+    assert "".join(mixed_deltas) == "Right [2]."
+    assert mixed_result == ("Right [2].", [2], [])
+
+
+

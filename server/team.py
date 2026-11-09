@@ -10,7 +10,18 @@ import unicodedata
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import (
+    Any,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Dict,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+)
 
 import httpx
 
@@ -227,13 +238,60 @@ def _normalize_product_blocks(
         row_cells = [
             row.get("cells") if isinstance(row, dict) else None for row in (rows or [])
         ]
-        if base_valid and all(
-            isinstance(cells, dict)
-            and set(cells) == set(keys)
-            and all(valid_cell(cell) for cell in cells.values())
-            for cells in row_cells
-        ):
-            normalized.append(block)
+
+        def canonical_row_cells(cells: Any) -> Optional[Dict[str, Any]]:
+            if (
+                not isinstance(cells, dict)
+                or len(cells) != len(keys)
+                or not all(valid_cell(cell) for cell in cells.values())
+            ):
+                return None
+            if set(cells) == set(keys):
+                return cells
+            remapped: Dict[str, Any] = {}
+            used_cell_keys: set[str] = set()
+            for column, col_key in zip(columns or [], keys):
+                col_label = str((column or {}).get("label") or "").strip()
+                exact_candidates = [
+                    ck
+                    for ck in cells
+                    if ck not in used_cell_keys and ck in {col_key, col_label} and ck
+                ]
+                if len(exact_candidates) == 1:
+                    chosen = exact_candidates[0]
+                else:
+                    folded_targets = {t.casefold() for t in (col_key, col_label) if t}
+                    ci_candidates = [
+                        ck
+                        for ck in cells
+                        if ck not in used_cell_keys
+                        and str(ck).strip()
+                        and str(ck).strip().casefold() in folded_targets
+                    ]
+                    if len(ci_candidates) != 1:
+                        return None
+                    chosen = ci_candidates[0]
+                if not cell_matches_column(column, cells[chosen]):
+                    return None
+                used_cell_keys.add(chosen)
+                remapped[col_key] = cells[chosen]
+            return remapped if len(remapped) == len(keys) else None
+
+        canonical_cells = (
+            [canonical_row_cells(cells) for cells in row_cells]
+            if base_valid
+            else []
+        )
+        if base_valid and all(c is not None for c in canonical_cells):
+            if all(c == cells for c, cells in zip(canonical_cells, row_cells)):
+                normalized.append(block)
+            else:
+                repaired = dict(block)
+                repaired["rows"] = [
+                    {"cells": c}
+                    for c in canonical_cells
+                ]
+                normalized.append(repaired)
             continue
 
         repairable = (
@@ -1435,16 +1493,39 @@ def _latest_assistant_text(messages: List[Dict[str, Any]]) -> str:
     return ""
 
 
-# Serialize ALL calls to the LLM backend hub-wide. The llama.cpp router (build 9430) has an
+# Serialize or bound calls to the LLM backend hub-wide. The llama.cpp router (build 9430) has an
 # unfixed TOCTOU race in models-max eviction (ggml-org/llama.cpp#20137, closed "not planned"):
 # concurrent requests bypass the load gate, so a request can land on a model the router is
 # evicting -> it force-kills that child after DEFAULT_STOP_TIMEOUT (hardcoded 10s) -> the call
-# fails with "Failed to read connection" (also #18063 on stream:false). The issue's own
-# recommendation is to QUEUE requests instead of letting them bypass; since the router won't,
-# we serialize client-side: exactly one model request in flight at a time, so the router only
-# ever loads/evicts ONE model with no concurrent request to race -> clean sequential loading
-# (the single-GPU host serves one model at a time regardless, so this costs no real throughput).
-_ROUTER_LOCK = asyncio.Lock()
+# fails with "Failed to read connection" (also #18063 on stream:false). On a single-slot local
+# router, default MED_AGENT_ROUTER_CONCURRENCY=1 serializes client-side with an asyncio.Lock().
+# On multi-slot GPU serving (e.g. llama-server --parallel N, vLLM, or LiteLLM), setting
+# MED_AGENT_ROUTER_CONCURRENCY=N uses an asyncio.BoundedSemaphore(N) so N clinical turns can
+# execute concurrently while bounding in-flight requests to the configured slot budget.
+def _make_router_lock(
+    concurrency: Optional[int] = None,
+) -> asyncio.Lock | asyncio.BoundedSemaphore:
+    if concurrency is None:
+        raw = os.getenv("MED_AGENT_ROUTER_CONCURRENCY", "1").strip()
+        try:
+            concurrency = int(raw)
+        except ValueError:
+            concurrency = 1
+    if concurrency <= 1:
+        return asyncio.Lock()
+    return asyncio.BoundedSemaphore(concurrency)
+
+
+_ROUTER_LOCK: asyncio.Lock | asyncio.BoundedSemaphore = _make_router_lock()
+
+
+def configure_router_concurrency(
+    concurrency: Optional[int] = None,
+) -> asyncio.Lock | asyncio.BoundedSemaphore:
+    """Reconfigure hub-wide LLM router concurrency (1 -> Lock, >1 -> BoundedSemaphore)."""
+    global _ROUTER_LOCK
+    _ROUTER_LOCK = _make_router_lock(concurrency)
+    return _ROUTER_LOCK
 
 
 @dataclass
@@ -1626,6 +1707,285 @@ async def _chat(
     return resp.json()["choices"][0]["message"]
 
 
+_DEFAULT_CHAT = _chat
+
+
+class _AnswerJsonDeltaExtractor:
+    """Incrementally extract decoded characters of the top-level JSON ``"answer"`` string field."""
+
+    def __init__(self) -> None:
+        self._state = "seek_key"  # seek_key -> after_key -> seek_value -> in_answer -> done
+        self._depth = 0
+        self._expect_key = False
+        self._in_string = False
+        self._escape = False
+        self._unicode_remaining = 0
+        self._unicode_buf = ""
+        self._current_string = ""
+        self._last_key: Optional[str] = None
+
+    def _decode_char(self, ch: str) -> Optional[str]:
+        if self._unicode_remaining > 0:
+            self._unicode_buf += ch
+            self._unicode_remaining -= 1
+            if self._unicode_remaining == 0:
+                try:
+                    code = int(self._unicode_buf, 16)
+                    self._unicode_buf = ""
+                    return chr(code)
+                except ValueError:
+                    self._unicode_buf = ""
+                    return ""
+            return None
+        if self._escape:
+            self._escape = False
+            if ch == "u":
+                self._unicode_remaining = 4
+                self._unicode_buf = ""
+                return None
+            return {
+                '"': '"',
+                "\\": "\\",
+                "/": "/",
+                "b": "\b",
+                "f": "\f",
+                "n": "\n",
+                "r": "\r",
+                "t": "\t",
+            }.get(ch, ch)
+        if ch == "\\":
+            self._escape = True
+            return None
+        return ch
+
+    def feed(self, chunk: str) -> str:
+        if not chunk or self._state == "done":
+            return ""
+        out: List[str] = []
+        for ch in chunk:
+            if self._state == "in_answer":
+                if not self._escape and self._unicode_remaining == 0 and ch == '"':
+                    self._state = "done"
+                    break
+                decoded = self._decode_char(ch)
+                if decoded:
+                    out.append(decoded)
+                continue
+
+            if self._in_string:
+                if not self._escape and self._unicode_remaining == 0 and ch == '"':
+                    self._in_string = False
+                    if self._depth == 1 and self._expect_key and self._state == "seek_key":
+                        self._last_key = self._current_string
+                        self._state = "after_key"
+                    self._current_string = ""
+                    continue
+                decoded = self._decode_char(ch)
+                if (
+                    decoded is not None
+                    and self._depth == 1
+                    and self._expect_key
+                    and self._state == "seek_key"
+                ):
+                    self._current_string += decoded
+                continue
+
+            if ch in " \t\r\n":
+                continue
+            if self._state == "after_key":
+                if ch == ":":
+                    self._expect_key = False
+                    if self._last_key == "answer":
+                        self._state = "seek_value"
+                    else:
+                        self._state = "seek_key"
+                    self._last_key = None
+                else:
+                    self._state = "seek_key"
+                    self._last_key = None
+                continue
+            if self._state == "seek_value":
+                if ch == '"':
+                    self._state = "in_answer"
+                    self._escape = False
+                    self._unicode_remaining = 0
+                    self._unicode_buf = ""
+                else:
+                    self._state = "done"
+                continue
+
+            if ch == '"':
+                self._in_string = True
+                self._current_string = ""
+            elif ch == "{":
+                self._depth += 1
+                if self._depth == 1:
+                    self._expect_key = True
+            elif ch == "[":
+                self._depth += 1
+            elif ch in "}]":
+                self._depth = max(0, self._depth - 1)
+            elif ch == "," and self._depth == 1:
+                self._expect_key = True
+                self._state = "seek_key"
+        return "".join(out)
+
+
+async def _stream_chat_chunks(
+    client: httpx.AsyncClient,
+    model: str,
+    messages: List[Dict[str, Any]],
+    *,
+    response_format: Optional[Dict[str, Any]] = None,
+    temperature: Optional[float] = None,
+    max_tokens: Optional[int] = None,
+    repeat_penalty: Optional[float] = None,
+    dry_multiplier: Optional[float] = None,
+    request_timeout: float | None | object = _REQUEST_TIMEOUT_UNSET,
+) -> AsyncIterator[str]:
+    """Stream content chunks from an OpenAI-compatible chat completion endpoint."""
+    payload: Dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature
+        if temperature is not None
+        else llm_config.temperature,
+    }
+    if max_tokens is not None:
+        payload["max_tokens"] = max_tokens
+    if response_format is not None:
+        payload["response_format"] = response_format
+    if repeat_penalty is not None:
+        payload["repeat_penalty"] = repeat_penalty
+    if dry_multiplier is not None:
+        payload["dry_multiplier"] = dry_multiplier
+
+    budget = _CHAT_BUDGET.get()
+    if budget is not None:
+        requested_output = (
+            max_tokens
+            if isinstance(max_tokens, int) and max_tokens > 0
+            else budget.reserved_output_tokens
+        )
+        output_tokens = min(requested_output, budget.reserved_output_tokens)
+        payload["max_tokens"] = output_tokens
+        count_chat = getattr(budget.counter, "count_chat", None)
+        if not callable(count_chat):
+            raise ContextSourceError(
+                "tokenization_unavailable",
+                "The product profile requires an exact chat-template token counter.",
+                source="llama-router",
+            )
+        input_tokens = await count_chat(model, payload)
+        budget.measurements.append(
+            {
+                "model": model,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "context_window": budget.context_window,
+            }
+        )
+        if input_tokens + output_tokens > budget.context_window:
+            raise InsufficientContextError(
+                f"The exact {model!r} request requires {input_tokens} input plus "
+                f"{output_tokens} output tokens, exceeding its "
+                f"{budget.context_window}-token context window.",
+                required_ids=(),
+            )
+
+    payload["stream"] = True
+    headers = {"Content-Type": "application/json"}
+    if llm_config.api_key:
+        headers["Authorization"] = f"Bearer {llm_config.api_key}"
+
+    url = f"{llm_config.base_url.rstrip('/')}/v1/chat/completions"
+    logger.info(
+        "team _stream_chat_chunks: model=%s response_format=%s",
+        model,
+        bool(response_format),
+    )
+    slot_evidence = _ROUTER_SLOT_EVIDENCE.get()
+    await _ROUTER_LOCK.acquire()
+    if slot_evidence is not None:
+        slot_evidence.acquired()
+    try:
+        router_timeout = (
+            llm_config.request_timeout_seconds
+            if request_timeout is _REQUEST_TIMEOUT_UNSET
+            else request_timeout
+        )
+        async with client.stream(
+            "POST",
+            url,
+            json=payload,
+            headers=headers,
+            timeout=router_timeout,
+        ) as resp:
+            if resp.status_code >= 400:
+                body_bytes = await resp.aread()
+                logger.error(
+                    "router %s for model=%s stream=True response_format=%s: %s",
+                    resp.status_code,
+                    model,
+                    bool(response_format),
+                    body_bytes.decode("utf-8", errors="replace")[:800],
+                )
+                resp.raise_for_status()
+            saw_nonempty_content = False
+            reasoning_pieces: List[str] = []
+            async for line in resp.aiter_lines():
+                stripped = line.strip()
+                if not stripped or not stripped.startswith("data:"):
+                    continue
+                data = stripped[5:].strip()
+                if not data or data == "[DONE]":
+                    continue
+                try:
+                    chunk_obj = json.loads(data)
+                except ValueError:
+                    continue
+                if not isinstance(chunk_obj, Mapping):
+                    continue
+                choices = chunk_obj.get("choices") or []
+                if not choices or not isinstance(choices[0], Mapping):
+                    continue
+                delta = choices[0].get("delta") or {}
+                msg = choices[0].get("message") or {}
+                piece = (
+                    (delta.get("content") if isinstance(delta, Mapping) else None)
+                    or (msg.get("content") if isinstance(msg, Mapping) else None)
+                    or ""
+                )
+                reasoning_piece = (
+                    (
+                        delta.get("reasoning_content")
+                        if isinstance(delta, Mapping)
+                        else None
+                    )
+                    or (
+                        msg.get("reasoning_content")
+                        if isinstance(msg, Mapping)
+                        else None
+                    )
+                    or ""
+                )
+                if piece:
+                    piece_str = str(piece)
+                    if piece_str.strip():
+                        saw_nonempty_content = True
+                    yield piece_str
+                if reasoning_piece:
+                    reasoning_pieces.append(str(reasoning_piece))
+            if not saw_nonempty_content and reasoning_pieces:
+                for r_piece in reasoning_pieces:
+                    if r_piece:
+                        yield r_piece
+    finally:
+        _ROUTER_LOCK.release()
+        if slot_evidence is not None:
+            slot_evidence.released()
+
+
 def _message_text(msg: Dict[str, Any]) -> str:
     """Read assistant text from standard or reasoning-content backend responses."""
     return (msg.get("content") or "").strip() or (
@@ -1703,12 +2063,16 @@ def _is_substantive_answer(text: Optional[str]) -> bool:
     return "could not produce a complete answer" not in ans
 
 
+_COMPACT_CITATIONS_RE = re.compile(r"\[(\d+(?:\s*[,/]\s*\d+)+)\]")
+
+
 def _normalize_envelope(raw: str) -> str:
     """Post-process the synthesizer envelope JSON: (1) repair the section line breaks small
     models mangle — a literal backslash-n OR runs of backslashes ("**Answer**\\\\\\:") — into
-    real newlines, and (2) reconcile inline [N] chart-record markers into
-    `citations` so the count is not lost when the model cites in prose but leaves the array
-    empty. Returns `raw` unchanged if it is not parseable JSON."""
+    real newlines, (2) expand compact multi-citation brackets (e.g. ``[2, 34, 37]`` or ``[2/34]``)
+    corroborated by ``citations`` into adjacent single markers ``[2][34][37]``, and (3) reconcile
+    inline [N] chart-record markers into ``citations`` so the count is not lost when the model
+    cites in prose but leaves the array empty. Returns `raw` unchanged if it is not parseable JSON."""
     try:
         env = json.loads(raw)
     except (json.JSONDecodeError, TypeError):
@@ -1723,11 +2087,20 @@ def _normalize_envelope(raw: str) -> str:
         ans = re.sub(r"\\{2,}\s*:?\s*", "\n", ans)
         ans = ans.replace("\\n", "\n")
         ans = re.sub(r"\n{3,}", "\n\n", ans).strip()
+        existing = [c for c in (env.get("citations") or []) if isinstance(c, int)]
+        existing_set = set(existing)
+        if existing_set:
+            def _expand_group(match: re.Match) -> str:
+                nums = [int(part.strip()) for part in re.split(r"[,/]", match.group(1))]
+                if all(n in existing_set for n in nums):
+                    return "".join(f"[{n}]" for n in nums)
+                return match.group(0)
+
+            ans = _COMPACT_CITATIONS_RE.sub(_expand_group, ans)
         env["answer"] = ans
         inline = sorted({int(m) for m in re.findall(r"\[(\d+)\]", ans)})
         if inline:
-            existing = [c for c in (env.get("citations") or []) if isinstance(c, int)]
-            env["citations"] = sorted(set(existing) | set(inline))
+            env["citations"] = sorted(existing_set | set(inline))
     return json.dumps(env)
 
 
@@ -2304,6 +2677,79 @@ async def _synthesize_answer(
     except Exception as e:
         logger.warning("answer synthesis failed: %s", e)
         return "", [], []
+
+
+_DEFAULT_SYNTHESIZE_ANSWER = _synthesize_answer
+
+
+async def _synthesize_answer_stream(
+    client: httpx.AsyncClient,
+    synth_model: str,
+    base_messages: List[Dict[str, Any]],
+    answer_instruction: str,
+    gathered: str,
+    *,
+    response_format: Optional[Dict[str, Any]],
+    temperature: float,
+    max_tokens: Optional[int],
+    repeat_penalty: Optional[float],
+    dry: Optional[float],
+    extra_msgs: Optional[List[Dict[str, Any]]] = None,
+) -> AsyncIterator[Tuple[str, Any]]:
+    """Stream ``("delta", text)`` events while synthesizing the Answer, then ``("result", tuple)``.
+
+    Falls back to ``_synthesize_answer`` when a test monkeypatches ``_synthesize_answer`` or
+    ``_chat`` with a non-streaming stub.
+    """
+    if (
+        _synthesize_answer is not _DEFAULT_SYNTHESIZE_ANSWER
+        or _chat is not _DEFAULT_CHAT
+        or not hasattr(client, "stream")
+    ):
+        result = await _synthesize_answer(
+            client,
+            synth_model,
+            base_messages,
+            answer_instruction,
+            gathered,
+            response_format=response_format,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            repeat_penalty=repeat_penalty,
+            dry=dry,
+            extra_msgs=extra_msgs,
+        )
+        yield ("result", result)
+        return
+
+    user = with_gathered(answer_instruction, gathered, base_messages)
+    messages = (
+        list(base_messages) + [{"role": "user", "content": user}] + (extra_msgs or [])
+    )
+    extractor = _AnswerJsonDeltaExtractor()
+    raw_pieces: List[str] = []
+    try:
+        async for piece in _stream_chat_chunks(
+            client,
+            synth_model,
+            messages,
+            response_format=response_format,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            repeat_penalty=repeat_penalty,
+            dry_multiplier=dry,
+        ):
+            raw_pieces.append(piece)
+            delta_text = extractor.feed(piece)
+            if delta_text:
+                yield ("delta", delta_text)
+        raw = "".join(raw_pieces).strip()
+        yield ("result", _answer_fields(_normalize_envelope(raw)))
+    except ContextSourceError:
+        raise
+    except Exception as e:
+        logger.warning("streaming answer synthesis failed: %s", e)
+        yield ("result", ("", [], []))
 
 
 async def _synthesize_indepth(
