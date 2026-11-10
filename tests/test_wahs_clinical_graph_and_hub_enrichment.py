@@ -734,6 +734,30 @@ def test_three_pathway_profiles_and_q1_q15_p2_q13_refinements() -> None:
     alg_only_enrichment = build_wahs_hub_enrichment_block([{"role": "user", "content": alg_only_prompt}], max_tokens=800)
     assert "wahs-kb-allergy-med-conflict-01" not in alg_only_enrichment.enrichment_text
 
+    # Verify folded 'Medication (status: active):' lines populate active_ings so a stopped older strength is not flagged as STOPPED with no active order,
+    # and two active CKD Stage 3 records with slightly different wording do NOT trigger a false stage-conflict edge
+    folded_active_and_ckd_ledger = "\n".join(
+        [
+            "[1] (2026-01-19) Patient: Elena Rostova, DOB: 1954-04-12, Gender: female",
+            "[2] (2026-01-19) Completeness Manifest: Tier 3 | omitted_clinical_items=0",
+            "[3] (2025-11-10) Condition: Chronic kidney disease stage 3 (SNOMED 433144002) [UUID: cond-ckd3-a]",
+            "[4] (2025-12-01) Condition: Chronic kidney disease stage 3 (disorder) (SNOMED 433144002) [UUID: cond-ckd3-b]",
+            "[5] (2026-01-15) Medication (status: active): Metoprolol Succinate 50 MG Oral Tablet (2026-01-15); Lisinopril 10 MG Oral Tablet (2026-01-15)",
+            "[10] (2026-01-20) Note (Clinic Progress Note): Plan: Continue metoprolol succinate 50 mg daily.",
+            "[20] (2025-06-01) Medication History: metoprolol succinate 25 MG Extended Release Oral Tablet — 2 records (2025-01-10..2025-06-01, status: stopped)",
+        ]
+    )
+    folded_graph = ClinicalEntityGraph.from_condensed_ledger(folded_active_and_ckd_ledger)
+    assert not any(
+        e.edge_type == "CONTRADICTED_OR_MODIFIED_BY_NOTE" and "metoprolol" in e.rationale.lower()
+        for e in folded_graph.edges
+    )
+    assert not any(
+        "Mutually exclusive active CKD stages" in e.rationale
+        for e in folded_graph.edges
+    )
+
+
 
 
 

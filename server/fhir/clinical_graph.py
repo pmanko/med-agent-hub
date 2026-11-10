@@ -794,11 +794,36 @@ class ClinicalEntityGraph:
 
         active_medications = [m for m in medications if not _is_stopped_med(m)]
         stopped_medications = [m for m in medications if _is_stopped_med(m)]
-        active_ings = {
-            normalize_drug_ingredient(m.clean_label()).lower()
-            for m in active_medications
-            if normalize_drug_ingredient(m.clean_label())
+        _generic_med_headers = {
+            "medication", "medications", "active", "history", "record", "records",
+            "status", "dosage", "oral", "tablet", "tablets", "capsule", "capsules",
+            "solution", "daily",
         }
+        active_ings: Set[str] = set()
+        for m in active_medications:
+            for raw_src in (m.clean_label(), m.raw_line or "", m.value_summary or ""):
+                if not raw_src:
+                    continue
+                stripped_src = re.sub(
+                    r"^(?:Tier-0\s+Recovered\s+)?Medication(?:\s+History)?(?:\s*(?:\[[^\]]*\]|\([^)]*\)))?\s*:\s*",
+                    "",
+                    raw_src,
+                    flags=re.IGNORECASE,
+                ).strip()
+                for dash_part in stripped_src.split("—"):
+                    for semi_part in dash_part.split(";"):
+                        seg_no_qual = re.sub(r"\s*(?:\[[^\]]*\]|\([^)]*\))", " ", semi_part).strip()
+                        for comma_part in seg_no_qual.split(","):
+                            cand_seg = comma_part.strip()
+                            if not cand_seg:
+                                continue
+                            ing_norm = normalize_drug_ingredient(cand_seg).lower()
+                            if (
+                                ing_norm
+                                and ing_norm not in _generic_med_headers
+                                and not any(ch.isdigit() for ch in ing_norm[:4])
+                            ):
+                                active_ings.add(ing_norm)
         latest_stopped_by_ing: Dict[str, ClinicalNode] = {}
         for m_st in stopped_medications:
             raw_l = (m_st.raw_line or "").strip()
@@ -1004,10 +1029,23 @@ class ClinicalEntityGraph:
                 prediabetes_nodes.append(c_node)
             elif "type 2 diabetes" in c_low or "diabetes mellitus type 2" in c_low:
                 t2dm_nodes.append(c_node)
+        def _extract_ckd_stage_token(label: str) -> str:
+            m_stage = re.search(
+                r"\bstage\s*([1-5](?:[ab])?|(?:i{1,3}|iv|v))\b",
+                label.lower(),
+            )
+            if not m_stage:
+                return ""
+            raw_st = m_stage.group(1).lower()
+            roman_map = {"i": "1", "ii": "2", "iii": "3", "iv": "4", "v": "5"}
+            return roman_map.get(raw_st, raw_st)
+
         if len(ckd_stage_nodes) >= 2:
             for c_prev in ckd_stage_nodes[:-1]:
                 c_last = ckd_stage_nodes[-1]
-                if c_prev.clean_label().lower() != c_last.clean_label().lower():
+                st_prev = _extract_ckd_stage_token(c_prev.clean_label())
+                st_last = _extract_ckd_stage_token(c_last.clean_label())
+                if st_prev and st_last and st_prev != st_last:
                     self.add_edge(
                         c_prev.node_id,
                         c_last.node_id,
@@ -1804,7 +1842,10 @@ def _build_question_conditioned_clinical_and_privacy_directives(
         "domestic", "violence", "criminal", "record", "records", "chart", "patient", "doctor",
     }
     candidate_named_persons = []
-    for m in re.finditer(r"\b([A-Z][a-z]{2,}\s+[A-Z][a-z]{2,})\b", question or ""):
+    q_scan = (question or "")[:4000]
+    for idx_m, m in enumerate(re.finditer(r"\b([A-Z][a-z]{2,}\s+[A-Z][a-z]{2,})\b", q_scan)):
+        if idx_m >= 64:
+            break
         cand = m.group(1).lower()
         cand_tokens = cand.split()
         if any(tok in patient_name_tokens or tok in non_person_tokens for tok in cand_tokens):
@@ -1817,8 +1858,10 @@ def _build_question_conditioned_clinical_and_privacy_directives(
             rf"|\b(?:pull\s+up|look\s+up|access|open|show(?:\s+me)?|check|view|get|fetch)\s+{cand_esc}(?:'s|\s+(?:chart|records?|files?|labs?|results?|medications?|meds|history|notes?))\b)",
             re.IGNORECASE,
         )
-        if cross_patient_name_pattern.search(q_low):
+        local_window = q_scan[max(0, m.start() - 64) : min(len(q_scan), m.end() + 64)].lower()
+        if cross_patient_name_pattern.search(local_window):
             candidate_named_persons.append(cand)
+            break
     if any(
         c in q_low
         for c in (
@@ -2668,9 +2711,9 @@ def _classify_ledger_line_category(body: str) -> str:
 
 
 def _split_ledger_label_and_value(body: str, category: str) -> Tuple[str, str]:
-    # Strip category prefix like "Condition Summary:", "Medication [HIGH-ALERT: ...]:", "Lab Trajectory:"
+    # Strip category prefix like "Condition Summary:", "Medication [HIGH-ALERT: ...]:", "Medication (status: active):", "Lab Trajectory:"
     cleaned = re.sub(
-        r"^(?:Tier-0\s+Recovered\s+)?(?:Condition(?:\s+Summary)?|Active\s+Problem|Problem|Medication(?:\s+History)?(?:\s*\[[^\]]*\])?|Device|"
+        r"^(?:Tier-0\s+Recovered\s+)?(?:Condition(?:\s+Summary)?|Active\s+Problem|Problem|Medication(?:\s+History)?(?:\s*(?:\[[^\]]*\]|\([^)]*\)))?|Device(?:\s*\([^)]*\))?|"
         r"Allergy/Intolerance|Allergy|Immunization(?:\s+Series)?|Lab\s+Trajectory|Lab/Vital\s+Observation|"
         r"Lab(?:\s+Observation)?|Observation|Clinical\s+Note|Diagnostic\s+Report|Report|Note)\s*:\s*",
         "",
