@@ -444,6 +444,31 @@ def _row_refs(row: Any) -> List[int]:
     return refs
 
 
+def _format_drug_order_groups(order_records: Sequence[Dict[str, Any]]) -> str:
+    by_date: Dict[str, List[Dict[str, Any]]] = {}
+    for rec in order_records:
+        dt = str(rec.get("date") or "")
+        if not dt or not _drug_name(rec):
+            continue
+        by_date.setdefault(dt, []).append(rec)
+    date_clauses: List[str] = []
+    for dt in sorted(by_date.keys(), reverse=True):
+        group = sorted(by_date[dt], key=lambda r: int(r["index"]))
+        items = [f"{_drug_name(r)} [{r['index']}]" for r in group]
+        if len(items) == 1:
+            joined = items[0]
+        elif len(items) == 2:
+            joined = f"{items[0]} and {items[1]}"
+        else:
+            joined = f"{', '.join(items[:-1])}, and {items[-1]}"
+        date_clauses.append(f"on {dt} for {joined}")
+    if len(date_clauses) <= 1:
+        return "".join(date_clauses)
+    if len(date_clauses) == 2:
+        return f"{date_clauses[0]}, and {date_clauses[1]}"
+    return f"{'; '.join(date_clauses[:-1])}; and {date_clauses[-1]}"
+
+
 def _window_edits(
     question: str, text: str, blocks: List[Any], records: Dict[int, Dict[str, Any]], facts: Dict[str, Any]
 ) -> Tuple[str, List[Any], List[Dict[str, Any]]]:
@@ -453,6 +478,8 @@ def _window_edits(
     start, words = window
     dropped: List[int] = []
     listed_old: List[int] = []
+    backfilled_drugs: List[int] = []
+    row_date_pruned: List[int] = []
     findings: List[Dict[str, Any]] = []
     cited_anywhere = [i for i in _cites(text) + _row_refs(blocks) if i in records]
     reference = _date(facts.get("reference_date")) or start
@@ -527,6 +554,40 @@ def _window_edits(
         )
         return lead + " " + text, blocks, findings
 
+    orders_query = bool(
+        re.search(
+            r"\b(?:order(?:s|ed)?|prescrib(?:ed|ing)|medications?|drugs?|regimen)\b",
+            question or "",
+            re.I,
+        )
+    )
+    cited_drug_indices = [
+        i for i in cited_anywhere if records.get(i, {}).get("cls") == "Drug order"
+    ]
+    in_window_cited_drugs = [
+        i
+        for i in cited_drug_indices
+        if start <= (_date(records[i].get("date")) or _dt.date.min) <= reference
+    ]
+    cited_drug_names = {
+        _drug_name(records[i]) for i in cited_drug_indices if _drug_name(records[i])
+    }
+    expected_in_window_drugs: List[Dict[str, Any]] = []
+    if orders_query and in_window_cited_drugs and cited_drug_names:
+        expected_in_window_drugs = sorted(
+            (
+                r
+                for r in records.values()
+                if r.get("cls") == "Drug order"
+                and r.get("clinical", True)
+                and "action: discontinue" not in str(r.get("body") or "").lower()
+                and _drug_name(r) in cited_drug_names
+                and start <= (_date(r.get("date")) or _dt.date.min) <= reference
+            ),
+            key=lambda r: (str(r.get("date") or ""), -int(r["index"])),
+            reverse=True,
+        )
+
     def _prune_row_old_refs(value: Any) -> None:
         if isinstance(value, dict):
             for key, child in value.items():
@@ -544,6 +605,36 @@ def _window_edits(
             for child in value:
                 _prune_row_old_refs(child)
 
+    def _prune_row_mismatched_date_refs(row: Any) -> None:
+        cells = row.get("cells") if isinstance(row, dict) else None
+        if not isinstance(cells, dict):
+            return
+        row_dates = {
+            m.group(0)
+            for cell in cells.values()
+            if isinstance(cell, dict)
+            for m in re.finditer(r"\b\d{4}-\d{2}-\d{2}\b", str(cell.get("text") or ""))
+        }
+        if len(row_dates) != 1:
+            return
+        row_date = next(iter(row_dates))
+        all_refs = _row_refs(row)
+        if not any(records.get(i, {}).get("date") == row_date for i in all_refs):
+            return
+        for cell in cells.values():
+            if not isinstance(cell, dict) or not isinstance(cell.get("refs"), list):
+                continue
+            matching = [
+                i
+                for i in cell["refs"]
+                if isinstance(i, int) and records.get(i, {}).get("date") == row_date
+            ]
+            if matching and len(matching) < len(cell["refs"]):
+                row_date_pruned.extend(
+                    i for i in cell["refs"] if isinstance(i, int) and i not in matching
+                )
+                cell["refs"] = matching
+
     new_blocks = copy.deepcopy(blocks)
     for block in new_blocks if isinstance(new_blocks, list) else []:
         rows = block.get("rows") if isinstance(block, dict) else None
@@ -557,10 +648,158 @@ def _window_edits(
             else:
                 if refs:
                     _prune_row_old_refs(row)
+                    _prune_row_mismatched_date_refs(row)
                     if not _row_refs(row):
                         continue
                 kept.append(row)
+        if expected_in_window_drugs and any(
+            records.get(idx, {}).get("cls") == "Drug order" for idx in _row_refs(kept)
+        ):
+            for row in kept:
+                cells = row.get("cells") if isinstance(row, dict) else None
+                if not isinstance(cells, dict):
+                    continue
+                row_drug_refs = [
+                    idx
+                    for idx in _row_refs(row)
+                    if idx in records and records[idx].get("cls") == "Drug order"
+                ]
+                if not row_drug_refs or len(row_drug_refs) != len(_row_refs(row)):
+                    continue
+                primary_ref = sorted(
+                    row_drug_refs,
+                    key=lambda idx: (str(records[idx].get("date") or ""), -idx),
+                    reverse=True,
+                )[0]
+                primary_date = str(records[primary_ref].get("date") or "")
+                distinct_dates = {
+                    str(records[idx].get("date") or "") for idx in row_drug_refs
+                }
+                has_placeholder_date = any(
+                    isinstance(c, dict)
+                    and str(c.get("text") or "").strip().lower()
+                    in {"multiple", "various", "several"}
+                    for c in cells.values()
+                )
+                if len(distinct_dates) > 1 or has_placeholder_date:
+                    for col_key, cell in cells.items():
+                        if not isinstance(cell, dict):
+                            continue
+                        cell_text = str(cell.get("text") or "").strip()
+                        if cell_text.lower() in {
+                            "multiple",
+                            "various",
+                            "several",
+                        } or (
+                            re.search(r"date|when", str(col_key), re.I)
+                            and not re.search(r"\b\d{4}-\d{2}-\d{2}\b", cell_text)
+                        ):
+                            cell["text"] = primary_date
+                        if isinstance(cell.get("refs"), list) and cell["refs"]:
+                            if len(cell["refs"]) > 1:
+                                row_date_pruned.extend(
+                                    idx
+                                    for idx in cell["refs"]
+                                    if isinstance(idx, int) and idx != primary_ref
+                                )
+                            cell["refs"] = [primary_ref]
+            present_table_refs = set(_row_refs(kept))
+            for r in expected_in_window_drugs:
+                if r["index"] in present_table_refs:
+                    continue
+                target_name = _drug_name(r) or ""
+                template_row = next(
+                    (
+                        row
+                        for row in kept
+                        if any(
+                            _drug_name(records.get(idx, {})) == target_name
+                            for idx in _row_refs(row)
+                        )
+                    ),
+                    next(
+                        (
+                            row
+                            for row in kept
+                            if any(
+                                records.get(idx, {}).get("cls") == "Drug order"
+                                for idx in _row_refs(row)
+                            )
+                        ),
+                        None,
+                    ),
+                )
+                if not isinstance(template_row, dict) or not isinstance(
+                    template_row.get("cells"), dict
+                ):
+                    continue
+                template_indices = [
+                    idx for idx in _row_refs(template_row) if idx in records
+                ]
+                template_date = next(
+                    (
+                        str(records[idx].get("date") or "")
+                        for idx in template_indices
+                        if records[idx].get("date")
+                    ),
+                    "",
+                )
+                template_name = next(
+                    (
+                        _drug_name(records[idx]) or ""
+                        for idx in template_indices
+                        if _drug_name(records[idx])
+                    ),
+                    "",
+                )
+                cloned_row = copy.deepcopy(template_row)
+                for col_key, cell in cloned_row["cells"].items():
+                    if not isinstance(cell, dict):
+                        continue
+                    cell_text = str(cell.get("text") or "")
+                    if template_date and template_date in cell_text:
+                        cell["text"] = cell_text.replace(
+                            template_date, str(r.get("date") or "")
+                        )
+                    elif cell_text.strip().lower() in {
+                        "multiple",
+                        "various",
+                        "several",
+                    } or (
+                        re.search(r"date|when", str(col_key), re.I)
+                        and not re.search(r"\b\d{4}-\d{2}-\d{2}\b", cell_text)
+                    ):
+                        cell["text"] = str(r.get("date") or "")
+                    elif (
+                        template_name
+                        and target_name
+                        and template_name.lower() in cell_text.lower()
+                    ):
+                        cell["text"] = target_name
+                    if isinstance(cell.get("refs"), list):
+                        cell["refs"] = [r["index"]]
+                kept.append(cloned_row)
+                present_table_refs.add(r["index"])
+                backfilled_drugs.append(r["index"])
         block["rows"] = kept
+
+    old_non_drug_classes = {
+        records[i].get("cls")
+        for i in cited_anywhere
+        if i in records
+        and _all_before([i], records, start)
+        and records[i].get("cls") != "Drug order"
+    }
+    late_non_drug_classes = {
+        records[i].get("cls")
+        for i in cited_anywhere
+        if i in records
+        and not _all_before([i], records, start)
+        and records[i].get("cls") != "Drug order"
+    }
+    expected_drug_dates = {
+        str(r.get("date") or "") for r in expected_in_window_drugs if r.get("date")
+    }
 
     pieces: List[str] = []
     for line in text.split("\n"):
@@ -579,6 +818,44 @@ def _window_edits(
                     kept_sentences.append(sentence)
                 else:
                     dropped.extend(cited)
+                continue
+            if (
+                expected_in_window_drugs
+                and old_non_drug_classes
+                and not late_non_drug_classes
+                and not (_WINDOW_STATED_RE.search(sentence) or _PRIOR_RE.search(sentence))
+                and (
+                    any(
+                        records.get(i, {}).get("cls") != "Drug order"
+                        and _all_before([i], records, start)
+                        for i in cited
+                    )
+                    or bool(
+                        re.search(
+                            r"\b(?:diagnostic\s+tests?|test\s+orders?|tests?\s+ordered|x-?rays?|imaging|blood\s+work|labs?|laboratory|panels?)\b",
+                            sentence,
+                            re.I,
+                        )
+                    )
+                    or (
+                        bool(set(cited) & set(in_window_cited_drugs))
+                        and bool(
+                            {r["index"] for r in expected_in_window_drugs}
+                            - set(cited)
+                        )
+                        and any(_all_before([i], records, start) for i in cited)
+                        and not all(d in sentence for d in expected_drug_dates)
+                    )
+                )
+            ):
+                dropped.extend(i for i in cited if _all_before([i], records, start))
+                for r in expected_in_window_drugs:
+                    if r["index"] not in cited_anywhere:
+                        backfilled_drugs.append(r["index"])
+                kept_sentences.append(
+                    f"Within the {words} (since {start.isoformat()}), drug orders were placed "
+                    f"{_format_drug_order_groups(expected_in_window_drugs)}."
+                )
                 continue
             # Within a sentence with in-window records, a citation group with both in-window and
             # older citations keeps only its in-window records; a group citing only older records
@@ -609,6 +886,26 @@ def _window_edits(
             pieces.append(joined)
     new_text = "\n".join(pieces).strip("\n")
 
+    if expected_in_window_drugs and (
+        (set(_cites(new_text)) & set(in_window_cited_drugs))
+        or not _row_refs(new_blocks)
+    ):
+        cites_now = set(_cites(new_text))
+        missing_text_drugs = [
+            r for r in expected_in_window_drugs if r["index"] not in cites_now
+        ]
+        if missing_text_drugs:
+            extra_sentence = (
+                f"Drug orders were also placed {_format_drug_order_groups(missing_text_drugs)}."
+            )
+            new_text = (
+                new_text.rstrip()
+                + (" " if new_text.strip() else "")
+                + extra_sentence
+            )
+            for r in missing_text_drugs:
+                backfilled_drugs.append(r["index"])
+
     if listed_old:
         findings.append(
             _finding(
@@ -629,7 +926,24 @@ def _window_edits(
         )
         new_text = new_text.rstrip() + (" " if new_text.strip() else "") + note
         findings.append(
-            _finding("window", "info", question, f"left out {n} cited records dated before {start.isoformat()}", dropped)
+            _finding(
+                "window",
+                "info",
+                question,
+                f"left out {n} cited records dated before {start.isoformat()}",
+                dropped + backfilled_drugs + row_date_pruned,
+            )
+        )
+    elif backfilled_drugs or row_date_pruned:
+        changed_refs = sorted(set(backfilled_drugs + row_date_pruned))
+        findings.append(
+            _finding(
+                "window",
+                "info",
+                question,
+                f"reconciled in-window order records ({len(changed_refs)} record{'s' if len(changed_refs) != 1 else ''})",
+                changed_refs,
+            )
         )
     return new_text, new_blocks, findings
 
@@ -645,6 +959,49 @@ def _drug_citation_edits(text: str, records: Dict[int, Dict[str, Any]], answer_c
         indices = [i for i, _s, _e in group]
         wrong = [i for i in indices if names.get(i) and not (_drug_tokens(names[i]) & named)]
         if not wrong:
+            group_dates = {
+                str(records[i].get("date") or "")
+                for i in indices
+                if i in records and records[i].get("cls") == "Drug order"
+            }
+            if (
+                len(group_dates) == 1
+                and len(indices) >= 2
+                and all(records.get(i, {}).get("cls") == "Drug order" for i in indices)
+                and re.search(r",\s*[\w/ -]+\s*,?\s+and\s+[\w/ -]+", item, re.I)
+            ):
+                target_date = next(iter(group_dates))
+                covered_tokens = set().union(
+                    *(_drug_tokens(names[i] or "") for i in indices if names.get(i))
+                )
+                uncovered = named - covered_tokens
+                if uncovered:
+                    missing_same_date = sorted(
+                        i
+                        for i, r in records.items()
+                        if r.get("cls") == "Drug order"
+                        and str(r.get("date") or "") == target_date
+                        and names.get(i)
+                        and (_drug_tokens(names[i]) & uncovered)
+                        and i not in indices
+                    )
+                    if missing_same_date:
+                        right = sorted(set(indices) | set(missing_same_date))
+                        text = (
+                            text[: group[0][1]]
+                            + "".join(f"[{i}]" for i in right)
+                            + text[group[-1][2] :]
+                        )
+                        findings.append(
+                            _finding(
+                                "drug_citation",
+                                "info",
+                                item.strip(),
+                                "added missing same-date drug order citation(s) "
+                                + ", ".join(f"[{i}]" for i in missing_same_date),
+                                right,
+                            )
+                        )
             continue
         right = [i for i in indices if i not in wrong]
         if not right:
@@ -869,6 +1226,52 @@ def _series_edits(question: str, text: str, facts: Dict[str, Any]) -> Tuple[str,
                 or (str(p.get("date") or "") and str(p.get("date")) in text)
             )
         ]
+        if trend_question and len(points) == 1:
+            only_pt = points[0]
+            if not re.search(
+                r"\b(?:only|single|one\s+(?:dated|recorded)|sole)\b",
+                text or "",
+                re.I,
+            ):
+                lead_token = concept.lower().split()[0] if concept else ""
+                companion_parts: List[str] = []
+                companion_idxs: List[int] = []
+                if lead_token:
+                    for other_s in facts.get("numeric_series") or []:
+                        if other_s is series:
+                            continue
+                        other_c = str(other_s.get("concept") or "").split(" (")[0]
+                        if (
+                            other_c.lower().startswith(lead_token)
+                            and len(other_s.get("points") or []) == 1
+                        ):
+                            opt = other_s["points"][0]
+                            if (
+                                str(opt.get("date") or "") == str(only_pt.get("date") or "")
+                                and isinstance(opt.get("index"), int)
+                                and opt["index"] not in cites_in_text
+                            ):
+                                companion_parts.append(
+                                    f"paired with {other_c} of {_reading(opt)}"
+                                )
+                                companion_idxs.append(opt["index"])
+                comp_clause = (
+                    ", " + ", ".join(companion_parts) if companion_parts else ""
+                )
+                appended.append(
+                    f"This is the only {concept.lower()} reading in the chart ({only_pt.get('date')}) "
+                    f"[{only_pt.get('index')}]{comp_clause}."
+                )
+                added.extend([only_pt["index"]] + companion_idxs)
+                findings.append(
+                    _finding(
+                        "series",
+                        "info",
+                        text,
+                        f"noted single {concept.lower()} reading",
+                        [only_pt["index"]] + companion_idxs,
+                    )
+                )
         if trend_question and (
             len(points) >= 3
             or (is_growth_question and len(points) >= 2 and len(stated_points) == 0)
@@ -887,6 +1290,14 @@ def _series_edits(question: str, text: str, facts: Dict[str, Any]) -> Tuple[str,
                         [p["index"] for p in points],
                     )
                 )
+                if len(stated_points) <= 2 and len(stated_points) < len(points):
+                    text = re.sub(
+                        r"\b(?:steadily|consistently|monotonically|continually|continuously)\s+"
+                        r"(?=(?:decreas|declin|fell|fall|drop|increas|ris|rose|grow|grew)\w*)",
+                        "",
+                        text,
+                        flags=re.I,
+                    )
             if len(stated_points) <= 2 and len(stated_points) < len(points):
                 if len(points) <= 8:
                     shown = points
@@ -981,6 +1392,66 @@ def _series_edits(question: str, text: str, facts: Dict[str, Any]) -> Tuple[str,
                     [gc["index"]],
                 )
             )
+        weight_series = next(
+            (
+                s
+                for s in series_list
+                if "weight" in str(s.get("concept") or "").lower()
+            ),
+            None,
+        )
+        w_pts = _points_in_window(weight_series, start, reference) if weight_series else []
+        ftt_recs = [
+            r
+            for r in records_map.values()
+            if "failure to thrive" in str(r.get("body") or "").lower()
+            and "status: active" in str(r.get("body") or "").lower()
+        ]
+        if (
+            len(w_pts) >= 2
+            and float(w_pts[-1]["value"]) <= float(w_pts[0]["value"])
+            and ftt_recs
+            and not re.search(
+                r"\b(?:no\s+net\s+weight\s+gain|inadequate|poor\s+growth|not\s+growing)\b",
+                text or "",
+                re.I,
+            )
+        ):
+            ftt_idx = ftt_recs[0]["index"]
+            context_clauses: List[str] = []
+            context_idxs: List[int] = [w_pts[0]["index"], w_pts[-1]["index"], ftt_idx]
+            for r in sorted(records_map.values(), key=lambda item: item["index"]):
+                b_str = str(r.get("body") or "")
+                b_low = b_str.lower()
+                if r["index"] in cites_in_text or r["index"] in added:
+                    continue
+                if (
+                    "who stage 4" in b_low
+                    or "pneumocystis" in b_low
+                    or "patient hospitalized:" in b_low
+                ):
+                    context_clauses.append(f"{b_str} ({r.get('date')}) [{r['index']}]")
+                    context_idxs.append(r["index"])
+            ctx_tail = (
+                " alongside " + "; ".join(context_clauses[:3])
+                if context_clauses
+                else ""
+            )
+            appended.append(
+                f"With no net weight gain from {w_pts[0]['date']} ({_reading(w_pts[0])}) to "
+                f"{w_pts[-1]['date']} ({_reading(w_pts[-1])}) and active Failure to thrive "
+                f"[{ftt_idx}]{ctx_tail}, the chart indicates inadequate growth."
+            )
+            added.extend(context_idxs)
+            findings.append(
+                _finding(
+                    "series",
+                    "info",
+                    text,
+                    "summarized net weight change and growth failure context",
+                    context_idxs,
+                )
+            )
     for date, group in sorted(stale_by_date.items()):
         last_date = _date(date)
         months = round((reference - last_date).days / 30.44 * 2) / 2
@@ -1004,7 +1475,8 @@ def _measurement_citation_edits(
     text: str, records: Dict[int, Dict[str, Any]]
 ) -> Tuple[str, List[Dict[str, Any]]]:
     """Repair paired blood-pressure citations when a same-date non-BP vital (e.g. Pulse) is cited
-    instead of one of the Systolic/Diastolic blood pressure records."""
+    instead of one of the Systolic/Diastolic blood pressure records, or when only one of the two
+    paired systolic/diastolic records is cited for a combined SYS/DIA reading."""
     findings: List[Dict[str, Any]] = []
     for _start, _end, item, group in reversed(_clusters(text)):
         bp_match = re.search(
@@ -1028,7 +1500,7 @@ def _measurement_citation_edits(
             if "blood pressure" not in str(records[i].get("body") or "").lower()
             and str(records[i].get("cls") or "").lower() not in {"encounter", "visit"}
         ]
-        if not bp_cited or not wrong_cited:
+        if not bp_cited:
             continue
         target_date = str(records[bp_cited[0]].get("date") or "")
         sys_val = bp_match.group("sys")
@@ -1050,6 +1522,8 @@ def _measurement_citation_edits(
         if not sys_candidates or not dia_candidates:
             continue
         right = [sys_candidates[0], dia_candidates[0]]
+        if not wrong_cited and set(right).issubset(set(bp_cited)):
+            continue
         text = (
             text[: group[0][1]]
             + "".join(f"[{i}]" for i in right)
@@ -1060,10 +1534,17 @@ def _measurement_citation_edits(
                 "measurement_citation",
                 "info",
                 item.strip(),
-                "cited "
-                + ", ".join(f"[{i}]" for i in wrong_cited)
-                + " for blood pressure; replaced by "
-                + ", ".join(f"[{i}]" for i in right),
+                (
+                    "cited "
+                    + ", ".join(f"[{i}]" for i in wrong_cited)
+                    + " for blood pressure; replaced by "
+                    + ", ".join(f"[{i}]" for i in right)
+                )
+                if wrong_cited
+                else (
+                    "completed paired blood-pressure citations "
+                    + ", ".join(f"[{i}]" for i in right)
+                ),
                 wrong_cited + right,
             )
         )
@@ -1233,6 +1714,29 @@ def _adherence_edits(
                     [earliest_all["index"], latest_all["index"]],
                 )
             )
+            prior_other = sorted(
+                (
+                    r
+                    for r in adh_records
+                    if str(r.get("date") or "") < latest_date
+                    and str(r.get("date") or "") not in set(distinct_all_dates)
+                    and re.search(r":\s*(?:yes|most)\b", str(r.get("body") or ""), re.I)
+                    and r["index"] not in cites_in_text
+                ),
+                key=lambda r: (str(r.get("date") or ""), r["index"]),
+            )
+            if prior_other:
+                other_date = str(prior_other[0].get("date") or "")
+                same_date_other = [
+                    r for r in prior_other if str(r.get("date") or "") == other_date
+                ]
+                other_items = " and ".join(
+                    f"'{r['body']}' [{r['index']}]" for r in same_date_other
+                )
+                appended.append(
+                    f"An intervening visit on {other_date} recorded {other_items}."
+                )
+                added.extend(r["index"] for r in same_date_other)
     reference = _date(facts.get("reference_date"))
     last_dt = _date(latest_date)
     adh_dates = sorted({_date(r.get("date")) for r in adh_records if _date(r.get("date"))})
@@ -1327,6 +1831,7 @@ def _last_visit_purpose_edits(
             or "temperature" in body_lower
             or "pulse:" in body_lower
             or "blood pressure:" in body_lower
+            or "oxygen saturation" in body_lower
             or "plan: continue regimen" in body_lower
         )
         is_context = (
@@ -1344,7 +1849,7 @@ def _last_visit_purpose_edits(
         return text, [], []
     summary_sentence = (
         f"Documented findings and plans on {enc_date} include: "
-        + "; ".join(highlights[:12])
+        + "; ".join(highlights[:18])
         + "."
     )
     text = text.rstrip() + " " + summary_sentence
@@ -1356,8 +1861,8 @@ def _last_visit_purpose_edits(
                 "visit_purpose",
                 "info",
                 question,
-                f"added {len(highlights[:12])} same-day clinical findings/plans for {enc_date}",
-                added[:12],
+                f"added {len(highlights[:18])} same-day clinical findings/plans for {enc_date}",
+                added[:18],
             )
         ],
     )
@@ -1390,13 +1895,25 @@ def _missed_return_visit_edits(
     ref_iso = str((facts or {}).get("reference_date") or "")
     source_date = str(latest_past.get("source_date") or "")
     last_enc_date = str(((facts or {}).get("last_clinical_encounter") or {}).get("date") or "")
+    has_past_or_negation = bool(
+        re.search(
+            r"\b(?:no|not|none|neither|without|passed|prior|past|earlier|was)\b",
+            text or "",
+            re.I,
+        )
+    )
     if (
         past_date in (text or "")
         and (not source_date or source_date in (text or ""))
         and re.search(r"\b(?:documented|chart|records?)\b", text or "", re.I)
+        and has_past_or_negation
     ):
         return text, [], []
-    if past_date in (text or "") and re.search(r"\b(?:documented|chart|records?)\b", text or "", re.I):
+    if (
+        past_date in (text or "")
+        and re.search(r"\b(?:documented|chart|records?)\b", text or "", re.I)
+        and has_past_or_negation
+    ):
         enc_tail = (
             f", and no subsequent encounter is documented in the chart after {last_enc_date}."
             if last_enc_date and last_enc_date < past_date
@@ -1405,6 +1922,7 @@ def _missed_return_visit_edits(
         addition = (
             f"That return visit date ({past_date} [{past_idx}]) was recorded at the {source_date} encounter{enc_tail}"
         )
+        text = text.rstrip() + " " + addition
     else:
         source_clause = f" (recorded on {source_date})" if source_date else ""
         if last_enc_date and last_enc_date < past_date:
@@ -1416,7 +1934,10 @@ def _missed_return_visit_edits(
             f"the latest documented return visit date was {past_date} [{past_idx}]{source_clause}, "
             f"{tail}"
         )
-    text = text.rstrip() + " " + addition
+        if not has_past_or_negation:
+            text = addition
+        else:
+            text = text.rstrip() + " " + addition
     return (
         text,
         [past_idx],
@@ -1528,11 +2049,22 @@ def _medication_safety_reconciliation_edits(
             order_str = ", ".join(
                 f"{_drug_name(r)} [{r['index']}]" for r in latest_orders if _drug_name(r)
             )
-            addition = (
-                f"In the chart, {old_name} was last ordered on {latest_old['date']} "
-                f"[{latest_old['index']}], while the most recent orders on {latest_order_date} "
-                f"are {order_str}."
+            asks_double = bool(
+                re.search(r"\b(?:doubl(?:e|ing)|catch\s+up|missed\s+days?)\b", q_lower)
             )
+            if asks_double and "double" not in (text or "").lower():
+                addition = (
+                    f"The chart contains no order or instruction to double a dose for missed days; "
+                    f"in the chart, {old_name} was last ordered on {latest_old['date']} "
+                    f"[{latest_old['index']}], while the most recent orders on {latest_order_date} "
+                    f"are {order_str}."
+                )
+            else:
+                addition = (
+                    f"In the chart, {old_name} was last ordered on {latest_old['date']} "
+                    f"[{latest_old['index']}], while the most recent orders on {latest_order_date} "
+                    f"are {order_str}."
+                )
             text = text.rstrip() + " " + addition
             new_idxs = [latest_old["index"]] + [r["index"] for r in latest_orders]
             added.extend(new_idxs)

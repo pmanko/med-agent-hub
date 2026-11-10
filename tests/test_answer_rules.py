@@ -79,6 +79,121 @@ def test_window_leaves_an_answer_without_a_window_question_alone(aloice):
     assert text.startswith(answer)
 
 
+def test_window_repairs_mixed_order_cluster_and_backfills_in_window_drug_orders(aloice):
+    def row(name, date, index):
+        return {"cells": {"item": {"text": name, "refs": [index]}, "date": {"text": date, "refs": [index]}}}
+
+    answer = (
+        "Over the past 6 months, the patient has had several drug orders and diagnostic tests "
+        "placed, including a series of antiretroviral and tuberculosis medications, as well as "
+        "chest X-rays and blood work [2][3][4][5][70][71][72][110][231][305][306][307][308][309]."
+    )
+    blocks = [{
+        "kind": "table",
+        "rows": [
+            row("Trimethoprim and sulfamethoxazole", "2026-01-07", 2),
+            row("Lamivudine / zidovudine", "2026-01-07", 3),
+            row("Efavirenz", "2026-01-07", 4),
+            row("Rifampicin isoniazid pyrazinamide and ethambutol", "2026-01-07", 5),
+            row("Rifampicin isoniazid pyrazinamide and ethambutol", "2025-12-16", 69),
+            row("Lamivudine / zidovudine", "2025-12-16", 70),
+            row("Efavirenz", "2025-12-16", 71),
+            row("Trimethoprim and sulfamethoxazole", "2025-12-16", 72),
+            row("X-ray, chest", "2025-12-14", 110),
+            row("X-ray, chest", "2025-10-23", 231),
+            row("Complete blood count", "2025-10-22", 305),
+        ],
+    }]
+    text, citations, new_blocks, findings = answer_rules.apply_answer_rules(
+        "What has been ordered for this patient over the past 6 months?",
+        answer,
+        [2, 3, 4, 5, 69, 70, 71, 72, 110, 231, 305, 306, 307, 308, 309],
+        blocks,
+        aloice,
+    )
+    assert "chest X-rays" not in text
+    assert "blood work" not in text
+    assert "on 2026-01-07 for" in text and "on 2025-12-31 for" in text
+    assert set(citations) == {2, 3, 4, 5, 34, 35, 36, 37}
+    assert len(new_blocks[0]["rows"]) == 8
+    assert {r["cells"]["date"]["text"] for r in new_blocks[0]["rows"]} == {"2026-01-07", "2025-12-31"}
+    assert "rule_window" in _ids(findings, "info")
+
+
+def test_window_normalizes_multiple_date_placeholder_rows_and_incomplete_prose(aloice):
+    def row(name, date, refs):
+        return {"cells": {"Item": {"text": name, "refs": list(refs)}, "Date": {"text": date, "refs": list(refs)}}}
+
+    answer = (
+        "Over the past 6 months, the patient has had multiple drug orders for Trimethoprim and "
+        "sulfamethoxazole, Lamivudine / zidovudine, Efavirenz, and Rifampicin isoniazid "
+        "pyrazinamide and ethambutol [2][37][72][3][70][4][34][71][5][35][69]."
+    )
+    blocks = [{
+        "kind": "table",
+        "rows": [
+            row("Trimethoprim and sulfamethoxazole", "Multiple", [2, 37, 72]),
+            row("Lamivudine / zidovudine", "Multiple", [3, 70]),
+            row("Efavirenz", "Multiple", [4, 71]),
+            row("Rifampicin isoniazid pyrazinamide and ethambutol", "Multiple", [5, 69]),
+            row("X-ray, chest", "2025-12-14", [110]),
+        ],
+    }]
+    text, citations, new_blocks, _findings = answer_rules.apply_answer_rules(
+        "What has been ordered for this patient over the past 6 months?",
+        answer,
+        [2, 37, 72, 3, 70, 4, 34, 71, 5, 35, 69, 110],
+        blocks,
+        aloice,
+    )
+    assert "on 2026-01-07 for" in text and "on 2025-12-31 for" in text
+    assert set(citations) == {2, 3, 4, 5, 34, 35, 36, 37}
+    assert len(new_blocks[0]["rows"]) == 8
+    assert {r["cells"]["Date"]["text"] for r in new_blocks[0]["rows"]} == {"2026-01-07", "2025-12-31"}
+
+
+def test_missed_return_visit_replaces_affirmative_past_return_visit_claim(zabella):
+    text, citations, _b, _f = answer_rules.apply_answer_rules(
+        "Does the patient have any upcoming appointments?",
+        "The patient has a return visit date scheduled for 2026-02-23 [22].",
+        [22],
+        [],
+        zabella,
+    )
+    assert not text.startswith("The patient has a return visit date scheduled")
+    assert text.startswith("In the chart records, no return visit date after 2026-06-20 is documented;")
+    assert 22 in citations
+
+
+def test_window_prunes_mismatched_date_refs_from_dated_table_rows(aloice):
+    blocks = [{
+        "kind": "table",
+        "rows": [
+            {
+                "cells": {
+                    "medication_name": {"text": "Trimethoprim and sulfamethoxazole", "refs": [2, 37, 114, 147]},
+                    "order_date": {"text": "2026-01-07", "refs": [2]},
+                }
+            },
+            {
+                "cells": {
+                    "medication_name": {"text": "Trimethoprim and sulfamethoxazole", "refs": [37]},
+                    "order_date": {"text": "2025-12-31", "refs": [37]},
+                }
+            },
+        ],
+    }]
+    _text, _citations, new_blocks, _findings = answer_rules.apply_answer_rules(
+        "Show this patient's medication orders in the past 6 months as a table with medication name and exact order dates.",
+        "The patient's medication orders from the past 6 months are listed in the table below.",
+        [2, 37, 114, 147],
+        blocks,
+        aloice,
+    )
+    assert new_blocks[0]["rows"][0]["cells"]["medication_name"]["refs"] == [2]
+    assert new_blocks[0]["rows"][1]["cells"]["medication_name"]["refs"] == [37]
+
+
 # R2 relative time -----------------------------------------------------------------------------------
 
 
