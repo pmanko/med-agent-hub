@@ -588,7 +588,7 @@ def _apply_stage2_conflict_skills_on_chart(extracted: ExtractedChart) -> Extract
                         continue
                     full_phrase = stop_split_re.split(match.group(0).lower())[0]
                     for ing_k, m_item in latest_stopped_by_ing.items():
-                        m_date_iso = (m_item.clinical_date or m_item.date or "")[:10]
+                        m_date_iso = (m_item.end_date or m_item.clinical_date or m_item.date or "")[:10]
                         if len(n_date_iso) == 10 and len(m_date_iso) == 10 and n_date_iso < m_date_iso:
                             continue
                         ing_parts = [

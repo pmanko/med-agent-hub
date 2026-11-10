@@ -1138,11 +1138,11 @@ class ClinicalEntityGraph:
                     )
 
             # Check stopped medications (with no active order) that a clinical note instructs to continue
-            note_date_iso = (note.date or "")[:10]
+            note_date_iso = (note.date_str or "")[:10]
             for ing_k, st_med in latest_stopped_by_ing.items():
                 if ing_k in active_ings:
                     continue
-                st_date_iso = (st_med.date or "")[:10]
+                st_date_iso = (st_med.date_str or "")[:10]
                 if len(note_date_iso) == 10 and len(st_date_iso) == 10 and note_date_iso < st_date_iso:
                     continue
                 ing_parts = [
