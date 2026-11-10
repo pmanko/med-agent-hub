@@ -31,6 +31,7 @@ from .levels_loader import (
     profile_ids,
     profile_metadata,
     resolve_openrouter_model,
+    resolve_wahs_model_context_spec,
     wahs_profile_ids,
     wahs_profile_metadata,
 )
@@ -529,7 +530,11 @@ async def _execute_wahs_chat_completion(
         dict(m) for m in req.messages if str(m.get("role") or "").lower() != "system"
     ]
     enrichment_meta: Optional[Dict[str, Any]] = None
-    if bool(profile.policies.get("include_kb_findings", True)) and user_messages:
+    hub_enrich_hdr = (request.headers.get("x-wahs-hub-enrichment") or "").strip().lower()
+    enable_hub_enrichment = bool(
+        profile.policies.get("include_hub_enrichment", profile.policies.get("include_kb_findings", True))
+    ) and hub_enrich_hdr not in {"0", "false", "off", "no"}
+    if enable_hub_enrichment and user_messages:
         enrichment_res = build_wahs_hub_enrichment_block(req.messages, max_tokens=800)
         enrichment_meta = enrichment_res.to_metadata_dict()
         for idx in range(len(user_messages) - 1, -1, -1):
@@ -578,6 +583,21 @@ async def _execute_wahs_chat_completion(
     if provider == "local":
         upstream_payload["reasoning_effort"] = "none"
         upstream_payload["chat_template_kwargs"] = {"enable_thinking": False}
+        total_msg_chars = sum(
+            len(str(m.get("content") or ""))
+            for m in upstream_messages
+            if isinstance(m, dict)
+        )
+        est_total_tokens = int(total_msg_chars / 3.2) + max_tokens + 256
+        if est_total_tokens > 28672:
+            ctx_max, _ = resolve_wahs_model_context_spec(raw_writer_model)
+            if est_total_tokens <= 65536:
+                req_ctx = 65536
+            elif est_total_tokens <= 131072:
+                req_ctx = 131072
+            else:
+                req_ctx = 262144
+            upstream_payload["num_ctx"] = min(req_ctx, ctx_max)
 
     async def _run_review_stage(draft_answer: str) -> str:
         if "review" not in profile.stages or "review" not in profile.models:

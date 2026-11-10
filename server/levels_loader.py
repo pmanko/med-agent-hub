@@ -274,7 +274,11 @@ def wahs_profile_ids() -> List[str]:
 def is_wahs_profile_id(profile_id: str) -> bool:
     if profile_id in wahs_profile_ids():
         return True
-    if profile_id.startswith(("wahs-kb:", "wahs-raw:")):
+    if profile_id.endswith("-direct-kb"):
+        base_kb = profile_id[: -len("-direct-kb")] + "-kb"
+        if base_kb in wahs_profile_ids():
+            return True
+    if profile_id.startswith(("wahs-kb:", "wahs-raw:", "wahs-direct-kb:")):
         _, _, model_id = profile_id.partition(":")
         return bool(model_id.strip())
     return False
@@ -295,7 +299,9 @@ OPENROUTER_MODEL_MAP: Dict[str, str] = {
     "qwen2.5-14b": "qwen/qwen-2.5-72b-instruct",
     "qwen3-14b": "qwen/qwen-2.5-72b-instruct",
     "qwen3.6-35b": "qwen/qwen-2.5-72b-instruct",
+    "llama-3.2-3b": "meta-llama/llama-3.2-3b-instruct",
     "llama-3.1-8b": "meta-llama/llama-3.3-70b-instruct",
+    "hermes3-8b": "nousresearch/hermes-3-llama-3.1-8b",
     "mistral-nemo-12b": "mistralai/mistral-nemo",
     "granite-3.3-8b": "ibm-granite/granite-3.3-8b-instruct",
     "lfm2-8b-a1b": "liquid/lfm-7b",
@@ -317,7 +323,9 @@ WAHS_MODEL_CONTEXT_SPECS: Dict[str, Tuple[int, int]] = {
     "gemma-e4b": (131072, 16384),
     "gemma-e4b-q8": (131072, 16384),
     "qwen3.5-9b": (131072, 16384),
+    "llama-3.2-3b": (131072, 12288),
     "llama-3.1-8b": (131072, 16384),
+    "hermes3-8b": (131072, 16384),
     "granite-3.3-8b": (131072, 16384),
     "lfm2-8b-a1b": (65536, 16384),
     "gemma-e2b": (131072, 12288),
@@ -358,7 +366,7 @@ def _infer_model_family(model_id: str) -> str:
         return "gemma-4"
     if "qwen" in low:
         return "qwen"
-    if "llama" in low:
+    if "llama" in low or "hermes" in low:
         return "llama"
     if "mistral" in low or "nemo" in low:
         return "mistral"
@@ -375,15 +383,32 @@ def get_wahs_profile(profile_id: str) -> Profile:
     raw = _load_raw()
     if profile_id in wahs_profile_ids():
         return _from_spec(profile_id, raw[profile_id] or {})
-    if profile_id.startswith(("wahs-kb:", "wahs-raw:")):
+    if profile_id.endswith("-direct-kb"):
+        base_kb = profile_id[: -len("-direct-kb")] + "-kb"
+        if base_kb in wahs_profile_ids():
+            spec = json.loads(json.dumps(raw[base_kb] or {}))
+            spec["label"] = f"{spec.get('label', base_kb)} (Direct KB Only — No Hub Graph)"
+            pol = dict(spec.get("policies") or {})
+            pol["include_kb_findings"] = True
+            pol["include_hub_enrichment"] = False
+            pol["overflow_lookup_tools"] = False
+            spec["policies"] = pol
+            return _from_spec(profile_id, spec)
+    if profile_id.startswith(("wahs-kb:", "wahs-raw:", "wahs-direct-kb:")):
         prefix, _, raw_model = profile_id.partition(":")
         model_id = raw_model.strip()
         if not model_id:
             raise ModelNotFoundError(profile_id, wahs_profile_ids())
-        include_kb = prefix == "wahs-kb"
+        include_kb = prefix in {"wahs-kb", "wahs-direct-kb"}
+        include_hub_enrichment = prefix == "wahs-kb"
         provider = "openrouter" if "/" in model_id else "local"
         family = _infer_model_family(model_id)
-        mode_label = "+ 4-Layer Clinical KB" if include_kb else "Raw Condensed Chart Only"
+        if prefix == "wahs-kb":
+            mode_label = "+ 4-Layer Clinical KB + Med Agent Hub"
+        elif prefix == "wahs-direct-kb":
+            mode_label = "Direct Model + 4-Layer Clinical KB"
+        else:
+            mode_label = "Raw Condensed Chart Only"
         return compile_profile(
             Profile(
                 id=profile_id,
@@ -398,7 +423,8 @@ def get_wahs_profile(profile_id: str) -> Profile:
                     "provider": provider,
                     "model_family": family,
                     "include_kb_findings": include_kb,
-                    "overflow_lookup_tools": include_kb,
+                    "include_hub_enrichment": include_hub_enrichment,
+                    "overflow_lookup_tools": include_hub_enrichment,
                     "citation_grounding": "enforce",
                 },
                 workflow="wahs",

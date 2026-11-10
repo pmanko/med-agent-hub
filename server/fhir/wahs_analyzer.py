@@ -543,6 +543,128 @@ def _apply_stage2_conflict_skills_on_chart(extracted: ExtractedChart) -> Extract
                     if m_item.resource_uuid not in note_contradicted_meds[n_item.resource_uuid]:
                         note_contradicted_meds[n_item.resource_uuid].append(m_item.resource_uuid)
 
+        # Detect stopped medications (absent from active list) that a clinical note instructs to continue
+        active_ings = {
+            (it.ingredient_key or normalize_drug_ingredient(it.display)).lower()
+            for it in active_meds
+        }
+        stopped_meds_list = [
+            it for it in extracted.items if it.section in {"med_stopped", "med_historical"}
+        ]
+        latest_stopped_by_ing: Dict[str, ClinicalItem] = {}
+        for m_it in stopped_meds_list:
+            ing_k = (m_it.ingredient_key or normalize_drug_ingredient(m_it.display)).lower()
+            if not ing_k or ing_k in active_ings or any(ch.isdigit() for ch in ing_k[:4]):
+                continue
+            prev_m = latest_stopped_by_ing.get(ing_k)
+            if prev_m is None or (m_it.date or "") >= (prev_m.date or ""):
+                latest_stopped_by_ing[ing_k] = m_it
+
+        cont_re = re.compile(
+            r"\b(?:while\s+continuing|and\s+continue|but\s+continue|continuing|continue|on\s+[a-z0-9/-]+\s+monotherapy)\s*([^.;|\n]{0,90})",
+            re.IGNORECASE,
+        )
+        stop_split_re = re.compile(
+            r"\b(?:and\s+reconcile|reconciling|reconcile|and\s+hold|holding|hold|and\s+stop|stopping|stop|"
+            r"and\s+discontinue|discontinuing|discontinue|and\s+retire|retiring|retire)\b",
+            re.IGNORECASE,
+        )
+        cont_stopwords = form_stopwords | {
+            "succinate", "hydrochloride", "sodium", "tartrate", "fumarate", "besylate", "monotherapy",
+            "routine", "longitudinal", "laboratory", "monitoring", "care", "coordination", "inpatient",
+            "medication", "order", "administered", "syringe", "vial", "premix", "floor", "stock",
+            "packet", "bottle", "dextrose", "chloride", "normal", "saline",
+        }
+        note_continued_stopped_meds: Dict[str, List[str]] = defaultdict(list)
+        for n_item in notes:
+            n_date_iso = (n_item.clinical_date or n_item.date or "")[:10]
+            matched_stopped_for_note: List[ClinicalItem] = []
+            for raw_clause in re.split(r"[.;|\n]+", n_item.text or ""):
+                if conditional_clause_re.search(raw_clause):
+                    continue
+                for match in cont_re.finditer(raw_clause):
+                    prefix = raw_clause[: match.start()]
+                    if negation_prefix_re.search(prefix):
+                        continue
+                    full_phrase = stop_split_re.split(match.group(0).lower())[0]
+                    for ing_k, m_item in latest_stopped_by_ing.items():
+                        m_date_iso = (m_item.end_date or m_item.clinical_date or m_item.date or "")[:10]
+                        if len(n_date_iso) == 10 and len(m_date_iso) == 10 and n_date_iso < m_date_iso:
+                            continue
+                        ing_parts = [
+                            p for p in re.split(r"[^a-z0-9]+", ing_k)
+                            if len(p) >= 5 and p not in cont_stopwords
+                        ]
+                        disp_parts = [
+                            p for p in re.split(r"[^a-z0-9]+", m_item.display.lower())
+                            if len(p) >= 5 and not p.isdigit() and p not in cont_stopwords
+                        ]
+                        tokens = list(dict.fromkeys(ing_parts + disp_parts[:3]))
+                        if any(re.search(rf"\b{re.escape(tok)}\b", full_phrase) for tok in tokens):
+                            if m_item not in matched_stopped_for_note:
+                                matched_stopped_for_note.append(m_item)
+            if matched_stopped_for_note:
+                stopped_names_str = ", ".join(m.display for m in matched_stopped_for_note)
+                stopped_msg = (
+                    f"note_stopped_medication_contradiction: Clinical note ({n_item.clinical_date or 'recent'}) "
+                    f"instructs to continue {stopped_names_str}, but structured MedicationRequest is marked STOPPED with no active order"
+                )
+                if n_item.resource_uuid in note_conflicts:
+                    note_conflicts[n_item.resource_uuid] = f"{note_conflicts[n_item.resource_uuid]}; {stopped_msg}"
+                else:
+                    note_conflicts[n_item.resource_uuid] = stopped_msg
+                for m_item in matched_stopped_for_note:
+                    if m_item.resource_uuid not in med_conflicts:
+                        med_conflicts[m_item.resource_uuid] = stopped_msg
+                    note_med_links[m_item.resource_uuid].append(n_item.resource_uuid)
+                    note_med_links[n_item.resource_uuid].append(m_item.resource_uuid)
+                    if m_item.resource_uuid not in note_continued_stopped_meds[n_item.resource_uuid]:
+                        note_continued_stopped_meds[n_item.resource_uuid].append(m_item.resource_uuid)
+
+        # Detect AllergyIntolerance vs. MedicationRequest cross-reactivity conflicts
+        allergies_list = [it for it in extracted.items if it.section == "allergy"]
+        all_meds_list = [
+            it for it in extracted.items if it.section in {"med_active", "med_stopped", "med_historical"}
+        ]
+        allergy_conflicts: Dict[str, str] = {}
+        allergy_conflicting_meds: Dict[str, List[str]] = defaultdict(list)
+        allergy_rules = [
+            (
+                re.compile(r"\b(?:penicillin|beta-?lactam|amoxicillin|ampicillin)\b", re.IGNORECASE),
+                re.compile(r"\b(?:penicillin|amoxicillin|ampicillin|piperacillin|tazobactam|zosyn|augmentin|unasyn|nafcillin|oxacillin)\b", re.IGNORECASE),
+                "extended-spectrum penicillin / beta-lactam antibiotic",
+            ),
+            (
+                re.compile(r"\b(?:sulfonamide|sulfa\b|bactrim|sulfamethoxazole)\b", re.IGNORECASE),
+                re.compile(r"\b(?:sulfamethoxazole|bactrim|septra|sulfadiazine|sulfasalazine)\b", re.IGNORECASE),
+                "sulfonamide antibiotic",
+            ),
+        ]
+        for a_item in allergies_list:
+            matched_allergy_meds: List[ClinicalItem] = []
+            for a_re, m_re, cls_desc in allergy_rules:
+                if a_re.search(a_item.display) or a_re.search(a_item.text):
+                    for m_item in all_meds_list:
+                        if m_re.search(m_item.display) or m_re.search(m_item.text):
+                            if m_item not in matched_allergy_meds:
+                                matched_allergy_meds.append(m_item)
+                    if matched_allergy_meds:
+                        m_summary = ", ".join(
+                            f"{m.display} ({m.clinical_date or m.date or 'recorded'}, status={m.status or 'recorded'})"
+                            for m in matched_allergy_meds
+                        )
+                        a_msg = (
+                            f"allergy_medication_conflict: Documented allergy '{a_item.display}' conflicts with "
+                            f"ordered {cls_desc}: {m_summary}"
+                        )
+                        allergy_conflicts[a_item.resource_uuid] = a_msg
+                        for m_item in matched_allergy_meds:
+                            if m_item.resource_uuid not in med_conflicts:
+                                med_conflicts[m_item.resource_uuid] = a_msg
+                            note_med_links[a_item.resource_uuid].append(m_item.resource_uuid)
+                            note_med_links[m_item.resource_uuid].append(a_item.resource_uuid)
+                            if m_item.resource_uuid not in allergy_conflicting_meds[a_item.resource_uuid]:
+                                allergy_conflicting_meds[a_item.resource_uuid].append(m_item.resource_uuid)
 
     updated_items: List[ClinicalItem] = []
     for it in extracted.items:
@@ -552,6 +674,7 @@ def _apply_stage2_conflict_skills_on_chart(extracted: ExtractedChart) -> Extract
             or med_conflicts.get(it.resource_uuid)
             or imm_anomalies.get(it.resource_uuid)
             or note_conflicts.get(it.resource_uuid)
+            or (allergy_conflicts.get(it.resource_uuid) if not skip_multi_source else None)
         )
         extra_members = list(note_med_links.get(it.resource_uuid, []))
         if c_note and c_note.startswith("acip_schedule_note:"):
@@ -560,6 +683,10 @@ def _apply_stage2_conflict_skills_on_chart(extracted: ExtractedChart) -> Extract
         new_meta = dict(it.metadata)
         if it.resource_uuid in note_contradicted_meds:
             new_meta["contradicted_med_uuids"] = list(note_contradicted_meds[it.resource_uuid])
+        if not skip_multi_source and it.resource_uuid in note_continued_stopped_meds:
+            new_meta["continued_stopped_med_uuids"] = list(note_continued_stopped_meds[it.resource_uuid])
+        if not skip_multi_source and it.resource_uuid in allergy_conflicting_meds:
+            new_meta["conflicting_med_uuids"] = list(allergy_conflicting_meds[it.resource_uuid])
         if c_note or extra_members or eff_sens != it.sensitivity or new_meta != it.metadata:
             new_members = tuple(dict.fromkeys(list(it.member_uuids) + extra_members))
             updated_items.append(
@@ -1088,6 +1215,107 @@ def analyze_data_quality_and_conflicts(
                     "Reconcile outpatient MedicationRequest status against the discharge/progress note Assessment & Plan."
                 ),
                 "kb_rule_id": "wahs-kb-note-med-contradiction-01",
+                "resource_uuids": uuids,
+                "citations": cites,
+            }
+        )
+
+    # 6. Free-Text Clinical Note Continues Stopped Medication (No Active Order)
+    note_stopped_conflicts = [
+        it
+        for it in extracted.items
+        if it.section in {"clinical_note", "note"}
+        and "note_stopped_medication_contradiction" in (it.conflict_note or "")
+        and not (sharing_posture == "external_share" and _is_sdoh_privacy_sensitive(it))
+    ]
+    for n_it in note_stopped_conflicts:
+        stopped_uuids = set(n_it.metadata.get("continued_stopped_med_uuids") or ())
+        linked_stopped = [
+            it
+            for it in extracted.items
+            if it.section in {"med_stopped", "med_historical"} and it.resource_uuid in stopped_uuids
+        ]
+        if not linked_stopped:
+            continue
+        uuids = [n_it.resource_uuid] + [m.resource_uuid for m in linked_stopped]
+        cites = _citations_for_uuids(uuids, uuid_map, condensed)
+        med_names = ", ".join(m.display for m in linked_stopped)
+        findings.append(
+            {
+                "id": f"conflict-note-stopped-med-{n_it.resource_uuid}",
+                "domain": "Unstructured Note vs. Stopped Medication Order Contradiction",
+                "severity": "high",
+                "title": f"Clinical Note Instructs to Continue Medication Listed as Stopped ({med_names})",
+                "description": (
+                    f"Clinical note '{n_it.display}' ({n_it.clinical_date}) instructs to continue "
+                    f"{med_names}, but the structured MedicationRequest is marked STOPPED with no active prescription."
+                ),
+                "patient_plain_summary": (
+                    f"A doctor's note from {n_it.clinical_date} says to continue taking {med_names}, "
+                    f"but your structured medication list shows {med_names} as 'stopped' with no active prescription."
+                ),
+                "what_to_ask_doctor": (
+                    f"My clinical note from {n_it.clinical_date} says to continue {med_names}, "
+                    f"but my medication list shows it as stopped—should an active prescription be renewed, or am I no longer taking it?"
+                ),
+                "clinician_technical_note": (
+                    f"Rule wahs-kb-note-stopped-med-01: DocumentReference ({n_it.resource_uuid}, {n_it.clinical_date}) "
+                    f"instructs continuation of {med_names} while MedicationRequest ({', '.join(m.resource_uuid for m in linked_stopped)}) is status=stopped."
+                ),
+                "recommendation": (
+                    "Verify whether the medication should be re-ordered as active or whether the clinical note Assessment & Plan reflects an outdated medication list."
+                ),
+                "kb_rule_id": "wahs-kb-note-stopped-med-01",
+                "resource_uuids": uuids,
+                "citations": cites,
+            }
+        )
+
+    # 7. AllergyIntolerance vs. MedicationRequest Cross-Reactivity Conflicts
+    allergy_med_conflicts = [
+        it
+        for it in extracted.items
+        if it.section == "allergy" and "allergy_medication_conflict" in (it.conflict_note or "")
+    ]
+    for a_it in allergy_med_conflicts:
+        conf_med_uuids = set(a_it.metadata.get("conflicting_med_uuids") or ())
+        linked_conf_meds = [
+            it for it in extracted.items if it.resource_uuid in conf_med_uuids
+        ]
+        if not linked_conf_meds:
+            continue
+        uuids = [a_it.resource_uuid] + [m.resource_uuid for m in linked_conf_meds]
+        cites = _citations_for_uuids(uuids, uuid_map, condensed)
+        med_names = ", ".join(
+            f"{m.display} ({m.clinical_date or m.date or 'recorded'}, status={m.status or 'recorded'})"
+            for m in linked_conf_meds
+        )
+        findings.append(
+            {
+                "id": f"conflict-allergy-med-{a_it.resource_uuid}",
+                "domain": "Allergy vs. Medication Cross-Reactivity Conflict",
+                "severity": "high",
+                "title": f"Medication Order Conflicts with Documented Allergy ({a_it.display})",
+                "description": (
+                    f"Patient has a documented allergy '{a_it.display}', but chart contains a conflicting "
+                    f"same-class medication order: {med_names}."
+                ),
+                "patient_plain_summary": (
+                    f"Your chart lists a high-risk allergy to '{a_it.display}', and also records an order for "
+                    f"a related antibiotic/medication in the same drug family ({med_names})."
+                ),
+                "what_to_ask_doctor": (
+                    f"My chart shows an allergy to '{a_it.display}' alongside an order for {med_names}—"
+                    f"can we confirm my allergy alert is active so I am not prescribed related medications?"
+                ),
+                "clinician_technical_note": (
+                    f"Rule wahs-kb-allergy-med-conflict-01: AllergyIntolerance ({a_it.resource_uuid}, {a_it.display}) "
+                    f"cross-reacts with MedicationRequest ({', '.join(m.resource_uuid for m in linked_conf_meds)}: {med_names})."
+                ),
+                "recommendation": (
+                    "Flag the cross-reactive medication order against the documented AllergyIntolerance and verify beta-lactam/allergen avoidance."
+                ),
+                "kb_rule_id": "wahs-kb-allergy-med-conflict-01",
                 "resource_uuids": uuids,
                 "citations": cites,
             }
