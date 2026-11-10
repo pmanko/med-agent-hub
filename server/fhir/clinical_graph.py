@@ -1735,7 +1735,8 @@ def _build_question_conditioned_clinical_and_privacy_directives(
         "looking at my screen",
         "next to me",
     )
-    if any(c in q_low for c in bystander_cues):
+    has_bystander = any(c in q_low for c in bystander_cues)
+    if has_bystander:
         directives.append(
             "- [KB wahs-kb-coercion-screen-safety-01 | Trauma-Informed Coercion & Bystander Safety] "
             "Screen-Watching Coercion Guardrail: CRITICAL SAFETY RULE — Another person (e.g., partner/spouse) is reading "
@@ -1767,7 +1768,7 @@ def _build_question_conditioned_clinical_and_privacy_directives(
             f"DNR status) unless the patient explicitly chooses to include them."
         )
 
-    if any(c in q_low for c in ("criminal record", "criminal", "jail", "prison")) and "delete" not in q_low:
+    if not has_bystander and any(c in q_low for c in ("criminal record", "criminal", "jail", "prison")) and "delete" not in q_low:
         directives.append(
             "- [KB wahs-kb-criminal-vs-clinical-restraint-01 | SDOH & Inpatient Restraint Disambiguation] "
             "Criminal Record Disambiguation: Check whether an SDOH 'Criminal record' (SNOMED 454101000124102) or PRAPARE "
@@ -1852,25 +1853,43 @@ def _build_question_conditioned_clinical_and_privacy_directives(
         )
 
     if "who can see" in q_low or ("mental health" in q_low and "alcohol" in q_low and "delete" not in q_low):
-        directives.append(
-            "- [KB wahs-kb-behavioral-access-transparency-01 | Behavioral Health & Privacy Transparency] "
-            "Mental Health & Alcohol Screening Inventory: Accurately list the mental health entries (PHQ-2/PHQ-9, GAD-7, "
-            "depression, anxiety, conversion disorder, insomnia) and alcohol/substance entries (AUDIT-C, unhealthy alcohol "
-            "drinking behavior) actually recorded in this chart with dates and [N] citations (or state plainly if none are "
-            "recorded). State that you cannot verify who has access from the chart alone, avoid overconfident legal claims "
-            "(and for a minor, avoid definitive claims about parental access), and refer the patient to the clinic's Privacy Office."
-        )
+        if has_bystander:
+            directives.append(
+                "- [KB wahs-kb-behavioral-access-transparency-01 | Behavioral Health & Privacy Transparency] "
+                "Access Limitations (Bystander Present): State neutrally that you cannot verify who has access from the "
+                "chart alone, avoid overconfident legal claims, and refer the patient to the clinic's Privacy Office. "
+                "Do NOT list, cite, or confirm specific mental health or alcohol/substance entries while another person "
+                "is watching the screen."
+            )
+        else:
+            directives.append(
+                "- [KB wahs-kb-behavioral-access-transparency-01 | Behavioral Health & Privacy Transparency] "
+                "Mental Health & Alcohol Screening Inventory: Accurately list the mental health entries (PHQ-2/PHQ-9, GAD-7, "
+                "depression, anxiety, conversion disorder, insomnia) and alcohol/substance entries (AUDIT-C, unhealthy alcohol "
+                "drinking behavior) actually recorded in this chart with dates and [N] citations (or state plainly if none are "
+                "recorded). State that you cannot verify who has access from the chart alone, avoid overconfident legal claims "
+                "(and for a minor, avoid definitive claims about parental access), and refer the patient to the clinic's Privacy Office."
+            )
 
     if any(c in q_low for c in ("delete the sensitive", "delete ", "erase ", "remove the sensitive")):
-        directives.append(
-            "- [KB wahs-kb-readonly-amendment-01 | HIPAA 45 CFR 164.526 Right to Request Amendment] "
-            "Read-Only Honesty & Amendment Path: State clearly that you are a read-only assistant and cannot delete, edit, "
-            "or remove any entries from the medical record (never claim deletion succeeded). State factually whether the "
-            "mentioned entries exist in this chart, and explain how to request a formal medical record amendment through the "
-            "recording clinic's Health Information Management / Privacy Office (or discuss DNR changes with the care team)."
-        )
+        if has_bystander:
+            directives.append(
+                "- [KB wahs-kb-readonly-amendment-01 | HIPAA 45 CFR 164.526 Right to Request Amendment] "
+                "Read-Only Honesty & Amendment Path (Bystander Present): State clearly that you are a read-only assistant "
+                "and cannot delete, edit, or remove any entries from the medical record, and explain how to request a formal "
+                "medical record amendment through the recording clinic's Health Information Management / Privacy Office "
+                "without reading out or confirming sensitive chart entries while another person is watching the screen."
+            )
+        else:
+            directives.append(
+                "- [KB wahs-kb-readonly-amendment-01 | HIPAA 45 CFR 164.526 Right to Request Amendment] "
+                "Read-Only Honesty & Amendment Path: State clearly that you are a read-only assistant and cannot delete, edit, "
+                "or remove any entries from the medical record (never claim deletion succeeded). State factually whether the "
+                "mentioned entries exist in this chart, and explain how to request a formal medical record amendment through the "
+                "recording clinic's Health Information Management / Privacy Office (or discuss DNR changes with the care team)."
+            )
 
-    if "personal information" in q_low or "besides medical" in q_low:
+    if not has_bystander and ("personal information" in q_low or "besides medical" in q_low):
         directives.append(
             "- [KB wahs-kb-sdoh-transparency-01 | SDOH & Demographic Transparency] "
             "Non-Medical Social Data Inventory: List only the non-medical social, demographic, and SDOH entries actually "

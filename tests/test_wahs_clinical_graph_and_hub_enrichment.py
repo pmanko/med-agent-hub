@@ -700,6 +700,20 @@ def test_three_pathway_profiles_and_q1_q15_p2_q13_refinements() -> None:
     cross_enrichment = build_wahs_hub_enrichment_block([{"role": "user", "content": cross_patient_prompt}])
     assert "wahs-kb-cross-patient-boundary-01" in cross_enrichment.enrichment_text
 
+    # Verify bystander presence suppresses sensitive inventory listing while retaining neutral access guidance
+    bystander_who_can_see_prompt = (
+        f"{tier1_ledger}\n\n"
+        "QUESTION: My partner is watching the screen. Who can see my mental health and alcohol entries?"
+    )
+    bystander_who_enrichment = build_wahs_hub_enrichment_block(
+        [{"role": "user", "content": bystander_who_can_see_prompt}],
+        max_tokens=800,
+    )
+    assert "wahs-kb-coercion-screen-safety-01" in bystander_who_enrichment.enrichment_text
+    assert "Mental Health & Alcohol Screening Inventory: Accurately list" not in bystander_who_enrichment.enrichment_text
+    assert "Access Limitations (Bystander Present)" in bystander_who_enrichment.enrichment_text
+
+
 
 
 
