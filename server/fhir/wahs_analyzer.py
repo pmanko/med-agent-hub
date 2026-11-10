@@ -577,6 +577,7 @@ def _apply_stage2_conflict_skills_on_chart(extracted: ExtractedChart) -> Extract
         }
         note_continued_stopped_meds: Dict[str, List[str]] = defaultdict(list)
         for n_item in notes:
+            n_date_iso = (n_item.clinical_date or n_item.date or "")[:10]
             matched_stopped_for_note: List[ClinicalItem] = []
             for raw_clause in re.split(r"[.;|\n]+", n_item.text or ""):
                 if conditional_clause_re.search(raw_clause):
@@ -587,6 +588,9 @@ def _apply_stage2_conflict_skills_on_chart(extracted: ExtractedChart) -> Extract
                         continue
                     full_phrase = stop_split_re.split(match.group(0).lower())[0]
                     for ing_k, m_item in latest_stopped_by_ing.items():
+                        m_date_iso = (m_item.clinical_date or m_item.date or "")[:10]
+                        if len(n_date_iso) == 10 and len(m_date_iso) == 10 and n_date_iso < m_date_iso:
+                            continue
                         ing_parts = [
                             p for p in re.split(r"[^a-z0-9]+", ing_k)
                             if len(p) >= 5 and p not in cont_stopwords

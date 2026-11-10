@@ -1138,8 +1138,12 @@ class ClinicalEntityGraph:
                     )
 
             # Check stopped medications (with no active order) that a clinical note instructs to continue
+            note_date_iso = (note.date or "")[:10]
             for ing_k, st_med in latest_stopped_by_ing.items():
                 if ing_k in active_ings:
+                    continue
+                st_date_iso = (st_med.date or "")[:10]
+                if len(note_date_iso) == 10 and len(st_date_iso) == 10 and note_date_iso < st_date_iso:
                     continue
                 ing_parts = [
                     p for p in re.split(r"[^a-z0-9]+", ing_k)
@@ -1994,8 +1998,13 @@ def _build_question_conditioned_clinical_and_privacy_directives(
         else:
             alg_edges = [
                 e for e in graph.edges
-                if e.source_id in graph.nodes and e.target_id in graph.nodes
-                and (graph.nodes[e.source_id].category == "AllergyIntolerance" or graph.nodes[e.target_id].category == "AllergyIntolerance")
+                if e.edge_type == "CONTRAINDICATED_OR_DOSE_ADJUST_IN"
+                and e.source_id in graph.nodes
+                and e.target_id in graph.nodes
+                and {
+                    graph.nodes[e.source_id].category,
+                    graph.nodes[e.target_id].category,
+                } == {"AllergyIntolerance", "MedicationRequest"}
             ]
             if alg_edges:
                 e0 = alg_edges[0]

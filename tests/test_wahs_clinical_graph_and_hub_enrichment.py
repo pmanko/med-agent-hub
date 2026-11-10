@@ -713,6 +713,28 @@ def test_three_pathway_profiles_and_q1_q15_p2_q13_refinements() -> None:
     assert "Mental Health & Alcohol Screening Inventory: Accurately list" not in bystander_who_enrichment.enrichment_text
     assert "Access Limitations (Bystander Present)" in bystander_who_enrichment.enrichment_text
 
+    # Verify historical note before a stopped medication date does NOT create a false stopped-med contradiction
+    older_note_ledger = "\n".join(
+        [
+            "[1] (2026-01-19) Patient: Elena Rostova, DOB: 1954-04-12, Gender: female",
+            "[2] (2026-01-19) Completeness Manifest: Tier 1 | omitted_clinical_items=0",
+            "[10] (2024-01-10) Note (Clinic Progress Note): Plan: Continue metoprolol succinate 50 mg daily.",
+            "[20] (2025-12-15) Medication History: metoprolol succinate 50 MG Extended Release Oral Tablet — 4 records (2024-01-10..2025-12-15, status: stopped)",
+            "[30] (2025-11-01) AllergyIntolerance: Penicillin [active, criticality: high] (Source: General Hospital)",
+        ]
+    )
+    older_note_graph = ClinicalEntityGraph.from_condensed_ledger(older_note_ledger)
+    assert not any(
+        e.edge_type == "CONTRADICTED_OR_MODIFIED_BY_NOTE" and "metoprolol" in e.rationale.lower()
+        for e in older_note_graph.edges
+    )
+
+    # Verify an allergy with REPORTED_BY_ORG provenance edge but no conflicting medication does NOT emit CRITICAL ALLERGY CONFLICT
+    alg_only_prompt = f"{older_note_ledger}\n\nQUESTION: What allergies do I have?"
+    alg_only_enrichment = build_wahs_hub_enrichment_block([{"role": "user", "content": alg_only_prompt}], max_tokens=800)
+    assert "wahs-kb-allergy-med-conflict-01" not in alg_only_enrichment.enrichment_text
+
+
 
 
 
