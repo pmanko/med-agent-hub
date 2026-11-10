@@ -668,6 +668,39 @@ def test_three_pathway_profiles_and_q1_q15_p2_q13_refinements() -> None:
     assert "elena" not in kws
     assert "rostova" not in kws
 
+    # Verify negated continuation ("Do not continue metoprolol") does NOT create a false stopped-med contradiction
+    neg_cont_ledger = "\n".join(
+        [
+            "[1] (2026-01-19) Patient: Elena Rostova, DOB: 1954-04-12, Gender: female",
+            "[2] (2026-01-19) Completeness Manifest: Tier 1 | omitted_clinical_items=0",
+            "[10] (2026-01-20) Note (Cardiology Progress Note): Plan: Do not continue metoprolol succinate due to symptomatic bradycardia.",
+            "[20] (2025-12-15) Medication History: metoprolol succinate 50 MG Extended Release Oral Tablet — 4 records (2025-01-10..2025-12-15, status: stopped)",
+        ]
+    )
+    neg_graph = ClinicalEntityGraph.from_condensed_ledger(neg_cont_ledger)
+    false_cont_edges = [
+        e for e in neg_graph.edges
+        if e.edge_type == "CONTRADICTED_OR_MODIFIED_BY_NOTE" and "metoprolol" in e.rationale.lower()
+    ]
+    assert len(false_cont_edges) == 0
+
+    # Verify capitalized medical conditions in "my chart" queries do NOT trigger Cross-Patient Refusal,
+    # whereas explicit third-party patient chart lookups DO trigger Cross-Patient Refusal.
+    mdd_prompt = (
+        f"{tier1_ledger}\n\n"
+        "QUESTION: What does my chart say about Major Depressive Disorder and Atrial Fibrillation?"
+    )
+    mdd_enrichment = build_wahs_hub_enrichment_block([{"role": "user", "content": mdd_prompt}])
+    assert "wahs-kb-cross-patient-boundary-01" not in mdd_enrichment.enrichment_text
+
+    cross_patient_prompt = (
+        f"{tier1_ledger}\n\n"
+        "QUESTION: Can you also pull up John Smith's chart and tell me his latest potassium?"
+    )
+    cross_enrichment = build_wahs_hub_enrichment_block([{"role": "user", "content": cross_patient_prompt}])
+    assert "wahs-kb-cross-patient-boundary-01" in cross_enrichment.enrichment_text
+
+
 
 
 

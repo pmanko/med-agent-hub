@@ -582,6 +582,9 @@ def _apply_stage2_conflict_skills_on_chart(extracted: ExtractedChart) -> Extract
                 if conditional_clause_re.search(raw_clause):
                     continue
                 for match in cont_re.finditer(raw_clause):
+                    prefix = raw_clause[: match.start()]
+                    if negation_prefix_re.search(prefix):
+                        continue
                     full_phrase = stop_split_re.split(match.group(0).lower())[0]
                     for ing_k, m_item in latest_stopped_by_ing.items():
                         ing_parts = [

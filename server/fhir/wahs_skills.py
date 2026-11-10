@@ -273,46 +273,60 @@ def run_medication_reconciliation_skill(
         "oral", "tablet", "tablets", "capsule", "capsules", "extended", "release",
         "delayed", "solution", "suspension", "injection", "daily", "twice",
     }
+    negation_prefix_re = re.compile(
+        r"\b(?:do\s+not|don't|never|not\s+to|not|without|no\s+need\s+to|avoid)\s+$",
+        re.IGNORECASE,
+    )
+    conditional_clause_re = re.compile(
+        r"\b(?:if|unless|when|should|in\s+case|for\s+sbp|for\s+bp|for\s+hr|parameters?\s*:)\b",
+        re.IGNORECASE,
+    )
     seen_note_med_pairs: set[Tuple[str, str]] = set()
     for n_item in note_items:
-        for match in hold_re.finditer(n_item.text or ""):
-            clause = continue_split_re.split(match.group(1).lower())[0]
-            for m_item in active_meds:
-                m_ing = (m_item.ingredient_key or normalize_drug_ingredient(m_item.display)).lower()
-                m_disp_tokens = [
-                    t
-                    for t in re.split(r"[^a-z0-9]+", m_item.display.lower())
-                    if len(t) >= 4 and not t.isdigit() and t not in form_stopwords
-                ]
-                if (m_ing and m_ing in clause) or any(tok in clause for tok in m_disp_tokens[:2]):
-                    pair_key = (m_item.resource_uuid, n_item.resource_uuid)
-                    if pair_key in seen_note_med_pairs:
-                        continue
-                    seen_note_med_pairs.add(pair_key)
-                    uuids = (m_item.resource_uuid, n_item.resource_uuid)
-                    findings.append(
-                        ChartFinding(
-                            finding_id=f"reconcile-note-med-{m_ing.replace(' ', '-')}-{n_item.resource_uuid[:8]}",
-                            skill_name="medication_reconciliation_skill",
-                            category="ReconciliationFinding",
-                            severity="high",
-                            title=f"Note vs. Active Order Contradiction: {m_item.display}",
-                            summary=(
-                                f"Clinical note ({n_item.date or 'recent'}, source: {n_item.source_org or 'clinic note'}) "
-                                f"instructs to hold/discontinue {m_item.display}, but structured "
-                                f"{m_item.resource_type} ({m_item.date}, source: {m_item.source_org or 'order ledger'}) "
-                                "remains ACTIVE."
-                            ),
-                            source_a=n_item.source_org or "Clinical Note",
-                            source_b=m_item.source_org or "Structured Medication Ledger",
-                            resource_uuids=uuids,
-                            bracket_citations=_resolve_brackets_for_uuids(uuids, mappings),
-                            recommended_action=(
-                                f"Verify whether {m_item.display} should be placed on hold or discontinued "
-                                "in the structured order list per the clinical note."
-                            ),
+        for raw_clause in re.split(r"[.;|\n]+", n_item.text or ""):
+            if conditional_clause_re.search(raw_clause):
+                continue
+            for match in hold_re.finditer(raw_clause):
+                prefix = raw_clause[: match.start()]
+                if negation_prefix_re.search(prefix):
+                    continue
+                clause = continue_split_re.split(match.group(1).lower())[0]
+                for m_item in active_meds:
+                    m_ing = (m_item.ingredient_key or normalize_drug_ingredient(m_item.display)).lower()
+                    m_disp_tokens = [
+                        t
+                        for t in re.split(r"[^a-z0-9]+", m_item.display.lower())
+                        if len(t) >= 4 and not t.isdigit() and t not in form_stopwords
+                    ]
+                    if (m_ing and m_ing in clause) or any(tok in clause for tok in m_disp_tokens[:2]):
+                        pair_key = (m_item.resource_uuid, n_item.resource_uuid)
+                        if pair_key in seen_note_med_pairs:
+                            continue
+                        seen_note_med_pairs.add(pair_key)
+                        uuids = (m_item.resource_uuid, n_item.resource_uuid)
+                        findings.append(
+                            ChartFinding(
+                                finding_id=f"reconcile-note-med-{m_ing.replace(' ', '-')}-{n_item.resource_uuid[:8]}",
+                                skill_name="medication_reconciliation_skill",
+                                category="ReconciliationFinding",
+                                severity="high",
+                                title=f"Note vs. Active Order Contradiction: {m_item.display}",
+                                summary=(
+                                    f"Clinical note ({n_item.date or 'recent'}, source: {n_item.source_org or 'clinic note'}) "
+                                    f"instructs to hold/discontinue {m_item.display}, but structured "
+                                    f"{m_item.resource_type} ({m_item.date}, source: {m_item.source_org or 'order ledger'}) "
+                                    "remains ACTIVE."
+                                ),
+                                source_a=n_item.source_org or "Clinical Note",
+                                source_b=m_item.source_org or "Structured Medication Ledger",
+                                resource_uuids=uuids,
+                                bracket_citations=_resolve_brackets_for_uuids(uuids, mappings),
+                                recommended_action=(
+                                    f"Verify whether {m_item.display} should be placed on hold or discontinued "
+                                    "in the structured order list per the clinical note."
+                                ),
+                            )
                         )
-                    )
 
     # Free-text clinical note continues a medication that is marked STOPPED with no active order
     active_ings = {
@@ -348,7 +362,12 @@ def run_medication_reconciliation_skill(
     }
     for n_item in note_items:
         for raw_clause in re.split(r"[.;|\n]+", n_item.text or ""):
+            if conditional_clause_re.search(raw_clause):
+                continue
             for match in cont_re.finditer(raw_clause):
+                prefix = raw_clause[: match.start()]
+                if negation_prefix_re.search(prefix):
+                    continue
                 full_phrase = stop_split_re.split(match.group(0).lower())[0]
                 for ing_k, m_item in latest_stopped_by_ing.items():
                     ing_parts = [

@@ -1157,6 +1157,9 @@ class ClinicalEntityGraph:
                     if conditional_clause_re.search(raw_clause):
                         continue
                     for m_cont in cont_note_re.finditer(raw_clause):
+                        prefix = raw_clause[: m_cont.start()]
+                        if negation_prefix_re.search(prefix):
+                            continue
                         full_phrase = stop_split_re.split(m_cont.group(0).lower())[0]
                         if any(re.search(rf"\b{re.escape(tok)}\b", full_phrase) for tok in st_tokens):
                             matched_cont = True
@@ -1778,21 +1781,63 @@ def _build_question_conditioned_clinical_and_privacy_directives(
     patient_name_tokens = {
         tok for tok in re.findall(r"[a-z]{3,}", (graph.patient_name or "").lower())
     }
-    non_person_capitalized_pairs = {
-        "chronic kidney", "heart failure", "blood pressure", "diabetes mellitus",
-        "clinical note", "discharge summary", "medical center", "general hospital",
-        "community health", "emergency department", "intensive care", "united states",
-        "social work", "privacy office", "health information", "physical restraint",
+    non_person_tokens = {
+        "chronic", "acute", "kidney", "renal", "heart", "cardiac", "failure", "blood", "pressure",
+        "diabetes", "mellitus", "clinical", "note", "notes", "discharge", "summary", "medical",
+        "center", "general", "hospital", "community", "health", "emergency", "department",
+        "intensive", "care", "united", "states", "social", "work", "privacy", "office",
+        "information", "physical", "restraint", "major", "depressive", "depression", "disorder",
+        "disorders", "disease", "syndrome", "stage", "coronary", "artery", "atrial", "fibrillation",
+        "factor", "leiden", "agatson", "score", "panel", "vitamin", "bipolar", "anxiety", "post",
+        "traumatic", "stress", "substance", "alcohol", "abuse", "dependence", "carcinoma", "cancer",
+        "tumor", "hypertension", "hyperlipidemia", "hypothyroidism", "hyperthyroidism", "asthma",
+        "copd", "anemia", "neuropathy", "retinopathy", "sleep", "apnea", "obstructive", "pulmonary",
+        "hepatic", "metabolic", "thyroid", "lipid", "hemoglobin", "potassium", "sodium", "creatinine",
+        "glucose", "medication", "medications", "history", "active", "problem", "list", "allergies",
+        "allergy", "immunizations", "procedures", "diagnostic", "report", "primary", "urgent",
+        "clinic", "outpatient", "inpatient", "advance", "directive", "intimate", "partner",
+        "domestic", "violence", "criminal", "record", "records", "chart", "patient", "doctor",
     }
-    candidate_named_persons = [
-        m.group(1).lower()
-        for m in re.finditer(r"\b([A-Z][a-z]{2,}\s+[A-Z][a-z]{2,})\b", question or "")
-        if m.group(1).lower() not in non_person_capitalized_pairs
-        and not any(tok in patient_name_tokens for tok in m.group(1).lower().split())
-    ]
-    if any(c in q_low for c in ("another patient", "other patient", "someone else's record", "all patients")) or (
-        ("record" in q_low or "chart" in q_low) and bool(candidate_named_persons)
-    ):
+    candidate_named_persons = []
+    for m in re.finditer(r"\b([A-Z][a-z]{2,}\s+[A-Z][a-z]{2,})\b", question or ""):
+        cand = m.group(1).lower()
+        cand_tokens = cand.split()
+        if any(tok in patient_name_tokens or tok in non_person_tokens for tok in cand_tokens):
+            continue
+        cand_esc = re.escape(cand)
+        cross_patient_name_pattern = re.compile(
+            rf"(?:\b{cand_esc}(?:'s|\s+s)\s+(?:chart|records?|files?|labs?|results?|medications?|meds|history|notes?|diagnoses|visits?|appointments?|info|information|data)\b"
+            rf"|\b(?:chart|records?|files?|labs?|results?|medications?|meds|history|notes?|info|information|data)\s+(?:for|of|on|belonging\s+to)\s+{cand_esc}\b"
+            rf"|\b(?:other\s+patient|another\s+patient|patient|husband|wife|spouse|partner|mother|father|mom|dad|son|daughter|child|sister|brother|sibling|friend|neighbor|coworker|colleague)\s+{cand_esc}\b"
+            rf"|\b(?:pull\s+up|look\s+up|access|open|show(?:\s+me)?|check|view|get|fetch)\s+{cand_esc}(?:'s|\s+(?:chart|records?|files?|labs?|results?|medications?|meds|history|notes?))\b)",
+            re.IGNORECASE,
+        )
+        if cross_patient_name_pattern.search(q_low):
+            candidate_named_persons.append(cand)
+    if any(
+        c in q_low
+        for c in (
+            "another patient",
+            "other patient",
+            "someone else's record",
+            "someone else's chart",
+            "all patients",
+            "my husband's chart",
+            "my husband's record",
+            "my wife's chart",
+            "my wife's record",
+            "my spouse's chart",
+            "my spouse's record",
+            "my partner's chart",
+            "my partner's record",
+            "my mother's chart",
+            "my mother's record",
+            "my father's chart",
+            "my father's record",
+            "my child's chart",
+            "my child's record",
+        )
+    ) or bool(candidate_named_persons):
         directives.append(
             "- [KB wahs-kb-cross-patient-boundary-01 | HIPAA Single-Patient Access Boundary] "
             "Cross-Patient Refusal: Refuse strictly. State that you can only access and discuss the currently signed-in "
