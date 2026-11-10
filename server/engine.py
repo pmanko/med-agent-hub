@@ -561,12 +561,15 @@ def _replace_chart_message(
     ]
     if chart:
         at = 1 if out and out[0].get("role") == "system" else 0
+        rec_msg = stages.records_message(chart, gathered)
+        rec_content = rec_msg["content"]
+        turn_chart = getattr(rec_content, "turn_chart", "")
+        full_content = rec_content + ("\n\n" + requester if requester else "")
         out.insert(
             at,
             {
                 "role": "user",
-                "content": stages.records_message(chart, gathered)["content"]
-                + ("\n\n" + requester if requester else ""),
+                "content": stages._with_turn_chart_attr(full_content, turn_chart),
             },
         )
     return out
@@ -638,6 +641,9 @@ async def _count_answer_input(
     return await counter.count(target_model, rendered)
 
 
+_MULTI_TURN_HEADROOM_TOKENS = 1536
+
+
 async def _select_answer_context(
     request: ExecutionRequest,
     state: _State,
@@ -649,14 +655,40 @@ async def _select_answer_context(
             source="llama-router",
         )
     selector = request.context_selector or select_context
-    state.view = await selector(
-        state.ledger,
-        question=stages._latest_user_text(state.messages),
-        model=request.profile.models["answer"],
-        budget=state.context_budget,
-        counter=state.token_counter,
-        input_measure=lambda chart: _count_answer_input(request, state, chart),
-    )
+    selection_budget = state.context_budget
+    if (
+        len(state.gathered) >= 16000
+        and state.context_budget.context_window >= 16384
+        and request.context_selector is None
+    ):
+        selection_budget = ContextBudget(
+            context_window=state.context_budget.context_window
+            - _MULTI_TURN_HEADROOM_TOKENS,
+            reserved_output_tokens=state.context_budget.reserved_output_tokens,
+        )
+    try:
+        view = await selector(
+            state.ledger,
+            question=stages._latest_user_text(state.messages),
+            model=request.profile.models["answer"],
+            budget=selection_budget,
+            counter=state.token_counter,
+            input_measure=lambda chart: _count_answer_input(request, state, chart),
+        )
+    except InsufficientContextError:
+        if selection_budget == state.context_budget:
+            raise
+        view = await selector(
+            state.ledger,
+            question=stages._latest_user_text(state.messages),
+            model=request.profile.models["answer"],
+            budget=state.context_budget,
+            counter=state.token_counter,
+            input_measure=lambda chart: _count_answer_input(request, state, chart),
+        )
+    if selection_budget != state.context_budget:
+        view = dataclasses.replace(view, input_limit=state.context_budget.input_limit)
+    state.view = view
     state.chart = state.view.render()
     state.messages = _replace_chart_message(state.messages, state.chart, requester_line(request.context), state.gathered)
 

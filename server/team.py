@@ -2970,19 +2970,154 @@ _LEDGER_NOTE = (
     "evidence ledger (patient records and KnowledgeReference records)."
 )
 
+_PREFIX_CHART_LINE_RE = re.compile(r"^\[(\d+)\]\s*(.*)$")
+_PREFIX_DATE_RE = re.compile(r"^\((\d{4}-\d{2}-\d{2})\)\s*")
+_NON_PATIENT_RECORD_RE = re.compile(
+    r"^(?:KnowledgeReference\b|Drug reference\b|Safety finding\b|Active drug order:)",
+    re.I,
+)
+_INVARIANT_PATIENT_RECORD_RE = re.compile(
+    r"^(?:Allergy|AllergyIntolerance)\s*:",
+    re.I,
+)
+_TURN_RECORDS_HEADER = (
+    "Question-specific records for this turn (same [N] numbering as the patient chart above):\n"
+)
+
+
+class _PrefixContent(str):
+    """String carrying deferred turn-specific records so msg[0] stays patient-invariant."""
+
+    turn_chart: str = ""
+
+
+def _with_turn_chart_attr(content: str, turn_chart: str) -> str:
+    if not turn_chart:
+        return str(content)
+    wrapped = _PrefixContent(content)
+    wrapped.turn_chart = turn_chart
+    return wrapped
+
+
+def _extract_turn_chart(messages: Sequence[Mapping[str, Any]]) -> str:
+    for message in messages:
+        content = message.get("content")
+        turn_chart = getattr(content, "turn_chart", "")
+        if turn_chart:
+            return turn_chart
+    return ""
+
+
+def with_turn_records(instruction: str, turn_chart: str) -> str:
+    """Prepend question-specific records to the trailing stage instruction so msg[0] stays invariant."""
+    if not turn_chart or turn_chart in instruction:
+        return instruction
+    return _TURN_RECORDS_HEADER + turn_chart.rstrip("\n") + "\n\n" + instruction
+
+
+def split_chart_for_prefix(chart: str, gathered: str = "") -> Tuple[str, str]:
+    """Partition rendered chart lines into (patient_invariant_prefix_chart, turn_specific_chart).
+
+    When ``gathered`` (chart-wide temporal facts) leads ``msg[0]``, keeping ``msg[0]`` strictly
+    patient-invariant lets the inference engine reuse the prompt prefix KV cache across questions
+    and multi-turn conversations on the same patient. Question-triggered supplemental records
+    (``KnowledgeReference``, ``DrugReference``) and question-selected subsets of larger patient
+    charts are deferred to the trailing turn instruction message (``msg[-1]``) with their
+    canonical ``[N]`` indices preserved.
+    """
+    if not gathered or not chart:
+        return chart, ""
+    preamble_lines: List[str] = []
+    entries: List[Tuple[int, str, bool, bool]] = []
+    current_index: Optional[int] = None
+    current_lines: List[str] = []
+    current_supp = False
+    current_inv = False
+
+    def flush() -> None:
+        if current_index is not None and current_lines:
+            entries.append(
+                (current_index, "\n".join(current_lines), current_supp, current_inv)
+            )
+
+    for raw_line in chart.splitlines():
+        match = _PREFIX_CHART_LINE_RE.match(raw_line.strip())
+        if match:
+            flush()
+            current_index = int(match.group(1))
+            current_lines = [raw_line]
+            body = _PREFIX_DATE_RE.sub("", match.group(2)).lstrip()
+            current_supp = bool(_NON_PATIENT_RECORD_RE.match(body))
+            current_inv = (not current_supp) and bool(
+                _INVARIANT_PATIENT_RECORD_RE.match(body)
+            )
+        elif current_index is None:
+            if raw_line.strip() != CHART_MARKER:
+                preamble_lines.append(raw_line)
+        else:
+            current_lines.append(raw_line)
+    flush()
+
+    if not entries:
+        return chart, ""
+
+    patient_entries = [e for e in entries if not e[2]]
+    supp_entries = [e for e in entries if e[2]]
+    patient_indices = [e[0] for e in patient_entries]
+    is_contiguous_from_one = patient_indices == list(
+        range(1, len(patient_entries) + 1)
+    )
+    has_invariant_patient = any(e[3] for e in patient_entries)
+    if len(patient_entries) < 2 and not has_invariant_patient:
+        return chart, ""
+    needs_patient_split = (
+        len(patient_entries) > 8
+        or (not is_contiguous_from_one and has_invariant_patient)
+        or (bool(patient_indices) and max(patient_indices) > 32)
+    )
+
+    if not needs_patient_split and not supp_entries:
+        return chart, ""
+
+    if needs_patient_split:
+        prefix_entries = [e for e in patient_entries if e[3]]
+        prefix_indices = {e[0] for e in prefix_entries}
+        turn_entries = [e for e in entries if e[0] not in prefix_indices]
+    else:
+        prefix_entries = patient_entries
+        turn_entries = supp_entries
+
+    if not turn_entries:
+        return chart, ""
+
+    preamble = "\n".join(preamble_lines)
+    if preamble:
+        preamble += "\n"
+    prefix_body = "\n".join(e[1] for e in prefix_entries)
+    if prefix_body:
+        prefix_body += "\n"
+    prefix_chart = preamble + prefix_body
+    turn_chart = "\n".join(e[1] for e in turn_entries) + "\n"
+    return prefix_chart, turn_chart
+
 
 def records_message(chart: str, gathered: str = "") -> Dict[str, Any]:
     """The context message every stage sends first, so the router reads it once.
 
     Gathered evidence (the chart-wide temporal facts, then any team notes) comes before
-    the question-specific records, so later answers on the same chart can reuse it too.
+    the patient-invariant records, while question-specific records are carried in the
+    trailing stage instruction so later answers on the same chart reuse the prefix.
     """
-    return {
-        "role": "user",
-        "content": (gathered + "\n\n" if gathered else "")
+    prefix_chart, turn_chart = split_chart_for_prefix(chart, gathered)
+    content = (
+        (gathered + "\n\n" if gathered else "")
         + CHART_MARKER
         + "\n"
-        + (chart or "(none)"),
+        + (prefix_chart or "(none)")
+    )
+    return {
+        "role": "user",
+        "content": _with_turn_chart_attr(content, turn_chart),
     }
 
 
@@ -2992,13 +3127,16 @@ def with_gathered(
     base_messages: List[Dict[str, Any]],
     header: str = "",
 ) -> str:
-    """Append gathered evidence only when the context message does not already carry it."""
+    """Append gathered evidence only when the context message does not already carry it,
+    and prepend any question-specific records deferred from the shared prefix message."""
+    turn_chart = _extract_turn_chart(base_messages)
+    out = with_turn_records(instruction, turn_chart)
     if not gathered or any(
         isinstance(message.get("content"), str) and gathered in message["content"]
         for message in base_messages
     ):
-        return instruction
-    return instruction + "\n\n" + header + gathered
+        return out
+    return out + "\n\n" + header + gathered
 
 
 def _answer_validation_messages(
@@ -3027,7 +3165,12 @@ def _answer_validation_messages(
             "do not report them as errors.\n"
             + "\n".join(f"- {check['claim']} ({check['reason']})" for check in verified)
         )
-    return [records_message(chart, gathered), {"role": "user", "content": audit_user}]
+    rec_msg = records_message(chart, gathered)
+    turn_chart = getattr(rec_msg["content"], "turn_chart", "")
+    return [
+        rec_msg,
+        {"role": "user", "content": with_turn_records(audit_user, turn_chart)},
+    ]
 
 
 async def _validate_indepth_verdict(
@@ -3174,7 +3317,12 @@ def _indepth_validation_messages(
         + "\n\n=== IN-DEPTH CLAIMS (numbered; return the numbers to FLAG) ===\n"
         + numbered
     )
-    return [records_message(chart, gathered), {"role": "user", "content": audit_user}]
+    rec_msg = records_message(chart, gathered)
+    turn_chart = getattr(rec_msg["content"], "turn_chart", "")
+    return [
+        rec_msg,
+        {"role": "user", "content": with_turn_records(audit_user, turn_chart)},
+    ]
 
 
 def _comparable(text: str) -> str:
