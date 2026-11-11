@@ -24,10 +24,12 @@ import sqlite3
 import threading
 from typing import Any, Dict, List, Optional, Sequence
 
+from wahs_core import WAHS_CORPUS_PATH as _DEFAULT_WAHS_CORPUS_PATH
+
 logger = logging.getLogger(__name__)
 
 _CORPUS_PATH = os.path.join(os.path.dirname(__file__), "kb_data", "corpus.jsonl")
-_WAHS_CORPUS_PATH = os.path.join(os.path.dirname(__file__), "kb_data", "wahs_corpus.jsonl")
+_WAHS_CORPUS_PATH = _DEFAULT_WAHS_CORPUS_PATH
 _DEFAULT_K = 3
 _TERM = re.compile(r"[A-Za-z0-9]+")
 

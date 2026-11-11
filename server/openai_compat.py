@@ -606,7 +606,7 @@ async def _execute_wahs_chat_completion(
         profile.policies.get("include_hub_enrichment", profile.policies.get("include_kb_findings", True))
     ) and hub_enrich_hdr not in {"0", "false", "off", "no"}
     if enable_hub_enrichment and user_messages:
-        enrichment_res = build_wahs_hub_enrichment_block(req.messages, max_tokens=800)
+        enrichment_res = build_wahs_hub_enrichment_block(req.messages)
         enrichment_meta = enrichment_res.to_metadata_dict()
         for idx in range(len(user_messages) - 1, -1, -1):
             if str(user_messages[idx].get("role") or "").lower() == "user":

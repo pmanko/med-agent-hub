@@ -5,7 +5,7 @@ FROM python:3.11-slim AS builder
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc g++ build-essential \
+    gcc g++ build-essential git \
     && rm -rf /var/lib/apt/lists/*
 
 ENV POETRY_VERSION=1.8.3 \
