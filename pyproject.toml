@@ -17,6 +17,7 @@ httpx = "^0.28.1"
 python-dotenv = "^1.0.1"
 PyYAML = "^6.0"
 rfc8785 = "^0.1.4"
+wahs-engine = { git = "https://github.com/pmanko/wahs-engine.git", rev = "3f1ce6b756fd68dc987340cf23ce6ee7e3fb9af7" }
 
 [tool.poetry.group.dev.dependencies]
 black = "^23.0.0"
