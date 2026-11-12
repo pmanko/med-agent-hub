@@ -157,15 +157,35 @@ def _models_url(base_url: str) -> str:
     return f"{clean}/models" if clean.endswith("/v1") else f"{clean}/v1/models"
 
 
+def _cfg_effective_base_url(cfg: Any) -> str:
+    val = getattr(cfg, "effective_base_url", None)
+    if val:
+        return str(val)
+    return str(getattr(cfg, "base_url", "http://localhost:8077"))
+
+
+def _cfg_effective_api_key(cfg: Any) -> str:
+    val = getattr(cfg, "effective_api_key", None)
+    if val is not None:
+        return str(val)
+    return str(getattr(cfg, "api_key", "") or "")
+
+
+def _cfg_is_openrouter(cfg: Any) -> bool:
+    if hasattr(cfg, "is_openrouter"):
+        return bool(cfg.is_openrouter)
+    return str(getattr(cfg, "provider", "") or "").strip().lower() == "openrouter"
+
+
 def _served_backend_model_metadata() -> Optional[Dict[str, Dict[str, Any]]]:
     """Return the router catalog's per-model metadata, or ``None`` when discovery itself fails."""
     headers = {}
-    api_key = llm_config.effective_api_key
+    api_key = _cfg_effective_api_key(llm_config)
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     try:
         response = httpx.get(
-            _models_url(llm_config.effective_base_url),
+            _models_url(_cfg_effective_base_url(llm_config)),
             headers=headers,
             timeout=ROUTER_PROBE_TIMEOUT_SECONDS,
         )
@@ -192,7 +212,7 @@ def _served_backend_models() -> Optional[set[str]]:
 
 
 def _backend_discovery_metadata() -> Dict[str, str]:
-    endpoint = _public_url(str(llm_config.effective_base_url).rstrip("/"))
+    endpoint = _public_url(str(_cfg_effective_base_url(llm_config)).rstrip("/"))
     return {
         "provider": str(getattr(llm_config, "provider", "openai-compatible")),
         "endpoint": endpoint,
@@ -207,7 +227,15 @@ def list_models(
 ) -> Dict[str, Any]:
     created = int(time.time())
     is_wahs = isinstance(workflow, str) and workflow.strip().lower() == "wahs"
-    if not is_wahs and llm_config.is_openrouter:
+    is_openrouter = _cfg_is_openrouter(llm_config)
+    provider_name = str(getattr(llm_config, "provider", "openai-compatible"))
+    model_map_raw = str(getattr(llm_config, "model_map_raw", "") or "")
+    openrouter_api_key = str(getattr(llm_config, "openrouter_api_key", "") or "")
+    openrouter_base_url = str(
+        getattr(llm_config, "openrouter_base_url", "https://openrouter.ai/api/v1")
+    )
+
+    if not is_wahs and is_openrouter:
         backend_models = None
     else:
         backend_models = _served_backend_model_metadata()
@@ -220,7 +248,7 @@ def list_models(
             x_openrouter_key.strip() if isinstance(x_openrouter_key, str) else ""
         )
         openrouter_configured = bool(
-            header_key or (llm_config.openrouter_api_key or "").strip()
+            header_key or openrouter_api_key.strip()
         )
         wahs_profiles = [get_wahs_profile(pid) for pid in wahs_profile_ids()]
         wahs_data = []
@@ -250,22 +278,22 @@ def list_models(
                 "catalog_reachable": backend_reachable,
                 "advertised_model_ids": sorted(advertised),
                 "openrouter_configured": openrouter_configured,
-                "openrouter_base_url": _public_url(llm_config.openrouter_base_url),
+                "openrouter_base_url": _public_url(openrouter_base_url),
             },
         }
 
     profiles = [get_profile(profile_id) for profile_id in profile_ids()]
     readiness = []
-    if llm_config.is_openrouter:
-        openrouter_configured = bool(llm_config.effective_api_key)
+    if is_openrouter:
+        openrouter_configured = bool(_cfg_effective_api_key(llm_config))
         backend_reachable = openrouter_configured
         advertised = set()
         for profile in profiles:
             resolved_models = {
                 resolve_backend_model(
                     model,
-                    provider=llm_config.provider,
-                    model_map_raw=llm_config.model_map_raw,
+                    provider=provider_name,
+                    model_map_raw=model_map_raw,
                 )
                 for model in profile.models.values()
             }
@@ -282,8 +310,8 @@ def list_models(
                 for model in sorted(set(profile.models.values()))
                 if resolve_backend_model(
                     model,
-                    provider=llm_config.provider,
-                    model_map_raw=llm_config.model_map_raw,
+                    provider=provider_name,
+                    model_map_raw=model_map_raw,
                 )
                 not in advertised
             ]
@@ -330,8 +358,8 @@ def list_models(
                     or (backend_models or {}).get(
                         resolve_backend_model(
                             model,
-                            provider=llm_config.provider,
-                            model_map_raw=llm_config.model_map_raw,
+                            provider=provider_name,
+                            model_map_raw=model_map_raw,
                         )
                     )
                     for model in sorted(set(profile.models.values()))
