@@ -48,10 +48,23 @@ def _model_dir() -> Optional[Path]:
 
 def _manifest_path() -> Optional[Path]:
     raw = (os.environ.get("LLAMA_MODELS_MANIFEST") or "").strip()
-    if not raw:
+    if raw:
+        path = Path(raw).expanduser()
+        return path if path.is_file() else None
+    if _model_dir() is None:
         return None
-    path = Path(raw).expanduser()
-    return path if path.is_file() else None
+    bundled = Path(__file__).resolve().with_name("llama-router.models.tsv")
+    return bundled if bundled.is_file() else None
+
+
+def parse_preload_models(raw: str) -> list[str]:
+    """Parse a comma/whitespace-separated list of model aliases for warmup."""
+    seen: list[str] = []
+    for part in str(raw or "").replace("\n", ",").split(","):
+        alias = part.strip()
+        if alias and alias not in seen:
+            seen.append(alias)
+    return seen
 
 
 def load_pinned_manifest() -> Dict[str, PinnedModelRecord]:

@@ -23,9 +23,10 @@ from typing import (
 
 import httpx
 
-from . import kb
+from . import kb, model_provisioner
 from .chart_serializer import render_chart
 from .config import llm_config, querystore_config
+from .levels_loader import resolve_backend_model
 from .patient_ledger_cache import PatientLedgerCache, default_patient_ledger_cache
 from .querystore_client import ContextSliceFetch, InconsistentSnapshotError, QueryStoreClient
 from .ranked_candidates import resolve_ranked_hits_with_retry
@@ -963,10 +964,17 @@ class RouterTokenCounter:
         raise AssertionError("unreachable")
 
     async def count(self, model: str, text: str) -> int:
+        if not llm_config.is_remote_openai:
+            await model_provisioner.ensure_local_model_provisioned(model)
+        backend_model = resolve_backend_model(
+            model,
+            provider=llm_config.provider,
+            model_map_raw=llm_config.model_map_raw,
+        )
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
-        payload = {"model": model, "content": text, "add_special": False}
+        payload = {"model": backend_model, "content": text, "add_special": False}
         try:
             response = await self._post_token_request(
                 self._http_client(),
@@ -1002,6 +1010,13 @@ class RouterTokenCounter:
         """
         if not texts:
             return ()
+        if not llm_config.is_remote_openai:
+            await model_provisioner.ensure_local_model_provisioned(model)
+        backend_model = resolve_backend_model(
+            model,
+            provider=llm_config.provider,
+            model_map_raw=llm_config.model_map_raw,
+        )
         separator = "\n\x1eMAH-CONTEXT-RECORD-BOUNDARY\x1e\n"
         suffix = 0
         while any(separator in text for text in texts):
@@ -1027,7 +1042,7 @@ class RouterTokenCounter:
                 self._http_client(),
                 f"{self.base_url}/tokenize",
                 json={
-                    "model": model,
+                    "model": backend_model,
                     "content": content,
                     "add_special": False,
                     "parse_special": False,
@@ -1086,12 +1101,19 @@ class RouterTokenCounter:
         router builds expose the equivalent two-step operation: apply the model's
         chat template, then tokenize that rendered prompt.
         """
+        if not llm_config.is_remote_openai:
+            await model_provisioner.ensure_local_model_provisioned(model)
+        backend_model = resolve_backend_model(
+            model,
+            provider=llm_config.provider,
+            model_map_raw=llm_config.model_map_raw,
+        )
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
         body = dict(payload)
-        body["model"] = model
-        count_key = self._chat_count_key(model, body)
+        body["model"] = backend_model
+        count_key = self._chat_count_key(backend_model, body)
         cached = self._chat_counts.get(count_key)
         if cached is not None:
             self._chat_cache_hits += 1
@@ -1139,7 +1161,7 @@ class RouterTokenCounter:
                 client,
                 f"{self.base_url}/tokenize",
                 json={
-                    "model": model,
+                    "model": backend_model,
                     "content": prompt,
                     "add_special": False,
                     "parse_special": True,
@@ -1157,6 +1179,77 @@ class RouterTokenCounter:
                 f"Exact chat-template token count unavailable for model {model!r}: {exc}",
                 source="llama-router",
             ) from exc
+
+
+class LocalDeterministicTokenCounter:
+    """Offline deterministic token counter for remote OpenAI/OpenRouter endpoints.
+
+    Uses conservative UTF-8 subword chunking (splitting long tokens every 4 bytes)
+    so context selection and prompt-budget enforcement stay deterministic even when
+    the upstream endpoint does not expose llama.cpp's ``/tokenize`` API.
+    """
+
+    _CHUNK_RE = re.compile(r"\s+|\w+|[^\w\s]", re.UNICODE)
+
+    def __init__(self) -> None:
+        self._chat_counts_performed = 0
+
+    @classmethod
+    def _estimate_tokens(cls, text: str) -> int:
+        if not text:
+            return 0
+        count = 0
+        for piece in cls._CHUNK_RE.findall(text):
+            utf8_len = len(piece.encode("utf-8"))
+            count += max(1, (utf8_len + 3) // 4)
+        return count
+
+    async def aclose(self) -> None:
+        return None
+
+    def stats(self) -> Mapping[str, Any]:
+        return {
+            "http_requests": 0,
+            "chat_counts_performed": self._chat_counts_performed,
+            "chat_cache_hits": 0,
+            "chat_count_mode": "local_deterministic",
+            "cached_prompt_counts": 0,
+        }
+
+    async def count(self, model: str, text: str) -> int:
+        del model
+        return self._estimate_tokens(text)
+
+    async def count_records(self, model: str, texts: Sequence[str]) -> Tuple[int, ...]:
+        del model
+        return tuple(self._estimate_tokens(text) for text in texts)
+
+    async def count_chat(self, model: str, payload: Mapping[str, Any]) -> int:
+        del model
+        self._chat_counts_performed += 1
+        total = 4
+        for message in payload.get("messages") or ():
+            total += 6
+            if isinstance(message, Mapping):
+                content = message.get("content")
+                if isinstance(content, str):
+                    total += self._estimate_tokens(content)
+                elif content is not None:
+                    total += self._estimate_tokens(json.dumps(content, ensure_ascii=False))
+                if message.get("tool_calls"):
+                    total += self._estimate_tokens(
+                        json.dumps(message.get("tool_calls"), ensure_ascii=False)
+                    )
+        if payload.get("tools"):
+            total += self._estimate_tokens(json.dumps(payload.get("tools"), ensure_ascii=False))
+        return total
+
+
+def default_token_counter() -> TokenCounter:
+    """Return the configured TokenCounter for runtime profile execution."""
+    if llm_config.use_local_tokenizer:
+        return LocalDeterministicTokenCounter()
+    return RouterTokenCounter()
 
 
 def _inline_chart(messages: Sequence[Mapping[str, Any]]) -> str:

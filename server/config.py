@@ -24,11 +24,45 @@ class LLMConfig:
         "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"
     )
     openrouter_api_key: str = os.getenv("OPENROUTER_API_KEY", "")
+    tokenizer_mode: str = os.getenv("LLM_TOKENIZER_MODE", "router")
+    model_map_raw: str = os.getenv("LLM_MODEL_MAP", "")
+    hub_api_key: str = os.getenv("HUB_API_KEY", "")
     temperature: float = float(os.getenv("LLM_TEMPERATURE", "0.2"))
     max_tokens: int = int(os.getenv("LLM_MAX_TOKENS", "2000"))
     request_timeout_seconds: float = float(
         os.getenv("LLM_REQUEST_TIMEOUT_SECONDS", "600")
     )
+
+    @property
+    def is_openrouter(self) -> bool:
+        return (self.provider or "").strip().lower() == "openrouter"
+
+    @property
+    def is_remote_openai(self) -> bool:
+        return (self.provider or "").strip().lower() in {
+            "openrouter",
+            "openai",
+            "remote",
+        }
+
+    @property
+    def effective_base_url(self) -> str:
+        return self.openrouter_base_url if self.is_openrouter else self.base_url
+
+    @property
+    def effective_api_key(self) -> str:
+        if self.is_openrouter:
+            return (self.openrouter_api_key or self.api_key or "").strip()
+        return (self.api_key or "").strip()
+
+    @property
+    def use_local_tokenizer(self) -> bool:
+        mode = (self.tokenizer_mode or "router").strip().lower()
+        if mode == "local":
+            return True
+        if mode == "auto":
+            return self.is_remote_openai
+        return self.is_openrouter
 
 
 @dataclass(frozen=True)
@@ -81,7 +115,20 @@ def resolve_hub_build_revision() -> str:
 
 
 def validate_config() -> None:
-    if not llm_config.base_url:
+    if (llm_config.tokenizer_mode or "router").strip().lower() not in {
+        "router",
+        "local",
+        "auto",
+    }:
+        raise ValueError(
+            "LLM_TOKENIZER_MODE must be one of 'router', 'local', or 'auto'."
+        )
+    if llm_config.is_openrouter:
+        if not (llm_config.openrouter_base_url or "").strip():
+            raise ValueError(
+                "OPENROUTER_BASE_URL must identify the OpenRouter API endpoint."
+            )
+    elif not llm_config.base_url:
         raise ValueError(
             "LLM_BASE_URL must identify the OpenAI-compatible model router."
         )

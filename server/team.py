@@ -33,6 +33,7 @@ from .context_sources import (
     ContextSourceError,
     InsufficientContextError,
 )
+from .levels_loader import resolve_backend_model
 from .prompt_loader import load_prompt
 
 logger = logging.getLogger(__name__)
@@ -1591,22 +1592,62 @@ def reset_chat_budget(token: Token) -> None:
     _CHAT_BUDGET.reset(token)
 
 
-async def _chat(
-    client: httpx.AsyncClient,
+def _resolve_chat_target(model: str) -> Tuple[str, str, Dict[str, str], bool]:
+    """Resolve URL, mapped model id, HTTP headers, and whether backend is remote OpenAI."""
+    base = llm_config.effective_base_url.rstrip("/")
+    url = f"{base}/chat/completions" if base.endswith("/v1") else f"{base}/v1/chat/completions"
+    upstream_model = resolve_backend_model(
+        model,
+        provider=llm_config.provider,
+        model_map_raw=llm_config.model_map_raw,
+    )
+    headers: Dict[str, str] = {"Content-Type": "application/json"}
+    api_key = llm_config.effective_api_key
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    if llm_config.is_openrouter:
+        headers["X-Title"] = "OpenClinAI Med-Agent Hub"
+    return url, upstream_model, headers, llm_config.is_remote_openai
+
+
+def _without_json_schema_payload(payload: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+    """Build a fallback payload when OpenRouter rejects ``response_format: json_schema``."""
+    fmt = payload.get("response_format")
+    if not isinstance(fmt, Mapping) or fmt.get("type") != "json_schema":
+        return None
+    schema_obj = (fmt.get("json_schema") or {}).get("schema")
+    retry_payload = dict(payload)
+    retry_payload.pop("response_format", None)
+    schema_note = (
+        "\n\nReturn ONLY a single raw JSON object (no markdown fences) matching this JSON schema:\n"
+        + json.dumps(schema_obj, ensure_ascii=False)
+        if schema_obj is not None
+        else "\n\nReturn ONLY a single raw JSON object (no markdown fences)."
+    )
+    messages = [dict(m) for m in (payload.get("messages") or [])]
+    if messages and str(messages[0].get("role") or "") == "system":
+        messages[0]["content"] = str(messages[0].get("content") or "") + schema_note
+    else:
+        messages.insert(0, {"role": "system", "content": schema_note.strip()})
+    retry_payload["messages"] = messages
+    return retry_payload
+
+
+async def _prepare_chat_payload(
     model: str,
+    upstream_model: str,
     messages: List[Dict[str, Any]],
     *,
+    is_remote: bool,
     tools: Optional[List[Dict[str, Any]]] = None,
     response_format: Optional[Dict[str, Any]] = None,
     temperature: Optional[float] = None,
     max_tokens: Optional[int] = None,
     repeat_penalty: Optional[float] = None,
     dry_multiplier: Optional[float] = None,
-    request_timeout: float | None | object = _REQUEST_TIMEOUT_UNSET,
 ) -> Dict[str, Any]:
-    """One OpenAI-compatible backend call. Returns the first choice's message."""
     payload: Dict[str, Any] = {
-        "model": model,
+        "model": upstream_model,
         "messages": messages,
         "temperature": temperature
         if temperature is not None
@@ -1619,10 +1660,11 @@ async def _chat(
         payload["tool_choice"] = "auto"
     if response_format is not None:
         payload["response_format"] = response_format
-    if repeat_penalty is not None:
-        payload["repeat_penalty"] = repeat_penalty
-    if dry_multiplier is not None:
-        payload["dry_multiplier"] = dry_multiplier
+    if not is_remote:
+        if repeat_penalty is not None:
+            payload["repeat_penalty"] = repeat_penalty
+        if dry_multiplier is not None:
+            payload["dry_multiplier"] = dry_multiplier
 
     budget = _CHAT_BUDGET.get()
     if budget is not None:
@@ -1656,15 +1698,40 @@ async def _chat(
                 f"{budget.context_window}-token context window.",
                 required_ids=(),
             )
+    return payload
 
-    headers = {"Content-Type": "application/json"}
-    if llm_config.api_key:
-        headers["Authorization"] = f"Bearer {llm_config.api_key}"
 
-    url = f"{llm_config.base_url.rstrip('/')}/v1/chat/completions"
-    logger.info(
-        "team _chat: model=%s tools=%s response_format=%s",
+async def _chat(
+    client: httpx.AsyncClient,
+    model: str,
+    messages: List[Dict[str, Any]],
+    *,
+    tools: Optional[List[Dict[str, Any]]] = None,
+    response_format: Optional[Dict[str, Any]] = None,
+    temperature: Optional[float] = None,
+    max_tokens: Optional[int] = None,
+    repeat_penalty: Optional[float] = None,
+    dry_multiplier: Optional[float] = None,
+    request_timeout: float | None | object = _REQUEST_TIMEOUT_UNSET,
+) -> Dict[str, Any]:
+    """One OpenAI-compatible backend call. Returns the first choice's message."""
+    url, upstream_model, headers, is_remote = _resolve_chat_target(model)
+    payload = await _prepare_chat_payload(
         model,
+        upstream_model,
+        messages,
+        is_remote=is_remote,
+        tools=tools,
+        response_format=response_format,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        repeat_penalty=repeat_penalty,
+        dry_multiplier=dry_multiplier,
+    )
+    logger.info(
+        "team _chat: model=%s upstream=%s tools=%s response_format=%s",
+        model,
+        upstream_model,
         bool(tools),
         bool(response_format),
     )
@@ -1676,7 +1743,8 @@ async def _chat(
     if slot_evidence is not None:
         slot_evidence.acquired()
     try:
-        await model_provisioner.ensure_local_model_provisioned(model)
+        if not is_remote:
+            await model_provisioner.ensure_local_model_provisioned(upstream_model)
         router_timeout = (
             llm_config.request_timeout_seconds
             if request_timeout is _REQUEST_TIMEOUT_UNSET
@@ -1688,6 +1756,20 @@ async def _chat(
             headers=headers,
             timeout=router_timeout,
         )
+        if resp.status_code == 400 and llm_config.is_openrouter:
+            retry_payload = _without_json_schema_payload(payload)
+            if retry_payload is not None:
+                logger.warning(
+                    "openrouter rejected json_schema for %s (%s); retrying without response_format",
+                    upstream_model,
+                    resp.text[:200],
+                )
+                resp = await client.post(
+                    url,
+                    json=retry_payload,
+                    headers=headers,
+                    timeout=router_timeout,
+                )
     finally:
         _ROUTER_LOCK.release()
         if slot_evidence is not None:
@@ -1698,7 +1780,7 @@ async def _chat(
         logger.error(
             "router %s for model=%s tools=%s response_format=%s: %s",
             resp.status_code,
-            model,
+            upstream_model,
             bool(tools),
             bool(response_format),
             resp.text[:800],
@@ -1844,64 +1926,24 @@ async def _stream_chat_chunks(
     request_timeout: float | None | object = _REQUEST_TIMEOUT_UNSET,
 ) -> AsyncIterator[str]:
     """Stream content chunks from an OpenAI-compatible chat completion endpoint."""
-    payload: Dict[str, Any] = {
-        "model": model,
-        "messages": messages,
-        "temperature": temperature
-        if temperature is not None
-        else llm_config.temperature,
-    }
-    if max_tokens is not None:
-        payload["max_tokens"] = max_tokens
-    if response_format is not None:
-        payload["response_format"] = response_format
-    if repeat_penalty is not None:
-        payload["repeat_penalty"] = repeat_penalty
-    if dry_multiplier is not None:
-        payload["dry_multiplier"] = dry_multiplier
-
-    budget = _CHAT_BUDGET.get()
-    if budget is not None:
-        requested_output = (
-            max_tokens
-            if isinstance(max_tokens, int) and max_tokens > 0
-            else budget.reserved_output_tokens
-        )
-        output_tokens = min(requested_output, budget.reserved_output_tokens)
-        payload["max_tokens"] = output_tokens
-        count_chat = getattr(budget.counter, "count_chat", None)
-        if not callable(count_chat):
-            raise ContextSourceError(
-                "tokenization_unavailable",
-                "The product profile requires an exact chat-template token counter.",
-                source="llama-router",
-            )
-        input_tokens = await count_chat(model, payload)
-        budget.measurements.append(
-            {
-                "model": model,
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-                "context_window": budget.context_window,
-            }
-        )
-        if input_tokens + output_tokens > budget.context_window:
-            raise InsufficientContextError(
-                f"The exact {model!r} request requires {input_tokens} input plus "
-                f"{output_tokens} output tokens, exceeding its "
-                f"{budget.context_window}-token context window.",
-                required_ids=(),
-            )
-
-    payload["stream"] = True
-    headers = {"Content-Type": "application/json"}
-    if llm_config.api_key:
-        headers["Authorization"] = f"Bearer {llm_config.api_key}"
-
-    url = f"{llm_config.base_url.rstrip('/')}/v1/chat/completions"
-    logger.info(
-        "team _stream_chat_chunks: model=%s response_format=%s",
+    url, upstream_model, headers, is_remote = _resolve_chat_target(model)
+    payload = await _prepare_chat_payload(
         model,
+        upstream_model,
+        messages,
+        is_remote=is_remote,
+        response_format=response_format,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        repeat_penalty=repeat_penalty,
+        dry_multiplier=dry_multiplier,
+    )
+    payload["stream"] = True
+
+    logger.info(
+        "team _stream_chat_chunks: model=%s upstream=%s response_format=%s",
+        model,
+        upstream_model,
         bool(response_format),
     )
     slot_evidence = _ROUTER_SLOT_EVIDENCE.get()
@@ -1909,77 +1951,99 @@ async def _stream_chat_chunks(
     if slot_evidence is not None:
         slot_evidence.acquired()
     try:
+        if not is_remote:
+            await model_provisioner.ensure_local_model_provisioned(upstream_model)
         router_timeout = (
             llm_config.request_timeout_seconds
             if request_timeout is _REQUEST_TIMEOUT_UNSET
             else request_timeout
         )
-        async with client.stream(
-            "POST",
-            url,
-            json=payload,
-            headers=headers,
-            timeout=router_timeout,
-        ) as resp:
-            if resp.status_code >= 400:
-                body_bytes = await resp.aread()
-                logger.error(
-                    "router %s for model=%s stream=True response_format=%s: %s",
-                    resp.status_code,
-                    model,
-                    bool(response_format),
-                    body_bytes.decode("utf-8", errors="replace")[:800],
-                )
-                resp.raise_for_status()
-            saw_nonempty_content = False
-            reasoning_pieces: List[str] = []
-            async for line in resp.aiter_lines():
-                stripped = line.strip()
-                if not stripped or not stripped.startswith("data:"):
-                    continue
-                data = stripped[5:].strip()
-                if not data or data == "[DONE]":
-                    continue
-                try:
-                    chunk_obj = json.loads(data)
-                except ValueError:
-                    continue
-                if not isinstance(chunk_obj, Mapping):
-                    continue
-                choices = chunk_obj.get("choices") or []
-                if not choices or not isinstance(choices[0], Mapping):
-                    continue
-                delta = choices[0].get("delta") or {}
-                msg = choices[0].get("message") or {}
-                piece = (
-                    (delta.get("content") if isinstance(delta, Mapping) else None)
-                    or (msg.get("content") if isinstance(msg, Mapping) else None)
-                    or ""
-                )
-                reasoning_piece = (
-                    (
-                        delta.get("reasoning_content")
-                        if isinstance(delta, Mapping)
-                        else None
+        active_payload: Dict[str, Any] = payload
+        fallback_attempted = False
+        while True:
+            async with client.stream(
+                "POST",
+                url,
+                json=active_payload,
+                headers=headers,
+                timeout=router_timeout,
+            ) as resp:
+                if resp.status_code >= 400:
+                    body_bytes = await resp.aread()
+                    if (
+                        resp.status_code == 400
+                        and llm_config.is_openrouter
+                        and not fallback_attempted
+                    ):
+                        retry_payload = _without_json_schema_payload(active_payload)
+                        if retry_payload is not None:
+                            fallback_attempted = True
+                            retry_payload["stream"] = True
+                            active_payload = retry_payload
+                            logger.warning(
+                                "openrouter rejected json_schema stream for %s (%s); retrying without response_format",
+                                upstream_model,
+                                body_bytes.decode("utf-8", errors="replace")[:200],
+                            )
+                            continue
+                    logger.error(
+                        "router %s for model=%s stream=True response_format=%s: %s",
+                        resp.status_code,
+                        upstream_model,
+                        bool(response_format),
+                        body_bytes.decode("utf-8", errors="replace")[:800],
                     )
-                    or (
-                        msg.get("reasoning_content")
-                        if isinstance(msg, Mapping)
-                        else None
+                    resp.raise_for_status()
+                saw_nonempty_content = False
+                reasoning_pieces: List[str] = []
+                async for line in resp.aiter_lines():
+                    stripped = line.strip()
+                    if not stripped or not stripped.startswith("data:"):
+                        continue
+                    data = stripped[5:].strip()
+                    if not data or data == "[DONE]":
+                        continue
+                    try:
+                        chunk_obj = json.loads(data)
+                    except ValueError:
+                        continue
+                    if not isinstance(chunk_obj, Mapping):
+                        continue
+                    choices = chunk_obj.get("choices") or []
+                    if not choices or not isinstance(choices[0], Mapping):
+                        continue
+                    delta = choices[0].get("delta") or {}
+                    msg = choices[0].get("message") or {}
+                    piece = (
+                        (delta.get("content") if isinstance(delta, Mapping) else None)
+                        or (msg.get("content") if isinstance(msg, Mapping) else None)
+                        or ""
                     )
-                    or ""
-                )
-                if piece:
-                    piece_str = str(piece)
-                    if piece_str.strip():
-                        saw_nonempty_content = True
-                    yield piece_str
-                if reasoning_piece:
-                    reasoning_pieces.append(str(reasoning_piece))
-            if not saw_nonempty_content and reasoning_pieces:
-                for r_piece in reasoning_pieces:
-                    if r_piece:
-                        yield r_piece
+                    reasoning_piece = (
+                        (
+                            delta.get("reasoning_content")
+                            if isinstance(delta, Mapping)
+                            else None
+                        )
+                        or (
+                            msg.get("reasoning_content")
+                            if isinstance(msg, Mapping)
+                            else None
+                        )
+                        or ""
+                    )
+                    if piece:
+                        piece_str = str(piece)
+                        if piece_str.strip():
+                            saw_nonempty_content = True
+                        yield piece_str
+                    if reasoning_piece:
+                        reasoning_pieces.append(str(reasoning_piece))
+                if not saw_nonempty_content and reasoning_pieces:
+                    for r_piece in reasoning_pieces:
+                        if r_piece:
+                            yield r_piece
+                break
     finally:
         _ROUTER_LOCK.release()
         if slot_evidence is not None:
