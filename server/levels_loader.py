@@ -347,11 +347,52 @@ def resolve_wahs_model_context_spec(model_id: str, fallback_window: int = 0) -> 
     return (131072, fallback_window or 24576)
 
 
+def parse_model_map(raw: str) -> Dict[str, str]:
+    """Parse ``LLM_MODEL_MAP`` as a JSON object or comma-separated ``src=dst`` pairs."""
+    text = str(raw or "").strip()
+    if not text:
+        return {}
+    if text.startswith("{"):
+        parsed = json.loads(text)
+        if not isinstance(parsed, Mapping):
+            raise ValueError("LLM_MODEL_MAP JSON must be an object mapping model ids")
+        return {
+            str(k).strip(): str(v).strip()
+            for k, v in parsed.items()
+            if str(k).strip() and str(v).strip()
+        }
+    mapping: Dict[str, str] = {}
+    for item in text.split(","):
+        part = item.strip()
+        if not part or "=" not in part:
+            continue
+        key, value = part.split("=", 1)
+        if key.strip() and value.strip():
+            mapping[key.strip()] = value.strip()
+    return mapping
+
+
 def resolve_openrouter_model(model_id: str) -> str:
     clean = str(model_id or "").strip()
     if "/" in clean:
         return clean
     return OPENROUTER_MODEL_MAP.get(clean, clean)
+
+
+def resolve_backend_model(
+    model_id: str,
+    *,
+    provider: str = "",
+    model_map_raw: str = "",
+) -> str:
+    """Resolve a profile model alias to the configured upstream backend model id."""
+    clean = str(model_id or "").strip()
+    explicit = parse_model_map(model_map_raw)
+    if clean in explicit:
+        return explicit[clean]
+    if (provider or "").strip().lower() == "openrouter":
+        return resolve_openrouter_model(clean)
+    return clean
 
 
 def _infer_model_family(model_id: str) -> str:

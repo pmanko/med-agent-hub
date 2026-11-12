@@ -42,5 +42,6 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health', timeout=3).read()"]
 
 # A numeric unprivileged identity needs no /etc/passwd mutation or runtime package install.
+RUN mkdir -p /app/models /app/trace && chown -R 65532:65532 /app/models /app/trace
 USER 65532:65532
 CMD ["python", "-m", "uvicorn", "server.main:app", "--host", "0.0.0.0", "--port", "8080"]

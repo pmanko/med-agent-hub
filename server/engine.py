@@ -33,6 +33,7 @@ from .config import (
     ORCHESTRATOR_DRY_MULTIPLIER,
     SYNTH_DRY_MULTIPLIER,
     SYNTH_REPEAT_PENALTY,
+    llm_config,
 )
 from .context_sources import (
     ContextBudget,
@@ -45,6 +46,7 @@ from .context_sources import (
     HistoryView,
     IncludedRecord,
     InsufficientContextError,
+    LocalDeterministicTokenCounter,
     RouterTokenCounter,
     SourceRegistry,
     TokenCounter,
@@ -1091,7 +1093,7 @@ async def _prepare_context(request: ExecutionRequest, state: _State) -> None:
         # StageEngine installs one request-scoped counter before context preparation.
         # Reusing it lets the final dispatch consume the exact count already measured
         # for the identical prompt instead of tokenizing that prompt again.
-        counter = state.token_counter or request.token_counter or RouterTokenCounter()
+        counter = state.token_counter or request.token_counter or _default_token_counter()
         budget = ContextBudget(
             context_window=request.profile.context_window,
             reserved_output_tokens=request.profile.reserved_output_tokens,
@@ -3175,13 +3177,19 @@ async def _execute_stages(
             yield "result", fallback
 
 
+def _default_token_counter() -> TokenCounter:
+    if llm_config.use_local_tokenizer:
+        return LocalDeterministicTokenCounter()
+    return RouterTokenCounter()
+
+
 def _chat_budget_policy(
     request: ExecutionRequest,
 ) -> Optional[stages.ChatBudgetPolicy]:
     if not request.profile.exact_tokenizer:
         return None
     return stages.ChatBudgetPolicy(
-        counter=request.token_counter or RouterTokenCounter(),
+        counter=request.token_counter or _default_token_counter(),
         context_window=request.profile.context_window,
         reserved_output_tokens=request.profile.reserved_output_tokens,
     )
@@ -3235,7 +3243,10 @@ class StageEngine:
                 if (
                     request.token_counter is None
                     and budget_policy is not None
-                    and isinstance(budget_policy.counter, RouterTokenCounter)
+                    and isinstance(
+                        budget_policy.counter,
+                        (RouterTokenCounter, LocalDeterministicTokenCounter),
+                    )
                 ):
                     await budget_policy.counter.aclose()
 
