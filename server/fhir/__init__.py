@@ -1,75 +1,71 @@
-"""FHIR R4 / US Core / IPS chart condensation and ContextSource subpackage."""
+"""FHIR R4 / US Core / IPS chart condensation and ContextSource subpackage.
+
+Canonical deterministic condensation, terminology normalization, clinical entity graph,
+and WAHS knowledge-base packs live in `wahs_core` (`pmanko/wahs-engine`) and are re-exported
+here alongside `med-agent-hub`'s `FhirBundleContextSource` and `ResilientTokenCounter`.
+"""
 
 from __future__ import annotations
 
-from .clinical_graph import (
+from wahs_core import (
+    ChartFinding,
     ClinicalEdge,
     ClinicalEntityGraph,
-    ClinicalNode,
-    HubEnrichmentResult,
-    build_wahs_hub_enrichment_block,
-    parse_omitted_clinical_items,
-)
-from .condenser import (
-    CondensedChartResult,
-    build_tier_items,
-    condense_bundle_to_budget,
-    estimate_tokens_local,
-    items_to_querystore_records,
-)
-from .extractors import (
     ClinicalItem,
+    ClinicalNode,
+    CondensedChartResult,
     ExtractedChart,
+    HubEnrichmentResult,
     NumericPoint,
+    analyze_data_quality_and_conflicts,
+    analyze_duplicates_and_bloat,
+    analyze_patterns_and_summaries,
+    annotate_immunization_anomalies,
+    answer_wahs_question,
+    audit_cohort_code_coverage,
+    build_fhir_browser_index,
+    build_patient_skills_and_condensation_matrix,
+    build_tier_items,
+    build_wahs_hub_enrichment_block,
+    classify_sensitivity,
+    classify_vaccine_group,
+    condense_bundle_to_budget,
+    detect_condition_conflicts,
+    detect_medication_conflicts,
+    estimate_tokens_local,
     extract_bundle,
     extract_bundle_lossless,
-)
-from .fhir_browser import build_fhir_browser_index
-from .kb_lookup import (
-    audit_cohort_code_coverage,
     extract_chart_kb_codes,
     get_acip_rules,
     get_clinical_exclusivity_and_privacy,
+    get_lab_history,
     get_rxnorm_lookup,
+    is_clinic_room_equipment,
+    items_to_querystore_records,
+    normalize_drug_ingredient,
+    parse_omitted_clinical_items,
+    read_clinical_note,
     resolve_condition_code,
     resolve_immunization_code,
     resolve_lab_code,
     resolve_medication_code,
-)
-from .normalizers import (
-    annotate_immunization_anomalies,
-    classify_sensitivity,
-    classify_vaccine_group,
-    detect_condition_conflicts,
-    detect_medication_conflicts,
-    is_clinic_room_equipment,
-    normalize_drug_ingredient,
-)
-try:
-    from .source import FhirBundleContextSource, ResilientTokenCounter
-except ModuleNotFoundError:  # pragma: no cover - optional when running offline stdlib-only scripts
-    FhirBundleContextSource = None  # type: ignore[assignment,misc]
-    ResilientTokenCounter = None  # type: ignore[assignment,misc]
-from .wahs_analyzer import (
-    analyze_data_quality_and_conflicts,
-    analyze_duplicates_and_bloat,
-    analyze_patterns_and_summaries,
-    answer_wahs_question,
-)
-from .wahs_patient_workspace import build_patient_skills_and_condensation_matrix
-from .wahs_skills import (
-    ChartFinding,
     run_acip_immunization_skill,
     run_chart_hygiene_and_reconciliation_skills,
     run_condition_stage_reconciliation_skill,
     run_duplicate_and_redundancy_skill,
     run_medication_reconciliation_skill,
-)
-from .wahs_tools import (
-    get_lab_history,
-    read_clinical_note,
     search_chart_entries,
 )
+
+from .hub_catalog_bridge import ensure_hub_catalog_registered
+
+ensure_hub_catalog_registered()
+
+try:
+    from .source import FhirBundleContextSource, ResilientTokenCounter
+except ModuleNotFoundError:  # pragma: no cover - optional when running offline stdlib-only scripts
+    FhirBundleContextSource = None  # type: ignore[assignment,misc]
+    ResilientTokenCounter = None  # type: ignore[assignment,misc]
 
 __all__ = [
     "ChartFinding",

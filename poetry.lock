@@ -971,6 +971,30 @@ docs = ["Sphinx (>=4.1.2,<4.2.0)", "sphinx_rtd_theme (>=0.5.2,<0.6.0)", "sphinxc
 test = ["aiohttp (>=3.10.5)", "flake8 (>=6.1,<7.0)", "mypy (>=0.800)", "psutil", "pyOpenSSL (>=25.3.0,<25.4.0)", "pycodestyle (>=2.11.0,<2.12.0)"]
 
 [[package]]
+name = "wahs-engine"
+version = "0.1.0"
+description = "Standalone OpenAI-compatible clinical FHIR R4 condensation, provenance & fhir-auth middleware for Washington Health Summary (WAHS)"
+optional = false
+python-versions = ">=3.10"
+files = []
+develop = false
+
+[package.dependencies]
+fastapi = ">=0.115.0,<1.0.0"
+httpx = ">=0.27.0,<1.0.0"
+pydantic = ">=2.0.0,<3.0.0"
+uvicorn = ">=0.30.0,<1.0.0"
+
+[package.extras]
+dev = ["pytest (>=8.0.0)", "pytest-asyncio (>=0.23.0)"]
+
+[package.source]
+type = "git"
+url = "https://github.com/pmanko/wahs-engine.git"
+reference = "3f1ce6b756fd68dc987340cf23ce6ee7e3fb9af7"
+resolved_reference = "3f1ce6b756fd68dc987340cf23ce6ee7e3fb9af7"
+
+[[package]]
 name = "watchfiles"
 version = "1.2.0"
 description = "Simple, modern and high performance file watching and code reload in python."
@@ -1210,4 +1234,4 @@ files = [
 [metadata]
 lock-version = "2.0"
 python-versions = ">=3.10,<3.14"
-content-hash = "28280aabc7429ef64ce492468d406ce7566ae6233589d807e26269a345eb65b2"
+content-hash = "5ccf73203effcd1710e3af62d270a135dfe535a8ec7849700783d2ac18086b56"

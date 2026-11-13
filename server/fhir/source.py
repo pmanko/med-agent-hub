@@ -15,7 +15,7 @@ from ..context_sources import (
     RouterTokenCounter,
     _is_mandatory_safety_record,
 )
-from .condenser import CondensedChartResult, condense_bundle_to_budget, estimate_tokens_local
+from wahs_core import CondensedChartResult, condense_bundle_to_budget, estimate_tokens_local
 
 
 class ResilientTokenCounter:
