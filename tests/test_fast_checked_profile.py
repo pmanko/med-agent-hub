@@ -5,7 +5,7 @@ from dataclasses import replace
 import pytest
 
 import server.team as team
-from server.levels_loader import compile_profile, get_profile
+from server.levels_loader import compile_execution_spec, compile_profile
 from tests.factories import make_profile
 from tests.test_staged_stream import _collect, _stub_common
 
@@ -13,19 +13,18 @@ ANSWER_CHECKS = ("answer", "gate", "resolve_refs", "review", "final_resolve_refs
 
 
 def test_the_fast_checked_profile_keeps_every_answer_check_and_drops_only_in_depth():
-    checked = get_profile("single-12b-checked")
-    fast = get_profile("single-12b-fast")
+    checked = compile_execution_spec("gemma-4-12b", {"mode": "verified"})
+    fast = compile_execution_spec("gemma-4-12b", {"mode": "verified", "indepth": False})
 
     assert all(stage in fast.stages for stage in ANSWER_CHECKS)
     assert [s for s in checked.stages if s not in ("indepth", "indepth_gate")] == list(fast.stages)
     assert {role: fast.models[role] for role in fast.models} == {
         role: checked.models[role] for role in ("answer", "review", "grounding")
     }
-    assert not checked.default and not fast.default
 
 
 def test_in_depth_without_its_gate_is_rejected():
-    fast = get_profile("single-12b-fast")
+    fast = compile_execution_spec("gemma-4-12b", {"mode": "fast_checked"})
 
     with pytest.raises(ValueError, match="indepth"):
         compile_profile(replace(fast, stages=fast.stages + ("indepth",)))
@@ -63,12 +62,11 @@ def test_a_profile_without_in_depth_streams_no_pending_in_depth(monkeypatch, rev
 
 
 def test_the_answer_profile_is_a_product_profile_without_review_or_in_depth():
-    checked = get_profile("single-12b-checked")
-    answer = get_profile("single-12b-answer")
+    checked = compile_execution_spec("gemma-4-12b", {"mode": "verified"})
+    answer = compile_execution_spec("gemma-4-12b", {"mode": "quick"})
 
     assert answer.visibility == "product" and answer.output_mode == "product"
     assert list(answer.stages) == [
         "context", "answer", "gate", "resolve_refs", "final_resolve_refs"
     ]
     assert answer.models == {"answer": checked.models["answer"]}
-    assert not answer.default

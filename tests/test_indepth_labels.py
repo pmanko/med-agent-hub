@@ -209,7 +209,9 @@ def test_stream_displays_missing_fact_and_source_number_in_indepth_answer(monkey
             }
         ],
     )
-    profile = get_profile("single-12b-checked")
+    from server.levels_loader import compile_execution_spec
+
+    profile = compile_execution_spec("gemma-4-12b", {"mode": "verified"})
     profile = replace(
         profile,
         stages=tuple(stage for stage in profile.stages if stage != "review"),

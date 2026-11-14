@@ -2,8 +2,7 @@
 
 import asyncio
 
-from server import engine
-from server.levels_loader import get_profile
+from server import engine, levels_loader
 from tests.factories import patient_source_registry
 
 ACCOUNT = {
@@ -36,7 +35,7 @@ def _prepared(context):
     registry = patient_source_registry("[1] (2026-01-25) Weight: 71 kg\n", mappings)
     state = engine._State(messages=[{"role": "user", "content": "What is the latest weight?"}])
     request = engine.ExecutionRequest(
-        profile=get_profile("single-12b-checked"),
+        profile=levels_loader.compile_execution_spec("gemma-4-12b", {"mode": "verified"}),
         messages=state.messages,
         patient="patient-1",
         context=context,

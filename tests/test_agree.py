@@ -229,9 +229,11 @@ def test_an_unavailable_agreement_check_marks_answer_validation_unavailable(monk
 def test_agree_stage_requires_second_model_and_valid_stage_order():
     from dataclasses import replace
     import pytest
-    from server.levels_loader import compile_profile, get_profile, profile_metadata
+    from server.levels_loader import compile_execution_spec, compile_profile, profile_metadata
 
-    profile = get_profile("single-12b-agree")
+    profile = compile_execution_spec(
+        "gemma-4-12b", {"mode": "agree", "second_model": "qwen3.6-35b"}
+    )
     metadata = profile_metadata(profile, available=True)
     assert "second" in metadata["role_models"]
     assert "second" in metadata["role_prompt_digests"]

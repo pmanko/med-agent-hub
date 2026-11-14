@@ -12,7 +12,9 @@ from server.levels_loader import (
     catalyst_query_profile_evidence,
     catalyst_query_profile_ids,
     catalyst_query_profile_metadata,
+    compile_execution_spec,
     compile_profile,
+    execution_modes_metadata,
     get_catalyst_query_profile,
     get_profile,
     profile_ids,
@@ -25,34 +27,25 @@ from server.prompt_loader import load_prompt
 
 
 def test_configured_catalog_contains_only_current_product_eval_and_debug_profiles():
-    assert set(profile_ids()) == {
-        "single-e2b-checked",
-        "single-e4b-checked",
-        "single-12b-checked",
-        "single-12b-fast",
-        "single-12b-answer",
-        "single-31b-xcheck",
-        "single-12b-bare",
-        "single-12b-verify",
-        "single-12b-agree",
-        "single-a4b-checked",
-        "team-med-checked",
-        "debug-team-high-checked",
-        "eval-e4b-answer-only",
-        "eval-e4b-temporal-enforce",
-        "eval-12b-answer-only",
-        "eval-12b-temporal-enforce",
+    assert profile_ids() == []
+    assert {mode["id"] for mode in execution_modes_metadata()} == {
+        "quick",
+        "fast_checked",
+        "standard",
+        "verified",
+        "agree",
+        "team",
+        "bare_eval",
     }
+    with pytest.raises(ModelNotFoundError):
+        get_profile("single-12b-checked")
 
 
 def test_default_product_profile_is_human_readable_single_12b():
-    """Owner, 28 October 2026: the default is the bare profile, deterministic checks only, from
-    the judged runs D3 and D4 (no model check moved a score; bare is the fastest Hub arm)."""
-    profile = get_profile("single-12b-bare")
+    profile = compile_execution_spec("gemma-4-12b", {"mode": "standard", "preset_id": "standard"})
 
-    assert profile.label == "Answer with the chart checks only (12B)"
+    assert profile.id == "standard"
     assert profile.workflow == "clinical_answer"
-    assert profile.default is True
     assert profile.topology == "single"
     assert "orchestrator" not in profile.models
     assert set(profile.models.values()) == {"gemma-4-12b"}
@@ -69,10 +62,17 @@ def test_default_product_profile_is_human_readable_single_12b():
 
 
 def test_experimental_e2b_profile_changes_only_the_fast_answer_writer():
-    profile = get_profile("single-e2b-checked")
+    base = compile_execution_spec("gemma-e4b", {"mode": "verified"})
+    profile = compile_execution_spec(
+        "gemma-e2b",
+        {
+            "mode": "verified",
+            "verifier_model": "gemma-e4b",
+            "grounding_model": "gemma-e4b",
+            "indepth_model": "gemma-e4b",
+        },
+    )
 
-    assert profile.label == "Experimental fast answer (E2B, E4B check)"
-    assert profile.default is False
     assert profile.topology == "single"
     assert "orchestrator" not in profile.models
     assert profile.models == {
@@ -81,8 +81,8 @@ def test_experimental_e2b_profile_changes_only_the_fast_answer_writer():
         "grounding": "gemma-e4b",
         "indepth": "gemma-e4b",
     }
-    assert profile.stages == get_profile("single-e4b-checked").stages
-    assert profile.policies == get_profile("single-e4b-checked").policies
+    assert profile.stages == base.stages
+    assert profile.policies == base.policies
     assert profile.context_window == 24576
     assert profile.reserved_output_tokens == 4096
     assert profile.exact_tokenizer is True
@@ -91,7 +91,7 @@ def test_experimental_e2b_profile_changes_only_the_fast_answer_writer():
 
 
 def test_product_profiles_temporal_cannot_weaken_enforce():
-    profile = get_profile("single-e4b-checked")
+    profile = compile_execution_spec("gemma-e4b", {"mode": "verified"})
 
     assert profile.context_window > profile.reserved_output_tokens > 0
     assert profile.exact_tokenizer is True
@@ -103,18 +103,20 @@ def test_product_profiles_temporal_cannot_weaken_enforce():
 
 
 @pytest.mark.parametrize(
-    ("profile_id", "model", "temporal_gate"),
+    ("model", "temporal_gate"),
     [
-        ("eval-e4b-answer-only", "gemma-e4b", "off"),
-        ("eval-e4b-temporal-enforce", "gemma-e4b", "enforce"),
-        ("eval-12b-answer-only", "gemma-4-12b", "off"),
-        ("eval-12b-temporal-enforce", "gemma-4-12b", "enforce"),
+        ("gemma-e4b", "off"),
+        ("gemma-e4b", "enforce"),
+        ("gemma-4-12b", "off"),
+        ("gemma-4-12b", "enforce"),
     ],
 )
 def test_answer_path_evaluation_profiles_have_matched_exact_context(
-    profile_id: str, model: str, temporal_gate: str
+    model: str, temporal_gate: str
 ):
-    profile = get_profile(profile_id)
+    profile = compile_execution_spec(
+        model, {"mode": "bare_eval", "checks": {"temporal": temporal_gate}}
+    )
 
     assert profile.visibility == "evaluation"
     assert profile.default is False
@@ -134,7 +136,7 @@ def test_answer_path_evaluation_profiles_have_matched_exact_context(
 
 
 def test_non_advertised_product_envelope_temporal_cannot_weaken_enforce():
-    profile = get_profile("debug-team-high-checked")
+    profile = replace(compile_execution_spec("gemma-31b", {"mode": "team"}), visibility="debug")
 
     assert profile.visibility != "product"
     assert profile.output_mode == "product"
@@ -144,7 +146,7 @@ def test_non_advertised_product_envelope_temporal_cannot_weaken_enforce():
 
 
 def test_product_envelope_requires_exact_budget_even_when_not_advertised():
-    profile = get_profile("single-e4b-checked")
+    profile = compile_execution_spec("gemma-e4b", {"mode": "verified"})
     experimental = replace(
         profile,
         visibility="experimental",
@@ -173,7 +175,7 @@ def test_low_level_answer_leg_remains_minimal_and_experimental():
 
 
 def test_invalid_answer_contract_is_rejected_at_compile_time():
-    profile = get_profile("eval-e4b-answer-only")
+    profile = compile_execution_spec("gemma-e4b", {"mode": "bare_eval"})
     bad = replace(profile, policies={**profile.policies, "answer_contract": "typo"})
 
     with pytest.raises(ValueError, match="invalid answer contract"):
@@ -181,7 +183,7 @@ def test_invalid_answer_contract_is_rejected_at_compile_time():
 
 
 def test_invalid_grounding_order_is_rejected_at_compile_time():
-    profile = get_profile("single-e4b-checked")
+    profile = compile_execution_spec("gemma-e4b", {"mode": "verified"})
     bad = replace(
         profile,
         stages=(
@@ -203,7 +205,7 @@ def test_invalid_grounding_order_is_rejected_at_compile_time():
 
 
 def test_final_reference_resolution_before_review_is_rejected_at_compile_time():
-    profile = get_profile("single-e4b-checked")
+    profile = compile_execution_spec("gemma-e4b", {"mode": "verified"})
     bad = replace(
         profile,
         stages=(
@@ -225,7 +227,7 @@ def test_final_reference_resolution_before_review_is_rejected_at_compile_time():
 
 
 def test_answer_without_immediate_gate_is_rejected_at_compile_time():
-    profile = get_profile("single-e4b-checked")
+    profile = compile_execution_spec("gemma-e4b", {"mode": "verified"})
     bad = replace(
         profile,
         stages=(
@@ -255,26 +257,27 @@ def test_unknown_model_is_a_structured_error_not_backend_passthrough():
 
 
 def test_discovery_metadata_is_authoritative_and_dynamic_legs_are_not_advertised():
-    ids = profile_ids()
-    assert "single-e4b-checked" in ids
-    assert all(not model_id.startswith("answer:") for model_id in ids)
+    mode_ids = [mode["id"] for mode in execution_modes_metadata()]
+    assert "verified" in mode_ids
+    assert all(not mode_id.startswith("answer:") for mode_id in mode_ids)
 
-    metadata = profile_metadata(get_profile("single-e4b-checked"), available=True)
+    compiled = compile_execution_spec("gemma-e4b", {"mode": "verified", "preset_id": "verified-e4b"})
+    metadata = profile_metadata(compiled, available=True)
     configuration_digest = metadata.pop("profile_configuration_digest")
     prompt_digests = metadata.pop("role_prompt_digests")
     assert metadata == {
-        "id": "single-e4b-checked",
-        "label": "Fast checked answer (E4B)",
+        "id": "verified-e4b",
+        "label": "verified-e4b",
         "workflow": "clinical_answer",
         "staged": True,
         "validation": True,
         "temporal_enforcement": "enforce",
         "available": True,
         "default": False,
-        "selection_priority": 10,
+        "selection_priority": 100,
         "topology": "single",
         "visibility": "product",
-        "stages": list(get_profile("single-e4b-checked").stages),
+        "stages": list(compiled.stages),
         "required_models": ["gemma-e4b"],
         "role_models": {
             "answer": "gemma-e4b",
@@ -304,7 +307,7 @@ def test_discovery_metadata_is_authoritative_and_dynamic_legs_are_not_advertised
 
 
 def test_profile_and_prompt_digests_are_deterministic_and_separate():
-    profile = get_profile("single-e4b-checked")
+    profile = compile_execution_spec("gemma-e4b", {"mode": "verified"})
 
     first = profile_metadata(profile, available=True)
     second = profile_metadata(profile, available=False)
@@ -337,7 +340,7 @@ def test_profile_and_prompt_digests_are_deterministic_and_separate():
 
 
 def test_stage_plan_derives_discovery_capabilities_without_manual_flags():
-    profile = get_profile("single-e4b-checked")
+    profile = compile_execution_spec("gemma-e4b", {"mode": "verified"})
     metadata = profile_metadata(profile, available=True)
 
     assert metadata["staged"] is True
@@ -350,15 +353,12 @@ def test_unconsumed_legacy_staged_profiles_are_removed():
 
 
 def test_only_one_configured_profile_is_default():
-    defaults = [
-        profile_id for profile_id in profile_ids() if get_profile(profile_id).default
-    ]
-    assert defaults == ["single-12b-bare"]
+    assert profile_ids() == []
 
 
 def test_all_configured_profiles_and_prompts_validate_at_startup():
     profiles = validate_profiles()
-    assert len(profiles) == len(profile_ids())
+    assert len(profiles) == len(execution_modes_metadata()) + 1
 
 
 def test_catalyst_uses_the_same_profile_schema_with_caller_owned_orchestration():
@@ -492,7 +492,7 @@ def test_catalyst_prompt_evidence_uses_workbench_sha256_contract():
 
 
 def test_compiled_profile_configuration_is_immutable():
-    profile = get_profile("single-e4b-checked")
+    profile = compile_execution_spec("gemma-e4b", {"mode": "verified"})
     with pytest.raises(TypeError):
         profile.models["answer"] = "different"
     with pytest.raises(TypeError):
@@ -500,10 +500,15 @@ def test_compiled_profile_configuration_is_immutable():
 
 
 @pytest.mark.parametrize(
-    ("profile_id", "models", "grounding", "review_prompt", "review_temperature"),
+    ("writer", "execution", "models", "grounding", "review_prompt", "review_temperature"),
     [
         (
-            "single-12b-verify",
+            "gemma-4-12b",
+            {
+                "mode": "verified",
+                "verifier_model": "qwen3.5-9b",
+                "checks": {"grounding": "folded"},
+            },
             {
                 "answer": "gemma-4-12b",
                 "review": "qwen3.5-9b",
@@ -515,8 +520,20 @@ def test_compiled_profile_configuration_is_immutable():
             0,
         ),
         (
-            "single-31b-xcheck",
-            {"answer": "gemma-31b", "review": "qwen3.5-9b", "grounding": "qwen3.5-9b", "indepth": "gemma-31b"},
+            "gemma-31b",
+            {
+                "mode": "verified",
+                "verifier_model": "qwen3.5-9b",
+                "grounding_model": "qwen3.5-9b",
+                "checks": {"grounding": "separate"},
+                "knobs": {"review": {"temperature": 0.7}},
+            },
+            {
+                "answer": "gemma-31b",
+                "review": "qwen3.5-9b",
+                "grounding": "qwen3.5-9b",
+                "indepth": "gemma-31b",
+            },
             "separate",
             "validation-verify",
             0.7,
@@ -524,14 +541,13 @@ def test_compiled_profile_configuration_is_immutable():
     ],
 )
 def test_checked_answer_arms_change_only_their_declared_choice(
-    profile_id, models, grounding, review_prompt, review_temperature
+    writer, execution, models, grounding, review_prompt, review_temperature
 ):
-    default = get_profile("single-12b-checked")
-    arm = get_profile(profile_id)
+    default = compile_execution_spec(writer, {"mode": "verified"})
+    arm = compile_execution_spec(writer, execution)
 
     assert arm.visibility == "product"
     assert not arm.default
-    assert arm.selection_priority > default.selection_priority
     assert arm.stages == default.stages
     # The verifier arms ask verification questions; every other prompt is the default's.
     assert {role: prompt for role, prompt in arm.prompts.items() if role != "review"} == {
@@ -563,14 +579,35 @@ def test_checked_answer_arms_change_only_their_declared_choice(
 
 
 @pytest.mark.parametrize(
-    ("profile_id", "expected_model", "expected_temp"),
+    ("writer", "execution", "expected_model", "expected_temp"),
     [
-        ("single-12b-verify", "gemma-4-12b", 0.0),
-        ("single-31b-xcheck", "qwen3.5-9b", 0.7),
+        (
+            "gemma-4-12b",
+            {
+                "mode": "verified",
+                "verifier_model": "qwen3.5-9b",
+                "checks": {"grounding": "folded"},
+            },
+            "gemma-4-12b",
+            0.0,
+        ),
+        (
+            "gemma-31b",
+            {
+                "mode": "verified",
+                "verifier_model": "qwen3.5-9b",
+                "grounding_model": "qwen3.5-9b",
+                "checks": {"grounding": "separate"},
+                "knobs": {"review": {"temperature": 0.7}},
+            },
+            "qwen3.5-9b",
+            0.7,
+        ),
     ],
 )
 def test_cross_family_checked_answer_arms_pass_checker_temperature_to_grounding(
-    profile_id: str,
+    writer: str,
+    execution: dict,
     expected_model: str,
     expected_temp: float,
     monkeypatch: pytest.MonkeyPatch,
@@ -578,10 +615,10 @@ def test_cross_family_checked_answer_arms_pass_checker_temperature_to_grounding(
     import asyncio
     from server import engine, team
 
-    profile = get_profile(profile_id)
+    profile = compile_execution_spec(writer, execution)
     default_sampling = engine._sampling(
         engine.ExecutionRequest(
-            profile=get_profile("single-12b-checked"),
+            profile=compile_execution_spec("gemma-4-12b", {"mode": "verified"}),
             messages=[{"role": "user", "content": "What was the weight?"}],
         )
     )

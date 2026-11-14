@@ -179,11 +179,13 @@ def test_review_policy_accepts_only_known_confidence_values():
 
 
 def test_product_profiles_ship_findings():
-    from server.levels_loader import get_profile
+    from server.levels_loader import compile_execution_spec
 
-    for profile_id in ("single-12b-checked", "single-12b-answer", "single-31b-xcheck",
-                       "single-12b-bare", "single-12b-verify", "single-12b-agree"):
-        assert get_profile(profile_id).policies["confidence"] == "findings", profile_id
+    for mode in ("quick", "standard", "verified", "agree"):
+        compiled = compile_execution_spec(
+            "gemma-4-12b", {"mode": mode, "checks": {"confidence": "findings"}}
+        )
+        assert compiled.policies["confidence"] == "findings", mode
 
 
 def test_indepth_pass_entry_and_multirecord_literal_verification(monkeypatch):

@@ -6,17 +6,23 @@ from server import levels_loader, team
 
 
 def test_profile_ids_are_unique_and_include_supported_topologies():
-    ids = levels_loader.profile_ids()
-    assert len(ids) == len(set(ids))
-    assert {
-        "single-e2b-checked",
-        "single-e4b-checked",
-        "team-med-checked",
-    } <= set(ids)
+    assert levels_loader.profile_ids() == []
+    mode_ids = [mode["id"] for mode in levels_loader.execution_modes_metadata()]
+    assert len(mode_ids) == len(set(mode_ids))
+    assert {"quick", "standard", "verified", "team"} <= set(mode_ids)
+    assert levels_loader.catalyst_query_profile_ids()
+    assert levels_loader.wahs_profile_ids()
 
 
 def test_configured_team_profile_resolves_explicit_roles_and_stages():
-    profile = levels_loader.get_profile("team-med-checked")
+    profile = levels_loader.compile_execution_spec(
+        "qwen2.5-14b",
+        {
+            "mode": "team",
+            "orchestrator_model": "gemma-e4b-q8",
+            "verifier_model": "gemma-4-12b",
+        },
+    )
     assert profile.topology == "team"
     assert profile.models["orchestrator"] == "gemma-e4b-q8"
     assert profile.models["answer"] == "qwen2.5-14b"
@@ -86,7 +92,7 @@ def test_invalid_dynamic_options_fail_loud():
 
 
 def test_product_single_profile_has_no_fake_orchestrator_and_correct_order():
-    profile = levels_loader.get_profile("single-12b-checked")
+    profile = levels_loader.compile_execution_spec("gemma-4-12b", {"mode": "verified"})
     assert profile.topology == "single"
     assert "orchestrator" not in profile.models
     assert profile.default is False
@@ -108,7 +114,7 @@ def test_product_single_profile_has_no_fake_orchestrator_and_correct_order():
 
 def test_grounding_is_after_review_and_final_reference_resolution():
     # Required order: review -> final_resolve_refs -> ground_verdicts.
-    profile = levels_loader.get_profile("single-12b-checked")
+    profile = levels_loader.compile_execution_spec("gemma-4-12b", {"mode": "verified"})
     assert profile.stages.index("review") < profile.stages.index("final_resolve_refs")
     assert profile.stages.index("final_resolve_refs") < profile.stages.index(
         "ground_verdicts"
