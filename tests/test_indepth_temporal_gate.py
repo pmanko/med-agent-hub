@@ -533,7 +533,9 @@ def test_engine_judges_indepth_claims_without_question_while_answer_gate_uses_qu
             },
         ],
     )
-    profile = get_profile("single-12b-checked")
+    from server.levels_loader import compile_execution_spec
+
+    profile = compile_execution_spec("gemma-4-12b", {"mode": "verified"})
     profile = replace(
         profile,
         stages=tuple(stage for stage in profile.stages if stage != "review"),

@@ -1087,6 +1087,480 @@ def _freeze_mapping(value: Mapping[str, Any]) -> Mapping[str, Any]:
     return MappingProxyType({key: _freeze_value(item) for key, item in value.items()})
 
 
+def known_model_aliases(model_map_raw: str = "") -> List[str]:
+    """Return all configured backing-model aliases known to med-agent-hub."""
+    explicit = parse_model_map(model_map_raw)
+    return sorted(
+        set(OPENROUTER_MODEL_MAP)
+        | set(WAHS_MODEL_CONTEXT_SPECS)
+        | set(explicit)
+    )
+
+
+EXECUTION_MODES: Dict[str, Dict[str, Any]] = {
+    "quick": {
+        "topology": "single",
+        "stages": ("context", "answer", "gate", "resolve_refs", "final_resolve_refs"),
+        "output": "product",
+        "supports_indepth": False,
+        "default_indepth": False,
+        "visibility": "product",
+        "description": "Single-pass cited answer with deterministic temporal, citation, and safety checks.",
+    },
+    "fast_checked": {
+        "topology": "single",
+        "stages": (
+            "context",
+            "answer",
+            "gate",
+            "resolve_refs",
+            "review",
+            "gate",
+            "final_resolve_refs",
+            "ground_verdicts",
+        ),
+        "output": "product",
+        "supports_indepth": False,
+        "default_indepth": False,
+        "visibility": "product",
+        "description": "Reviewed and grounded cited answer without an In-Depth section.",
+    },
+    "standard": {
+        "topology": "single",
+        "stages": (
+            "context",
+            "answer",
+            "gate",
+            "resolve_refs",
+            "final_resolve_refs",
+            "indepth",
+            "indepth_gate",
+        ),
+        "output": "product",
+        "supports_indepth": True,
+        "default_indepth": True,
+        "visibility": "product",
+        "description": "Cited answer and In-Depth section with deterministic temporal, citation, and safety checks.",
+    },
+    "verified": {
+        "topology": "single",
+        "stages": (
+            "context",
+            "answer",
+            "gate",
+            "resolve_refs",
+            "review",
+            "gate",
+            "final_resolve_refs",
+            "ground_verdicts",
+            "indepth",
+            "indepth_gate",
+        ),
+        "output": "product",
+        "supports_indepth": True,
+        "default_indepth": True,
+        "visibility": "product",
+        "description": "Cited answer, verification review with citation grounding, and In-Depth section.",
+    },
+    "agree": {
+        "topology": "single",
+        "stages": (
+            "context",
+            "answer",
+            "gate",
+            "resolve_refs",
+            "final_resolve_refs",
+            "agree",
+            "indepth",
+            "indepth_gate",
+        ),
+        "output": "product",
+        "supports_indepth": True,
+        "default_indepth": True,
+        "visibility": "product",
+        "description": "Dual-writer agreement check across clinical statements plus In-Depth section.",
+    },
+    "team": {
+        "topology": "team",
+        "stages": (
+            "context",
+            "gather",
+            "answer",
+            "gate",
+            "resolve_refs",
+            "review",
+            "gate",
+            "final_resolve_refs",
+            "ground_verdicts",
+            "indepth",
+            "indepth_gate",
+        ),
+        "output": "product",
+        "supports_indepth": True,
+        "default_indepth": True,
+        "visibility": "product",
+        "description": "Coordinator evidence gathering paired with synthesis, verification review, and In-Depth section.",
+    },
+    "bare_eval": {
+        "topology": "single",
+        "stages": ("context", "answer", "gate"),
+        "output": "bare",
+        "supports_indepth": False,
+        "default_indepth": False,
+        "visibility": "evaluation",
+        "description": "Single-call evaluation mode emitting raw answer text without the product envelope.",
+    },
+}
+
+_EXECUTION_MODE_ALIASES: Dict[str, str] = {
+    "fast": "fast_checked",
+    "bare": "standard",
+    "checked": "verified",
+    "verify": "verified",
+    "cross_checked": "verified",
+    "eval": "bare_eval",
+}
+
+_EXECUTION_SPEC_KEYS = {
+    "mode",
+    "verifier_model",
+    "second_model",
+    "orchestrator_model",
+    "expert_model",
+    "specialist_model",
+    "grounding_model",
+    "indepth_model",
+    "indepth",
+    "checks",
+    "knobs",
+    "context_window",
+    "reserved_output_tokens",
+    "exact_tokenizer",
+    "supplemental_sources",
+    "preset_id",
+    "roles",
+}
+
+_EXECUTION_CHECK_KEYS = {
+    "temporal",
+    "grounding",
+    "confidence",
+    "drug_safety",
+    "review_action",
+    "review_prompt",
+    "answer_contract",
+}
+
+
+def _execution_required_roles(stages: Tuple[str, ...]) -> List[str]:
+    roles = ["answer"]
+    if "gather" in stages:
+        roles.extend(["orchestrator", "expert"])
+    if "review" in stages:
+        roles.append("review")
+    if "ground_verdicts" in stages:
+        roles.append("grounding")
+    if "agree" in stages:
+        roles.append("second")
+    if "indepth" in stages:
+        roles.append("indepth")
+    return roles
+
+
+def execution_modes_metadata() -> List[Dict[str, Any]]:
+    """Describe generic orthogonal execution modes supported for backing models."""
+    return [
+        {
+            "id": mode_id,
+            "topology": spec["topology"],
+            "output_mode": spec["output"],
+            "stages": list(spec["stages"]),
+            "required_roles": _execution_required_roles(spec["stages"]),
+            "supports_indepth_toggle": bool(spec["supports_indepth"]),
+            "description": spec["description"],
+        }
+        for mode_id, spec in EXECUTION_MODES.items()
+    ]
+
+
+def _verify_profile_prompts(profile: Profile) -> None:
+    roles: Dict[str, str] = {
+        str(role): str(configured)
+        for role, configured in profile.prompts.items()
+    }
+    if "second" in profile.models and "second" not in roles:
+        roles["second"] = str(profile.prompts.get("answer") or "synthesis-answer")
+    for role, prompt in sorted(roles.items()):
+        if not prompt:
+            continue
+        names = _prompt_assets(profile, role, prompt)
+        missing = [
+            name for name in names if not (_PROMPTS / f"{name}.txt").is_file()
+        ]
+        if missing:
+            raise ValueError(
+                f"profile {profile.id!r} references missing prompts {missing}"
+            )
+
+
+def _clean_role_model(value: Any, *, field_name: str, default: str) -> str:
+    if value is None:
+        return default
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"execution.{field_name} must be a non-empty string")
+    return value.strip()
+
+
+def compile_execution_spec(
+    model_id: str, execution: Optional[Mapping[str, Any]] = None
+) -> Profile:
+    """Compile an orthogonal backing-model + execution-mode specification into a ``Profile``."""
+    model = str(model_id or "").strip()
+    if not model:
+        raise ValueError("model id is required")
+    if execution is None:
+        spec: Dict[str, Any] = {}
+    elif not isinstance(execution, Mapping):
+        raise ValueError("execution must be a JSON object")
+    else:
+        spec = dict(execution)
+
+    unknown = sorted(set(spec) - _EXECUTION_SPEC_KEYS)
+    if unknown:
+        raise ValueError(f"execution has unknown keys {unknown}")
+
+    raw_mode = str(spec.get("mode") or "standard").strip().lower()
+    canonical_mode = _EXECUTION_MODE_ALIASES.get(raw_mode, raw_mode)
+    if canonical_mode not in EXECUTION_MODES:
+        raise ValueError(
+            f"unknown execution mode {raw_mode!r}; supported: {sorted(EXECUTION_MODES)}"
+        )
+    mode_def = EXECUTION_MODES[canonical_mode]
+
+    checks_raw = spec.get("checks")
+    if checks_raw is None:
+        checks: Dict[str, Any] = {}
+    elif not isinstance(checks_raw, Mapping):
+        raise ValueError("execution.checks must be a JSON object")
+    else:
+        checks = dict(checks_raw)
+    unknown_checks = sorted(set(checks) - _EXECUTION_CHECK_KEYS)
+    if unknown_checks:
+        raise ValueError(f"execution.checks has unknown keys {unknown_checks}")
+
+    if "indepth" in spec and spec["indepth"] is not None:
+        if not isinstance(spec["indepth"], bool):
+            raise ValueError("execution.indepth must be a boolean")
+        indepth_enabled = spec["indepth"]
+        if (
+            not mode_def["supports_indepth"]
+            and indepth_enabled != mode_def["default_indepth"]
+        ):
+            raise ValueError(
+                f"execution mode {canonical_mode!r} does not support indepth={indepth_enabled}"
+            )
+    else:
+        indepth_enabled = bool(mode_def["default_indepth"])
+
+    stages = tuple(
+        stage
+        for stage in mode_def["stages"]
+        if indepth_enabled or stage not in {"indepth", "indepth_gate"}
+    )
+
+    roles_raw = spec.get("roles")
+    if roles_raw is None:
+        roles_override: Dict[str, str] = {}
+    elif not isinstance(roles_raw, Mapping):
+        raise ValueError("execution.roles must be a JSON object")
+    else:
+        roles_override = {
+            str(key).strip(): _clean_role_model(
+                val, field_name=f"roles.{key}", default=""
+            )
+            for key, val in roles_raw.items()
+        }
+
+    answer_model = roles_override.get("answer") or model
+    models: Dict[str, str] = {"answer": answer_model}
+    prompts: Dict[str, str] = {"answer": "synthesis-answer"}
+
+    has_review = "review" in stages or "ground_verdicts" in stages
+    raw_grounding = checks.get("grounding")
+    if not has_review:
+        if raw_grounding is not None and str(raw_grounding).strip().lower() != "off":
+            raise ValueError(
+                f"execution mode {canonical_mode!r} does not run review/grounding; use 'verified' or 'fast_checked'"
+            )
+        grounding = "off"
+    else:
+        grounding = str(raw_grounding or "separate").strip().lower()
+
+    if "review" in stages:
+        verifier_model = _clean_role_model(
+            spec.get("verifier_model") or roles_override.get("review"),
+            field_name="verifier_model",
+            default=answer_model,
+        )
+        models["review"] = verifier_model
+        review_prompt = checks.get("review_prompt")
+        if review_prompt is not None:
+            prompts["review"] = _clean_role_model(
+                review_prompt, field_name="checks.review_prompt", default=""
+            )
+        elif (
+            grounding == "folded"
+            or raw_mode in {"verify", "cross_checked"}
+            or verifier_model != answer_model
+        ):
+            prompts["review"] = "validation-verify"
+        else:
+            prompts["review"] = "validation-label"
+
+    if "ground_verdicts" in stages:
+        models["grounding"] = _clean_role_model(
+            spec.get("grounding_model") or roles_override.get("grounding"),
+            field_name="grounding_model",
+            default=answer_model,
+        )
+
+    if "agree" in stages:
+        models["second"] = _clean_role_model(
+            spec.get("second_model") or roles_override.get("second"),
+            field_name="second_model",
+            default=answer_model,
+        )
+
+    if "gather" in stages:
+        models["orchestrator"] = _clean_role_model(
+            spec.get("orchestrator_model") or roles_override.get("orchestrator"),
+            field_name="orchestrator_model",
+            default=answer_model,
+        )
+        prompts["orchestrator"] = "orchestrator"
+        expert_override = (
+            spec.get("expert_model")
+            or spec.get("specialist_model")
+            or roles_override.get("expert")
+            or roles_override.get("specialist")
+        )
+        if expert_override is not None or canonical_mode == "team":
+            models["expert"] = _clean_role_model(
+                expert_override,
+                field_name="expert_model",
+                default=answer_model,
+            )
+            prompts["expert"] = "medical_expert"
+
+    if "indepth" in stages:
+        models["indepth"] = _clean_role_model(
+            spec.get("indepth_model") or roles_override.get("indepth"),
+            field_name="indepth_model",
+            default=answer_model,
+        )
+        prompts["indepth"] = "synthesis-indepth"
+
+    output_mode = str(mode_def["output"])
+    if output_mode == "product":
+        temporal_gate = str(checks.get("temporal") or "enforce").strip().lower()
+        confidence = str(checks.get("confidence") or "levels").strip().lower()
+        drug_safety = checks.get("drug_safety", True)
+        if not isinstance(drug_safety, bool):
+            raise ValueError("execution.checks.drug_safety must be a boolean")
+        policies: Dict[str, Any] = {
+            "output": "product",
+            "answer_contract": str(
+                checks.get("answer_contract") or "chart_answer"
+            ).strip().lower(),
+            "temporal_gate": temporal_gate,
+            "temporal_render": "full",
+            "drug_safety": drug_safety,
+            "confidence": confidence,
+        }
+        if has_review:
+            review_action = str(
+                checks.get("review_action") or "label"
+            ).strip().lower()
+            policies["review"] = {
+                "action": review_action,
+                "grounding": grounding,
+                "confidence": confidence,
+            }
+    else:
+        temporal_gate = str(checks.get("temporal") or "off").strip().lower()
+        policies = {
+            "output": output_mode,
+            "answer_contract": str(
+                checks.get("answer_contract") or "chart_answer"
+            ).strip().lower(),
+            "temporal_gate": temporal_gate,
+            "temporal_render": "full",
+        }
+        if "confidence" in checks:
+            policies["confidence"] = str(checks["confidence"]).strip().lower()
+        if "drug_safety" in checks:
+            if not isinstance(checks["drug_safety"], bool):
+                raise ValueError("execution.checks.drug_safety must be a boolean")
+            policies["drug_safety"] = checks["drug_safety"]
+
+    knobs: Dict[str, Dict[str, Any]] = {"answer": {"temperature": 0}}
+    if has_review and grounding == "folded":
+        knobs["review"] = {"temperature": 0}
+    knobs_raw = spec.get("knobs")
+    if knobs_raw is not None:
+        if not isinstance(knobs_raw, Mapping):
+            raise ValueError("execution.knobs must be a JSON object")
+        for role, role_knobs in knobs_raw.items():
+            if not isinstance(role_knobs, Mapping):
+                raise ValueError(f"execution.knobs.{role} must be a JSON object")
+            merged = dict(knobs.get(str(role), {}))
+            merged.update(dict(role_knobs))
+            knobs[str(role)] = merged
+
+    context_window = int(spec.get("context_window") or 24576)
+    reserved_output_tokens = int(spec.get("reserved_output_tokens") or 4096)
+    exact_tokenizer = bool(spec.get("exact_tokenizer", True))
+    supplemental_raw = spec.get("supplemental_sources")
+    if supplemental_raw is None:
+        supplemental_sources: Tuple[str, ...] = ("knowledge-base",)
+    elif isinstance(supplemental_raw, str):
+        supplemental_sources = (supplemental_raw,)
+    elif isinstance(supplemental_raw, (list, tuple)):
+        supplemental_sources = tuple(str(s) for s in supplemental_raw)
+    else:
+        raise ValueError("execution.supplemental_sources must be a list of strings")
+
+    preset_id = spec.get("preset_id")
+    profile_id = (
+        str(preset_id).strip()
+        if isinstance(preset_id, str) and preset_id.strip()
+        else f"{answer_model}:{canonical_mode}"
+    )
+
+    compiled = compile_profile(
+        Profile(
+            id=profile_id,
+            label=profile_id,
+            topology=str(mode_def["topology"]),
+            stages=stages,
+            models=models,
+            prompts=prompts,
+            policies=policies,
+            workflow="clinical_answer",
+            supplemental_sources=supplemental_sources,
+            knobs=knobs,
+            visibility=str(mode_def["visibility"]),
+            default=False,
+            selection_priority=100,
+            context_window=context_window,
+            reserved_output_tokens=reserved_output_tokens,
+            exact_tokenizer=exact_tokenizer,
+        )
+    )
+    _verify_profile_prompts(compiled)
+    return compiled
+
+
 def profile_ids() -> List[str]:
     raw = _load_raw()
     ids = [
@@ -1094,49 +1568,48 @@ def profile_ids() -> List[str]:
         for profile_id, spec in raw.items()
         if str((spec or {}).get("workflow") or "clinical_answer") == "clinical_answer"
     ]
-    defaults = [
-        profile_id for profile_id in ids if bool((raw[profile_id] or {}).get("default"))
-    ]
-    if len(defaults) != 1:
-        raise ValueError(
-            f"levels.yaml must define exactly one default profile; found {defaults}"
-        )
+    if ids:
+        defaults = [
+            profile_id for profile_id in ids if bool((raw[profile_id] or {}).get("default"))
+        ]
+        if len(defaults) != 1:
+            raise ValueError(
+                f"levels.yaml must define exactly one default profile; found {defaults}"
+            )
     return ids
 
 
 def validate_profiles() -> Tuple[Profile, ...]:
-    """Compile every configured profile and verify its prompt files at startup."""
-    profiles = tuple(get_profile(profile_id) for profile_id in profile_ids())
+    """Compile every configured profile and canonical execution mode and verify prompts."""
+    profiles = list(get_profile(profile_id) for profile_id in profile_ids())
+    for mode_id in EXECUTION_MODES:
+        profiles.append(compile_execution_spec("gemma-4-12b", {"mode": mode_id}))
+    profiles.append(
+        compile_execution_spec(
+            "gemma-4-12b",
+            {"mode": "verified", "checks": {"grounding": "folded"}},
+        )
+    )
     for profile in profiles:
-        for role in profile.models:
-            prompt = profile.prompts.get(role)
-            if not prompt and role == "second":
-                prompt = profile.prompts.get("answer") or "synthesis-answer"
-            if not prompt:
-                continue
-            names = [str(prompt)]
-            if role == "review":
-                names = [str(prompt) + "-answer"]
-                if "indepth" in profile.stages:
-                    names.append(str(prompt) + "-indepth")
-            missing = [
-                name for name in names if not (_PROMPTS / f"{name}.txt").is_file()
-            ]
-            if missing:
-                raise ValueError(
-                    f"profile {profile.id!r} references missing prompts {missing}"
-                )
-    return profiles
+        _verify_profile_prompts(profile)
+    return tuple(profiles)
 
 
 def get_profile(profile_id: str) -> Profile:
     dynamic = _dynamic_profile(profile_id)
     if dynamic is not None:
         return dynamic
-    raw = _load_raw()
-    if profile_id not in profile_ids():
-        raise ModelNotFoundError(profile_id, profile_ids())
-    return _from_spec(profile_id, raw[profile_id] or {})
+    configured_ids = profile_ids()
+    if profile_id in configured_ids:
+        raw = _load_raw()
+        return _from_spec(profile_id, raw[profile_id] or {})
+    if ":" in profile_id:
+        base_model, _, suffix = profile_id.rpartition(":")
+        mode_key = suffix.strip().lower()
+        canonical_mode = _EXECUTION_MODE_ALIASES.get(mode_key, mode_key)
+        if base_model.strip() and canonical_mode in EXECUTION_MODES:
+            return compile_execution_spec(base_model.strip(), {"mode": mode_key})
+    raise ModelNotFoundError(profile_id, configured_ids)
 
 
 def resolve_temporal_policy(

@@ -23,13 +23,16 @@ from .context_sources import ContextSourceError
 from .engine import ExecutionRequest, drain_profile, execute_profile
 from .fhir.clinical_graph import build_wahs_hub_enrichment_block
 from .levels_loader import (
+    OPENROUTER_MODEL_MAP,
     ModelNotFoundError,
     Profile,
+    compile_execution_spec,
+    execution_modes_metadata,
     get_profile,
     get_wahs_profile,
     is_wahs_profile_id,
-    profile_ids,
-    profile_metadata,
+    known_model_aliases,
+    parse_model_map,
     resolve_backend_model,
     resolve_openrouter_model,
     resolve_wahs_model_context_spec,
@@ -44,6 +47,7 @@ router = APIRouter()
 class ChatCompletionRequest(BaseModel):
     model: str
     messages: List[Dict[str, Any]] = Field(..., min_length=1)
+    execution: Optional[Dict[str, Any]] = None
     response_format: Optional[Dict[str, Any]] = None
     temperature: Optional[float] = None
     max_tokens: Optional[int] = None
@@ -282,93 +286,70 @@ def list_models(
             },
         }
 
-    profiles = [get_profile(profile_id) for profile_id in profile_ids()]
-    readiness = []
+    explicit_map = parse_model_map(model_map_raw)
+    data = []
     if is_openrouter:
         openrouter_configured = bool(_cfg_effective_api_key(llm_config))
         backend_reachable = openrouter_configured
         advertised = set()
-        for profile in profiles:
-            resolved_models = {
-                resolve_backend_model(
-                    model,
-                    provider=provider_name,
-                    model_map_raw=model_map_raw,
-                )
-                for model in profile.models.values()
-            }
-            if openrouter_configured and all(resolved_models):
-                readiness.append((profile, True, ()))
-            else:
-                readiness.append(
-                    (profile, False, ("openrouter_api_key_not_configured",))
-                )
-    else:
-        for profile in profiles:
-            missing = [
-                model
-                for model in sorted(set(profile.models.values()))
-                if resolve_backend_model(
-                    model,
-                    provider=provider_name,
-                    model_map_raw=model_map_raw,
-                )
-                not in advertised
-            ]
-            unavailable_reasons = (
-                ("model_backend_unreachable",)
-                if not backend_reachable
-                else tuple(f"model_not_advertised:{model}" for model in missing)
+        for model_id in sorted(set(OPENROUTER_MODEL_MAP) | set(explicit_map)):
+            resolved = resolve_backend_model(
+                model_id,
+                provider=provider_name,
+                model_map_raw=model_map_raw,
             )
-            readiness.append((profile, not missing, unavailable_reasons))
-
-    available_products = [
-        profile
-        for profile, available, _reasons in readiness
-        if available and profile.visibility == "product"
-    ]
-    configured_default = next(
-        (profile for profile in available_products if profile.default), None
-    )
-    effective_default = configured_default or min(
-        available_products,
-        key=lambda profile: (profile.selection_priority, profile.id),
-        default=None,
-    )
-
-    data = []
-    for profile, available, unavailable_reasons in readiness:
-        data.append(
-            {
-                **profile_metadata(
-                    profile,
-                    available=available,
-                    unavailable_reasons=unavailable_reasons,
-                    effective_default=(
-                        effective_default is not None
-                        and profile.id == effective_default.id
+            available = openrouter_configured and bool(resolved)
+            unavailable_reasons = (
+                () if available else ("openrouter_api_key_not_configured",)
+            )
+            data.append(
+                {
+                    "id": model_id,
+                    "object": "model",
+                    "created": created,
+                    "owned_by": "med-agent-hub",
+                    "available": available,
+                    "unavailable_reasons": list(unavailable_reasons),
+                    "resolved_backend_model": resolved,
+                    "backend": backend,
+                    "backend_metadata": None,
+                }
+            )
+    else:
+        for model_id in sorted(advertised | set(explicit_map)):
+            resolved = resolve_backend_model(
+                model_id,
+                provider=provider_name,
+                model_map_raw=model_map_raw,
+            )
+            is_advertised = model_id in advertised or resolved in advertised
+            if not backend_reachable:
+                reasons: tuple[str, ...] = ("model_backend_unreachable",)
+            elif not is_advertised:
+                reasons = (f"model_not_advertised:{resolved}",)
+            else:
+                reasons = ()
+            available = backend_reachable and is_advertised
+            data.append(
+                {
+                    "id": model_id,
+                    "object": "model",
+                    "created": created,
+                    "owned_by": "med-agent-hub",
+                    "available": available,
+                    "unavailable_reasons": list(reasons),
+                    "resolved_backend_model": resolved,
+                    "backend": backend,
+                    "backend_metadata": (
+                        (backend_models or {}).get(model_id)
+                        or (backend_models or {}).get(resolved)
                     ),
-                ),
-                "object": "model",
-                "created": created,
-                "owned_by": "med-agent-hub",
-                "backend": backend,
-                "backend_model_metadata": {
-                    model: (backend_models or {}).get(model)
-                    or (backend_models or {}).get(
-                        resolve_backend_model(
-                            model,
-                            provider=provider_name,
-                            model_map_raw=model_map_raw,
-                        )
-                    )
-                    for model in sorted(set(profile.models.values()))
-                },
-            }
-        )
+                }
+            )
     return {
         "object": "list",
         "data": data,
+        "execution_modes": execution_modes_metadata(),
         "backend": {
             "contract_version": "med-agent-hub.backend-model-inventory.v1",
             **backend,
@@ -376,6 +357,14 @@ def list_models(
             "advertised_model_ids": sorted(advertised),
         },
     }
+
+
+def _model_label(req: ChatCompletionRequest) -> str:
+    if isinstance(req.execution, Mapping):
+        preset_id = req.execution.get("preset_id")
+        if isinstance(preset_id, str) and preset_id.strip():
+            return preset_id.strip()
+    return req.model
 
 
 def _request_for(req: ChatCompletionRequest, profile: Profile) -> ExecutionRequest:
@@ -387,27 +376,31 @@ def _request_for(req: ChatCompletionRequest, profile: Profile) -> ExecutionReque
         max_tokens=req.max_tokens,
         context=req.context,
         patient=req.patient,
-        model_label=req.model,
+        model_label=_model_label(req),
     )
 
 
 def _require_product_profile(req: ChatCompletionRequest, profile: Profile) -> None:
-    """Keep product clients on complete, safety-enforced profile plans.
+    """Keep product clients on complete, safety-enforced product-mode plans.
 
-    Direct hub clients may intentionally use low-level legs. Product relays mark
-    their request explicitly so an arbitrary client-supplied model id cannot turn a
-    product Answer into an experimental ``off``/``warn`` execution.
+    Direct hub clients may intentionally use low-level legs or bare evaluation modes.
+    Product relays mark their request explicitly so an arbitrary request cannot bypass
+    product envelope checks or temporal enforcement.
     """
-    product_request = bool((req.context or {}).get("require_product_profile"))
+    context = req.context or {}
+    product_request = bool(
+        context.get("require_product_profile")
+        or context.get("require_product_envelope")
+    )
     if product_request and (
-        profile.visibility != "product" or profile.output_mode != "product"
+        profile.low_level_leg or profile.output_mode != "product"
     ):
         raise HTTPException(
             status_code=400,
             detail={
                 "code": "product_profile_required",
                 "model": req.model,
-                "message": "This client accepts configured product profiles only.",
+                "message": "This client requires a product-mode execution profile.",
             },
         )
 
@@ -875,6 +868,53 @@ async def _execute_wahs_chat_completion(
     return envelope
 
 
+def _invalid_execution_error(req: ChatCompletionRequest, error: ValueError) -> HTTPException:
+    return HTTPException(
+        status_code=400,
+        detail={
+            "code": "invalid_execution_spec",
+            "model": req.model,
+            "message": str(error),
+        },
+    )
+
+
+def _is_known_backing_model(model_id: str) -> bool:
+    clean = model_id.strip()
+    if not clean:
+        return False
+    model_map_raw = str(getattr(llm_config, "model_map_raw", "") or "")
+    is_openrouter = _cfg_is_openrouter(llm_config)
+    if is_openrouter and "/" in clean:
+        return True
+    if clean in known_model_aliases(model_map_raw):
+        return True
+    if not is_openrouter:
+        served = _served_backend_models()
+        if served and clean in served:
+            return True
+    return False
+
+
+def _resolve_chat_profile(req: ChatCompletionRequest) -> Profile:
+    if req.execution is not None:
+        try:
+            return compile_execution_spec(req.model, req.execution)
+        except ValueError as error:
+            raise _invalid_execution_error(req, error) from error
+    try:
+        return get_profile(req.model)
+    except ValueError as error:
+        raise _invalid_execution_error(req, error) from error
+    except ModelNotFoundError as error:
+        if _is_known_backing_model(req.model):
+            try:
+                return compile_execution_spec(req.model, {"mode": "standard"})
+            except ValueError as spec_error:
+                raise _invalid_execution_error(req, spec_error) from spec_error
+        raise _model_error(error) from error
+
+
 @router.post("/v1/chat/completions")
 async def chat_completions(
     req: ChatCompletionRequest,
@@ -887,10 +927,7 @@ async def chat_completions(
             req, wahs_profile, request, response=response
         )
 
-    try:
-        profile = get_profile(req.model)
-    except ModelNotFoundError as error:
-        raise _model_error(error) from error
+    profile = _resolve_chat_profile(req)
 
     _require_product_profile(req, profile)
     execution = _request_for(req, profile)
@@ -906,9 +943,10 @@ async def chat_completions(
         content = await drain_profile(execution)
     except ContextSourceError as error:
         raise _context_error(error) from error
+    model_label = execution.model_label or req.model
     if req.stream:
         return StreamingResponse(
-            _sse_stream(req.model, content),
+            _sse_stream(model_label, content),
             media_type="text/event-stream",
         )
-    return _completion_envelope(req.model, content)
+    return _completion_envelope(model_label, content)

@@ -521,13 +521,20 @@ def test_profile_drain_falls_back_to_a_valid_envelope_when_synthesis_fails():
 
 
 def test_v1_models_advertises_the_levels():
-    client = TestClient(app)
-    r = client.get("/v1/models")
+    with patch.object(
+        openai_compat,
+        "_served_backend_model_metadata",
+        return_value={"gemma-4-12b": {}, "qwen3.5-9b": {}},
+    ):
+        client = TestClient(app)
+        r = client.get("/v1/models")
     assert r.status_code == 200
-    ids = [m["id"] for m in r.json()["data"]]
-    # Discovery is authoritative product/config metadata. Low-level dynamic legs remain
-    # callable but are intentionally not advertised in the product model picker.
-    assert ids == levels_loader.profile_ids()
+    body = r.json()
+    ids = [m["id"] for m in body["data"]]
+    assert ids == ["gemma-4-12b", "qwen3.5-9b"]
+    assert all(not mid.startswith(("single-", "team-", "eval-")) for mid in ids)
+    mode_ids = [m["id"] for m in body["execution_modes"]]
+    assert {"quick", "fast_checked", "standard", "verified", "agree", "team", "bare_eval"} <= set(mode_ids)
 
 
 def test_root_status_does_not_duplicate_authoritative_profile_metadata():
@@ -734,84 +741,140 @@ def test_v1_models_advertises_complete_backend_inventory_for_generic_clients():
     }
 
 
-def test_v1_models_advertises_staged_capability_not_just_id_prefix():
-    # Gate 10: clients must route by this field, never by pattern-matching the id string.
+def test_v1_models_advertises_backing_inventory_and_excludes_legs():
     with patch.object(
         openai_compat,
         "_served_backend_model_metadata",
         return_value={"gemma-e4b": {}, "gemma-4-12b": {}},
     ):
-        client = TestClient(app)
-        r = client.get("/v1/models")
-    by_id = {m["id"]: m for m in r.json()["data"]}
-    assert by_id["single-12b-checked"]["staged"] is True
-    assert by_id["eval-e4b-answer-only"]["staged"] is False
-    assert by_id["single-12b-bare"]["default"] is True
-    assert by_id["single-12b-checked"]["default"] is False
-    assert by_id["single-e4b-checked"]["default"] is False
-    assert by_id["single-e2b-checked"]["available"] is False
-    assert by_id["single-e2b-checked"]["required_models"] == [
-        "gemma-e2b",
-        "gemma-e4b",
-    ]
+        r = TestClient(app).get("/v1/models")
+
+    body = r.json()
+    by_id = {m["id"]: m for m in body["data"]}
+    assert set(by_id) == {"gemma-4-12b", "gemma-e4b"}
+    assert by_id["gemma-4-12b"]["available"] is True
+    assert by_id["gemma-4-12b"]["resolved_backend_model"] == "gemma-4-12b"
     assert "answer-review:qwen2.5-14b" not in by_id
+    modes_by_id = {m["id"]: m for m in body["execution_modes"]}
+    assert modes_by_id["quick"]["output_mode"] == "product"
+    assert "indepth" not in modes_by_id["quick"]["stages"]
+    assert modes_by_id["bare_eval"]["output_mode"] == "bare"
 
 
-def test_v1_models_advertises_e2b_comparison_when_writer_and_checker_are_available():
-    with patch.object(
+def test_v1_models_marks_explicit_mapped_missing_models_unavailable():
+    backend = SimpleNamespace(
+        provider="openai-compatible",
+        base_url="http://router.example",
+        api_key="",
+        model_map_raw="gemma-e2b=gemma-e2b,gemma-e4b=gemma-e4b",
+    )
+    with patch.object(openai_compat, "llm_config", backend), patch.object(
         openai_compat,
         "_served_backend_model_metadata",
-        return_value={"gemma-e2b": {}, "gemma-e4b": {}},
+        return_value={"gemma-e4b": {}},
     ):
         r = TestClient(app).get("/v1/models")
 
-    by_id = {model["id"]: model for model in r.json()["data"]}
-    e2b = by_id["single-e2b-checked"]
-    assert e2b["label"] == "Experimental fast answer (E2B, E4B check)"
-    assert e2b["available"] is True
-    assert e2b["default"] is False
-    assert e2b["temporal_enforcement"] == "enforce"
+    by_id = {m["id"]: m for m in r.json()["data"]}
+    assert by_id["gemma-e4b"]["available"] is True
+    assert by_id["gemma-e2b"]["available"] is False
+    assert by_id["gemma-e2b"]["unavailable_reasons"] == ["model_not_advertised:gemma-e2b"]
 
 
-def test_v1_models_selects_available_fallback_default_in_the_hub():
-    with patch.object(
-        openai_compat, "_served_backend_model_metadata", return_value={"gemma-26b": {}}
-    ):
-        client = TestClient(app)
-        r = client.get("/v1/models")
-
-    product = [item for item in r.json()["data"] if item["visibility"] == "product"]
-    defaults = [item for item in product if item["default"]]
-    assert [(item["id"], item["available"]) for item in defaults] == [
-        ("single-a4b-checked", True)
-    ]
-    assert next(item for item in product if item["id"] == "single-e4b-checked")["default"] is False
-
-
-def test_chat_completions_profile_returns_openai_shape_with_the_envelope():
+def test_chat_completions_execution_spec_and_preset_id():
     async def fake_drain(execution):
-        # The API is only an adapter: it compiles the profile and drains the engine.
         assert execution.messages == MESSAGES
         assert execution.response_format == RESP_FORMAT
-        assert execution.profile.id == "team-med-checked"
+        assert execution.profile.id == "verified"
+        assert execution.model_label == "verified"
+        assert execution.profile.models["answer"] == "gemma-4-12b"
+        assert execution.profile.models["review"] == "qwen3.5-9b"
+        assert execution.profile.prompts["review"] == "validation-verify"
+        assert execution.profile.policies["review"]["grounding"] == "folded"
+        assert execution.profile.output_mode == "product"
         return ENVELOPE
 
     with patch("server.openai_compat.drain_profile", side_effect=fake_drain):
-        client = TestClient(app)
-        r = client.post(
+        r = TestClient(app).post(
             "/v1/chat/completions",
             json={
-                "model": "team-med-checked",
+                "model": "gemma-4-12b",
+                "execution": {
+                    "mode": "verified",
+                    "verifier_model": "qwen3.5-9b",
+                    "checks": {"grounding": "folded", "temporal": "enforce", "confidence": "levels"},
+                    "preset_id": "verified",
+                },
                 "messages": MESSAGES,
                 "response_format": RESP_FORMAT,
+                "context": {"require_product_profile": True},
             },
         )
 
     assert r.status_code == 200
     body = r.json()
-    assert body["model"] == "team-med-checked"
-    content = body["choices"][0]["message"]["content"]
-    assert json.loads(content)["citations"] == [1]
+    assert body["model"] == "verified"
+    assert json.loads(body["choices"][0]["message"]["content"])["citations"] == [1]
+
+
+def test_chat_completions_model_mode_shorthand_and_bare_model_default():
+    seen = []
+
+    async def fake_drain(execution):
+        seen.append((execution.profile.id, execution.profile.stages, execution.profile.output_mode))
+        return ENVELOPE
+
+    with patch("server.openai_compat.drain_profile", side_effect=fake_drain):
+        client = TestClient(app)
+        r_quick = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "gemma-4-12b:quick",
+                "messages": MESSAGES,
+                "context": {"require_product_profile": True},
+            },
+        )
+        r_bare = client.post(
+            "/v1/chat/completions",
+            json={"model": "gemma-4-12b", "messages": MESSAGES},
+        )
+
+    assert r_quick.status_code == 200
+    assert r_bare.status_code == 200
+    assert seen[0][0] == "gemma-4-12b:quick"
+    assert "indepth" not in seen[0][1]
+    assert seen[1][0] == "gemma-4-12b:standard"
+    assert "indepth" in seen[1][1]
+
+
+def test_chat_completions_rejects_invalid_execution_and_eval_on_product_clients():
+    with patch("server.openai_compat.drain_profile") as mock_drain:
+        client = TestClient(app)
+        bad_exec = client.post(
+            "/v1/chat/completions",
+            json={"model": "gemma-4-12b", "execution": {"mode": "nonexistent"}, "messages": MESSAGES},
+        )
+        eval_on_product = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "gemma-4-12b",
+                "execution": {"mode": "bare_eval"},
+                "messages": MESSAGES,
+                "context": {"require_product_profile": True},
+            },
+        )
+        removed_static = client.post(
+            "/v1/chat/completions",
+            json={"model": "single-12b-checked", "messages": MESSAGES},
+        )
+
+    assert bad_exec.status_code == 400
+    assert bad_exec.json()["detail"]["code"] == "invalid_execution_spec"
+    assert eval_on_product.status_code == 400
+    assert eval_on_product.json()["detail"]["code"] == "product_profile_required"
+    assert removed_static.status_code == 404
+    assert removed_static.json()["detail"]["code"] == "model_not_found"
+    mock_drain.assert_not_called()
 
 
 def test_unknown_model_id_returns_structured_model_not_found():
