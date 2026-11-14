@@ -1463,7 +1463,7 @@ def compile_execution_spec(
     output_mode = str(mode_def["output"])
     if output_mode == "product":
         temporal_gate = str(checks.get("temporal") or "enforce").strip().lower()
-        confidence = str(checks.get("confidence") or "levels").strip().lower()
+        confidence = str(checks.get("confidence") or "findings").strip().lower()
         drug_safety = checks.get("drug_safety", True)
         if not isinstance(drug_safety, bool):
             raise ValueError("execution.checks.drug_safety must be a boolean")

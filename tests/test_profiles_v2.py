@@ -697,3 +697,26 @@ def test_verifier_answer_review_retains_checked_questions_and_findings(
     assert review_step["checked"] == [
         {"question": "Was weight 71 kg?", "chart": "[1] 2026-01-26 Weight: 71 kg"}
     ]
+
+
+def test_quick_mode_defaults_to_single_llm_call_with_findings_and_deterministic_checks():
+    profile = compile_execution_spec("gemma-4-12b", {"mode": "quick", "preset_id": "gemma-4-12b"})
+
+    assert profile.id == "gemma-4-12b"
+    assert profile.stages == (
+        "context",
+        "answer",
+        "gate",
+        "resolve_refs",
+        "final_resolve_refs",
+    )
+    assert list(profile.models.keys()) == ["answer"]
+    assert profile.policies["output"] == "product"
+    assert profile.policies["temporal_gate"] == "enforce"
+    assert profile.policies["drug_safety"] is True
+    assert profile.policies["confidence"] == "findings"
+
+    explicit_levels = compile_execution_spec(
+        "gemma-4-12b", {"mode": "quick", "checks": {"confidence": "levels"}}
+    )
+    assert explicit_levels.policies["confidence"] == "levels"
