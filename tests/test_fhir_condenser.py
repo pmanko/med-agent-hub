@@ -381,8 +381,9 @@ def test_extract_bundle_normalizes_notes_panels_components_and_conflicts():
     assert set(note_items[0].member_uuids) == {"docref-1", "diagrep-note-dup"}
     assert "Shortness of breath" in note_items[0].text
     assert "Acute decompensated heart failure" in note_items[0].text
-    # Repeated boilerplate section ("long boilerplate history") is stripped
-    assert "long boilerplate history" not in note_items[0].text
+    # Non-empty Markdown note sections (including HPI) are preserved faithfully by clean extraction
+    assert "History Of Present Illness:" in note_items[0].text
+    assert "long boilerplate history" in note_items[0].text
 
     # 2. Clinic room equipment (Dental x-ray system) is excluded while patient CPAP is retained
     assert extracted.excluded_resource_counts.get("Device(clinic_equipment)") == 1
@@ -418,7 +419,7 @@ def test_sharing_postures_keep_or_redact_privacy_sensitive_sdoh():
 
     self_res = condense_bundle_to_budget(bundle, target_tokens=8192, sharing_posture="patient_self")
     assert "Has a criminal record" in self_res.chart_text
-    assert "[sensitivity: SDOH/PRIVACY-SENSITIVE]" in self_res.chart_text
+    assert "[sensitivity:" not in self_res.chart_text
     assert any(m.get("sensitivity") == "SDOH/PRIVACY-SENSITIVE" for m in self_res.mappings)
     assert self_res.redacted_for_privacy == []
 

@@ -313,7 +313,8 @@ def test_deterministic_pre_tagging_and_cohort_code_coverage() -> None:
     assert len(code_only_meds) == 2
     for med_it in code_only_meds.values():
         assert med_it.conflict_note and "duplicate_therapy" in med_it.conflict_note
-        assert "ingredient_group: clopidogrel (p2y12_antiplatelet); duplicate_therapy:" in med_it.text
+        assert med_it.ingredient_key == "clopidogrel"
+        assert "duplicate_therapy:" not in med_it.text
 
 
 def test_static_knowledge_source_integrates_with_fhir_bundle_context_source() -> None:

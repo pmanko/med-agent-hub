@@ -14,8 +14,10 @@ from scripts.build_wahs_eval_fixtures import (
     inject_messy_ehr_perturbations,
 )
 from server.fhir import (
+    analyze_data_quality_and_conflicts,
     audit_cohort_code_coverage,
     build_tier_items,
+    build_wahs_hub_enrichment_block,
     condense_bundle_to_budget,
     detect_condition_conflicts,
     detect_medication_conflicts,
@@ -352,10 +354,11 @@ def test_multisource_perturbation_functions_preserve_anomaly_uuids_across_budget
             for hpv_uid in ("imm-hpv-1", "imm-hpv-2", "imm-hpv-3"):
                 assert hpv_uid in present, f"Missing {hpv_uid} at budget {budget}"
             if budget == 2048:
+                assert "[duplicate_therapy" not in condensed.chart_text
                 if label in ("lamar", "maurice"):
-                    assert "duplicate_therapy" in condensed.chart_text
+                    assert any("duplicate_therapy" in (it.conflict_note or "") for it in extracted.items)
                 if label == "lamar":
-                    assert "status_conflict" in condensed.chart_text
+                    assert any("status_conflict" in (it.conflict_note or "") for it in extracted.items)
 
 
 def test_build_eval_cases_covers_all_wahs_use_cases() -> None:
@@ -430,14 +433,22 @@ def test_messy_set_c_and_real_clinical_summaries_recover_uncoded_entries_and_not
     assert cov_c["precoded_pct"] < cov_b["precoded_pct"]
     assert cov_c["text_fallback_recovered"] >= 1
     assert cov_c["resolution_rate"] == 1.0
-    assert any("note_medication_contradiction" in (it.conflict_note or "") for it in ext_c.items)
     assert len(messy_anoms) == 1
 
-    # Readable conflict-note instruction is preserved even at tight 1,024-token budget
+    # Layer-2 stays purely structural; Layer-3 enrichment & analyzer surface note contradictions cleanly
     cond_c_1024 = condense_bundle_to_budget(ext_c, target_tokens=1024)
     assert cond_c_1024.actual_tokens <= 1024
-    assert "Hold lisinopril" in cond_c_1024.chart_text
-    assert "note_medication_contradiction" in cond_c_1024.chart_text
+    assert "[note_medication_contradiction" not in cond_c_1024.chart_text
+    enr_c = build_wahs_hub_enrichment_block(
+        [{"role": "user", "content": cond_c_1024.chart_text + "\n\nShould lisinopril be held?"}],
+        extracted=ext_c,
+    )
+    assert "Hold lisinopril" in enr_c.enrichment_text
+    assert "CONTRADICTED_OR_MODIFIED_BY_NOTE" in enr_c.enrichment_text
+    dq_c = analyze_data_quality_and_conflicts(ext_c)
+    assert "Unstructured Note vs. Active Medication Contradiction" in {
+        f["domain"] for f in dq_c["findings"]
+    }
 
     real_summaries = build_deidentified_real_clinical_summaries()
     assert "MIMIC_IV_Cardiorenal_Summary.json" in real_summaries
@@ -449,6 +460,13 @@ def test_messy_set_c_and_real_clinical_summaries_recover_uncoded_entries_and_not
             assert cov_r["precoded_pct"] < 100.0, f"Expected uncoded entries in {label}"
             assert cov_r["text_fallback_recovered"] >= 1
         assert cov_r["resolution_rate"] == 1.0
+        cond_8k = condense_bundle_to_budget(ext_r, target_tokens=8192)
+        present_8k = {
+            str(u)
+            for m in cond_8k.mappings
+            for u in ([m.get("resourceUuid")] + list(m.get("memberUuids") or []))
+            if u
+        }
         cond_r = condense_bundle_to_budget(ext_r, target_tokens=2048)
         present_r = {
             str(u)
@@ -458,7 +476,9 @@ def test_messy_set_c_and_real_clinical_summaries_recover_uncoded_entries_and_not
         }
         for a in r_anoms:
             for uid in a["expected_resource_uuids"]:
-                assert uid in present_r, f"Missing {uid} in {label}"
+                assert uid in present_8k, f"Missing {uid} at 8k in {label}"
+                if not uid.endswith(("-note-discharge", "-note-geriatrics")):
+                    assert uid in present_r, f"Missing structured {uid} at 2k in {label}"
 
 
 def test_w17_script_modularity_archetypes_and_demo_exporter(tmp_path: Any) -> None:

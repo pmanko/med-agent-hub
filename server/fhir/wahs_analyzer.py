@@ -402,7 +402,12 @@ def _apply_stage2_conflict_skills_on_chart(extracted: ExtractedChart) -> Extract
         normalize_drug_ingredient,
     )
 
-    if any(it.conflict_note for it in extracted.items):
+    if any(
+        "note_medication_contradiction" in (it.conflict_note or "")
+        or "note_stopped_medication_contradiction" in (it.conflict_note or "")
+        or "allergy_medication_conflict" in (it.conflict_note or "")
+        for it in extracted.items
+    ):
         return extracted
     if any(it.metadata.get("skip_stage2_skills") for it in extracted.items):
         return extracted
