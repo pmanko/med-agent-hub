@@ -1048,11 +1048,23 @@ def compile_profile(profile: Profile) -> Profile:
             )
         if (
             not profile.exact_tokenizer
+            or profile.reserved_output_tokens <= 0
             or profile.context_window <= profile.reserved_output_tokens
         ):
             raise ValueError(
                 f"product-envelope profile {profile.id!r} requires an exact context budget"
             )
+    elif (
+        profile.context_window < 0
+        or profile.reserved_output_tokens < 0
+        or (
+            (profile.context_window or profile.reserved_output_tokens)
+            and profile.context_window <= profile.reserved_output_tokens
+        )
+    ):
+        raise ValueError(
+            f"profile {profile.id!r} requires context_window > reserved_output_tokens"
+        )
     return Profile(
         id=profile.id,
         label=profile.label,
@@ -1241,6 +1253,17 @@ _EXECUTION_SPEC_KEYS = {
     "roles",
 }
 
+_EXECUTION_ROLE_KEYS = {
+    "answer",
+    "review",
+    "grounding",
+    "second",
+    "orchestrator",
+    "expert",
+    "specialist",
+    "indepth",
+}
+
 _EXECUTION_CHECK_KEYS = {
     "temporal",
     "grounding",
@@ -1309,6 +1332,20 @@ def _clean_role_model(value: Any, *, field_name: str, default: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"execution.{field_name} must be a non-empty string")
     return value.strip()
+
+
+def _positive_int(value: Any, *, field_name: str, default: int) -> int:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        raise ValueError(f"execution.{field_name} must be a positive integer")
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"execution.{field_name} must be a positive integer") from exc
+    if parsed <= 0:
+        raise ValueError(f"execution.{field_name} must be a positive integer")
+    return parsed
 
 
 def compile_execution_spec(
@@ -1380,6 +1417,11 @@ def compile_execution_spec(
             )
             for key, val in roles_raw.items()
         }
+        unknown_roles = sorted(set(roles_override) - _EXECUTION_ROLE_KEYS)
+        if unknown_roles:
+            raise ValueError(
+                f"execution.roles has unknown keys {unknown_roles}; supported: {sorted(_EXECUTION_ROLE_KEYS)}"
+            )
 
     answer_model = roles_override.get("answer") or model
     models: Dict[str, str] = {"answer": answer_model}
@@ -1517,8 +1559,18 @@ def compile_execution_spec(
             merged.update(dict(role_knobs))
             knobs[str(role)] = merged
 
-    context_window = int(spec.get("context_window") or 24576)
-    reserved_output_tokens = int(spec.get("reserved_output_tokens") or 4096)
+    context_window = _positive_int(
+        spec.get("context_window"), field_name="context_window", default=24576
+    )
+    reserved_output_tokens = _positive_int(
+        spec.get("reserved_output_tokens"),
+        field_name="reserved_output_tokens",
+        default=4096,
+    )
+    if context_window <= reserved_output_tokens:
+        raise ValueError(
+            "execution.context_window must exceed execution.reserved_output_tokens"
+        )
     exact_tokenizer = bool(spec.get("exact_tokenizer", True))
     supplemental_raw = spec.get("supplemental_sources")
     if supplemental_raw is None:

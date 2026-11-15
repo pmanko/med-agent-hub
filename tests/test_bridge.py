@@ -924,3 +924,59 @@ def test_direct_hub_client_can_still_use_low_level_leg():
         )
 
     assert r.status_code == 200
+
+
+def test_chat_completions_rejects_unknown_backing_models_across_execution_and_shorthand():
+    with patch("server.openai_compat.drain_profile") as mock_drain:
+        client = TestClient(app)
+        unknown_exec = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "totally-unknown-model",
+                "execution": {"mode": "quick"},
+                "messages": MESSAGES,
+            },
+        )
+        unknown_verifier = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "gemma-4-12b",
+                "execution": {
+                    "mode": "verified",
+                    "verifier_model": "totally-unknown-verifier",
+                },
+                "messages": MESSAGES,
+            },
+        )
+        unknown_shorthand = client.post(
+            "/v1/chat/completions",
+            json={"model": "totally-unknown-model:quick", "messages": MESSAGES},
+        )
+        bad_role_key = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "gemma-4-12b",
+                "execution": {"mode": "quick", "roles": {"answr": "qwen3.5-9b"}},
+                "messages": MESSAGES,
+            },
+        )
+        zero_window = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "gemma-4-12b",
+                "execution": {"mode": "bare_eval", "context_window": 0},
+                "messages": MESSAGES,
+            },
+        )
+
+    assert unknown_exec.status_code == 404
+    assert unknown_exec.json()["detail"]["code"] == "model_not_found"
+    assert unknown_verifier.status_code == 404
+    assert unknown_verifier.json()["detail"]["code"] == "model_not_found"
+    assert unknown_shorthand.status_code == 404
+    assert unknown_shorthand.json()["detail"]["code"] == "model_not_found"
+    assert bad_role_key.status_code == 400
+    assert bad_role_key.json()["detail"]["code"] == "invalid_execution_spec"
+    assert zero_window.status_code == 400
+    assert zero_window.json()["detail"]["code"] == "invalid_execution_spec"
+    mock_drain.assert_not_called()

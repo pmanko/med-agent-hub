@@ -720,3 +720,23 @@ def test_quick_mode_defaults_to_single_llm_call_with_findings_and_deterministic_
         "gemma-4-12b", {"mode": "quick", "checks": {"confidence": "levels"}}
     )
     assert explicit_levels.policies["confidence"] == "levels"
+
+
+def test_compile_execution_spec_rejects_unknown_roles_and_non_positive_budgets():
+    with pytest.raises(ValueError, match="execution.roles has unknown keys"):
+        compile_execution_spec(
+            "gemma-4-12b", {"mode": "quick", "roles": {"answr": "qwen3.5-9b"}}
+        )
+
+    for field in ("context_window", "reserved_output_tokens"):
+        for bad_value in (0, -100, True):
+            with pytest.raises(ValueError, match="positive integer"):
+                compile_execution_spec(
+                    "gemma-4-12b", {"mode": "bare_eval", field: bad_value}
+                )
+
+    with pytest.raises(ValueError, match="must exceed"):
+        compile_execution_spec(
+            "gemma-4-12b",
+            {"mode": "bare_eval", "context_window": 4096, "reserved_output_tokens": 4096},
+        )

@@ -33,6 +33,7 @@ from .levels_loader import (
     is_wahs_profile_id,
     known_model_aliases,
     parse_model_map,
+    profile_ids,
     resolve_backend_model,
     resolve_openrouter_model,
     resolve_wahs_model_context_spec,
@@ -929,12 +930,18 @@ def _is_known_backing_model(model_id: str) -> bool:
 
 def _resolve_chat_profile(req: ChatCompletionRequest) -> Profile:
     if req.execution is not None:
+        if not _is_known_backing_model(req.model):
+            raise _model_error(ModelNotFoundError(req.model, profile_ids()))
         try:
-            return compile_execution_spec(req.model, req.execution)
+            profile = compile_execution_spec(req.model, req.execution)
         except ValueError as error:
             raise _invalid_execution_error(req, error) from error
+        for role_model in profile.models.values():
+            if not _is_known_backing_model(role_model):
+                raise _model_error(ModelNotFoundError(role_model, profile_ids()))
+        return profile
     try:
-        return get_profile(req.model)
+        profile = get_profile(req.model)
     except ValueError as error:
         raise _invalid_execution_error(req, error) from error
     except ModelNotFoundError as error:
@@ -944,6 +951,11 @@ def _resolve_chat_profile(req: ChatCompletionRequest) -> Profile:
             except ValueError as spec_error:
                 raise _invalid_execution_error(req, spec_error) from spec_error
         raise _model_error(error) from error
+    if not profile.low_level_leg and req.model not in profile_ids():
+        for role_model in profile.models.values():
+            if not _is_known_backing_model(role_model):
+                raise _model_error(ModelNotFoundError(req.model, profile_ids()))
+    return profile
 
 
 @router.post("/v1/chat/completions")
