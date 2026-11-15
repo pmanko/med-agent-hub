@@ -38,7 +38,7 @@ jobs:
 
   # The hub ships exclusively as a container (compose service med-agent-hub);
   # a broken Dockerfile is invisible to pytest but breaks the whole stack.
-  docker-build:
+  docker-build-arch:
     strategy:
       fail-fast: true
       matrix:
@@ -91,6 +91,15 @@ jobs:
           path: /tmp/hub-ci-candidate-${{ matrix.arch }}.tar
           retention-days: 1
           if-no-files-found: error
+
+  # Fan-in gate preserving the exact `docker-build` check context required by branch protection.
+  docker-build:
+    if: always()
+    needs: [docker-build-arch]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify all architecture builds succeeded
+        run: test "${{ needs.docker-build-arch.result }}" = "success"
 
   # Only reviewed main commits may publish. This job receives the exact images
   # that passed /health on each architecture; it never rebuilds the source tree.
