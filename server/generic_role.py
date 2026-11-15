@@ -134,10 +134,21 @@ async def _prompt_measurement(
     if llm_config.api_key:
         headers["Authorization"] = f"Bearer {llm_config.api_key}"
     try:
-        async with httpx.AsyncClient(
-            headers=headers,
-            timeout=ROUTER_PROBE_TIMEOUT_SECONDS,
-        ) as client:
+        async with (
+            team.prepared_router_call(
+                model,
+                base_url=base,
+                api_key=llm_config.api_key,
+                is_remote=bool(getattr(llm_config, "is_remote_openai", False)),
+                record_slot_evidence=False,
+                acquire_for_remote=False,
+                provision_local=False,
+            ),
+            httpx.AsyncClient(
+                headers=headers,
+                timeout=ROUTER_PROBE_TIMEOUT_SECONDS,
+            ) as client,
+        ):
             try:
                 rendered = await client.post(
                     f"{base}/apply-template",

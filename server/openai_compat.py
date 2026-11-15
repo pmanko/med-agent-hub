@@ -251,9 +251,7 @@ def list_models(
         header_key = (
             x_openrouter_key.strip() if isinstance(x_openrouter_key, str) else ""
         )
-        openrouter_configured = bool(
-            header_key or openrouter_api_key.strip()
-        )
+        openrouter_configured = bool(header_key or openrouter_api_key.strip())
         wahs_profiles = [get_wahs_profile(pid) for pid in wahs_profile_ids()]
         wahs_data = []
         for profile in wahs_profiles:
@@ -392,9 +390,7 @@ def _require_product_profile(req: ChatCompletionRequest, profile: Profile) -> No
         context.get("require_product_profile")
         or context.get("require_product_envelope")
     )
-    if product_request and (
-        profile.low_level_leg or profile.output_mode != "product"
-    ):
+    if product_request and (profile.low_level_leg or profile.output_mode != "product"):
         raise HTTPException(
             status_code=400,
             detail={
@@ -583,7 +579,8 @@ async def _execute_wahs_chat_completion(
     caller_sys_parts = [
         str(m.get("content") or "").strip()
         for m in req.messages
-        if str(m.get("role") or "").lower() == "system" and str(m.get("content") or "").strip()
+        if str(m.get("role") or "").lower() == "system"
+        and str(m.get("content") or "").strip()
     ]
     combined_sys_prompt = (
         f"{sys_prompt}\n\n{chr(10).join(caller_sys_parts)}"
@@ -594,9 +591,13 @@ async def _execute_wahs_chat_completion(
         dict(m) for m in req.messages if str(m.get("role") or "").lower() != "system"
     ]
     enrichment_meta: Optional[Dict[str, Any]] = None
-    hub_enrich_hdr = (request.headers.get("x-wahs-hub-enrichment") or "").strip().lower()
+    hub_enrich_hdr = (
+        (request.headers.get("x-wahs-hub-enrichment") or "").strip().lower()
+    )
     enable_hub_enrichment = bool(
-        profile.policies.get("include_hub_enrichment", profile.policies.get("include_kb_findings", True))
+        profile.policies.get(
+            "include_hub_enrichment", profile.policies.get("include_kb_findings", True)
+        )
     ) and hub_enrich_hdr not in {"0", "false", "off", "no"}
     if enable_hub_enrichment and user_messages:
         enrichment_res = build_wahs_hub_enrichment_block(req.messages)
@@ -608,11 +609,14 @@ async def _execute_wahs_chat_completion(
                     "[MED-AGENT-HUB ORCHESTRATION:" not in orig_content
                     and enrichment_res.enrichment_text
                 ):
-                    user_messages[idx]["content"] = (
-                        f"{orig_content.rstrip()}\n\n{enrichment_res.enrichment_text}"
-                    )
+                    user_messages[idx][
+                        "content"
+                    ] = f"{orig_content.rstrip()}\n\n{enrichment_res.enrichment_text}"
                 break
-    upstream_messages = [{"role": "system", "content": combined_sys_prompt}, *user_messages]
+    upstream_messages = [
+        {"role": "system", "content": combined_sys_prompt},
+        *user_messages,
+    ]
 
     answer_knobs = dict(profile.knobs.get("answer") or {})
     temperature = (
@@ -698,10 +702,21 @@ async def _execute_wahs_chat_completion(
             "max_tokens": int(rev_knobs.get("maxTokens", 350)),
             "stream": False,
         }
+        from . import team
+
         try:
-            async with httpx.AsyncClient(
-                timeout=llm_config.request_timeout_seconds
-            ) as client:
+            async with (
+                team.prepared_router_call(
+                    rev_model,
+                    base_url=target_base_url,
+                    api_key="" if provider == "openrouter" else llm_config.api_key,
+                    is_remote=(provider != "local"),
+                    record_slot_evidence=False,
+                    acquire_for_remote=False,
+                    provision_local=True,
+                ),
+                httpx.AsyncClient(timeout=llm_config.request_timeout_seconds) as client,
+            ):
                 r = await client.post(upstream_url, headers=headers, json=rev_payload)
                 r.raise_for_status()
                 r_data = r.json()
@@ -722,48 +737,46 @@ async def _execute_wahs_chat_completion(
         created = int(time.time())
 
         async def _wahs_sse():
-            from . import model_provisioner, team
+            from . import team
 
             accumulated: List[str] = []
             first_chunk_emitted = False
-            if provider == "local":
-                await team._ROUTER_LOCK.acquire()
-            try:
-                if provider == "local":
-                    await model_provisioner.ensure_local_model_provisioned(writer_model)
-                async with httpx.AsyncClient(
-                    timeout=llm_config.request_timeout_seconds
-                ) as client:
-                    async with client.stream(
-                        "POST", upstream_url, headers=headers, json=upstream_payload
-                    ) as resp:
-                        resp.raise_for_status()
-                        async for raw_line in resp.aiter_lines():
-                            line = raw_line.strip()
-                            if not line or not line.startswith("data:"):
-                                continue
-                            data_str = line[5:].strip()
-                            if data_str == "[DONE]":
-                                break
-                            try:
-                                chunk_obj = json.loads(data_str)
-                                delta = (
-                                    (chunk_obj.get("choices") or [{}])[0].get("delta")
-                                    or {}
-                                )
-                                piece = delta.get("content") or ""
-                                if piece:
-                                    accumulated.append(piece)
-                                chunk_obj["model"] = profile.id
-                                if not first_chunk_emitted and enrichment_meta is not None:
-                                    chunk_obj["hub_enrichment"] = enrichment_meta
-                                    first_chunk_emitted = True
-                                yield f"data: {json.dumps(chunk_obj)}\n\n"
-                            except Exception:
-                                yield f"{line}\n\n"
-            finally:
-                if provider == "local":
-                    team._ROUTER_LOCK.release()
+            async with (
+                team.prepared_router_call(
+                    writer_model,
+                    base_url=target_base_url,
+                    api_key="" if provider == "openrouter" else llm_config.api_key,
+                    is_remote=(provider != "local"),
+                    record_slot_evidence=False,
+                    acquire_for_remote=False,
+                    provision_local=True,
+                ),
+                httpx.AsyncClient(timeout=llm_config.request_timeout_seconds) as client,
+                client.stream(
+                    "POST", upstream_url, headers=headers, json=upstream_payload
+                ) as resp,
+            ):
+                resp.raise_for_status()
+                async for raw_line in resp.aiter_lines():
+                    line = raw_line.strip()
+                    if not line or not line.startswith("data:"):
+                        continue
+                    data_str = line[5:].strip()
+                    if data_str == "[DONE]":
+                        break
+                    try:
+                        chunk_obj = json.loads(data_str)
+                        delta = (chunk_obj.get("choices") or [{}])[0].get("delta") or {}
+                        piece = delta.get("content") or ""
+                        if piece:
+                            accumulated.append(piece)
+                        chunk_obj["model"] = profile.id
+                        if not first_chunk_emitted and enrichment_meta is not None:
+                            chunk_obj["hub_enrichment"] = enrichment_meta
+                            first_chunk_emitted = True
+                        yield f"data: {json.dumps(chunk_obj)}\n\n"
+                    except Exception:
+                        yield f"{line}\n\n"
             review_appendix = await _run_review_stage("".join(accumulated))
             if review_appendix:
                 rev_chunk = {
@@ -791,26 +804,30 @@ async def _execute_wahs_chat_completion(
             headers=stream_headers,
         )
 
-    from . import model_provisioner, team
     import re
 
+    from . import team
+
     t0 = time.perf_counter()
-    if provider == "local":
-        await team._ROUTER_LOCK.acquire()
-    try:
-        if provider == "local":
-            await model_provisioner.ensure_local_model_provisioned(writer_model)
-        async with httpx.AsyncClient(timeout=llm_config.request_timeout_seconds) as client:
-            resp = await client.post(upstream_url, headers=headers, json=upstream_payload)
-            resp.raise_for_status()
-            body = resp.json()
-    finally:
-        if provider == "local":
-            team._ROUTER_LOCK.release()
+    async with (
+        team.prepared_router_call(
+            writer_model,
+            base_url=target_base_url,
+            api_key="" if provider == "openrouter" else llm_config.api_key,
+            is_remote=(provider != "local"),
+            record_slot_evidence=False,
+            acquire_for_remote=False,
+            provision_local=True,
+        ),
+        httpx.AsyncClient(timeout=llm_config.request_timeout_seconds) as client,
+    ):
+        resp = await client.post(upstream_url, headers=headers, json=upstream_payload)
+        resp.raise_for_status()
+        body = resp.json()
     latency_ms = round((time.perf_counter() - t0) * 1000.0, 2)
-    content = (
-        ((body.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
-    )
+    content = ((body.get("choices") or [{}])[0].get("message") or {}).get(
+        "content"
+    ) or ""
     if "<think>" in content and "</think>" in content:
         content = re.sub(r"<think>.*?</think>\s*", "", content, flags=re.DOTALL).strip()
     if "<|channel>thought" in content and "<channel|>" in content:
@@ -831,19 +848,31 @@ async def _execute_wahs_chat_completion(
     if content.startswith(("{", "[")):
         try:
             parsed_json = json.loads(content)
-            if isinstance(parsed_json, list) and parsed_json and isinstance(parsed_json[0], dict):
+            if (
+                isinstance(parsed_json, list)
+                and parsed_json
+                and isinstance(parsed_json[0], dict)
+            ):
                 parsed_json = parsed_json[0]
             if isinstance(parsed_json, dict):
                 if isinstance(parsed_json.get("text"), str):
                     content = parsed_json["text"].strip()
                 elif "summary" in parsed_json or "SUMMARY" in parsed_json:
-                    s_txt = str(parsed_json.get("summary") or parsed_json.get("SUMMARY") or "").strip()
-                    q_val = parsed_json.get("questions_for_doctor") or parsed_json.get("QUESTIONS_FOR_DOCTOR") or []
+                    s_txt = str(
+                        parsed_json.get("summary") or parsed_json.get("SUMMARY") or ""
+                    ).strip()
+                    q_val = (
+                        parsed_json.get("questions_for_doctor")
+                        or parsed_json.get("QUESTIONS_FOR_DOCTOR")
+                        or []
+                    )
                     if isinstance(q_val, list):
                         q_txt = "\n".join(f"- {q}" for q in q_val if str(q).strip())
                     else:
                         q_txt = str(q_val).strip()
-                    content = f"SUMMARY:\n{s_txt}" + (f"\n\nQUESTIONS_FOR_DOCTOR:\n{q_txt}" if q_txt else "")
+                    content = f"SUMMARY:\n{s_txt}" + (
+                        f"\n\nQUESTIONS_FOR_DOCTOR:\n{q_txt}" if q_txt else ""
+                    )
         except Exception:
             pass
     review_appendix = await _run_review_stage(content)
@@ -868,7 +897,9 @@ async def _execute_wahs_chat_completion(
     return envelope
 
 
-def _invalid_execution_error(req: ChatCompletionRequest, error: ValueError) -> HTTPException:
+def _invalid_execution_error(
+    req: ChatCompletionRequest, error: ValueError
+) -> HTTPException:
     return HTTPException(
         status_code=400,
         detail={

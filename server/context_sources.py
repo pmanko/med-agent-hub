@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import re
 from collections import Counter, OrderedDict
 from dataclasses import dataclass, field
@@ -28,7 +29,11 @@ from .chart_serializer import render_chart
 from .config import llm_config, querystore_config
 from .levels_loader import resolve_backend_model
 from .patient_ledger_cache import PatientLedgerCache, default_patient_ledger_cache
-from .querystore_client import ContextSliceFetch, InconsistentSnapshotError, QueryStoreClient
+from .querystore_client import (
+    ContextSliceFetch,
+    InconsistentSnapshotError,
+    QueryStoreClient,
+)
 from .ranked_candidates import resolve_ranked_hits_with_retry
 
 CHART_MARKER = "Patient records (most recent first):"
@@ -422,7 +427,10 @@ class StaticKnowledgeSource:
         fhir_source: Optional[Any] = None,
         sharing_posture: Optional[str] = None,
     ) -> None:
-        if sharing_posture is not None and sharing_posture not in {"patient_self", "external_share"}:
+        if sharing_posture is not None and sharing_posture not in {
+            "patient_self",
+            "external_share",
+        }:
             raise ValueError(f"Unsupported sharing_posture: {sharing_posture!r}")
         self.corpus = corpus
         self.bundles_by_patient = dict(bundles_by_patient or {})
@@ -430,7 +438,9 @@ class StaticKnowledgeSource:
         self.fhir_source = fhir_source
         self.sharing_posture = sharing_posture
 
-    def _resolve_patient_bundle(self, request: ContextRequest) -> Optional[Mapping[str, Any]]:
+    def _resolve_patient_bundle(
+        self, request: ContextRequest
+    ) -> Optional[Mapping[str, Any]]:
         if request.patient and request.patient in self.bundles_by_patient:
             return self.bundles_by_patient[request.patient]
         if self.fhir_source is not None:
@@ -456,7 +466,10 @@ class StaticKnowledgeSource:
                 if cand.exists():
                     try:
                         parsed = json.loads(cand.read_text(encoding="utf-8"))
-                        if isinstance(parsed, Mapping) and parsed.get("resourceType") == "Bundle":
+                        if (
+                            isinstance(parsed, Mapping)
+                            and parsed.get("resourceType") == "Bundle"
+                        ):
                             return parsed
                     except Exception:
                         pass
@@ -724,17 +737,21 @@ class QueryStoreSource:
                         ranks[identity] = provided_rank
                     else:
                         similarity_ranks_complete = False
-        return tiers, ranks, {
-            "slice_id": result.slice_id,
-            "chart_snapshot_id": result.chart_snapshot_id,
-            "total_count": result.total_count,
-            "chart_size": result.chart_size,
-            "chart_truncated": result.chart_truncated,
-            "projection_complete": result.projection_complete,
-            "similarity_ranks_complete": similarity_ranks_complete,
-            "effective_types": list(result.effective_types),
-            "temporal_applied": result.temporal_applied,
-        }
+        return (
+            tiers,
+            ranks,
+            {
+                "slice_id": result.slice_id,
+                "chart_snapshot_id": result.chart_snapshot_id,
+                "total_count": result.total_count,
+                "chart_size": result.chart_size,
+                "chart_truncated": result.chart_truncated,
+                "projection_complete": result.projection_complete,
+                "similarity_ranks_complete": similarity_ranks_complete,
+                "effective_types": list(result.effective_types),
+                "temporal_applied": result.temporal_applied,
+            },
+        )
 
     async def _ranked_candidate_identities(
         self, request: ContextRequest, raw_records: list[dict[str, Any]]
@@ -760,7 +777,9 @@ class QueryStoreSource:
                 ),
             )
 
-        resolved = await resolve_ranked_hits_with_retry(hits, raw_records, refetch_ledger)
+        resolved = await resolve_ranked_hits_with_retry(
+            hits, raw_records, refetch_ledger
+        )
         return {
             (record.get("resourceType"), record.get("resourceUuid")): position
             for position, record in enumerate(resolved, start=1)
@@ -774,7 +793,11 @@ class SourceRegistry:
             self._sources["inline"] = InlineChartSource()
         fhir_src = self._sources.get("fhir")
         kb_src = self._sources.get("knowledge-base")
-        if fhir_src is not None and isinstance(kb_src, StaticKnowledgeSource) and kb_src.fhir_source is None:
+        if (
+            fhir_src is not None
+            and isinstance(kb_src, StaticKnowledgeSource)
+            and kb_src.fhir_source is None
+        ):
             kb_src.fhir_source = fhir_src
 
     @classmethod
@@ -805,7 +828,11 @@ class SourceRegistry:
         )
         fhir_src = self._sources.get("fhir")
         for src in sources:
-            if isinstance(src, StaticKnowledgeSource) and src.fhir_source is None and fhir_src is not None:
+            if (
+                isinstance(src, StaticKnowledgeSource)
+                and src.fhir_source is None
+                and fhir_src is not None
+            ):
                 src.fhir_source = fhir_src
         ledgers = [await source.fetch(resolved_request) for source in sources]
         records = tuple(record for ledger in ledgers for record in ledger.records)
@@ -885,16 +912,36 @@ class RouterTokenCounter:
         base_url: Optional[str] = None,
         api_key: Optional[str] = None,
         *,
-        timeout: float = 15.0,
+        timeout: Optional[float] = None,
     ) -> None:
         self.base_url = (base_url or llm_config.base_url).rstrip("/")
         self.api_key = api_key if api_key is not None else llm_config.api_key
+        if timeout is None:
+            raw = (os.getenv("LLM_TOKENIZER_TIMEOUT_SECONDS") or "120.0").strip()
+            try:
+                timeout = float(raw)
+            except ValueError:
+                timeout = 120.0
         self.timeout = timeout
         self._client: Optional[httpx.AsyncClient] = None
         self._chat_counts: OrderedDict[str, int] = OrderedDict()
         self._http_requests = 0
         self._chat_cache_hits = 0
         self._chat_counts_performed = 0
+
+    def _hold_local_router_lock(self, backend_model: str):
+        """Serialize local router tokenization under ``_ROUTER_LOCK`` and enforce capacity."""
+        from . import team
+
+        return team.prepared_router_call(
+            backend_model,
+            base_url=self.base_url,
+            api_key=self.api_key,
+            is_remote=llm_config.is_remote_openai,
+            record_slot_evidence=False,
+            acquire_for_remote=False,
+            provision_local=False,
+        )
 
     @classmethod
     def reset_capability_cache(cls) -> None:
@@ -976,14 +1023,15 @@ class RouterTokenCounter:
             headers["Authorization"] = f"Bearer {self.api_key}"
         payload = {"model": backend_model, "content": text, "add_special": False}
         try:
-            response = await self._post_token_request(
-                self._http_client(),
-                f"{self.base_url}/tokenize",
-                json=payload,
-                headers=headers,
-            )
-            response.raise_for_status()
-            body = response.json()
+            async with self._hold_local_router_lock(backend_model):
+                response = await self._post_token_request(
+                    self._http_client(),
+                    f"{self.base_url}/tokenize",
+                    json=payload,
+                    headers=headers,
+                )
+                response.raise_for_status()
+                body = response.json()
         except Exception as exc:
             raise ContextSourceError(
                 "tokenization_unavailable",
@@ -1038,20 +1086,21 @@ class RouterTokenCounter:
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
         try:
-            response = await self._post_token_request(
-                self._http_client(),
-                f"{self.base_url}/tokenize",
-                json={
-                    "model": backend_model,
-                    "content": content,
-                    "add_special": False,
-                    "parse_special": False,
-                    "with_pieces": True,
-                },
-                headers=headers,
-            )
-            response.raise_for_status()
-            tokens = response.json().get("tokens")
+            async with self._hold_local_router_lock(backend_model):
+                response = await self._post_token_request(
+                    self._http_client(),
+                    f"{self.base_url}/tokenize",
+                    json={
+                        "model": backend_model,
+                        "content": content,
+                        "add_special": False,
+                        "parse_special": False,
+                        "with_pieces": True,
+                    },
+                    headers=headers,
+                )
+                response.raise_for_status()
+                tokens = response.json().get("tokens")
             if not isinstance(tokens, list):
                 raise ValueError("tokenize response had no tokens")
 
@@ -1122,57 +1171,60 @@ class RouterTokenCounter:
         self._chat_counts_performed += 1
         try:
             client = self._http_client()
-            mode = self._chat_count_modes.get(self.base_url)
-            if mode != "template":
-                response = await self._post_token_request(
+            async with self._hold_local_router_lock(backend_model):
+                mode = self._chat_count_modes.get(self.base_url)
+                if mode != "template":
+                    response = await self._post_token_request(
+                        client,
+                        f"{self.base_url}/v1/chat/completions/input_tokens",
+                        json=body,
+                        headers=headers,
+                    )
+                    if response.status_code != 404:
+                        response.raise_for_status()
+                        result = response.json()
+                        count = result.get("input_tokens")
+                        if isinstance(count, int) and count >= 0:
+                            self._chat_count_modes[self.base_url] = "direct"
+                            return self._remember_chat_count(count_key, count)
+                        raise ValueError(
+                            "chat token-count response had no input_tokens"
+                        )
+                    self._chat_count_modes[self.base_url] = "template"
+
+                # ``response_format`` is an out-of-band generation grammar in llama.cpp,
+                # not chat-template input. /apply-template accepts only these fields.
+                template_body = {
+                    key: body[key]
+                    for key in ("model", "messages", "tools", "tool_choice")
+                    if key in body
+                }
+                template = await self._post_token_request(
                     client,
-                    f"{self.base_url}/v1/chat/completions/input_tokens",
-                    json=body,
+                    f"{self.base_url}/apply-template",
+                    json=template_body,
                     headers=headers,
                 )
-                if response.status_code != 404:
-                    response.raise_for_status()
-                    result = response.json()
-                    count = result.get("input_tokens")
-                    if isinstance(count, int) and count >= 0:
-                        self._chat_count_modes[self.base_url] = "direct"
-                        return self._remember_chat_count(count_key, count)
-                    raise ValueError("chat token-count response had no input_tokens")
-                self._chat_count_modes[self.base_url] = "template"
-
-            # ``response_format`` is an out-of-band generation grammar in llama.cpp,
-            # not chat-template input. /apply-template accepts only these fields.
-            template_body = {
-                key: body[key]
-                for key in ("model", "messages", "tools", "tool_choice")
-                if key in body
-            }
-            template = await self._post_token_request(
-                client,
-                f"{self.base_url}/apply-template",
-                json=template_body,
-                headers=headers,
-            )
-            template.raise_for_status()
-            prompt = template.json().get("prompt")
-            if not isinstance(prompt, str):
-                raise ValueError("apply-template response had no prompt")
-            tokenized = await self._post_token_request(
-                client,
-                f"{self.base_url}/tokenize",
-                json={
-                    "model": backend_model,
-                    "content": prompt,
-                    "add_special": False,
-                    "parse_special": True,
-                },
-                headers=headers,
-            )
-            tokenized.raise_for_status()
-            tokens = tokenized.json().get("tokens")
-            if isinstance(tokens, list):
-                return self._remember_chat_count(count_key, len(tokens))
-            raise ValueError("tokenize response had no tokens")
+                template.raise_for_status()
+                prompt = template.json().get("prompt")
+                if not isinstance(prompt, str):
+                    raise ValueError("apply-template response had no prompt")
+                tokenized = await self._post_token_request(
+                    client,
+                    f"{self.base_url}/tokenize",
+                    json={
+                        "model": backend_model,
+                        "content": prompt,
+                        "add_special": False,
+                        "parse_special": True,
+                    },
+                    headers=headers,
+                )
+                tokenized.raise_for_status()
+                tokens = tokenized.json().get("tokens")
+                if isinstance(tokens, list):
+                    return self._remember_chat_count(count_key, len(tokens))
+                raise ValueError("tokenize response had no tokens")
         except Exception as exc:
             raise ContextSourceError(
                 "tokenization_unavailable",
@@ -1235,13 +1287,17 @@ class LocalDeterministicTokenCounter:
                 if isinstance(content, str):
                     total += self._estimate_tokens(content)
                 elif content is not None:
-                    total += self._estimate_tokens(json.dumps(content, ensure_ascii=False))
+                    total += self._estimate_tokens(
+                        json.dumps(content, ensure_ascii=False)
+                    )
                 if message.get("tool_calls"):
                     total += self._estimate_tokens(
                         json.dumps(message.get("tool_calls"), ensure_ascii=False)
                     )
         if payload.get("tools"):
-            total += self._estimate_tokens(json.dumps(payload.get("tools"), ensure_ascii=False))
+            total += self._estimate_tokens(
+                json.dumps(payload.get("tools"), ensure_ascii=False)
+            )
         return total
 
 
@@ -1669,9 +1725,7 @@ async def select_context(
             or record.slice_tier in protected_slice_tiers
         )
 
-    protected = [
-        record for record, reason in eligible if is_protected(record, reason)
-    ]
+    protected = [record for record, reason in eligible if is_protected(record, reason)]
     protected = canonical(protected)
     protected_tokens = await measure(render_selected(protected))
     if protected_tokens > budget.input_limit:
@@ -1688,8 +1742,7 @@ async def select_context(
     current_tokens = protected_tokens
     available_tokens = budget.input_limit - protected_tokens
     rendered_records = tuple(
-        _render_records((record,), (source_indices[id(record)],))
-        for record in optional
+        _render_records((record,), (source_indices[id(record)],)) for record in optional
     )
     count_records = getattr(counter, "count_records", None)
     if callable(count_records):
