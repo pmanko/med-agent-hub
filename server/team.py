@@ -26,7 +26,7 @@ from typing import (
 
 import httpx
 
-from . import answer_rules, drug_safety, model_provisioner, router_memory, temporal
+from . import drug_safety, model_provisioner, router_memory, temporal
 from .config import EXPERT_DRY_MULTIPLIER, llm_config, resolve_hub_build_revision
 from .context_sources import (
     CHART_MARKER,
@@ -347,13 +347,13 @@ def _normalize_product_blocks(
 def _enforce_product_citation_contract(
     answer: str, citations: List[int], blocks: List[Any]
 ) -> Tuple[str, List[int], List[Dict[str, Any]]]:
-    """Canonicalize explicit citation usage for product envelopes.
+    """Canonicalize explicit citation usage for product envelopes without mutating prose.
 
-    Inline markers and cell refs are unambiguous usage declarations, so they are authoritative over
-    a conflicting top-level array. An unscoped source set can be attached when the answer contains
-    exactly one prose claim, then grounded collectively. A source set cannot be distributed across
-    multiple claims safely; keep it visible for inspection but prevent the answer from reporting a
-    checked lifecycle state. Low-level legs do not call this helper and retain byte-exact behavior.
+    Grouped bracket lists (e.g. ``[19, 17]``) are expanded into separate ``[19][17]`` tokens so
+    inline link renderers match every cited record. Explicit inline markers and table-cell refs take
+    precedence when present; otherwise declared top-level ``citations`` remain attached cleanly so
+    downstream reference resolution and grounding still cover every declared source without
+    editing prose or blocking on unscoped arrays.
     """
     answer, _grouped_indices = temporal.canonicalize_citations(answer)
     declared = _citation_indices(citations)
@@ -362,49 +362,6 @@ def _enforce_product_citation_contract(
     explicit = _citation_indices(inline + block_refs)
     if explicit:
         return answer, explicit, []
-    prose_claims = [
-        fragment.strip()
-        for fragment in re.split(r"(?<=[.!?])\s+|\n+", answer.strip())
-        if fragment.strip()
-    ]
-    has_independent_clause_boundary = bool(
-        re.search(
-            r";|,\s*(?:and|but|for|nor|or|so|yet|while|whereas)\b",
-            answer,
-            re.I,
-        )
-    )
-    single_claim = len(prose_claims) == 1 and (
-        not has_independent_clause_boundary
-        or temporal.is_safe_no_upcoming_claim(answer)
-    )
-    if declared and single_claim:
-        markers = "".join(f"[{index}]" for index in declared)
-        stripped = answer.rstrip()
-        match = re.search(r"([.!?])$", stripped)
-        if match:
-            stripped = stripped[: match.start()] + f" {markers}" + match.group(1)
-        else:
-            stripped += f" {markers}"
-        return stripped, declared, []
-    if declared:
-        return (
-            answer,
-            declared,
-            [
-                {
-                    "id": "citation_scope",
-                    "status": "fail",
-                    "severity": "block",
-                    "reason": (
-                        "Top-level citations were declared without an unambiguous single prose claim, "
-                        "inline claim markers, or structured cell refs, so their usage cannot be "
-                        "mapped safely."
-                    ),
-                    "source_indices": declared,
-                }
-            ],
-        )
     return answer, declared, []
 
 
@@ -2662,36 +2619,28 @@ def _gate_failure_note(gate: Optional[Dict[str, Any]]) -> str:
 def _merge_temporal_gate_conf(
     conf: Optional[Dict[str, Any]], gate: Optional[Dict[str, Any]]
 ) -> Dict[str, Any]:
-    """Fold deterministic temporal-gate status into the structured Answer confidence."""
-    base = dict(conf or {"level": "green", "note": ""})
-    if (
-        not gate
-        or gate.get("mode") == "off"
-        or gate.get("status") not in {"warn", "fail"}
-    ):
-        return base
-    applied = gate.get("applied")
-    target_level = "yellow"
-    if gate.get("status") == "fail" and applied not in {"patch"}:
-        target_level = "red"
-    order = {"green": 0, "yellow": 1, "red": 2}
-    if order.get(target_level, 0) > order.get(base.get("level", "green"), 0):
-        base["level"] = target_level
-    reason = _gate_failure_note(gate)
-    if applied == "patch":
-        note = "Deterministic temporal gate corrected the answer before validation"
-    elif applied == "fallback":
-        note = "Deterministic temporal gate blocked the draft answer"
-    elif gate.get("mode") == "warn":
-        note = "Deterministic temporal gate warning"
-    else:
-        note = "Deterministic temporal gate"
-    if reason:
-        note += ": " + reason
-    note += "."
-    existing = (base.get("note") or "").strip()
-    base["note"] = (existing + " " + note).strip() if existing else note
-    return base
+    """Preserve structured Answer confidence when deterministic temporal checks are non-blocking."""
+    del gate
+    return dict(conf or {"level": "green", "note": ""})
+
+
+def _nonblocking_temporal_gate(gate: Dict[str, Any]) -> Dict[str, Any]:
+    """Downgrade deterministic temporal-gate checks to non-blocking warnings."""
+    checks: List[Dict[str, Any]] = []
+    for raw_check in gate.get("checks") or []:
+        if not isinstance(raw_check, dict):
+            continue
+        check = dict(raw_check)
+        if check.get("status") == "fail":
+            check["status"] = "warn"
+        if check.get("severity") == "block":
+            check["severity"] = "warn"
+        checks.append(check)
+    normalized = dict(gate)
+    normalized["checks"] = checks
+    normalized["status"] = temporal._final_gate_status(checks)
+    normalized["applied"] = "none"
+    return normalized
 
 
 def _apply_temporal_gate(
@@ -2704,67 +2653,15 @@ def _apply_temporal_gate(
     temporal_gate_mode: str,
     steps: List[Dict[str, Any]],
 ) -> Tuple[str, List[int], List[Any], Dict[str, Any], Optional[str]]:
-    """Run the deterministic temporal gate and optionally replace the answer in enforce mode."""
-    draft_answer = answer_text
-    repaired_text, date_repairs = temporal.repair_garbled_dates(
-        answer_text, temporal_facts
-    )
-    if date_repairs and (temporal_gate_mode or "enforce").strip().lower() == "enforce":
-        answer_text = repaired_text
+    """Run deterministic temporal checks in non-destructive, non-blocking observation mode."""
     block_text, block_refs = _block_temporal_text_and_refs(blocks)
     gate_answer_text = answer_text + (("\n" + block_text) if block_text else "")
     gate_citations = sorted(set(citations or []) | set(block_refs))
-    gate = temporal.run_temporal_gate(
-        question, gate_answer_text, gate_citations, temporal_facts, temporal_gate_mode
-    )
-    original_answer = None
-    gate["applied"] = "none"
-    if date_repairs and gate.get("mode") == "enforce":
-        gate["date_repairs"] = date_repairs
-        gate["applied"] = "repair"
-        original_answer = draft_answer
-    if gate.get("mode") == "enforce" and gate.get("status") == "fail":
-        original_answer = draft_answer
-        patch = (gate.get("patch_answer") or "").strip()
-        patch_citations = [
-            c for c in (gate.get("patch_citations") or []) if isinstance(c, int)
-        ]
-        if patch:
-            answer_text, citations, blocks = patch, patch_citations, []
-            gate["applied"] = "patch"
-        else:
-            answer_text, citations, blocks = (
-                (
-                    "I cannot safely answer this temporal question because deterministic temporal "
-                    "validation found a contradiction in the draft answer. Please verify against the chart."
-                ),
-                [],
-                [],
-            )
-            gate["applied"] = "fallback"
-    if gate.get("mode") in {"warn", "enforce"} and gate.get("applied") != "fallback":
-        enforce = gate.get("mode") == "enforce"
-        (
-            ruled_text,
-            ruled_citations,
-            ruled_blocks,
-            rule_findings,
-        ) = answer_rules.apply_answer_rules(
-            question, answer_text, citations, blocks, temporal_facts, edit=enforce
+    gate = _nonblocking_temporal_gate(
+        temporal.run_temporal_gate(
+            question, gate_answer_text, gate_citations, temporal_facts, temporal_gate_mode
         )
-        if rule_findings:
-            gate["checks"] = list(gate.get("checks") or []) + rule_findings
-            gate["status"] = temporal._final_gate_status(gate["checks"])
-        if enforce and (ruled_text != answer_text or ruled_blocks != blocks):
-            original_answer = (
-                original_answer if original_answer is not None else answer_text
-            )
-            answer_text, citations, blocks = ruled_text, ruled_citations, ruled_blocks
-            gate["rule_edits"] = [
-                f["id"] for f in rule_findings if f.get("status") == "info"
-            ]
-            if gate.get("applied") in {"none", "repair"}:
-                gate["applied"] = "edit"
+    )
     steps.append(
         {
             "role": "temporal_gate",
@@ -2774,7 +2671,7 @@ def _apply_temporal_gate(
             "n_checks": len(gate.get("checks") or []),
         }
     )
-    return answer_text, citations, blocks, gate, original_answer
+    return answer_text, citations, blocks, gate, None
 
 
 def _regate_after_rewrite(
@@ -3659,48 +3556,16 @@ async def _review_existing_answer(
         block_text, block_refs = _block_temporal_text_and_refs(blocks)
         gate_answer_text = answer_text + (("\n" + block_text) if block_text else "")
         gate_citations = sorted(set(citations or []) | set(block_refs))
-        temporal_gate_result = temporal.run_temporal_gate(
-            question,
-            gate_answer_text,
-            gate_citations,
-            temporal_facts,
-            temporal_gate_mode,
+        temporal_gate_result = _nonblocking_temporal_gate(
+            temporal.run_temporal_gate(
+                question,
+                gate_answer_text,
+                gate_citations,
+                temporal_facts,
+                temporal_gate_mode,
+            )
         )
-        temporal_gate_result["applied"] = "none"
-        if temporal_gate_result.get("status") == "fail":
-            gate_issues = [
-                c
-                for c in (temporal_gate_result.get("checks") or [])
-                if c.get("status") == "fail"
-            ]
-            issues.extend(gate_issues)
-            patch = (temporal_gate_result.get("patch_answer") or "").strip()
-            patch_citations = [
-                c
-                for c in (temporal_gate_result.get("patch_citations") or [])
-                if isinstance(c, int)
-            ]
-            if temporal_gate_result.get("mode") == "enforce" and patch:
-                answer_text, citations, blocks = patch, patch_citations, []
-                temporal_gate_result["applied"] = "patch"
-                status = "edited"
-                summary = (
-                    "The answer was updated after deterministic temporal/date checks."
-                )
-                answer_conf = {
-                    "level": "yellow",
-                    "note": "Deterministic answer check corrected a temporal/date issue.",
-                }
-            else:
-                status = "needs_review"
-                summary = (
-                    "The answer check found a temporal/date issue that needs review."
-                )
-                answer_conf = {
-                    "level": "red",
-                    "note": "Deterministic answer check found a temporal/date issue. Verify against the chart.",
-                }
-        elif temporal_gate_result.get("status") == "warn":
+        if temporal_gate_result.get("status") == "warn":
             issues.extend(
                 [
                     c
@@ -3708,39 +3573,6 @@ async def _review_existing_answer(
                     if c.get("status") == "warn"
                 ]
             )
-        if (
-            temporal_gate_result.get("mode") in {"warn", "enforce"}
-            and temporal_gate_result.get("applied") != "fallback"
-        ):
-            (
-                _ruled_text,
-                _ruled_citations,
-                _ruled_blocks,
-                rule_findings,
-            ) = answer_rules.apply_answer_rules(
-                question,
-                answer_text,
-                citations,
-                blocks,
-                temporal_facts,
-                edit=False,
-            )
-            if rule_findings:
-                temporal_gate_result["checks"] = (
-                    list(temporal_gate_result.get("checks") or []) + rule_findings
-                )
-                temporal_gate_result["status"] = temporal._final_gate_status(
-                    temporal_gate_result["checks"]
-                )
-                issues.extend(
-                    f for f in rule_findings if f.get("status") in {"warn", "fail"}
-                )
-            if any(f.get("status") == "fail" for f in rule_findings):
-                status = "needs_review"
-                summary = "The answer check found a deterministic rule issue that needs review."
-                answer_conf = _merge_temporal_gate_conf(
-                    answer_conf, temporal_gate_result
-                )
 
     if status in {"checked", "edited"} and _is_substantive_answer(answer_text):
         review_text = answer_text

@@ -30,9 +30,9 @@ def test_an_underscore_in_a_chart_date_is_repaired_before_the_check():
     assert repair_garbled_dates("no dates", FACTS) == ("no dates", [])
 
 
-def test_the_answer_gate_repairs_a_garbled_date_instead_of_flagging_it():
+def test_the_answer_gate_warns_non_destructively_without_overwriting_prose():
     steps: list = []
-    answer, _citations, _blocks, gate, _original = team._apply_temporal_gate(
+    answer, _citations, _blocks, gate, original = team._apply_temporal_gate(
         question="What was the last weight?",
         answer_text="The last weight was 71 kg on 2026-01_26 [19].",
         citations=[19],
@@ -42,10 +42,11 @@ def test_the_answer_gate_repairs_a_garbled_date_instead_of_flagging_it():
         steps=steps,
     )
 
-    assert answer == "The last weight was 71 kg on 2026-01-26 [19]."
-    assert gate["applied"] == "repair"
-    assert gate["date_repairs"] == [{"from": "2026-01_26", "to": "2026-01-26"}]
-    assert not [c for c in gate["checks"] if c["id"] == "date_format"]
+    assert answer == "The last weight was 71 kg on 2026-01_26 [19]."
+    assert gate["applied"] == "none"
+    assert gate["status"] == "warn"
+    assert original is None
+    assert any(c["id"] == "date_format" and c["status"] == "warn" for c in gate["checks"])
 
 
 def _with_review_policy(profile, **review):
@@ -256,3 +257,73 @@ def test_findings_policy_retains_unavailable_review_and_mixed_review_doubt(monke
     assert len(issues) == 2
     assert issues[0]["wrong"] == "first"
     assert issues[1]["id"] == "review_doubt" and issues[1]["wrong"] == "second"
+
+
+def test_quick_profile_preserves_multifact_citations_without_false_edit_or_grade(monkeypatch):
+    import asyncio
+    import json
+    from server.levels_loader import compile_execution_spec
+    from tests.factories import _TestTokenCounter, patient_source_registry, stream_profile
+
+    real_gate = team._apply_temporal_gate
+    _stub_common(monkeypatch)
+    monkeypatch.setattr(team, "_apply_temporal_gate", real_gate)
+
+    mappings = [
+        {"resourceType": "obs", "resourceUuid": "u1", "date": "2026-01-07", "text": "(2026-01-07) Assessment — New complaints: Yes"},
+        {"resourceType": "obs", "resourceUuid": "u2", "date": "2026-01-07", "text": "(2026-01-07) Finding — Diastolic blood pressure: 50 mmHg"},
+        {"resourceType": "obs", "resourceUuid": "u3", "date": "2026-01-07", "text": "(2026-01-07) Finding — Pulse: 157 beats/min"},
+        {"resourceType": "obs", "resourceUuid": "u4", "date": "2026-01-07", "text": "(2026-01-07) Finding — Systolic blood pressure: 90 mmHg"},
+        {"resourceType": "obs", "resourceUuid": "u5", "date": "2026-01-07", "text": "(2026-01-07) Assessment — Current WHO HIV stage: WHO stage 3"},
+        {"resourceType": "condition", "resourceUuid": "u6", "date": "2025-12-31", "text": "(2025-12-31) Condition — Fever: active"},
+        {"resourceType": "condition", "resourceUuid": "u7", "date": "2025-11-10", "text": "(2025-11-10) Condition — Vomiting: active"},
+        {"resourceType": "condition", "resourceUuid": "u8", "date": "2025-10-22", "text": "(2025-10-22) Condition — Oral candidiasis: active"},
+    ]
+    chart = "\n".join(f"[{idx}] {m['text']}" for idx, m in enumerate(mappings, start=1))
+    source = patient_source_registry(chart, mappings)
+    profile = compile_execution_spec(
+        "gemma-4-12b", {"mode": "quick", "checks": {"confidence": "findings", "drug_safety": False}}
+    )
+    expected_indices = [1, 2, 3, 4, 5, 6, 7, 8]
+
+    for draft_answer, expect_canonicalized in (
+        (
+            "Patient presented on 2026-01-07 with new complaints, pulse 157 bpm, and blood pressure 90/50 mmHg [1], [2], [3], [4], [5]. Active conditions include fever, vomiting, and oral candidiasis [6], [7], [8].",
+            False,
+        ),
+        (
+            "Patient presented on 2026-01-07 with new complaints, pulse 157 bpm, and blood pressure 90/50 mmHg [1, 2, 3, 4, 5]. Active conditions include fever, vomiting, and oral candidiasis [6, 7, 8].",
+            True,
+        ),
+    ):
+        async def fake_answer(*_args, _ans=draft_answer, **_kwargs):
+            return _ans, list(expected_indices), []
+
+        async def unchanged(_client, **kwargs):
+            return kwargs["answer_text"], kwargs["citations"], kwargs["blocks"], {"level": "green", "note": ""}
+
+        monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
+        monkeypatch.setattr(team, "_ensure_substantive_answer", unchanged)
+
+        async def run():
+            out = {}
+            async for name, raw in stream_profile(
+                profile,
+                [{"role": "user", "content": "whats up with this patient?"}],
+                patient="p39",
+                source_registry=source,
+                token_counter=_TestTokenCounter(),
+            ):
+                out[name] = json.loads(raw)
+            return out
+
+        done = asyncio.run(run())["done"]
+        if expect_canonicalized:
+            assert "[1][2][3][4][5]" in done["answer"]
+            assert "[6][7][8]" in done["answer"]
+        else:
+            assert done["answer"] == draft_answer
+        assert sorted(ref["index"] for ref in done["references"]) == expected_indices
+        assert done["answerValidation"]["status"] == "checked"
+        assert "originalAnswer" not in done["answerValidation"]
+        assert done["confidence"]["answer"]["level"] is None

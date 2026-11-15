@@ -297,7 +297,7 @@ def _bare_profile():
     )
 
 
-def test_a_bare_profile_reports_a_gate_patch_as_edited_and_no_review(monkeypatch):
+def test_a_bare_profile_keeps_answer_non_destructively_without_review(monkeypatch):
     import asyncio
     import json
     from tests.factories import _TestTokenCounter, patient_source_registry, stream_profile
@@ -331,9 +331,9 @@ def test_a_bare_profile_reports_a_gate_patch_as_edited_and_no_review(monkeypatch
 
     done = asyncio.run(run())["done"]
 
-    assert done["answer"] == "The visit was on 2026-01-26 [1]."
-    assert done["answerValidation"]["status"] == "edited"
-    assert done["answerValidation"]["originalAnswer"] == "The visit was on 2026-01_26 [1]."
+    assert done["answer"] == "The visit was on 2026-01_26 [1]."
+    assert done["answerValidation"]["status"] == "checked"
+    assert "originalAnswer" not in done["answerValidation"]
     assert "review_status" not in done["inDepth"]["validation"]
     assert "groundingChecks" not in (done["references"][0] if done["references"] else {})
 

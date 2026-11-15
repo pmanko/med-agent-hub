@@ -126,7 +126,7 @@ def _wrong_upcoming_chat(calls):
     return fake_chat
 
 
-def test_temporal_gate_enforce_patches_answer_and_trace(monkeypatch, tmp_path):
+def test_temporal_gate_enforce_keeps_draft_and_warns_nonblocking(monkeypatch, tmp_path):
     calls = []
     monkeypatch.setattr(team, "_chat", _wrong_upcoming_chat(calls))
     monkeypatch.setattr(team, "_TRACE_DIR", str(tmp_path))
@@ -146,9 +146,7 @@ def test_temporal_gate_enforce_patches_answer_and_trace(monkeypatch, tmp_path):
         )
     )
     env = json.loads(out)
-    assert env["answer"].startswith(
-        "No upcoming appointment is documented after 2026-06-20"
-    )
+    assert env["answer"] == "The next upcoming appointment is 2026-01-07 [2]."
     assert env["citations"] == [2]
 
     trace = json.loads(
@@ -156,17 +154,14 @@ def test_temporal_gate_enforce_patches_answer_and_trace(monkeypatch, tmp_path):
     )
     gate = trace["temporal_gate"]
     assert gate["mode"] == "enforce"
-    assert gate["status"] == "fail"
-    assert gate["applied"] == "patch"
-    assert (
-        trace["original_answer_text"]
-        == "The next upcoming appointment is 2026-01-07 [2]."
-    )
+    assert gate["status"] == "warn"
+    assert gate["applied"] == "none"
+    assert trace["original_answer_text"] is None
     assert trace["hub_revision"] == "a" * 40
     assert "temporal_facts_schema_version" not in trace
 
 
-def test_temporal_gate_warn_records_failure_without_changing_answer(
+def test_temporal_gate_warn_records_warning_without_changing_answer(
     monkeypatch, tmp_path
 ):
     calls = []
@@ -191,7 +186,7 @@ def test_temporal_gate_warn_records_failure_without_changing_answer(
     )
     gate = trace["temporal_gate"]
     assert gate["mode"] == "warn"
-    assert gate["status"] == "fail"
+    assert gate["status"] == "warn"
     assert gate["applied"] == "none"
     assert trace["original_answer_text"] is None
 

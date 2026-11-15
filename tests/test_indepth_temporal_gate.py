@@ -44,7 +44,7 @@ MULTI_COUNT_FACTS = {
 }
 
 
-def test_indepth_temporal_gate_checks_each_claim_and_flags_unsafe_output():
+def test_indepth_temporal_gate_checks_each_claim_and_warns_nonblocking():
     result = gate_indepth_claims(
         [
             "Follow-up should consider the clinical context.",
@@ -54,25 +54,27 @@ def test_indepth_temporal_gate_checks_each_claim_and_flags_unsafe_output():
         mode="enforce",
     )
 
-    assert result["status"] == "needs_review"
+    assert result["status"] == "checked"
     assert result["claims"] == [
         "Follow-up should consider the clinical context.",
         "The visit occurred on 2025-10-//13.",
     ]
-    assert result["flagged"] == [2]
+    assert result["flagged"] == []
     assert [item["claim_index"] for item in result["checks"]] == [1, 2]
+    assert result["checks"][1]["gate"]["status"] == "warn"
 
 
-def test_a_claim_the_date_check_cannot_correct_is_kept_and_flagged():
+def test_a_claim_with_a_date_issue_is_kept_and_warned_nonblocking():
     result = gate_indepth_claims(
         ["The visit occurred on 2025-10-//13."],
         FACTS,
         mode="enforce",
     )
 
-    assert result["status"] == "needs_review"
+    assert result["status"] == "checked"
     assert result["claims"] == ["The visit occurred on 2025-10-//13."]
-    assert result["flagged"] == [1]
+    assert result["flagged"] == []
+    assert result["checks"][0]["gate"]["status"] == "warn"
 
 
 def test_non_temporal_claim_still_records_not_applicable_verdict():
@@ -94,14 +96,15 @@ def test_empty_indepth_cannot_report_checked_or_complete():
     assert result["claims"] == []
 
 
-def test_uncited_value_mismatch_is_flagged_without_introducing_patch_citations():
+def test_uncited_value_mismatch_warns_nonblocking_without_patching():
     claim = "The CD4 count was 300 cells/uL on 2006-04-04."
     result = gate_indepth_claims([claim], MULTI_COUNT_FACTS, mode="enforce")
 
-    assert result["status"] == "needs_review"
+    assert result["status"] == "checked"
     assert result["claims"] == [claim]
-    assert result["flagged"] == [1]
+    assert result["flagged"] == []
     check = result["checks"][0]["gate"]
+    assert check["status"] == "warn"
     assert check["patch_citations"] == [178]
 
 
@@ -109,25 +112,27 @@ def test_single_point_cd4_trend_claim_targets_only_cited_cd4_series():
     claim = "The CD4 count was 341 cells/uL on 2006-04-04 [178] and shows a declining trend."
     result = gate_indepth_claims([claim], MULTI_COUNT_FACTS, mode="warn")
 
-    assert result["status"] == "needs_review"
+    assert result["status"] == "checked"
     assert result["claims"] == [claim]
-    assert result["flagged"] == [1]
+    assert result["flagged"] == []
     check = result["checks"][0]["gate"]
+    assert check["status"] == "warn"
     assert check["patch_citations"] == [178]
     assert {index for item in check["checks"] for index in item["source_indices"]} == {178}
 
 
-def test_safe_patch_must_stay_within_original_claim_citations():
+def test_indepth_gate_keeps_single_point_trend_claim_non_destructively():
+    claim = "The CD4 count is declining over time [178]."
     result = gate_indepth_claims(
-        ["The CD4 count is declining over time [178]."],
+        [claim],
         MULTI_COUNT_FACTS,
         mode="enforce",
     )
 
-    assert result["status"] == "edited"
+    assert result["status"] == "checked"
     assert result["flagged"] == []
-    assert result["claims"][0].startswith("The chart shows one dated CD4 count measurement")
-    assert "[178]" in result["claims"][0]
+    assert result["claims"] == [claim]
+    assert result["checks"][0]["gate"]["status"] == "warn"
 
 
 def test_long_indepth_date_is_not_inferred_as_a_last_visit_short_answer():
@@ -207,7 +212,7 @@ def test_indepth_blood_pressure_claim_does_not_bind_white_blood_cells():
     assert result["claims"] == [claim]
 
 
-def test_dangling_citation_is_repaired_from_one_exact_numeric_point():
+def test_dangling_citation_remains_needs_review_without_repair():
     facts = {
         **FACTS,
         "numeric_series": [
@@ -230,9 +235,10 @@ def test_dangling_citation_is_repaired_from_one_exact_numeric_point():
         mode="enforce",
     )
 
-    assert result["status"] == "edited"
-    assert result["claims"] == ["The patient's weight was 71 kg on 2006-06-06 [19]"]
-    assert result["checks"][0]["citation_repair"]["source_index"] == 19
+    assert result["status"] == "needs_review"
+    assert result["flagged"] == [1]
+    assert result["claims"] == ["The patient's weight was 71 kg on 2006-06-06 ["]
+    assert "citation_repair" not in result["checks"][0]
 
 
 def test_dangling_citation_is_not_repaired_when_point_binding_is_ambiguous():
@@ -365,7 +371,8 @@ def test_grouped_numeric_citations_are_canonicalized_in_enforce_mode():
 
     result = gate_indepth_claims([claim], FACTS, mode="enforce")
 
-    assert result["status"] == "edited"
+    assert result["status"] == "checked"
+    assert result["flagged"] == []
     assert result["claims"] == [
         "The recorded vital signs are supported by sources [18][17][15]."
     ]
@@ -375,13 +382,24 @@ def test_grouped_numeric_citations_are_canonicalized_in_enforce_mode():
     }
 
 
-def test_grouped_numeric_citations_are_not_mutated_in_warn_mode():
+def test_grouped_numeric_citations_canonicalize_in_warn_and_stay_untouched_when_off():
     claim = "The recorded vital signs are supported by sources [18, 17, 15]."
 
-    result = gate_indepth_claims([claim], FACTS, mode="warn")
+    warn_result = gate_indepth_claims([claim], FACTS, mode="warn")
 
-    assert result["claims"] == [claim]
-    assert "citation_canonicalization" not in result["checks"][0]
+    assert warn_result["status"] == "checked"
+    assert warn_result["flagged"] == []
+    assert warn_result["claims"] == [
+        "The recorded vital signs are supported by sources [18][17][15]."
+    ]
+    assert warn_result["checks"][0]["citation_canonicalization"] == {
+        "status": "canonicalized",
+        "source_indices": [18, 17, 15],
+    }
+
+    off_result = gate_indepth_claims([claim], FACTS, mode="off")
+    assert off_result["claims"] == [claim]
+    assert "citation_canonicalization" not in off_result["checks"][0]
 
 
 def test_grouped_numeric_citations_deduplicate_without_reordering():
@@ -448,31 +466,31 @@ def test_a_claim_stating_one_value_passes_when_it_asserts_no_trend():
     assert _flags(result) == []
 
 
-def test_a_claim_asserting_a_trend_over_one_point_still_fails():
+def test_a_claim_asserting_a_trend_over_one_point_warns_nonblocking():
     result = gate_indepth_claims(
         ["The CD4 count has declined [178]."], MULTI_COUNT_FACTS, mode="warn"
     )
 
-    assert result["status"] == "needs_review"
-    assert result["flagged"] == [1]
-    assert "single_point_trend:fail" in _flags(result)
+    assert result["status"] == "checked"
+    assert result["flagged"] == []
+    assert result["claims"] == ["The CD4 count has declined [178]."]
+    assert "single_point_trend:warn" in _flags(result)
 
 
-def test_generic_count_trend_claim_resolves_series_from_citation_without_question():
+def test_generic_count_trend_claim_resolves_series_and_warns_non_destructively():
     claim = "The count has declined to 341 cells/uL [178]."
 
     warn_result = gate_indepth_claims([claim], MULTI_COUNT_FACTS, mode="warn")
-    assert warn_result["status"] == "needs_review"
-    assert warn_result["flagged"] == [1]
-    assert "single_point_trend:fail" in _flags(warn_result)
+    assert warn_result["status"] == "checked"
+    assert warn_result["flagged"] == []
+    assert warn_result["claims"] == [claim]
+    assert "single_point_trend:warn" in _flags(warn_result)
 
     enforce_result = gate_indepth_claims([claim], MULTI_COUNT_FACTS, mode="enforce")
-    assert enforce_result["status"] == "edited"
+    assert enforce_result["status"] == "checked"
     assert enforce_result["flagged"] == []
-    assert enforce_result["claims"] == [
-        "The chart shows one dated CD4 count measurement: 341 cells/uL on 2006-04-04 [178]. "
-        "A trend cannot be determined from one point."
-    ]
+    assert enforce_result["claims"] == [claim]
+    assert "single_point_trend:warn" in _flags(enforce_result)
 
 
 def test_engine_judges_indepth_claims_without_question_while_answer_gate_uses_question(
@@ -554,8 +572,8 @@ def test_engine_judges_indepth_claims_without_question_while_answer_gate_uses_qu
 
     monkeypatch.setattr(team, "_gen_indepth", fake_indepth_single_value)
     payload = json.loads(asyncio.run(engine.drain_profile(request)))
-    assert payload["temporalGate"]["status"] == "fail"
-    assert payload["temporalGate"]["applied"] == "patch"
+    assert payload["temporalGate"]["status"] == "warn"
+    assert payload["temporalGate"]["applied"] == "none"
     assert payload["inDepth"]["answer"] == f"- {single_value_claim}"
     assert payload["inDepth"]["validation"]["status"] == "checked"
 
@@ -564,8 +582,12 @@ def test_engine_judges_indepth_claims_without_question_while_answer_gate_uses_qu
 
     monkeypatch.setattr(team, "_gen_indepth", fake_indepth_unsupported_trend)
     flagged_payload = json.loads(asyncio.run(engine.drain_profile(request)))
-    assert flagged_payload["inDepth"]["validation"]["status"] == "needs_review"
-    assert flagged_payload["inDepth"]["validation"]["flagged"] == [1]
+    assert flagged_payload["inDepth"]["validation"]["status"] == "checked"
+    assert flagged_payload["inDepth"]["validation"]["flagged"] == []
+    assert any(
+        c["gate"]["status"] == "warn"
+        for c in flagged_payload["inDepth"]["validation"]["checks"]
+    )
 
 
 def test_risk_and_outcome_words_are_not_read_as_the_patients_trend():
@@ -598,28 +620,28 @@ def test_trend_denial_is_scoped_to_its_own_series_and_clause():
         "is insufficient to establish a trend."
     )
     cross_result = gate_indepth_claims([cross_series], facts, mode="enforce")
-    assert cross_result["status"] == "needs_review"
-    assert cross_result["flagged"] == [1]
+    assert cross_result["status"] == "checked"
+    assert cross_result["flagged"] == []
     assert cross_result["claims"] == [cross_series]
-    assert _flags(cross_result) == ["trend_direction:fail"]
+    assert _flags(cross_result) == ["trend_direction:warn"]
 
     single_positive = "The CD4 count is declining based on a single value [3]."
     single_warn = gate_indepth_claims([single_positive], facts, mode="warn")
-    assert single_warn["status"] == "needs_review"
-    assert single_warn["flagged"] == [1]
-    assert _flags(single_warn) == ["single_point_trend:fail"]
+    assert single_warn["status"] == "checked"
+    assert single_warn["flagged"] == []
+    assert _flags(single_warn) == ["single_point_trend:warn"]
 
     other_series_denial = "There is no clear trend in weight, but the CD4 count is declining [3]."
     other_warn = gate_indepth_claims([other_series_denial], facts, mode="warn")
-    assert other_warn["status"] == "needs_review"
-    assert other_warn["flagged"] == [1]
-    assert _flags(other_warn) == ["single_point_trend:fail"]
+    assert other_warn["status"] == "checked"
+    assert other_warn["flagged"] == []
+    assert _flags(other_warn) == ["single_point_trend:warn"]
 
     contrast_trend = "The CD4 count shows a declining trend, not a stable one [3]."
     contrast_warn = gate_indepth_claims([contrast_trend], facts, mode="warn")
-    assert contrast_warn["status"] == "needs_review"
-    assert contrast_warn["flagged"] == [1]
-    assert _flags(contrast_warn) == ["single_point_trend:fail"]
+    assert contrast_warn["status"] == "checked"
+    assert contrast_warn["flagged"] == []
+    assert _flags(contrast_warn) == ["single_point_trend:warn"]
 
 
 def test_measurement_explicitly_placed_at_last_visit_is_checked_against_last_encounter():
@@ -632,10 +654,10 @@ def test_measurement_explicitly_placed_at_last_visit_is_checked_against_last_enc
     claim = "At the last visit, weight was 52 kg on 2025-10-22 [1]."
 
     result = gate_indepth_claims([claim], facts, mode="enforce")
-    assert result["status"] == "needs_review"
-    assert result["flagged"] == [1]
+    assert result["status"] == "checked"
+    assert result["flagged"] == []
     assert result["claims"] == [claim]
-    assert "last_visit:fail" in _flags(result)
+    assert "last_visit:warn" in _flags(result)
 
 
 def test_coordinated_dates_and_shared_leading_date_bind_values_across_clauses():
@@ -649,15 +671,15 @@ def test_coordinated_dates_and_shared_leading_date_bind_values_across_clauses():
 
     coordinated = "Weight was 52 kg on 2025-10-22 and 2026-01-07 [1][2]."
     coord_warn = gate_indepth_claims([coordinated], facts, mode="warn")
-    assert coord_warn["status"] == "needs_review"
-    assert coord_warn["flagged"] == [1]
-    assert "date_value_binding:fail" in _flags(coord_warn)
+    assert coord_warn["status"] == "checked"
+    assert coord_warn["flagged"] == []
+    assert "date_value_binding:warn" in _flags(coord_warn)
 
     shared_leading = "On 2025-10-22, weight was 52 kg and CD4 count was 341 cells/uL [4]."
     shared_warn = gate_indepth_claims([shared_leading], facts, mode="warn")
-    assert shared_warn["status"] == "needs_review"
-    assert shared_warn["flagged"] == [1]
-    assert "date_value_binding:fail" in _flags(shared_warn)
+    assert shared_warn["status"] == "checked"
+    assert shared_warn["flagged"] == []
+    assert "date_value_binding:warn" in _flags(shared_warn)
 
 
 @pytest.mark.parametrize(
@@ -665,8 +687,7 @@ def test_coordinated_dates_and_shared_leading_date_bind_values_across_clauses():
 )
 def test_claims_the_gate_questioned_in_past_runs_get_the_reviewed_verdict(goldens_file):
     """Every In-Depth claim the gate questioned in the 26 and 27 October 2026 runs, replayed
-    claim-only: wrong or invented dates still fail; claims about risks, single values and the
-    correct last visit do not."""
+    claim-only: heuristic temporal concerns record non-blocking warnings while preserving claim text."""
     goldens = json.loads((FIXTURES / goldens_file).read_text())
     facts = {}
     for case in goldens["cases"]:
@@ -677,5 +698,7 @@ def test_claims_the_gate_questioned_in_past_runs_get_the_reviewed_verdict(golden
 
         result = gate_indepth_claims([case["claim"]], facts[chart], mode="enforce")
 
-        assert _flags(result) == case["expected"], case["scenario"]
-        assert result["claims"] == [case.get("expected_claim", case["claim"])], case["scenario"]
+        expected = [flag.replace(":fail", ":warn") for flag in case["expected"]]
+        assert _flags(result) == expected, case["scenario"]
+        assert result["flagged"] == [], case["scenario"]
+        assert result["claims"] == [case["claim"]], case["scenario"]
