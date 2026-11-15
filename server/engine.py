@@ -1210,17 +1210,24 @@ def _initial_answer_changed(state: _State) -> bool:
     _current_block_text, current_block_refs = stages._block_temporal_text_and_refs(
         state.blocks
     )
-    initial_sources = stages._citation_indices(
-        list(state.initial_answer_citations) + initial_block_refs,
+    initial_explicit = stages._citation_indices(
+        initial_block_refs,
         initial or "",
+    )
+    initial_sources = (
+        initial_explicit
+        if initial_explicit
+        else stages._citation_indices(list(state.initial_answer_citations), "")
     )
     current_sources = stages._citation_indices(
         list(state.citations) + current_block_refs,
         state.answer_text,
     )
-    # Citation order is not a change: resolving references can reorder the same records.
+    initial_canon, _ = temporal.canonicalize_citations(initial or "")
+    current_canon, _ = temporal.canonicalize_citations(state.answer_text or "")
+    # Grouped-bracket canonicalization and citation order are lossless formatting normalizations.
     return (state.answer_check_edited or state.review_edited) and initial is not None and (
-        initial.strip() != state.answer_text.strip()
+        initial_canon.strip() != current_canon.strip()
         or set(initial_sources) != set(current_sources)
         or state.initial_answer_blocks != state.blocks
     )
@@ -1910,6 +1917,15 @@ async def _execute_stages(
                     if request.profile.output_mode == "product":
                         before_contract_answer = state.answer_text
                         before_contract_citations = list(state.citations)
+                        _block_txt, contract_block_refs = (
+                            stages._block_temporal_text_and_refs(state.blocks)
+                        )
+                        before_explicit = stages._citation_indices(
+                            contract_block_refs, before_contract_answer
+                        )
+                        before_effective_sources = set(
+                            before_explicit or before_contract_citations
+                        )
                         (
                             state.answer_text,
                             state.citations,
@@ -1918,13 +1934,34 @@ async def _execute_stages(
                             state.answer_text, state.citations, state.blocks
                         )
                         state.citation_issues = state.table_issues + citation_issues
+                        before_canon, _ = temporal.canonicalize_citations(
+                            before_contract_answer
+                        )
+                        after_canon, _ = temporal.canonicalize_citations(
+                            state.answer_text
+                        )
+                        after_explicit = stages._citation_indices(
+                            contract_block_refs, state.answer_text
+                        )
+                        after_effective_sources = set(state.citations) | set(
+                            after_explicit
+                        )
                         contract_changed = (
-                            state.answer_text != before_contract_answer
-                            or state.citations != before_contract_citations
+                            after_canon.strip() != before_canon.strip()
+                            or after_effective_sources != before_effective_sources
+                        )
+                        before_gate_canon, _ = temporal.canonicalize_citations(
+                            before_gate_answer
+                        )
+                        before_gate_explicit = stages._citation_indices(
+                            contract_block_refs, before_gate_answer
+                        )
+                        before_gate_effective = set(
+                            before_gate_explicit or before_gate_citations
                         )
                         if gate_count > 1 and (
-                            state.answer_text != before_gate_answer
-                            or state.citations != before_gate_citations
+                            after_canon.strip() != before_gate_canon.strip()
+                            or after_effective_sources != before_gate_effective
                         ):
                             state.review_edited = True
                         if gate_count == 1 and contract_changed:

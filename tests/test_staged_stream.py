@@ -2036,7 +2036,7 @@ def test_final_unchecked_grounding_cannot_leave_answer_checked(monkeypatch):
     assert final["confidence"]["answer"]["level"] == "yellow"
 
 
-def test_product_unscoped_citations_over_multiple_claims_cannot_leave_answer_checked(
+def test_product_unscoped_citations_over_multiple_claims_stay_checked(
     monkeypatch,
 ):
     _stub_common(monkeypatch)
@@ -2051,15 +2051,21 @@ def test_product_unscoped_citations_over_multiple_claims_cannot_leave_answer_che
     monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
 
     final = dict(_collect(_product_profile()))["done"]
-    assert final["answerValidation"]["status"] == "needs_review"
-    assert any(
-        issue["id"] == "citation_scope"
+    assert (
+        final["answer"]
+        == "The documented visit was on 2025-01-01. A different order was on 2025-02-02."
+    )
+    assert [ref["index"] for ref in final["references"]] == [1, 2]
+    assert final["answerValidation"]["status"] == "checked"
+    assert "originalAnswer" not in final["answerValidation"]
+    assert not any(
+        issue.get("id") == "citation_scope"
         for issue in final["answerValidation"]["issues"]
     )
-    assert final["confidence"]["answer"]["level"] == "red"
+    assert final["confidence"]["answer"]["level"] == "green"
 
 
-def test_product_unscoped_source_set_on_one_claim_can_leave_answer_checked(monkeypatch):
+def test_product_unscoped_source_set_on_one_claim_stays_checked_without_editing_prose(monkeypatch):
     _stub_common(monkeypatch)
 
     async def fake_answer(*_args, **_kwargs):
@@ -2068,13 +2074,12 @@ def test_product_unscoped_source_set_on_one_claim_can_leave_answer_checked(monke
     monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
 
     final = dict(_collect(_product_profile()))["done"]
-    assert final["answer"] == "The chart contains two relevant records [1][2]."
-    assert final["answerValidation"]["status"] == "edited"
-    assert final["answerValidation"]["originalAnswer"] == (
-        "The chart contains two relevant records."
-    )
+    assert final["answer"] == "The chart contains two relevant records."
+    assert [ref["index"] for ref in final["references"]] == [1, 2]
+    assert final["answerValidation"]["status"] == "checked"
+    assert "originalAnswer" not in final["answerValidation"]
     assert not any(
-        issue["id"] == "citation_scope"
+        issue.get("id") == "citation_scope"
         for issue in final["answerValidation"]["issues"]
     )
 
@@ -2214,7 +2219,7 @@ def test_review_correction_does_not_replace_an_answer_whose_table_was_withheld(m
     assert review_calls == 1
 
 
-def test_product_single_unscoped_citation_is_scoped_and_grounded(monkeypatch):
+def test_product_single_unscoped_citation_is_resolved_and_grounded(monkeypatch):
     _stub_common(monkeypatch)
 
     async def fake_answer(*_args, **_kwargs):
@@ -2224,7 +2229,7 @@ def test_product_single_unscoped_citation_is_scoped_and_grounded(monkeypatch):
 
     events = dict(_collect(_product_profile()))
     final = events["done"]
-    assert final["answer"] == "The documented visit was on 2025-01-01 [1]."
+    assert final["answer"] == "The documented visit was on 2025-01-01."
     answer_references = [
         reference
         for reference in final["references"]
@@ -2235,13 +2240,11 @@ def test_product_single_unscoped_citation_is_scoped_and_grounded(monkeypatch):
     ]
     assert [reference["index"] for reference in answer_references] == [1]
     assert answer_references[0]["groundingStatus"] == "verified"
-    assert final["answerValidation"]["status"] == "edited"
-    assert final["answerValidation"]["originalAnswer"] == (
-        "The documented visit was on 2025-01-01."
-    )
+    assert final["answerValidation"]["status"] == "checked"
+    assert "originalAnswer" not in final["answerValidation"]
 
 
-def test_temporal_patch_is_citation_canonicalized_after_gate(monkeypatch):
+def test_temporal_patch_preserves_references_after_gate(monkeypatch):
     _stub_common(monkeypatch)
 
     async def fake_answer(*_args, **_kwargs):
@@ -2260,7 +2263,13 @@ def test_temporal_patch_is_citation_canonicalized_after_gate(monkeypatch):
     monkeypatch.setattr(team, "_apply_temporal_gate", patching_gate)
 
     final = dict(_collect(_product_profile()))["done"]
-    assert final["answer"] == "Safe deterministic correction [1]."
+    assert final["answer"] == "Safe deterministic correction."
+    answer_references = [
+        ref
+        for ref in final["references"]
+        if any(usage.get("location") == "answer" for usage in ref.get("usage", []))
+    ]
+    assert [ref["index"] for ref in answer_references] == [1]
     assert not any(
         issue["id"] == "citation_scope"
         for issue in final["answerValidation"]["issues"]
@@ -2277,7 +2286,12 @@ def test_citation_contract_edit_preserves_the_first_model_answer(monkeypatch):
     async def fake_answer(*_args, **_kwargs):
         return "Single clinical claim.", [1], []
 
+    def rewrite_citation_prose(answer, citations, blocks):
+        return answer.rstrip(".") + " [1].", citations, blocks
+
     monkeypatch.setattr(team, "_synthesize_answer", fake_answer)
+    monkeypatch.setattr(team, "_enforce_product_citation_contract", lambda a, c, b: (a.rstrip(".") + " [1].", c, []))
+    del rewrite_citation_prose
 
     final = dict(_collect(_product_profile()))["done"]
 

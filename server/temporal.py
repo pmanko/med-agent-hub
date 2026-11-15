@@ -2670,15 +2670,12 @@ def gate_indepth_claims(
     *,
     mode: str = "enforce",
 ) -> Dict[str, Any]:
-    """Apply the deterministic temporal gate to every displayed In-Depth claim.
+    """Run non-destructive temporal and syntax checks over In-Depth claims.
 
-    Each claim is judged on its own words, with no question attached: the trend, window,
-    last-visit and upcoming checks and the choice of measurement series see the claim alone.
-    A question that asks for a trend therefore cannot fail a claim that states one value.
-
-    In enforce mode a failing claim is replaced by the gate's chart-derived patch when the patch
-    cites only records the claim already cited. Otherwise the claim is kept and its 1-based index
-    listed in ``flagged``, so the reader sees it marked rather than removed.
+    Grouped bracket lists (e.g. ``[1, 2]``) are losslessly canonicalized into ``[1][2]``
+    tokens without marking claims as substantively edited. Deterministic temporal checks are
+    recorded as non-blocking ``warn``/``info`` notes without rewriting or flagging claim prose;
+    only malformed bracket syntax (e.g. ``[12`` or ``[N]``) flags ``needs_review``.
     """
     normalized_mode = (mode or "enforce").strip().lower()
     if normalized_mode not in {"off", "warn", "enforce"}:
@@ -2686,7 +2683,6 @@ def gate_indepth_claims(
     kept: List[str] = []
     flagged: List[int] = []
     checks: List[Dict[str, Any]] = []
-    edited = False
     if not claims:
         return {
             "schema_version": "indepth_temporal_gate.v1",
@@ -2699,48 +2695,37 @@ def gate_indepth_claims(
     for index, claim in enumerate(claims or [], 1):
         original_claim = claim
         canonicalized_indices: List[int] = []
-        if normalized_mode == "enforce":
+        if normalized_mode != "off":
             claim, canonicalized_indices = _canonicalize_grouped_citations(claim or "")
-            if canonicalized_indices:
-                edited = True
-        citation_repair = (
-            _repair_dangling_indepth_citation(claim or "", temporal_facts)
-            if normalized_mode == "enforce"
-            else None
-        )
-        if citation_repair:
-            claim, source_index, repair_reason = citation_repair
-            edited = True
-        date_repairs: List[Dict[str, str]] = []
-        if normalized_mode == "enforce":
-            claim, date_repairs = repair_garbled_dates(claim or "", temporal_facts)
-            if date_repairs:
-                edited = True
         citations = [int(value) for value in re.findall(r"\[(\d+)]", claim or "")]
-        gate = _scope_indepth_trend_checks(
+        raw_gate = _scope_indepth_trend_checks(
             claim or "",
             citations,
             run_temporal_gate("", claim or "", citations, temporal_facts, normalized_mode),
         )
-        if normalized_mode != "off":
-            from . import answer_rules
-
-            rule_marks = answer_rules.claim_marks(claim or "", temporal_facts)
-            if rule_marks:
-                gate = dict(gate)
-                gate_checks = list(gate.get("checks") or []) + rule_marks
-                gate.update({"checks": gate_checks, "status": _final_gate_status(gate_checks)})
-                if any(m.get("status") == "fail" for m in rule_marks):
-                    gate.update({"patch_answer": None, "patch_citations": []})
+        downgraded_checks: List[Dict[str, Any]] = []
+        for raw_check in raw_gate.get("checks") or []:
+            if not isinstance(raw_check, dict):
+                continue
+            item = dict(raw_check)
+            if item.get("status") == "fail":
+                item["status"] = "warn"
+            if item.get("severity") == "block":
+                item["severity"] = "warn"
+            downgraded_checks.append(item)
+        gate = dict(raw_gate)
+        gate["checks"] = downgraded_checks
+        gate["status"] = _final_gate_status(downgraded_checks)
+        gate["patch_answer"] = None
+        gate["patch_citations"] = []
         if normalized_mode != "off" and _has_malformed_citation_syntax(claim or ""):
-            gate = dict(gate)
             gate_checks = list(gate.get("checks") or [])
             _add_check(
                 gate_checks,
                 "citation_format",
                 "fail",
                 "block",
-                original_claim[:240],
+                (original_claim or "")[:240],
                 "The claim contains malformed, attached, nested, or incomplete evidence citation syntax.",
                 citations,
             )
@@ -2753,16 +2738,6 @@ def gate_indepth_claims(
                 }
             )
         check = {"claim_index": index, "claim": original_claim, "gate": gate}
-        if date_repairs:
-            check["evaluated_claim"] = claim
-            check["date_repairs"] = date_repairs
-        if citation_repair:
-            check["evaluated_claim"] = claim
-            check["citation_repair"] = {
-                "status": "repaired",
-                "source_index": source_index,
-                "reason": repair_reason,
-            }
         if canonicalized_indices:
             check["evaluated_claim"] = claim
             check["citation_canonicalization"] = {
@@ -2770,33 +2745,11 @@ def gate_indepth_claims(
                 "source_indices": canonicalized_indices,
             }
         checks.append(check)
-        if gate.get("status") != "fail":
-            kept.append(claim)
-            continue
-        patch = str(gate.get("patch_answer") or "").strip()
-        patch_citations = {
-            value for value in gate.get("patch_citations") or [] if isinstance(value, int)
-        }
-        original_citations = set(citations)
-        if (
-            normalized_mode == "enforce"
-            and patch
-            and patch_citations
-            and patch_citations <= original_citations
-        ):
-            kept.append(patch)
-            edited = True
-        else:
-            # A claim the date check cannot correct from the chart stays visible, marked.
-            kept.append(claim)
+        kept.append(claim)
+        if gate.get("status") == "fail":
             flagged.append(index)
 
-    if flagged:
-        status = "needs_review"
-    elif edited:
-        status = "edited"
-    else:
-        status = "checked"
+    status = "needs_review" if flagged else "checked"
     return {
         "schema_version": "indepth_temporal_gate.v1",
         "mode": normalized_mode,

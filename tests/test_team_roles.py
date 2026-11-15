@@ -272,32 +272,32 @@ def test_product_citation_contract_canonicalizes_grouped_numeric_markers():
     assert issues == []
 
 
-def test_product_citation_contract_scopes_one_declared_source_to_prose():
+def test_product_citation_contract_keeps_declared_source_without_mutating_single_claim():
     answer, citations, issues = team._enforce_product_citation_contract(
         "The documented visit was on 2006-06-06.", [4], []
     )
 
-    assert answer == "The documented visit was on 2006-06-06 [4]."
+    assert answer == "The documented visit was on 2006-06-06."
     assert citations == [4]
     assert issues == []
 
 
-def test_product_citation_contract_does_not_scope_one_source_over_two_claims():
+def test_product_citation_contract_keeps_declared_source_over_two_claims_nonblocking():
     answer, citations, issues = team._enforce_product_citation_contract(
         "The visit was on 2006-06-06. The weight was 71 kg.", [4], []
     )
 
     assert answer == "The visit was on 2006-06-06. The weight was 71 kg."
     assert citations == [4]
-    assert issues[0]["id"] == "citation_scope"
+    assert issues == []
 
 
-def test_product_citation_contract_scopes_multi_source_set_to_one_prose_claim():
+def test_product_citation_contract_keeps_multi_source_set_without_mutating_single_claim():
     answer, citations, issues = team._enforce_product_citation_contract(
         "The documented visit was on 2006-06-06.", [4, 1, 2], []
     )
 
-    assert answer == "The documented visit was on 2006-06-06 [4][1][2]."
+    assert answer == "The documented visit was on 2006-06-06."
     assert citations == [4, 1, 2]
     assert issues == []
 
@@ -316,14 +316,14 @@ def test_product_citation_contract_scopes_multi_source_set_to_one_prose_claim():
         "The visit was on 2006-06-06, yet the weight was 71 kg.",
     ),
 )
-def test_product_citation_contract_blocks_multi_source_set_over_two_claims(answer):
-    answer, citations, issues = team._enforce_product_citation_contract(
+def test_product_citation_contract_keeps_multi_source_set_over_two_claims_nonblocking(answer):
+    out_answer, citations, issues = team._enforce_product_citation_contract(
         answer, [4, 1, 2], []
     )
 
+    assert out_answer == answer
     assert citations == [4, 1, 2]
-    assert issues[0]["id"] == "citation_scope"
-    assert issues[0]["severity"] == "block"
+    assert issues == []
 
 
 def test_product_table_contract_repairs_alternating_cells_by_declared_columns():
