@@ -5,7 +5,7 @@ import asyncio
 from server import engine
 from server import team as stages
 from server.context_sources import ContextBudget
-from server.levels_loader import get_profile
+from server.levels_loader import compile_execution_spec
 from tests.factories import patient_source_registry
 
 ACCOUNT = {
@@ -38,7 +38,7 @@ def _prepared():
     chart = "".join(f"[{i}] {m['text']}\n" for i, m in enumerate(mappings, start=1))
     state = engine._State(messages=[{"role": "user", "content": "What is the latest weight?"}])
     request = engine.ExecutionRequest(
-        profile=get_profile("single-12b-checked"),
+        profile=compile_execution_spec("gemma-4-12b", {"mode": "verified"}),
         messages=state.messages,
         patient="patient-1",
         context={"account_context": ACCOUNT},
@@ -170,7 +170,7 @@ def test_prefix_message_stays_byte_identical_across_questions_and_turns_with_sup
     ]
     chart = "".join(f"[{i}] {m['text']}\n" for i, m in enumerate(mappings, start=1))
     registry = patient_source_registry(chart, mappings, raw_records)
-    profile = get_profile("single-12b-checked")
+    profile = compile_execution_spec("gemma-4-12b", {"mode": "verified"})
 
     # Turn 1: Regimen + WHO guideline question (triggers KnowledgeReference + DrugReference)
     state_t1 = engine._State(
@@ -302,7 +302,7 @@ def test_select_answer_context_reserves_multi_turn_headroom_for_large_temporal_p
         ),
     )
     profile = replace(
-        get_profile("single-12b-answer"),
+        compile_execution_spec("gemma-4-12b", {"mode": "quick"}),
         context_window=20480,
         reserved_output_tokens=4096,
     )

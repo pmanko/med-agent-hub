@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import unicodedata
+from contextlib import asynccontextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -25,7 +26,7 @@ from typing import (
 
 import httpx
 
-from . import answer_rules, drug_safety, model_provisioner, temporal
+from . import answer_rules, drug_safety, model_provisioner, router_memory, temporal
 from .config import EXPERT_DRY_MULTIPLIER, llm_config, resolve_hub_build_revision
 from .context_sources import (
     CHART_MARKER,
@@ -45,6 +46,7 @@ MAX_TOOL_ITERATIONS = 3
 # files per request (server/prompt_loader.load_prompt) under server/prompts/, so a
 # prompt edit changes behaviour with no rebuild. A missing file fails loud — the
 # files are the single source of truth.
+
 
 def _tool_definitions(has_expert: bool = True) -> List[Dict[str, Any]]:
     """Optional specialist tools; evidence retrieval is owned by context sources."""
@@ -279,19 +281,14 @@ def _normalize_product_blocks(
             return remapped if len(remapped) == len(keys) else None
 
         canonical_cells = (
-            [canonical_row_cells(cells) for cells in row_cells]
-            if base_valid
-            else []
+            [canonical_row_cells(cells) for cells in row_cells] if base_valid else []
         )
         if base_valid and all(c is not None for c in canonical_cells):
             if all(c == cells for c, cells in zip(canonical_cells, row_cells)):
                 normalized.append(block)
             else:
                 repaired = dict(block)
-                repaired["rows"] = [
-                    {"cells": c}
-                    for c in canonical_cells
-                ]
+                repaired["rows"] = [{"cells": c} for c in canonical_cells]
                 normalized.append(repaired)
             continue
 
@@ -391,19 +388,23 @@ def _enforce_product_citation_contract(
             stripped += f" {markers}"
         return stripped, declared, []
     if declared:
-        return answer, declared, [
-            {
-                "id": "citation_scope",
-                "status": "fail",
-                "severity": "block",
-                "reason": (
-                    "Top-level citations were declared without an unambiguous single prose claim, "
-                    "inline claim markers, or structured cell refs, so their usage cannot be "
-                    "mapped safely."
-                ),
-                "source_indices": declared,
-            }
-        ]
+        return (
+            answer,
+            declared,
+            [
+                {
+                    "id": "citation_scope",
+                    "status": "fail",
+                    "severity": "block",
+                    "reason": (
+                        "Top-level citations were declared without an unambiguous single prose claim, "
+                        "inline claim markers, or structured cell refs, so their usage cannot be "
+                        "mapped safely."
+                    ),
+                    "source_indices": declared,
+                }
+            ],
+        )
     return answer, declared, []
 
 
@@ -478,11 +479,7 @@ def _reference_usages(
         for fragment in _claim_fragments_for_index(answer, index)
     ]
     block_refs = _block_temporal_text_and_refs(blocks or [])[1]
-    if (
-        index in (structured_citations or [])
-        and index not in block_refs
-        and not usages
-    ):
+    if index in (structured_citations or []) and index not in block_refs and not usages:
         usages.append({"location": answer_location, "text": answer})
 
     def walk(value: Any, path: str) -> None:
@@ -555,7 +552,9 @@ def _citation_clusters(text: str) -> List[Dict[str, Any]]:
         idx = int(marker.group(1))
         between = text[prev_end : marker.start()]
         if not spans or re.search(r"\w", between):
-            spans.append({"indices": [idx], "text_start": prev_end, "last_end": marker.end()})
+            spans.append(
+                {"indices": [idx], "text_start": prev_end, "last_end": marker.end()}
+            )
         else:
             spans[-1]["indices"].append(idx)
             spans[-1]["last_end"] = marker.end()
@@ -569,9 +568,9 @@ def _citation_clusters(text: str) -> List[Dict[str, Any]]:
             previous = merged[-1]
             opener = text[previous["text_start"] : previous["last_end"]]
             lead = text[previous["last_end"] :]
-            if _RANGE_OPENER_RE.search(_INLINE_CITATION_RE.sub("", opener)) and _RANGE_JOINER_RE.match(
-                lead
-            ):
+            if _RANGE_OPENER_RE.search(
+                _INLINE_CITATION_RE.sub("", opener)
+            ) and _RANGE_JOINER_RE.match(lead):
                 previous["indices"].extend(span["indices"])
                 previous["last_end"] = span["last_end"]
                 continue
@@ -579,7 +578,11 @@ def _citation_clusters(text: str) -> List[Dict[str, Any]]:
     spans = merged
     clusters: List[Dict[str, Any]] = []
     for position, span in enumerate(spans):
-        span_end = spans[position + 1]["text_start"] if position + 1 < len(spans) else len(text)
+        span_end = (
+            spans[position + 1]["text_start"]
+            if position + 1 < len(spans)
+            else len(text)
+        )
         claim = _INLINE_CITATION_RE.sub("", text[span["text_start"] : span_end]).strip()
         clusters.append({"indices": span["indices"], "claim": claim})
     return clusters
@@ -653,7 +656,9 @@ def _as_verdict(value: Any) -> Dict[str, Any]:
     checker or a stub) reads as supported, contradicted or, for None, unchecked."""
     if isinstance(value, dict) and value.get("support"):
         return {"facts": [], "not_found": None, "chart_value": None, **value}
-    support = SUPPORTED if value is True else CONTRADICTED if value is False else UNCHECKED
+    support = (
+        SUPPORTED if value is True else CONTRADICTED if value is False else UNCHECKED
+    )
     return {"support": support, "facts": [], "not_found": None, "chart_value": None}
 
 
@@ -662,9 +667,11 @@ def _support_of(reference: Mapping[str, Any]) -> str:
     support = reference.get("support")
     if support in {SUPPORTED, CONTRADICTED, NOT_ADDRESSED, UNCHECKED}:
         return str(support)
-    return {"verified": SUPPORTED, "unsupported": CONTRADICTED, "mixed": CONTRADICTED}.get(
-        str(reference.get("groundingStatus") or ""), UNCHECKED
-    )
+    return {
+        "verified": SUPPORTED,
+        "unsupported": CONTRADICTED,
+        "mixed": CONTRADICTED,
+    }.get(str(reference.get("groundingStatus") or ""), UNCHECKED)
 
 
 def _check_support(check: Mapping[str, Any]) -> str:
@@ -718,10 +725,10 @@ def _support_from_facts(facts: List[Dict[str, Any]]) -> Dict[str, Any]:
     return {
         "support": support,
         "facts": clean,
-        "not_found": "; ".join(f["fact"] for f in clean if f["status"] == "not_found") or None,
+        "not_found": "; ".join(f["fact"] for f in clean if f["status"] == "not_found")
+        or None,
         "chart_value": "; ".join(
-            f"{f['fact']}: the record states {f['source_value']}"
-            for f in valid_differs
+            f"{f['fact']}: the record states {f['source_value']}" for f in valid_differs
         )
         or None,
     }
@@ -752,7 +759,12 @@ async def _entailment_verdicts(
         for i, (source, statement) in enumerate(pairs)
     )
     user = _ATTRIBUTION_SYSTEM_PROMPT + "\n\n" + body
-    unchecked = {"support": UNCHECKED, "facts": [], "not_found": None, "chart_value": None}
+    unchecked = {
+        "support": UNCHECKED,
+        "facts": [],
+        "not_found": None,
+        "chart_value": None,
+    }
     effective_temperature = (
         _default_grounding_temperature(model)
         if temperature is None
@@ -819,7 +831,14 @@ async def _bounded_entailment_verdicts(
                     "citation check[%s] single pair exceeds context -> unchecked",
                     model,
                 )
-                return [{"support": UNCHECKED, "facts": [], "not_found": None, "chart_value": None}]
+                return [
+                    {
+                        "support": UNCHECKED,
+                        "facts": [],
+                        "not_found": None,
+                        "chart_value": None,
+                    }
+                ]
             midpoint = len(items) // 2
             return await check(items[:midpoint]) + await check(items[midpoint:])
 
@@ -969,9 +988,7 @@ async def _ground_references(
     }
     text_by_index = {
         index: " ".join(
-            str(part)
-            for part in (mapping.get("date"), mapping.get("text"))
-            if part
+            str(part) for part in (mapping.get("date"), mapping.get("text")) if part
         )
         for index, mapping in mapping_by_index.items()
     }
@@ -990,9 +1007,7 @@ async def _ground_references(
             source_facts.append(source_text.rsplit(":", 1)[-1].strip())
         source_facts = [fact for fact in source_facts if fact]
         usages = [
-            usage
-            for usage in (ref.get("usage") or [])
-            if isinstance(usage, dict)
+            usage for usage in (ref.get("usage") or []) if isinstance(usage, dict)
         ]
         if not usages:
             usages = [
@@ -1009,7 +1024,9 @@ async def _ground_references(
             # behavior. Single-index parsing is deliberate (see _INLINE_CITATION_RE): a value bracket
             # like [120, 80] is never a marker, so it is never split into phantom references.
             clusters = _citation_clusters(usage_text)
-            idx_clusters = [cluster for cluster in clusters if idx in cluster["indices"]]
+            idx_clusters = [
+                cluster for cluster in clusters if idx in cluster["indices"]
+            ]
             if len(clusters) > 1 and len(idx_clusters) == 1:
                 claim = idx_clusters[0]["claim"]
             else:
@@ -1107,8 +1124,7 @@ async def _ground_references(
     checkable_positions = [
         position
         for position, group in enumerate(groups)
-        if group["sources"]
-        and position not in deterministic_positions
+        if group["sources"] and position not in deterministic_positions
     ]
     pairs = [
         ("\n".join(groups[i]["sources"]), groups[i]["claim"])
@@ -1151,7 +1167,9 @@ async def _ground_references(
                     usage_offsets[idx] = offset + 1
                 else:
                     judged.append(raw_val)
-            if not judged or any(value is None or value == UNCHECKED for value in judged):
+            if not judged or any(
+                value is None or value == UNCHECKED for value in judged
+            ):
                 verdicts.append({**blank, "support": UNCHECKED})
             elif any(value == CONTRADICTED for value in judged):
                 verdicts.append({**blank, "support": CONTRADICTED})
@@ -1192,7 +1210,10 @@ async def _ground_references(
             )
         ]
     verdict_by_position = {
-        **{position: {**blank, "support": SUPPORTED} for position in deterministic_positions},
+        **{
+            position: {**blank, "support": SUPPORTED}
+            for position in deterministic_positions
+        },
         **dict(zip(checkable_positions, verdicts)),
     }
 
@@ -1208,22 +1229,25 @@ async def _ground_references(
         grounding_checks = []
         for group_position in groups_by_reference[i]:
             group = groups[group_position]
-            group_verdict = verdict_by_position.get(group_position) or {**blank, "support": UNCHECKED}
+            group_verdict = verdict_by_position.get(group_position) or {
+                **blank,
+                "support": UNCHECKED,
+            }
             support = group_verdict["support"]
             grounding_check = {
-                    "status": _GROUNDING_STATUS_FOR_SUPPORT[support],
-                    "support": support,
-                    "claim": group["claim"],
-                    "location": group["location"],
-                    "path": group["path"],
-                    "source_indices": sorted(
-                        {
-                            references[position].get("index")
-                            for position in group["references"]
-                            if isinstance(references[position].get("index"), int)
-                        }
-                    ),
-                }
+                "status": _GROUNDING_STATUS_FOR_SUPPORT[support],
+                "support": support,
+                "claim": group["claim"],
+                "location": group["location"],
+                "path": group["path"],
+                "source_indices": sorted(
+                    {
+                        references[position].get("index")
+                        for position in group["references"]
+                        if isinstance(references[position].get("index"), int)
+                    }
+                ),
+            }
             if group_position in deterministic_positions:
                 grounding_check["method"] = deterministic_methods[group_position]
             if group_verdict.get("facts"):
@@ -1277,7 +1301,9 @@ def _answer_claims(answer_text: str, blocks: Optional[List[Any]] = None) -> List
             continue
         columns = block.get("columns") if isinstance(block.get("columns"), list) else []
         labels = {
-            str(col.get("key") or ""): str(col.get("label") or col.get("key") or "").strip()
+            str(col.get("key") or ""): str(
+                col.get("label") or col.get("key") or ""
+            ).strip()
             for col in columns
             if isinstance(col, dict) and col.get("key")
         }
@@ -1292,7 +1318,9 @@ def _answer_claims(answer_text: str, blocks: Optional[List[Any]] = None) -> List
                         for col in columns
                         if isinstance(col, dict) and str(col.get("key")) in cells
                     ]
-                    for key in ordered_keys + [k for k in cells if k not in ordered_keys]:
+                    for key in ordered_keys + [
+                        k for k in cells if k not in ordered_keys
+                    ]:
                         cell = cells.get(key)
                         text = (
                             str(cell.get("text") or "")
@@ -1326,18 +1354,26 @@ def _agreement_record(
     second_blocks: Optional[List[Any]] = None,
 ) -> Dict[str, Any]:
     """What the second writer agreed with, claim by claim: ``agreed`` (every fact stated),
-    ``differs`` (a fact stated differently, with the other reading), ``unverified`` (not stated)."""
-    status_for = {SUPPORTED: "agreed", CONTRADICTED: "differs", NOT_ADDRESSED: "unverified"}
+    ``differs`` (a fact stated differently, with the other reading), ``unverified`` (not stated).
+    """
+    status_for = {
+        SUPPORTED: "agreed",
+        CONTRADICTED: "differs",
+        NOT_ADDRESSED: "unverified",
+    }
     rows = []
     for claim, verdict in zip(claims, verdicts):
         verdict = _as_verdict(verdict)
-        row = {"claim": claim, "status": status_for.get(verdict["support"], "unchecked")}
+        row = {
+            "claim": claim,
+            "status": status_for.get(verdict["support"], "unchecked"),
+        }
         if verdict.get("chart_value"):
             row["other"] = verdict["chart_value"]
         if verdict.get("not_found"):
             row["not_stated"] = verdict["not_found"]
         rows.append(row)
-    for claim in claims[len(verdicts):]:
+    for claim in claims[len(verdicts) :]:
         rows.append({"claim": claim, "status": "unchecked"})
     statuses = {row["status"] for row in rows}
     status = (
@@ -1418,7 +1454,8 @@ def _grounding_failure_issues(
                 "claim": "",
                 "location": "answer",
                 "path": "",
-                "source_indices": reference.get("groundingGroup") or [reference.get("index")],
+                "source_indices": reference.get("groundingGroup")
+                or [reference.get("index")],
             }
         ]
         for check in checks:
@@ -1440,7 +1477,10 @@ def _grounding_failure_issues(
             if key in seen:
                 continue
             seen.add(key)
-            cited = ", ".join(f"[{index}]" for index in source_indices) or "the cited record"
+            cited = (
+                ", ".join(f"[{index}]" for index in source_indices)
+                or "the cited record"
+            )
             if check.get("support") == CONTRADICTED:
                 issue = {
                     "id": "citation_grounding",
@@ -1560,6 +1600,59 @@ class RouterSlotEvidence:
 _ROUTER_SLOT_EVIDENCE: ContextVar[Optional[RouterSlotEvidence]] = ContextVar(
     "med_agent_hub_router_slot_evidence", default=None
 )
+_ROUTER_LOCK_HELD: ContextVar[bool] = ContextVar(
+    "med_agent_hub_router_lock_held", default=False
+)
+
+
+@asynccontextmanager
+async def hold_router_lock(*, record_slot_evidence: bool = True) -> AsyncIterator[None]:
+    """Acquire ``_ROUTER_LOCK`` re-entrantly within a task and record slot evidence."""
+    if _ROUTER_LOCK_HELD.get():
+        yield
+        return
+    slot_evidence = _ROUTER_SLOT_EVIDENCE.get() if record_slot_evidence else None
+    await _ROUTER_LOCK.acquire()
+    held_token = _ROUTER_LOCK_HELD.set(True)
+    if slot_evidence is not None:
+        slot_evidence.acquired()
+    try:
+        yield
+    finally:
+        _ROUTER_LOCK_HELD.reset(held_token)
+        _ROUTER_LOCK.release()
+        if slot_evidence is not None:
+            slot_evidence.released()
+
+
+@asynccontextmanager
+async def prepared_router_call(
+    upstream_model: str,
+    *,
+    base_url: str,
+    api_key: str = "",
+    is_remote: bool = False,
+    record_slot_evidence: bool = True,
+    acquire_for_remote: bool = False,
+    provision_local: bool = False,
+) -> AsyncIterator[None]:
+    """Serialize router access under ``_ROUTER_LOCK`` and enforce local GPU capacity."""
+    if is_remote and not acquire_for_remote:
+        yield
+        return
+    async with hold_router_lock(record_slot_evidence=record_slot_evidence):
+        if not is_remote:
+            if provision_local:
+                await model_provisioner.ensure_local_model_provisioned(upstream_model)
+            await router_memory.ensure_router_capacity(
+                upstream_model,
+                base_url=base_url,
+                api_key=api_key,
+                is_remote=False,
+            )
+        yield
+        if not is_remote:
+            router_memory.touch_model(base_url, upstream_model)
 
 
 def activate_router_slot_evidence(evidence: RouterSlotEvidence) -> Token:
@@ -1595,7 +1688,11 @@ def reset_chat_budget(token: Token) -> None:
 def _resolve_chat_target(model: str) -> Tuple[str, str, Dict[str, str], bool]:
     """Resolve URL, mapped model id, HTTP headers, and whether backend is remote OpenAI."""
     base = llm_config.effective_base_url.rstrip("/")
-    url = f"{base}/chat/completions" if base.endswith("/v1") else f"{base}/v1/chat/completions"
+    url = (
+        f"{base}/chat/completions"
+        if base.endswith("/v1")
+        else f"{base}/v1/chat/completions"
+    )
     upstream_model = resolve_backend_model(
         model,
         provider=llm_config.provider,
@@ -1610,7 +1707,9 @@ def _resolve_chat_target(model: str) -> Tuple[str, str, Dict[str, str], bool]:
     return url, upstream_model, headers, llm_config.is_remote_openai
 
 
-def _without_json_schema_payload(payload: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+def _without_json_schema_payload(
+    payload: Mapping[str, Any]
+) -> Optional[Dict[str, Any]]:
     """Build a fallback payload when OpenRouter rejects ``response_format: json_schema``."""
     fmt = payload.get("response_format")
     if not isinstance(fmt, Mapping) or fmt.get("type") != "json_schema":
@@ -1735,16 +1834,18 @@ async def _chat(
         bool(tools),
         bool(response_format),
     )
-    # Hold the lock for the WHOLE request (load + generate) so the router never sees a second
-    # request while it is loading or evicting a model. The lock makes loads strictly sequential —
-    # no eviction-versus-serve race.
-    slot_evidence = _ROUTER_SLOT_EVIDENCE.get()
-    await _ROUTER_LOCK.acquire()
-    if slot_evidence is not None:
-        slot_evidence.acquired()
-    try:
-        if not is_remote:
-            await model_provisioner.ensure_local_model_provisioned(upstream_model)
+    # Hold the lock for the WHOLE request (evict + load + generate) so the router never sees a
+    # second request while it is loading or evicting a model. The lock makes loads strictly
+    # sequential — no eviction-versus-serve race.
+    async with prepared_router_call(
+        upstream_model,
+        base_url=llm_config.effective_base_url,
+        api_key=llm_config.effective_api_key,
+        is_remote=is_remote,
+        record_slot_evidence=True,
+        acquire_for_remote=True,
+        provision_local=True,
+    ):
         router_timeout = (
             llm_config.request_timeout_seconds
             if request_timeout is _REQUEST_TIMEOUT_UNSET
@@ -1770,10 +1871,6 @@ async def _chat(
                     headers=headers,
                     timeout=router_timeout,
                 )
-    finally:
-        _ROUTER_LOCK.release()
-        if slot_evidence is not None:
-            slot_evidence.released()
     if resp.status_code >= 400:
         # Surface the backend's reason (context overflow, bad schema, model-load failure) — bare
         # status codes are not actionable.
@@ -1796,7 +1893,9 @@ class _AnswerJsonDeltaExtractor:
     """Incrementally extract decoded characters of the top-level JSON ``"answer"`` string field."""
 
     def __init__(self) -> None:
-        self._state = "seek_key"  # seek_key -> after_key -> seek_value -> in_answer -> done
+        self._state = (
+            "seek_key"  # seek_key -> after_key -> seek_value -> in_answer -> done
+        )
         self._depth = 0
         self._expect_key = False
         self._in_string = False
@@ -1857,7 +1956,11 @@ class _AnswerJsonDeltaExtractor:
             if self._in_string:
                 if not self._escape and self._unicode_remaining == 0 and ch == '"':
                     self._in_string = False
-                    if self._depth == 1 and self._expect_key and self._state == "seek_key":
+                    if (
+                        self._depth == 1
+                        and self._expect_key
+                        and self._state == "seek_key"
+                    ):
                         self._last_key = self._current_string
                         self._state = "after_key"
                     self._current_string = ""
@@ -1946,13 +2049,15 @@ async def _stream_chat_chunks(
         upstream_model,
         bool(response_format),
     )
-    slot_evidence = _ROUTER_SLOT_EVIDENCE.get()
-    await _ROUTER_LOCK.acquire()
-    if slot_evidence is not None:
-        slot_evidence.acquired()
-    try:
-        if not is_remote:
-            await model_provisioner.ensure_local_model_provisioned(upstream_model)
+    async with prepared_router_call(
+        upstream_model,
+        base_url=llm_config.effective_base_url,
+        api_key=llm_config.effective_api_key,
+        is_remote=is_remote,
+        record_slot_evidence=True,
+        acquire_for_remote=True,
+        provision_local=True,
+    ):
         router_timeout = (
             llm_config.request_timeout_seconds
             if request_timeout is _REQUEST_TIMEOUT_UNSET
@@ -2044,10 +2149,6 @@ async def _stream_chat_chunks(
                         if r_piece:
                             yield r_piece
                 break
-    finally:
-        _ROUTER_LOCK.release()
-        if slot_evidence is not None:
-            slot_evidence.released()
 
 
 def _message_text(msg: Dict[str, Any]) -> str:
@@ -2136,7 +2237,8 @@ def _normalize_envelope(raw: str) -> str:
     real newlines, (2) expand compact multi-citation brackets (e.g. ``[2, 34, 37]`` or ``[2/34]``)
     corroborated by ``citations`` into adjacent single markers ``[2][34][37]``, and (3) reconcile
     inline [N] chart-record markers into ``citations`` so the count is not lost when the model
-    cites in prose but leaves the array empty. Returns `raw` unchanged if it is not parseable JSON."""
+    cites in prose but leaves the array empty. Returns `raw` unchanged if it is not parseable JSON.
+    """
     try:
         env = json.loads(raw)
     except (json.JSONDecodeError, TypeError):
@@ -2154,6 +2256,7 @@ def _normalize_envelope(raw: str) -> str:
         existing = [c for c in (env.get("citations") or []) if isinstance(c, int)]
         existing_set = set(existing)
         if existing_set:
+
             def _expand_group(match: re.Match) -> str:
                 nums = [int(part.strip()) for part in re.split(r"[,/]", match.group(1))]
                 if all(n in existing_set for n in nums):
@@ -2464,7 +2567,7 @@ def _review_payload_from_messages(messages: List[Dict[str, Any]]) -> Dict[str, A
         candidates.append(fence.group(1))
     first, last = raw.find("{"), raw.rfind("}")
     if first >= 0 and last > first:
-        candidates.append(raw[first:last + 1])
+        candidates.append(raw[first : last + 1])
     for candidate in candidates:
         try:
             obj = json.loads(candidate)
@@ -2520,7 +2623,9 @@ def _block_temporal_text_and_refs(
             if isinstance(rows, list):
                 for row in rows:
                     cells = row.get("cells") if isinstance(row, dict) else None
-                    row_text = collect_strings(cells if isinstance(cells, dict) else row)
+                    row_text = collect_strings(
+                        cells if isinstance(cells, dict) else row
+                    )
                     if row_text:
                         texts.append(" | ".join(row_text))
                 for key, child in value.items():
@@ -2601,7 +2706,9 @@ def _apply_temporal_gate(
 ) -> Tuple[str, List[int], List[Any], Dict[str, Any], Optional[str]]:
     """Run the deterministic temporal gate and optionally replace the answer in enforce mode."""
     draft_answer = answer_text
-    repaired_text, date_repairs = temporal.repair_garbled_dates(answer_text, temporal_facts)
+    repaired_text, date_repairs = temporal.repair_garbled_dates(
+        answer_text, temporal_facts
+    )
     if date_repairs and (temporal_gate_mode or "enforce").strip().lower() == "enforce":
         answer_text = repaired_text
     block_text, block_refs = _block_temporal_text_and_refs(blocks)
@@ -2628,8 +2735,8 @@ def _apply_temporal_gate(
         else:
             answer_text, citations, blocks = (
                 (
-                "I cannot safely answer this temporal question because deterministic temporal "
-                "validation found a contradiction in the draft answer. Please verify against the chart."
+                    "I cannot safely answer this temporal question because deterministic temporal "
+                    "validation found a contradiction in the draft answer. Please verify against the chart."
                 ),
                 [],
                 [],
@@ -2637,25 +2744,34 @@ def _apply_temporal_gate(
             gate["applied"] = "fallback"
     if gate.get("mode") in {"warn", "enforce"} and gate.get("applied") != "fallback":
         enforce = gate.get("mode") == "enforce"
-        ruled_text, ruled_citations, ruled_blocks, rule_findings = answer_rules.apply_answer_rules(
+        (
+            ruled_text,
+            ruled_citations,
+            ruled_blocks,
+            rule_findings,
+        ) = answer_rules.apply_answer_rules(
             question, answer_text, citations, blocks, temporal_facts, edit=enforce
         )
         if rule_findings:
             gate["checks"] = list(gate.get("checks") or []) + rule_findings
             gate["status"] = temporal._final_gate_status(gate["checks"])
         if enforce and (ruled_text != answer_text or ruled_blocks != blocks):
-            original_answer = original_answer if original_answer is not None else answer_text
+            original_answer = (
+                original_answer if original_answer is not None else answer_text
+            )
             answer_text, citations, blocks = ruled_text, ruled_citations, ruled_blocks
-            gate["rule_edits"] = [f["id"] for f in rule_findings if f.get("status") == "info"]
+            gate["rule_edits"] = [
+                f["id"] for f in rule_findings if f.get("status") == "info"
+            ]
             if gate.get("applied") in {"none", "repair"}:
                 gate["applied"] = "edit"
     steps.append(
         {
-        "role": "temporal_gate",
-        "mode": gate.get("mode"),
-        "status": gate.get("status"),
-        "applied": gate.get("applied"),
-        "n_checks": len(gate.get("checks") or []),
+            "role": "temporal_gate",
+            "mode": gate.get("mode"),
+            "status": gate.get("status"),
+            "applied": gate.get("applied"),
+            "n_checks": len(gate.get("checks") or []),
         }
     )
     return answer_text, citations, blocks, gate, original_answer
@@ -3011,7 +3127,9 @@ async def _validate_answer_label(
                 raw_status = item.get("status") or item.get("support")
                 raw_supported = item.get("supported")
                 if raw_status in {SUPPORTED, CONTRADICTED, NOT_ADDRESSED}:
-                    verdict_val: Any = True if raw_status == SUPPORTED else str(raw_status)
+                    verdict_val: Any = (
+                        True if raw_status == SUPPORTED else str(raw_status)
+                    )
                 elif isinstance(raw_supported, bool):
                     verdict_val = raw_supported
                 else:
@@ -3044,9 +3162,7 @@ _INVARIANT_PATIENT_RECORD_RE = re.compile(
     r"^(?:Allergy|AllergyIntolerance)\s*:",
     re.I,
 )
-_TURN_RECORDS_HEADER = (
-    "Question-specific records for this turn (same [N] numbering as the patient chart above):\n"
-)
+_TURN_RECORDS_HEADER = "Question-specific records for this turn (same [N] numbering as the patient chart above):\n"
 
 
 class _PrefixContent(str):
@@ -3128,9 +3244,7 @@ def split_chart_for_prefix(chart: str, gathered: str = "") -> Tuple[str, str]:
     patient_entries = [e for e in entries if not e[2]]
     supp_entries = [e for e in entries if e[2]]
     patient_indices = [e[0] for e in patient_entries]
-    is_contiguous_from_one = patient_indices == list(
-        range(1, len(patient_entries) + 1)
-    )
+    is_contiguous_from_one = patient_indices == list(range(1, len(patient_entries) + 1))
     has_invariant_patient = any(e[3] for e in patient_entries)
     if len(patient_entries) < 2 and not has_invariant_patient:
         return chart, ""
@@ -3192,7 +3306,8 @@ def with_gathered(
     header: str = "",
 ) -> str:
     """Append gathered evidence only when the context message does not already carry it,
-    and prepend any question-specific records deferred from the shared prefix message."""
+    and prepend any question-specific records deferred from the shared prefix message.
+    """
     turn_chart = _extract_turn_chart(base_messages)
     out = with_turn_records(instruction, turn_chart)
     if not gathered or any(
@@ -3216,11 +3331,7 @@ def _answer_validation_messages(
     if citation_support:
         instruction += "\n\n" + load_prompt(_CITATION_SUPPORT_PROMPT)
     audit_user = (
-        instruction
-        + "\n\n"
-        + _LEDGER_NOTE
-        + "\n\n=== DRAFT ANSWER ===\n"
-        + answer_text
+        instruction + "\n\n" + _LEDGER_NOTE + "\n\n=== DRAFT ANSWER ===\n" + answer_text
     )
     if verified:
         audit_user += (
@@ -3395,11 +3506,14 @@ def _comparable(text: str) -> str:
     return text.strip(" .,;:")
 
 
-def _overruled_by(error: Mapping[str, Any], verified: Sequence[Mapping[str, Any]]) -> bool:
+def _overruled_by(
+    error: Mapping[str, Any], verified: Sequence[Mapping[str, Any]]
+) -> bool:
     """Whether a reviewer error targets only a statement the deterministic date checks confirmed.
 
     The error's wrong text must lie within the confirmed fact, or be that fact with nothing but
-    punctuation around it: an error that also quotes another assertion is not overruled."""
+    punctuation around it: an error that also quotes another assertion is not overruled.
+    """
     wrong = _comparable(error.get("wrong") or "")
     if not wrong:
         return False
@@ -3407,7 +3521,9 @@ def _overruled_by(error: Mapping[str, Any], verified: Sequence[Mapping[str, Any]
         claim = _comparable(check.get("claim") or "")
         if not claim:
             continue
-        if wrong in claim or (claim in wrong and not re.search(r"\w", wrong.replace(claim, " "))):
+        if wrong in claim or (
+            claim in wrong and not re.search(r"\w", wrong.replace(claim, " "))
+        ):
             return True
     return False
 
@@ -3443,12 +3559,14 @@ def _review_flag_note(errors: Sequence[Mapping[str, Any]]) -> str:
     chart = str(first.get("chart") or "").strip()
     detail = ""
     if wrong and chart:
-        detail = f": it questioned \"{wrong}\" against {chart}"
+        detail = f': it questioned "{wrong}" against {chart}'
     elif wrong or chart:
         detail = f": {wrong or chart}"
     more = f" ({len(errors) - 1} more)" if len(errors) > 1 else ""
     return (
-        "A second model review flagged a possible error" + detail + more
+        "A second model review flagged a possible error"
+        + detail
+        + more
         + ". The answer is shown as written; verify against the chart."
     )
 
@@ -3594,15 +3712,18 @@ async def _review_existing_answer(
             temporal_gate_result.get("mode") in {"warn", "enforce"}
             and temporal_gate_result.get("applied") != "fallback"
         ):
-            _ruled_text, _ruled_citations, _ruled_blocks, rule_findings = (
-                answer_rules.apply_answer_rules(
-                    question,
-                    answer_text,
-                    citations,
-                    blocks,
-                    temporal_facts,
-                    edit=False,
-                )
+            (
+                _ruled_text,
+                _ruled_citations,
+                _ruled_blocks,
+                rule_findings,
+            ) = answer_rules.apply_answer_rules(
+                question,
+                answer_text,
+                citations,
+                blocks,
+                temporal_facts,
+                edit=False,
             )
             if rule_findings:
                 temporal_gate_result["checks"] = (
@@ -3612,15 +3733,11 @@ async def _review_existing_answer(
                     temporal_gate_result["checks"]
                 )
                 issues.extend(
-                    f
-                    for f in rule_findings
-                    if f.get("status") in {"warn", "fail"}
+                    f for f in rule_findings if f.get("status") in {"warn", "fail"}
                 )
             if any(f.get("status") == "fail" for f in rule_findings):
                 status = "needs_review"
-                summary = (
-                    "The answer check found a deterministic rule issue that needs review."
-                )
+                summary = "The answer check found a deterministic rule issue that needs review."
                 answer_conf = _merge_temporal_gate_conf(
                     answer_conf, temporal_gate_result
                 )
@@ -3637,7 +3754,9 @@ async def _review_existing_answer(
             if review_chart_selector is not None
             else chart
         )
-        verified = temporal.verified_series_endpoints(question, answer_text, temporal_facts)
+        verified = temporal.verified_series_endpoints(
+            question, answer_text, temporal_facts
+        )
         try:
             verdict = await _validate_answer_label(
                 client,
@@ -3861,7 +3980,11 @@ async def _gen_indepth(
         raise
     except Exception as e:
         logger.warning("indepth-validator call failed: %s", e)
-        verdict = {"flag": [], "issues": "In-Depth review unavailable.", "unavailable": True}
+        verdict = {
+            "flag": [],
+            "issues": "In-Depth review unavailable.",
+            "unavailable": True,
+        }
     validator_step: Dict[str, Any] = {
         "role": "indepth_validator",
         "model": validator_model,
@@ -4032,12 +4155,12 @@ def _write_trace(
     answer_confidence: Dict[str, Any],
     indepth_confidence: Dict[str, Any],
     answer_text: str = "",
-                 in_depth_claims: Optional[List[str]] = None,
-                 reference_date: Optional[str] = None,
-                 temporal_facts: Optional[Dict[str, Any]] = None,
-                 temporal_gate: Optional[Dict[str, Any]] = None,
-                 original_answer_text: Optional[str] = None,
-                 answer_validation: Optional[Dict[str, Any]] = None,
+    in_depth_claims: Optional[List[str]] = None,
+    reference_date: Optional[str] = None,
+    temporal_facts: Optional[Dict[str, Any]] = None,
+    temporal_gate: Optional[Dict[str, Any]] = None,
+    original_answer_text: Optional[str] = None,
+    answer_validation: Optional[Dict[str, Any]] = None,
     sampling: Optional[Dict[str, Any]] = None,
     context_summary: Optional[Dict[str, Any]] = None,
     request_context: Optional[Mapping[str, Any]] = None,
@@ -4192,9 +4315,9 @@ async def _gather_evidence(
                         observation = f"(unknown tool: {name})"
                 loop_messages.append(
                     {
-                    "role": "tool",
-                    "tool_call_id": tc.get("id"),
-                    "content": observation,
+                        "role": "tool",
+                        "tool_call_id": tc.get("id"),
+                        "content": observation,
                     }
                 )
     except ContextSourceError:

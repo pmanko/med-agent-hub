@@ -23,13 +23,17 @@ from .context_sources import ContextSourceError
 from .engine import ExecutionRequest, drain_profile, execute_profile
 from .fhir.clinical_graph import build_wahs_hub_enrichment_block
 from .levels_loader import (
+    OPENROUTER_MODEL_MAP,
     ModelNotFoundError,
     Profile,
+    compile_execution_spec,
+    execution_modes_metadata,
     get_profile,
     get_wahs_profile,
     is_wahs_profile_id,
+    known_model_aliases,
+    parse_model_map,
     profile_ids,
-    profile_metadata,
     resolve_backend_model,
     resolve_openrouter_model,
     resolve_wahs_model_context_spec,
@@ -44,6 +48,7 @@ router = APIRouter()
 class ChatCompletionRequest(BaseModel):
     model: str
     messages: List[Dict[str, Any]] = Field(..., min_length=1)
+    execution: Optional[Dict[str, Any]] = None
     response_format: Optional[Dict[str, Any]] = None
     temperature: Optional[float] = None
     max_tokens: Optional[int] = None
@@ -247,9 +252,7 @@ def list_models(
         header_key = (
             x_openrouter_key.strip() if isinstance(x_openrouter_key, str) else ""
         )
-        openrouter_configured = bool(
-            header_key or openrouter_api_key.strip()
-        )
+        openrouter_configured = bool(header_key or openrouter_api_key.strip())
         wahs_profiles = [get_wahs_profile(pid) for pid in wahs_profile_ids()]
         wahs_data = []
         for profile in wahs_profiles:
@@ -282,93 +285,70 @@ def list_models(
             },
         }
 
-    profiles = [get_profile(profile_id) for profile_id in profile_ids()]
-    readiness = []
+    explicit_map = parse_model_map(model_map_raw)
+    data = []
     if is_openrouter:
         openrouter_configured = bool(_cfg_effective_api_key(llm_config))
         backend_reachable = openrouter_configured
         advertised = set()
-        for profile in profiles:
-            resolved_models = {
-                resolve_backend_model(
-                    model,
-                    provider=provider_name,
-                    model_map_raw=model_map_raw,
-                )
-                for model in profile.models.values()
-            }
-            if openrouter_configured and all(resolved_models):
-                readiness.append((profile, True, ()))
-            else:
-                readiness.append(
-                    (profile, False, ("openrouter_api_key_not_configured",))
-                )
-    else:
-        for profile in profiles:
-            missing = [
-                model
-                for model in sorted(set(profile.models.values()))
-                if resolve_backend_model(
-                    model,
-                    provider=provider_name,
-                    model_map_raw=model_map_raw,
-                )
-                not in advertised
-            ]
-            unavailable_reasons = (
-                ("model_backend_unreachable",)
-                if not backend_reachable
-                else tuple(f"model_not_advertised:{model}" for model in missing)
+        for model_id in sorted(set(OPENROUTER_MODEL_MAP) | set(explicit_map)):
+            resolved = resolve_backend_model(
+                model_id,
+                provider=provider_name,
+                model_map_raw=model_map_raw,
             )
-            readiness.append((profile, not missing, unavailable_reasons))
-
-    available_products = [
-        profile
-        for profile, available, _reasons in readiness
-        if available and profile.visibility == "product"
-    ]
-    configured_default = next(
-        (profile for profile in available_products if profile.default), None
-    )
-    effective_default = configured_default or min(
-        available_products,
-        key=lambda profile: (profile.selection_priority, profile.id),
-        default=None,
-    )
-
-    data = []
-    for profile, available, unavailable_reasons in readiness:
-        data.append(
-            {
-                **profile_metadata(
-                    profile,
-                    available=available,
-                    unavailable_reasons=unavailable_reasons,
-                    effective_default=(
-                        effective_default is not None
-                        and profile.id == effective_default.id
+            available = openrouter_configured and bool(resolved)
+            unavailable_reasons = (
+                () if available else ("openrouter_api_key_not_configured",)
+            )
+            data.append(
+                {
+                    "id": model_id,
+                    "object": "model",
+                    "created": created,
+                    "owned_by": "med-agent-hub",
+                    "available": available,
+                    "unavailable_reasons": list(unavailable_reasons),
+                    "resolved_backend_model": resolved,
+                    "backend": backend,
+                    "backend_metadata": None,
+                }
+            )
+    else:
+        for model_id in sorted(advertised | set(explicit_map)):
+            resolved = resolve_backend_model(
+                model_id,
+                provider=provider_name,
+                model_map_raw=model_map_raw,
+            )
+            is_advertised = model_id in advertised or resolved in advertised
+            if not backend_reachable:
+                reasons: tuple[str, ...] = ("model_backend_unreachable",)
+            elif not is_advertised:
+                reasons = (f"model_not_advertised:{resolved}",)
+            else:
+                reasons = ()
+            available = backend_reachable and is_advertised
+            data.append(
+                {
+                    "id": model_id,
+                    "object": "model",
+                    "created": created,
+                    "owned_by": "med-agent-hub",
+                    "available": available,
+                    "unavailable_reasons": list(reasons),
+                    "resolved_backend_model": resolved,
+                    "backend": backend,
+                    "backend_metadata": (
+                        (backend_models or {}).get(model_id)
+                        or (backend_models or {}).get(resolved)
                     ),
-                ),
-                "object": "model",
-                "created": created,
-                "owned_by": "med-agent-hub",
-                "backend": backend,
-                "backend_model_metadata": {
-                    model: (backend_models or {}).get(model)
-                    or (backend_models or {}).get(
-                        resolve_backend_model(
-                            model,
-                            provider=provider_name,
-                            model_map_raw=model_map_raw,
-                        )
-                    )
-                    for model in sorted(set(profile.models.values()))
-                },
-            }
-        )
+                }
+            )
     return {
         "object": "list",
         "data": data,
+        "execution_modes": execution_modes_metadata(),
         "backend": {
             "contract_version": "med-agent-hub.backend-model-inventory.v1",
             **backend,
@@ -376,6 +356,14 @@ def list_models(
             "advertised_model_ids": sorted(advertised),
         },
     }
+
+
+def _model_label(req: ChatCompletionRequest) -> str:
+    if isinstance(req.execution, Mapping):
+        preset_id = req.execution.get("preset_id")
+        if isinstance(preset_id, str) and preset_id.strip():
+            return preset_id.strip()
+    return req.model
 
 
 def _request_for(req: ChatCompletionRequest, profile: Profile) -> ExecutionRequest:
@@ -387,27 +375,29 @@ def _request_for(req: ChatCompletionRequest, profile: Profile) -> ExecutionReque
         max_tokens=req.max_tokens,
         context=req.context,
         patient=req.patient,
-        model_label=req.model,
+        model_label=_model_label(req),
     )
 
 
 def _require_product_profile(req: ChatCompletionRequest, profile: Profile) -> None:
-    """Keep product clients on complete, safety-enforced profile plans.
+    """Keep product clients on complete, safety-enforced product-mode plans.
 
-    Direct hub clients may intentionally use low-level legs. Product relays mark
-    their request explicitly so an arbitrary client-supplied model id cannot turn a
-    product Answer into an experimental ``off``/``warn`` execution.
+    Direct hub clients may intentionally use low-level legs or bare evaluation modes.
+    Product relays mark their request explicitly so an arbitrary request cannot bypass
+    product envelope checks or temporal enforcement.
     """
-    product_request = bool((req.context or {}).get("require_product_profile"))
-    if product_request and (
-        profile.visibility != "product" or profile.output_mode != "product"
-    ):
+    context = req.context or {}
+    product_request = bool(
+        context.get("require_product_profile")
+        or context.get("require_product_envelope")
+    )
+    if product_request and (profile.low_level_leg or profile.output_mode != "product"):
         raise HTTPException(
             status_code=400,
             detail={
                 "code": "product_profile_required",
                 "model": req.model,
-                "message": "This client accepts configured product profiles only.",
+                "message": "This client requires a product-mode execution profile.",
             },
         )
 
@@ -590,7 +580,8 @@ async def _execute_wahs_chat_completion(
     caller_sys_parts = [
         str(m.get("content") or "").strip()
         for m in req.messages
-        if str(m.get("role") or "").lower() == "system" and str(m.get("content") or "").strip()
+        if str(m.get("role") or "").lower() == "system"
+        and str(m.get("content") or "").strip()
     ]
     combined_sys_prompt = (
         f"{sys_prompt}\n\n{chr(10).join(caller_sys_parts)}"
@@ -601,9 +592,13 @@ async def _execute_wahs_chat_completion(
         dict(m) for m in req.messages if str(m.get("role") or "").lower() != "system"
     ]
     enrichment_meta: Optional[Dict[str, Any]] = None
-    hub_enrich_hdr = (request.headers.get("x-wahs-hub-enrichment") or "").strip().lower()
+    hub_enrich_hdr = (
+        (request.headers.get("x-wahs-hub-enrichment") or "").strip().lower()
+    )
     enable_hub_enrichment = bool(
-        profile.policies.get("include_hub_enrichment", profile.policies.get("include_kb_findings", True))
+        profile.policies.get(
+            "include_hub_enrichment", profile.policies.get("include_kb_findings", True)
+        )
     ) and hub_enrich_hdr not in {"0", "false", "off", "no"}
     if enable_hub_enrichment and user_messages:
         enrichment_res = build_wahs_hub_enrichment_block(req.messages)
@@ -615,11 +610,14 @@ async def _execute_wahs_chat_completion(
                     "[MED-AGENT-HUB ORCHESTRATION:" not in orig_content
                     and enrichment_res.enrichment_text
                 ):
-                    user_messages[idx]["content"] = (
-                        f"{orig_content.rstrip()}\n\n{enrichment_res.enrichment_text}"
-                    )
+                    user_messages[idx][
+                        "content"
+                    ] = f"{orig_content.rstrip()}\n\n{enrichment_res.enrichment_text}"
                 break
-    upstream_messages = [{"role": "system", "content": combined_sys_prompt}, *user_messages]
+    upstream_messages = [
+        {"role": "system", "content": combined_sys_prompt},
+        *user_messages,
+    ]
 
     answer_knobs = dict(profile.knobs.get("answer") or {})
     temperature = (
@@ -705,10 +703,21 @@ async def _execute_wahs_chat_completion(
             "max_tokens": int(rev_knobs.get("maxTokens", 350)),
             "stream": False,
         }
+        from . import team
+
         try:
-            async with httpx.AsyncClient(
-                timeout=llm_config.request_timeout_seconds
-            ) as client:
+            async with (
+                team.prepared_router_call(
+                    rev_model,
+                    base_url=target_base_url,
+                    api_key="" if provider == "openrouter" else llm_config.api_key,
+                    is_remote=(provider != "local"),
+                    record_slot_evidence=False,
+                    acquire_for_remote=False,
+                    provision_local=True,
+                ),
+                httpx.AsyncClient(timeout=llm_config.request_timeout_seconds) as client,
+            ):
                 r = await client.post(upstream_url, headers=headers, json=rev_payload)
                 r.raise_for_status()
                 r_data = r.json()
@@ -729,48 +738,46 @@ async def _execute_wahs_chat_completion(
         created = int(time.time())
 
         async def _wahs_sse():
-            from . import model_provisioner, team
+            from . import team
 
             accumulated: List[str] = []
             first_chunk_emitted = False
-            if provider == "local":
-                await team._ROUTER_LOCK.acquire()
-            try:
-                if provider == "local":
-                    await model_provisioner.ensure_local_model_provisioned(writer_model)
-                async with httpx.AsyncClient(
-                    timeout=llm_config.request_timeout_seconds
-                ) as client:
-                    async with client.stream(
-                        "POST", upstream_url, headers=headers, json=upstream_payload
-                    ) as resp:
-                        resp.raise_for_status()
-                        async for raw_line in resp.aiter_lines():
-                            line = raw_line.strip()
-                            if not line or not line.startswith("data:"):
-                                continue
-                            data_str = line[5:].strip()
-                            if data_str == "[DONE]":
-                                break
-                            try:
-                                chunk_obj = json.loads(data_str)
-                                delta = (
-                                    (chunk_obj.get("choices") or [{}])[0].get("delta")
-                                    or {}
-                                )
-                                piece = delta.get("content") or ""
-                                if piece:
-                                    accumulated.append(piece)
-                                chunk_obj["model"] = profile.id
-                                if not first_chunk_emitted and enrichment_meta is not None:
-                                    chunk_obj["hub_enrichment"] = enrichment_meta
-                                    first_chunk_emitted = True
-                                yield f"data: {json.dumps(chunk_obj)}\n\n"
-                            except Exception:
-                                yield f"{line}\n\n"
-            finally:
-                if provider == "local":
-                    team._ROUTER_LOCK.release()
+            async with (
+                team.prepared_router_call(
+                    writer_model,
+                    base_url=target_base_url,
+                    api_key="" if provider == "openrouter" else llm_config.api_key,
+                    is_remote=(provider != "local"),
+                    record_slot_evidence=False,
+                    acquire_for_remote=False,
+                    provision_local=True,
+                ),
+                httpx.AsyncClient(timeout=llm_config.request_timeout_seconds) as client,
+                client.stream(
+                    "POST", upstream_url, headers=headers, json=upstream_payload
+                ) as resp,
+            ):
+                resp.raise_for_status()
+                async for raw_line in resp.aiter_lines():
+                    line = raw_line.strip()
+                    if not line or not line.startswith("data:"):
+                        continue
+                    data_str = line[5:].strip()
+                    if data_str == "[DONE]":
+                        break
+                    try:
+                        chunk_obj = json.loads(data_str)
+                        delta = (chunk_obj.get("choices") or [{}])[0].get("delta") or {}
+                        piece = delta.get("content") or ""
+                        if piece:
+                            accumulated.append(piece)
+                        chunk_obj["model"] = profile.id
+                        if not first_chunk_emitted and enrichment_meta is not None:
+                            chunk_obj["hub_enrichment"] = enrichment_meta
+                            first_chunk_emitted = True
+                        yield f"data: {json.dumps(chunk_obj)}\n\n"
+                    except Exception:
+                        yield f"{line}\n\n"
             review_appendix = await _run_review_stage("".join(accumulated))
             if review_appendix:
                 rev_chunk = {
@@ -798,26 +805,30 @@ async def _execute_wahs_chat_completion(
             headers=stream_headers,
         )
 
-    from . import model_provisioner, team
     import re
 
+    from . import team
+
     t0 = time.perf_counter()
-    if provider == "local":
-        await team._ROUTER_LOCK.acquire()
-    try:
-        if provider == "local":
-            await model_provisioner.ensure_local_model_provisioned(writer_model)
-        async with httpx.AsyncClient(timeout=llm_config.request_timeout_seconds) as client:
-            resp = await client.post(upstream_url, headers=headers, json=upstream_payload)
-            resp.raise_for_status()
-            body = resp.json()
-    finally:
-        if provider == "local":
-            team._ROUTER_LOCK.release()
+    async with (
+        team.prepared_router_call(
+            writer_model,
+            base_url=target_base_url,
+            api_key="" if provider == "openrouter" else llm_config.api_key,
+            is_remote=(provider != "local"),
+            record_slot_evidence=False,
+            acquire_for_remote=False,
+            provision_local=True,
+        ),
+        httpx.AsyncClient(timeout=llm_config.request_timeout_seconds) as client,
+    ):
+        resp = await client.post(upstream_url, headers=headers, json=upstream_payload)
+        resp.raise_for_status()
+        body = resp.json()
     latency_ms = round((time.perf_counter() - t0) * 1000.0, 2)
-    content = (
-        ((body.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
-    )
+    content = ((body.get("choices") or [{}])[0].get("message") or {}).get(
+        "content"
+    ) or ""
     if "<think>" in content and "</think>" in content:
         content = re.sub(r"<think>.*?</think>\s*", "", content, flags=re.DOTALL).strip()
     if "<|channel>thought" in content and "<channel|>" in content:
@@ -838,19 +849,31 @@ async def _execute_wahs_chat_completion(
     if content.startswith(("{", "[")):
         try:
             parsed_json = json.loads(content)
-            if isinstance(parsed_json, list) and parsed_json and isinstance(parsed_json[0], dict):
+            if (
+                isinstance(parsed_json, list)
+                and parsed_json
+                and isinstance(parsed_json[0], dict)
+            ):
                 parsed_json = parsed_json[0]
             if isinstance(parsed_json, dict):
                 if isinstance(parsed_json.get("text"), str):
                     content = parsed_json["text"].strip()
                 elif "summary" in parsed_json or "SUMMARY" in parsed_json:
-                    s_txt = str(parsed_json.get("summary") or parsed_json.get("SUMMARY") or "").strip()
-                    q_val = parsed_json.get("questions_for_doctor") or parsed_json.get("QUESTIONS_FOR_DOCTOR") or []
+                    s_txt = str(
+                        parsed_json.get("summary") or parsed_json.get("SUMMARY") or ""
+                    ).strip()
+                    q_val = (
+                        parsed_json.get("questions_for_doctor")
+                        or parsed_json.get("QUESTIONS_FOR_DOCTOR")
+                        or []
+                    )
                     if isinstance(q_val, list):
                         q_txt = "\n".join(f"- {q}" for q in q_val if str(q).strip())
                     else:
                         q_txt = str(q_val).strip()
-                    content = f"SUMMARY:\n{s_txt}" + (f"\n\nQUESTIONS_FOR_DOCTOR:\n{q_txt}" if q_txt else "")
+                    content = f"SUMMARY:\n{s_txt}" + (
+                        f"\n\nQUESTIONS_FOR_DOCTOR:\n{q_txt}" if q_txt else ""
+                    )
         except Exception:
             pass
     review_appendix = await _run_review_stage(content)
@@ -875,6 +898,66 @@ async def _execute_wahs_chat_completion(
     return envelope
 
 
+def _invalid_execution_error(
+    req: ChatCompletionRequest, error: ValueError
+) -> HTTPException:
+    return HTTPException(
+        status_code=400,
+        detail={
+            "code": "invalid_execution_spec",
+            "model": req.model,
+            "message": str(error),
+        },
+    )
+
+
+def _is_known_backing_model(model_id: str) -> bool:
+    clean = model_id.strip()
+    if not clean:
+        return False
+    model_map_raw = str(getattr(llm_config, "model_map_raw", "") or "")
+    is_openrouter = _cfg_is_openrouter(llm_config)
+    if is_openrouter and "/" in clean:
+        return True
+    if clean in known_model_aliases(model_map_raw):
+        return True
+    if not is_openrouter:
+        served = _served_backend_models()
+        if served and clean in served:
+            return True
+    return False
+
+
+def _resolve_chat_profile(req: ChatCompletionRequest) -> Profile:
+    if req.execution is not None:
+        if not _is_known_backing_model(req.model):
+            raise _model_error(ModelNotFoundError(req.model, profile_ids()))
+        try:
+            profile = compile_execution_spec(req.model, req.execution)
+        except ValueError as error:
+            raise _invalid_execution_error(req, error) from error
+        for role_model in profile.models.values():
+            if not _is_known_backing_model(role_model):
+                raise _model_error(ModelNotFoundError(role_model, profile_ids()))
+        return profile
+    try:
+        profile = get_profile(req.model)
+    except ValueError as error:
+        raise _invalid_execution_error(req, error) from error
+    except ModelNotFoundError as error:
+        if _is_known_backing_model(req.model):
+            try:
+                return compile_execution_spec(req.model, {"mode": "standard"})
+            except ValueError as spec_error:
+                raise _invalid_execution_error(req, spec_error) from spec_error
+        raise _model_error(error) from error
+    if not profile.low_level_leg and req.model not in profile_ids():
+        for role_model in profile.models.values():
+            if not _is_known_backing_model(role_model):
+                raise _model_error(ModelNotFoundError(req.model, profile_ids()))
+    return profile
+
+
 @router.post("/v1/chat/completions")
 async def chat_completions(
     req: ChatCompletionRequest,
@@ -887,10 +970,7 @@ async def chat_completions(
             req, wahs_profile, request, response=response
         )
 
-    try:
-        profile = get_profile(req.model)
-    except ModelNotFoundError as error:
-        raise _model_error(error) from error
+    profile = _resolve_chat_profile(req)
 
     _require_product_profile(req, profile)
     execution = _request_for(req, profile)
@@ -906,9 +986,10 @@ async def chat_completions(
         content = await drain_profile(execution)
     except ContextSourceError as error:
         raise _context_error(error) from error
+    model_label = execution.model_label or req.model
     if req.stream:
         return StreamingResponse(
-            _sse_stream(req.model, content),
+            _sse_stream(model_label, content),
             media_type="text/event-stream",
         )
-    return _completion_envelope(req.model, content)
+    return _completion_envelope(model_label, content)

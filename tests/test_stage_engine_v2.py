@@ -12,7 +12,7 @@ from server.context_sources import (
     EvidenceRecord,
     IncludedRecord,
 )
-from server.levels_loader import get_profile
+from server.levels_loader import compile_execution_spec, get_profile
 from tests.factories import patient_source_registry
 
 
@@ -84,7 +84,7 @@ def test_stage_engine_uses_injected_context_selector():
             return 1
 
     request = engine.ExecutionRequest(
-        profile=get_profile("single-e4b-checked"),
+        profile=compile_execution_spec("gemma-e4b", {"mode": "verified"}),
         messages=[{"role": "user", "content": "What is the weight?"}],
         context_selector=selector,
     )
@@ -125,7 +125,7 @@ def test_context_preparation_reuses_stage_counter_and_counts_normal_prompt_once(
         ],
     )
     profile = replace(
-        get_profile("single-e4b-checked"),
+        compile_execution_spec("gemma-e4b", {"mode": "verified"}),
         context_window=2048,
         reserved_output_tokens=64,
     )
@@ -154,7 +154,7 @@ def test_context_preparation_reuses_stage_counter_and_counts_normal_prompt_once(
 def test_product_profile_defaults_temporal_anchor_to_wall_clock(monkeypatch):
     monkeypatch.delenv("HUB_ANCHOR", raising=False)
     request = engine.ExecutionRequest(
-        profile=get_profile("single-e4b-checked"),
+        profile=compile_execution_spec("gemma-e4b", {"mode": "verified"}),
         messages=[{"role": "user", "content": "Question"}],
     )
 
@@ -164,7 +164,7 @@ def test_product_profile_defaults_temporal_anchor_to_wall_clock(monkeypatch):
 def test_fixed_evaluation_anchor_overrides_product_wall_clock_default(monkeypatch):
     monkeypatch.setenv("HUB_ANCHOR", "2026-06-20")
     request = engine.ExecutionRequest(
-        profile=get_profile("single-e4b-checked"),
+        profile=compile_execution_spec("gemma-e4b", {"mode": "verified"}),
         messages=[{"role": "user", "content": "Question"}],
     )
 
@@ -183,7 +183,7 @@ def test_low_level_leg_keeps_latest_record_default_without_an_explicit_anchor(mo
 
 def test_product_profile_owns_answer_schema_when_client_omits_it():
     request = engine.ExecutionRequest(
-        profile=get_profile("single-e4b-checked"),
+        profile=compile_execution_spec("gemma-e4b", {"mode": "verified"}),
         messages=[{"role": "user", "content": "Question"}],
     )
 
@@ -202,7 +202,7 @@ def test_product_profile_owns_answer_schema_when_client_omits_it():
 
 def test_evaluation_profile_owns_answer_schema_when_client_omits_it():
     request = engine.ExecutionRequest(
-        profile=get_profile("eval-e4b-answer-only"),
+        profile=compile_execution_spec("gemma-e4b", {"mode": "bare_eval"}),
         messages=[{"role": "user", "content": "Question"}],
     )
 
@@ -224,7 +224,7 @@ def test_low_level_leg_does_not_gain_product_answer_schema():
 def test_product_profile_ignores_conflicting_client_answer_schema():
     explicit = {"type": "json_schema", "json_schema": {"name": "client_contract"}}
     request = engine.ExecutionRequest(
-        profile=get_profile("single-e4b-checked"),
+        profile=compile_execution_spec("gemma-e4b", {"mode": "verified"}),
         messages=[{"role": "user", "content": "Question"}],
         response_format=explicit,
     )
@@ -235,7 +235,7 @@ def test_product_profile_ignores_conflicting_client_answer_schema():
 def test_evaluation_profile_ignores_conflicting_client_answer_schema():
     explicit = {"type": "json_schema", "json_schema": {"name": "client_contract"}}
     request = engine.ExecutionRequest(
-        profile=get_profile("eval-e4b-answer-only"),
+        profile=compile_execution_spec("gemma-e4b", {"mode": "bare_eval"}),
         messages=[{"role": "user", "content": "Question"}],
         response_format=explicit,
     )
@@ -306,7 +306,7 @@ def test_product_context_resolves_temporal_date_once_for_drug_safety_and_facts(
     monkeypatch.setattr(temporal, "build_temporal_facts", build_facts)
     monkeypatch.setattr(team, "_prepare_drug_safety", prepare_drugs)
     profile = replace(
-        get_profile("single-e4b-checked"),
+        compile_execution_spec("gemma-e4b", {"mode": "verified"}),
         context_window=2048,
         reserved_output_tokens=64,
     )
@@ -413,7 +413,7 @@ def test_prompt_selection_does_not_shrink_temporal_or_safety_evidence(monkeypatc
         raw,
     )
     profile = replace(
-        get_profile("single-e4b-checked"),
+        compile_execution_spec("gemma-e4b", {"mode": "verified"}),
         supplemental_sources=(),
         context_window=3,
         reserved_output_tokens=1,
@@ -528,7 +528,7 @@ def test_product_request_cannot_disable_answer_or_indepth_temporal_enforcement(
     monkeypatch.setattr(team, "_write_trace", lambda *_args, **_kwargs: None)
 
     request = engine.ExecutionRequest(
-        profile=get_profile("single-e4b-checked"),
+        profile=compile_execution_spec("gemma-e4b", {"mode": "verified"}),
         messages=[{"role": "user", "content": "When was the visit?"}],
         patient="patient-1",
         context={"temporal": False, "temporal_gate": "off"},
@@ -578,7 +578,7 @@ def test_product_pipeline_fallback_records_enforced_temporal_gate(monkeypatch):
     )
 
     request = engine.ExecutionRequest(
-        profile=get_profile("single-e4b-checked"),
+        profile=compile_execution_spec("gemma-e4b", {"mode": "verified"}),
         messages=[{"role": "user", "content": "When was the visit?"}],
         patient="patient-1",
         source_registry=registry,
@@ -618,7 +618,7 @@ def test_oversized_bare_inline_chart_is_replaced_not_duplicated():
         for index in range(1, 4)
     )
     profile = replace(
-        get_profile("single-e4b-checked"),
+        compile_execution_spec("gemma-e4b", {"mode": "verified"}),
         context_window=3,
         reserved_output_tokens=1,
     )

@@ -14,7 +14,7 @@ import server.openai_compat as openai_compat
 import server.engine as engine
 import server.team as team
 from server.context_sources import InsufficientContextError
-from server.levels_loader import get_profile
+from server.levels_loader import compile_execution_spec, get_profile
 from tests.factories import (
     make_profile,
     patient_source_registry,
@@ -185,7 +185,19 @@ def test_e2b_product_profile_routes_each_stage_to_its_declared_model(monkeypatch
     monkeypatch.setattr(team, "_ground_references", fake_ground)
     monkeypatch.setattr(team, "_gen_indepth", fake_indepth)
 
-    events = dict(_collect(get_profile("single-e2b-checked")))
+    events = dict(
+        _collect(
+            compile_execution_spec(
+                "gemma-e2b",
+                {
+                    "mode": "verified",
+                    "verifier_model": "gemma-e4b",
+                    "grounding_model": "gemma-e4b",
+                    "indepth_model": "gemma-e4b",
+                },
+            )
+        )
+    )
 
     assert calls == [
         ("answer", "gemma-e2b"),
@@ -3300,7 +3312,17 @@ def test_profile_stream_executes_gather_from_the_configured_stage_plan(monkeypat
 
     monkeypatch.setattr(team, "_chat", fake_chat)
 
-    _collect(get_profile("team-med-checked"))
+    _collect(
+        compile_execution_spec(
+            "qwen2.5-14b",
+            {
+                "mode": "team",
+                "orchestrator_model": "gemma-e4b-q8",
+                "expert_model": "medgemma-1.5-4b-q8",
+                "verifier_model": "gemma-4-12b",
+            },
+        )
+    )
     assert (
         "gemma-e4b-q8" in calls
     ), "the orchestrator was never called even though the compiled profile declares gather"

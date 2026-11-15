@@ -55,12 +55,16 @@ def test_openrouter_mode_models_endpoint_and_local_tokenizer(monkeypatch):
     resp = client.get("/v1/models")
     assert resp.status_code == 200
     body = resp.json()
-    e4b = next(item for item in body["data"] if item["id"] == "single-e4b-checked")
+    by_id = {item["id"]: item for item in body["data"]}
+    e4b = by_id["gemma-e4b"]
     assert e4b["available"] is True
-    assert e4b["default"] is False
-    default_item = next(item for item in body["data"] if item["default"] is True)
-    assert default_item["id"] == "single-12b-bare"
-    assert default_item["available"] is True
+    assert e4b["resolved_backend_model"] == "google/gemini-2.5-flash"
+    assert by_id["gemma-4-12b"]["available"] is True
+    assert {m["id"] for m in body["execution_modes"]} >= {
+        "quick",
+        "standard",
+        "verified",
+    }
     assert levels_loader.resolve_backend_model(
         "gemma-e4b", provider=cfg.provider, model_map_raw=cfg.model_map_raw
     ) == "google/gemini-2.5-flash"

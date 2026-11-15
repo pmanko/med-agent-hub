@@ -15,7 +15,7 @@ from server.context_sources import (
     fit_message_history,
     select_context,
 )
-from server.levels_loader import get_profile
+from server.levels_loader import compile_execution_spec, get_profile
 from tests.factories import patient_source_registry
 
 
@@ -785,7 +785,15 @@ def test_team_derived_context_triggers_exact_answer_context_reselection():
             )
 
     profile = replace(
-        get_profile("team-med-checked"),
+        compile_execution_spec(
+            "qwen2.5-14b",
+            {
+                "mode": "team",
+                "orchestrator_model": "gemma-e4b-q8",
+                "expert_model": "medgemma-1.5-4b-q8",
+                "verifier_model": "gemma-4-12b",
+            },
+        ),
         context_window=1300,
         reserved_output_tokens=20,
     )
@@ -833,7 +841,7 @@ def test_single_product_profile_supplies_knowledge_to_answer_and_indepth():
             "content": "How does the regimen compare with WHO recommendations?",
         },
     ]
-    profile = get_profile("single-12b-checked")
+    profile = compile_execution_spec("gemma-4-12b", {"mode": "verified"})
     state = engine._State(messages=messages)
     request = engine.ExecutionRequest(
         profile=profile,
@@ -890,7 +898,7 @@ def test_indepth_refits_context_without_mutating_answer_view_or_ledger():
             return records + fixed
 
     profile = replace(
-        get_profile("single-e4b-checked"),
+        compile_execution_spec("gemma-e4b", {"mode": "verified"}),
         supplemental_sources=(),
         context_window=5,
         reserved_output_tokens=1,
@@ -986,7 +994,7 @@ def test_indepth_synthesis_review_and_retry_match_the_exact_backend_guard():
                 fixed = 1
             return records + fixed
 
-    base_profile = get_profile("single-e4b-checked")
+    base_profile = compile_execution_spec("gemma-e4b", {"mode": "verified"})
     profile = replace(
         base_profile,
         supplemental_sources=(),
