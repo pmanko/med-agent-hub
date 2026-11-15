@@ -2360,16 +2360,16 @@ def _extract_codes_from_prompt_text(prompt_text: str) -> List[str]:
 def build_wahs_hub_enrichment_block(
     messages: Union[str, Sequence[Dict[str, Any]]],
     extracted: Optional[ExtractedChart] = None,
-    max_tokens: int = 800,
+    max_tokens: Optional[int] = None,
 ) -> HubEnrichmentResult:
-    """Build the bounded Med Agent Hub pre-generation context enrichment block.
+    """Build the Med Agent Hub pre-generation context enrichment block.
 
     Implements:
       1. Conditional Tier-0 Overflow Recovery (triggered ONLY when ``omitted_clinical_items > 0``)
       2. Patient Clinical Entity Subgraph (``TREATS``, ``CONTRAINDICATED_OR_DOSE_ADJUST_IN``,
          ``MONITORED_BY``, ``CONTRADICTED_OR_MODIFIED_BY_NOTE``, ``REPORTED_BY_ORG``)
       3. Live Question-Conditioned Clinical KB Lookup (``server.kb.search(..., corpus="wahs")``)
-      4. Strict ``<= max_tokens`` (default 800) token budget cap.
+      4. Optional ``<= max_tokens`` token budget cap when explicitly supplied (uncapped by default).
     """
     if isinstance(messages, str):
         prompt_text = messages
@@ -2543,25 +2543,26 @@ def build_wahs_hub_enrichment_block(
     cur_kb = list(kb_lines)
 
     block_text = _render_block(cur_rec, cur_sub, cur_kb)
-    while estimate_tokens_local(block_text) > max_tokens:
-        if len(cur_sub) > 3:
-            cur_sub.pop()
-        elif len(cur_kb) > 1:
-            cur_kb.pop()
-        elif len(cur_sub) > 2:
-            cur_sub.pop()
-        elif len(cur_sub) > 1:
-            cur_sub.pop()
-        elif cur_kb:
-            cur_kb.pop()
-        elif len(cur_rec) > 1:
-            cur_rec.pop()
-        else:
-            # Hard character truncation safeguard
-            max_chars = max(256, max_tokens * 3)
-            block_text = block_text[:max_chars].rsplit("\n", 1)[0]
-            break
-        block_text = _render_block(cur_rec, cur_sub, cur_kb)
+    if max_tokens is not None:
+        while estimate_tokens_local(block_text) > max_tokens:
+            if len(cur_sub) > 3:
+                cur_sub.pop()
+            elif len(cur_kb) > 1:
+                cur_kb.pop()
+            elif len(cur_sub) > 2:
+                cur_sub.pop()
+            elif len(cur_sub) > 1:
+                cur_sub.pop()
+            elif cur_kb:
+                cur_kb.pop()
+            elif len(cur_rec) > 1:
+                cur_rec.pop()
+            else:
+                # Hard character truncation safeguard
+                max_chars = max(256, max_tokens * 3)
+                block_text = block_text[:max_chars].rsplit("\n", 1)[0]
+                break
+            block_text = _render_block(cur_rec, cur_sub, cur_kb)
 
     final_tokens = estimate_tokens_local(block_text)
     max_cit_after = max_cit_before + len(cur_rec)

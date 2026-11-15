@@ -399,7 +399,7 @@ def test_openai_compat_wahs_kb_vs_raw_profile_enrichment() -> None:
         assert data_kb["hub_enrichment"]["omitted_clinical_items"] == 0
         assert data_kb["hub_enrichment"]["overflow_triggered"] is False
         assert data_kb["hub_enrichment"]["subgraph_edges"] >= 1
-        assert data_kb["hub_enrichment"]["enrichment_tokens"] <= 800
+        assert data_kb["hub_enrichment"]["enrichment_tokens"] > 0
         assert "X-WAHS-Hub-Enrichment" in resp_obj_kb.headers
 
         assert len(captured_payloads) >= 1
