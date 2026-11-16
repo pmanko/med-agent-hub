@@ -27,7 +27,7 @@ from typing import (
 import httpx
 
 from . import team as stages
-from . import temporal
+from . import temporal, terminology
 from .config import (
     EXPERT_DRY_MULTIPLIER,
     ORCHESTRATOR_DRY_MULTIPLIER,
@@ -243,6 +243,7 @@ class _State:
     chart: str = ""
     mappings: List[Dict[str, Any]] = field(default_factory=list)
     gathered: str = ""
+    turn_gathered: str = ""
     derived_context: str = ""
     token_counter: Optional[TokenCounter] = None
     context_budget: Optional[ContextBudget] = None
@@ -471,20 +472,30 @@ def _ledger_after_drug_injection(
             )
             continue
         resource_type = str(mapping.get("resourceType") or "DrugReference")
+        metadata = {
+            "review_state": mapping.get("reviewState"),
+            "package": mapping.get("package"),
+        }
+        if mapping.get("title"):
+            metadata["title"] = mapping.get("title")
+        if mapping.get("group"):
+            metadata["group"] = mapping.get("group")
+        prov = mapping.get("provenance") or {}
+        if isinstance(prov, Mapping):
+            for key in ("authority", "section", "strength", "url", "version", "license"):
+                if prov.get(key):
+                    metadata[key] = prov.get(key)
         records.append(
             EvidenceRecord(
                 stable_id=str(mapping.get("sourceId") or f"drug-reference:{index}"),
-                source="drug-safety",
+                source=str(mapping.get("source") or "drug-safety"),
                 source_priority=100,
                 resource_type=resource_type,
                 resource_uuid=uuid,
                 date=mapping.get("date"),
                 text=str(mapping.get("text") or ""),
                 mandatory=resource_type.lower() == "drugreference",
-                metadata={
-                    "review_state": mapping.get("reviewState"),
-                    "package": mapping.get("package"),
-                },
+                metadata=metadata,
             )
         )
     return EvidenceLedger(
@@ -499,6 +510,7 @@ def _fixed_context_text(
     request: ExecutionRequest,
     messages: Sequence[Mapping[str, Any]],
     temporal_block: str,
+    turn_gathered: str = "",
 ) -> str:
     parts: list[str] = []
     for message in messages:
@@ -529,6 +541,8 @@ def _fixed_context_text(
                 parts.append(_prompt(request.profile, role, fallback))
     if temporal_block:
         parts.append(temporal_block)
+    if turn_gathered:
+        parts.append(turn_gathered)
     return "\n\n".join(parts)
 
 
@@ -550,7 +564,11 @@ def requester_line(context: Optional[Mapping[str, Any]]) -> str:
 
 
 def _replace_chart_message(
-    messages: List[Dict[str, Any]], chart: str, requester: str = "", gathered: str = ""
+    messages: List[Dict[str, Any]],
+    chart: str,
+    requester: str = "",
+    gathered: str = "",
+    turn_gathered: str = "",
 ) -> List[Dict[str, Any]]:
     out = [
         message
@@ -571,7 +589,7 @@ def _replace_chart_message(
             at,
             {
                 "role": "user",
-                "content": stages._with_turn_chart_attr(full_content, turn_chart),
+                "content": stages._with_turn_chart_attr(full_content, turn_chart, turn_gathered),
             },
         )
     return out
@@ -621,7 +639,9 @@ async def _count_answer_input(
         else "synthesis-answer"
     )
     base_messages = [dict(message) for message in (messages or state.messages)]
-    actual_messages = _replace_chart_message(base_messages, chart, requester_line(request.context), state.gathered)
+    actual_messages = _replace_chart_message(
+        base_messages, chart, requester_line(request.context), state.gathered, state.turn_gathered
+    )
     user = stages.with_gathered(
         _prompt(request.profile, prompt_role, default_prompt), state.gathered, actual_messages
     )
@@ -692,7 +712,9 @@ async def _select_answer_context(
         view = dataclasses.replace(view, input_limit=state.context_budget.input_limit)
     state.view = view
     state.chart = state.view.render()
-    state.messages = _replace_chart_message(state.messages, state.chart, requester_line(request.context), state.gathered)
+    state.messages = _replace_chart_message(
+        state.messages, state.chart, requester_line(request.context), state.gathered, state.turn_gathered
+    )
 
 
 async def _select_second_answer_context(
@@ -718,7 +740,7 @@ async def _select_second_answer_context(
 
     if state.view is not None and await _reuse_answer_chart(state, measure, "agree"):
         return _replace_chart_message(
-            state.messages, state.chart, requester_line(request.context), state.gathered
+            state.messages, state.chart, requester_line(request.context), state.gathered, state.turn_gathered
         )
     selector = request.context_selector or select_context
     view = await selector(
@@ -731,7 +753,7 @@ async def _select_second_answer_context(
     )
     chart = view.render()
     messages = _replace_chart_message(
-        state.messages, chart, requester_line(request.context), state.gathered
+        state.messages, chart, requester_line(request.context), state.gathered, state.turn_gathered
     )
     state.steps.append(
         {
@@ -767,7 +789,9 @@ async def _count_indepth_input(
             "The profile requires an exact token counter.",
             source="llama-router",
         )
-    messages = _replace_chart_message(state.messages, chart, requester_line(request.context), state.gathered)
+    messages = _replace_chart_message(
+        state.messages, chart, requester_line(request.context), state.gathered, state.turn_gathered
+    )
     messages = stages._indepth_messages(
         messages,
         _prompt(request.profile, "indepth", "synthesis-indepth"),
@@ -807,7 +831,7 @@ async def _select_indepth_context(
 
     if state.view is not None and await _reuse_answer_chart(state, measure, stage):
         messages = _replace_chart_message(
-            state.messages, state.chart, requester_line(request.context), state.gathered
+            state.messages, state.chart, requester_line(request.context), state.gathered, state.turn_gathered
         )
         return state.view, messages, state.chart
     selector = request.context_selector or select_context
@@ -820,7 +844,9 @@ async def _select_indepth_context(
         input_measure=measure,
     )
     chart = view.render()
-    messages = _replace_chart_message(state.messages, chart, requester_line(request.context), state.gathered)
+    messages = _replace_chart_message(
+        state.messages, chart, requester_line(request.context), state.gathered, state.turn_gathered
+    )
     state.steps.append(
         {
             "role": "context_selection",
@@ -1087,7 +1113,27 @@ async def _prepare_context(request: ExecutionRequest, state: _State) -> None:
         )
     else:
         timing["temporal_facts_ms"] = 0
-    state.gathered = temporal_block
+    term_context = terminology.build_terminology_context(ledger.records)
+    included_concepts: list[str] = []
+    if term_context and "\n" in term_context:
+        try:
+            included_concepts = [
+                str(item.get("concept") or "")
+                for item in json.loads(term_context.split("\n", 1)[1]).get("terminology_context") or ()
+            ]
+        except Exception:
+            included_concepts = []
+    state.gathered = "\n\n".join(part for part in (temporal_block, term_context) if part)
+    latest_question = stages._latest_user_text(state.messages)
+    turn_term_hints = terminology.build_turn_terminology_hints(
+        ledger.records,
+        latest_question,
+        already_included_concepts=included_concepts,
+    )
+    safety_facts = str(getattr(state.drug_context, "medication_safety_facts", "") or "").strip()
+    state.turn_gathered = "\n\n".join(
+        part for part in (safety_facts, turn_term_hints) if part
+    )
 
     if request.profile.exact_tokenizer:
         # StageEngine installs one request-scoped counter before context preparation.
@@ -1109,7 +1155,7 @@ async def _prepare_context(request: ExecutionRequest, state: _State) -> None:
             budget=budget,
             counter=counter,
             fixed_renderer=lambda messages: _fixed_context_text(
-                request, messages, temporal_block
+                request, messages, state.gathered, state.turn_gathered
             ),
             mandatory_text=mandatory_text,
             required_ids=tuple(record.stable_id for record in mandatory),
@@ -1150,7 +1196,9 @@ async def _prepare_context(request: ExecutionRequest, state: _State) -> None:
         or state.view.mode == "selected"
         or state.ledger.source_names != ("inline",)
     ):
-        state.messages = _replace_chart_message(state.messages, state.chart, requester_line(request.context), state.gathered)
+        state.messages = _replace_chart_message(
+            state.messages, state.chart, requester_line(request.context), state.gathered, state.turn_gathered
+        )
     requester = requester_line(request.context)
     if requester:
         state.steps.append({"role": "requester", "line": requester})

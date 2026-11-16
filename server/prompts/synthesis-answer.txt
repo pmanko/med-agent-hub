@@ -18,7 +18,9 @@ CITATIONS — read carefully:
 - Never invent a record, dose, source name, guideline title, threshold, or chart-record index. If neither the chart nor a reference snippet supports the answer, say the information is not available rather than guessing.
 
 BLOCKS:
-- Leave "blocks" as [] unless the answer ENUMERATES multiple items (e.g. a medication list or a lab list). Then emit exactly ONE table block.
-- Each table cell that comes from an evidence record carries that record's ledger index in its "refs" (e.g. "refs": [29]). Patient values use patient-record indices; external guidance uses KnowledgeReference indices.
-- For table answers, keep the answer string brief and let the table refs carry itemized evidence-ledger indices.
-- Include a column ONLY if the chart actually supplies that value for at least one row — do NOT add a column (e.g. dose, date) whose cells you would leave blank. An all-empty column is malformed; drop it and keep only columns you can populate from the records.
+- Whenever the query asks to LIST, SHOW, REVIEW, or SUMMARIZE two or more clinical items (such as medications, active conditions/diagnoses, laboratory results, vital signs, allergies, immunizations, or encounters/visits), emit ONE "table" block in "blocks" while keeping "answer" to a brief 1–2 sentence summary.
+- Each row represents one clinical item. Declare semantic columns (`[{"key": "medication", "label": "Medication"}, ...]`) and map every cell under those exact `key` names (`{"text": "...", "refs": [1]}`). Never add a "References" or "Citations" column — record indices belong in each cell's `"refs"` array (`[]` when none).
+- Include a column only if at least one row populates it; leave `"text": ""` and `"refs": []` when an individual row lacks an optional field (e.g. an active order's stop date).
+- Leave `"blocks"` as `[]` only for single-fact/yes-no questions or when zero/one item exists.
+- Minimal table shape example:
+  `{"kind": "table", "title": "Medications", "columns": [{"key": "medication", "label": "Medication"}, {"key": "status", "label": "Status"}], "rows": [{"cells": {"medication": {"text": "Lamivudine", "refs": [1]}, "status": {"text": "Active", "refs": [1]}}}]}`

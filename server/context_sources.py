@@ -24,7 +24,7 @@ from typing import (
 
 import httpx
 
-from . import kb, model_provisioner
+from . import kb, model_provisioner, terminology
 from .chart_serializer import render_chart
 from .config import llm_config, querystore_config
 from .levels_loader import resolve_backend_model
@@ -150,6 +150,8 @@ class ContextRequest:
     sources: Tuple[str, ...] = ()
     supplemental_sources: Tuple[str, ...] = ()
     question: str = ""
+    chart_codes: Tuple[str, ...] = ()
+    chart_terms: Tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -197,11 +199,17 @@ class EvidenceRecord:
         }
         provenance = {
             key: self.metadata.get(key)
-            for key in ("authority", "url", "version", "license")
+            for key in ("authority", "section", "strength", "url", "version", "license")
             if self.metadata.get(key)
         }
         if provenance:
             mapping["provenance"] = provenance
+        if (
+            self.resource_type
+            in {"KnowledgeReference", "drug_reference", "safety_finding", "drug_class_note"}
+            or self.metadata.get("group") == "reference"
+        ):
+            mapping["group"] = "reference"
         if self.metadata.get("memberUuids"):
             mapping["memberUuids"] = list(self.metadata["memberUuids"])
         if self.metadata.get("sensitivity"):
@@ -499,8 +507,10 @@ class StaticKnowledgeSource:
                     extract_bundle(bundle),
                     sharing_posture=effective_posture,
                 )
+        elif request.chart_codes:
+            kb_codes = tuple(request.chart_codes)
 
-        rows = kb.search(query, k=3, corpus=effective_corpus, codes=kb_codes)
+        rows = [dict(r) for r in kb.search(query, k=3, corpus=effective_corpus, codes=kb_codes)]
         if effective_posture == "external_share":
             rows = [
                 r
@@ -549,6 +559,39 @@ class StaticKnowledgeSource:
             add(expanded_rows, min(3, len(merged) + 1))
             add(rows[2:], 3)
             rows = merged[:3]
+        if effective_corpus == "default" and (request.chart_terms or request.chart_codes):
+            chart_query = " ".join(request.chart_terms[:8]).strip() or query
+            chart_rows = kb.search(
+                chart_query,
+                k=3,
+                corpus=effective_corpus,
+                codes=kb_codes,
+            )
+            chart_ids = {str(r.get("id") or "") for r in chart_rows if r.get("id")}
+            for existing in rows:
+                if str(existing.get("id") or "") in chart_ids:
+                    existing["chart_kb_match"] = True
+            combined: list[dict[str, Any]] = []
+            seen_combined: set[str] = set()
+
+            def append_rows(candidates: Sequence[Mapping[str, Any]], limit: int, mark_chart: bool) -> None:
+                for candidate in candidates:
+                    cid = str(candidate.get("id") or "")
+                    if not cid or cid in seen_combined:
+                        continue
+                    seen_combined.add(cid)
+                    item = dict(candidate)
+                    if mark_chart or cid in chart_ids:
+                        item["chart_kb_match"] = True
+                    combined.append(item)
+                    if len(combined) >= limit:
+                        return
+
+            append_rows(rows[:2], 2, False)
+            append_rows(chart_rows, min(4, len(combined) + 2), True)
+            append_rows(rows[2:], 4, False)
+            append_rows(chart_rows, 4, True)
+            rows = combined[:4]
         records = []
         for position, row in enumerate(rows, 1):
             source_id = str(row.get("id") or position)
@@ -568,10 +611,15 @@ class StaticKnowledgeSource:
                     date=None,
                     text=text,
                     metadata={
+                        "title": title,
+                        "group": "reference",
                         "authority": row.get("source"),
+                        "section": row.get("section"),
+                        "strength": row.get("strength"),
                         "url": row.get("url"),
                         "version": row.get("version"),
                         "license": row.get("license"),
+                        "chart_kb_match": bool(row.get("chart_kb_match")),
                     },
                     raw=row,
                 )
@@ -834,7 +882,40 @@ class SourceRegistry:
                 and fhir_src is not None
             ):
                 src.fhir_source = fhir_src
-        ledgers = [await source.fetch(resolved_request) for source in sources]
+        supp_names = set(request.supplemental_sources)
+        primary_sources = tuple(
+            source for source in sources if source.name not in supp_names and source.name != "knowledge-base"
+        )
+        secondary_sources = tuple(
+            source for source in sources if source.name in supp_names or source.name == "knowledge-base"
+        )
+        ledger_by_name: dict[str, EvidenceLedger] = {}
+        for source in primary_sources:
+            ledger_by_name[source.name] = await source.fetch(resolved_request)
+        if secondary_sources:
+            primary_records = tuple(
+                record
+                for source in primary_sources
+                for record in ledger_by_name[source.name].records
+            )
+            chart_codes, chart_terms = (
+                terminology.extract_chart_clinical_signals(primary_records)
+                if primary_records
+                else ((), ())
+            )
+            secondary_request = ContextRequest(
+                messages=request.messages,
+                patient=request.patient,
+                source=resolved_request.source,
+                sources=resolved_names,
+                supplemental_sources=request.supplemental_sources,
+                question=request.question,
+                chart_codes=chart_codes,
+                chart_terms=chart_terms,
+            )
+            for source in secondary_sources:
+                ledger_by_name[source.name] = await source.fetch(secondary_request)
+        ledgers = [ledger_by_name[source.name] for source in sources]
         records = tuple(record for ledger in ledgers for record in ledger.records)
         stable_ids = [record.stable_id for record in records]
         duplicate_ids = sorted(
@@ -1598,6 +1679,14 @@ def _ranked_records(
     recent = recent_candidates[:recent_core_limit]
     recent_ids = {record.stable_id for record in recent}
     rest = [record for record in rest if record.stable_id not in recent_ids]
+    chart_kb = [
+        record
+        for record in rest
+        if record.resource_type == "KnowledgeReference"
+        and bool(record.metadata.get("chart_kb_match"))
+    ]
+    chart_kb_ids = {record.stable_id for record in chart_kb}
+    rest = [record for record in rest if record.stable_id not in chart_kb_ids]
     zero_relevance = list(rest)
     exact.sort(key=rank_key)
     relevant.sort(key=rank_key)
@@ -1615,6 +1704,7 @@ def _ranked_records(
             )
             for record in recent
         ]
+        + [(record, "chart_kb_guideline") for record in chart_kb]
         + [(record, "zero_relevance") for record in zero_relevance]
     )
 

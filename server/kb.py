@@ -74,17 +74,76 @@ def _load_corpus(path: str) -> List[Dict[str, Any]]:
     return rows
 
 
+def _expand_code_aliases(code: str) -> set[str]:
+    """Normalize equivalent code namespace prefixes without stripping prefixes off numeric IDs."""
+    cleaned = str(code or "").strip()
+    if not cleaned:
+        return set()
+    upper = cleaned.upper()
+    out = {upper}
+    if upper.startswith("WHO-ATC:"):
+        tail = upper[len("WHO-ATC:") :]
+        out.add(f"ATC:{tail}")
+        out.add(tail)
+    elif upper.startswith("ATC:"):
+        tail = upper[len("ATC:") :]
+        out.add(f"WHO-ATC:{tail}")
+        out.add(tail)
+    elif upper.startswith("ICD-10-WHO:"):
+        tail = upper[len("ICD-10-WHO:") :]
+        out.add(f"ICD-10:{tail}")
+        out.add(f"ICD10:{tail}")
+    elif upper.startswith("ICD-10:"):
+        tail = upper[len("ICD-10:") :]
+        out.add(f"ICD-10-WHO:{tail}")
+        out.add(f"ICD10:{tail}")
+    elif upper.startswith("ICD10:"):
+        tail = upper[len("ICD10:") :]
+        out.add(f"ICD-10:{tail}")
+        out.add(f"ICD-10-WHO:{tail}")
+    elif upper.startswith("SNOMED-CT:"):
+        out.add("SNOMEDCT:" + upper[len("SNOMED-CT:") :])
+    elif upper.startswith("SNOMEDCT:"):
+        out.add("SNOMED-CT:" + upper[len("SNOMEDCT:") :])
+    return out
+
+
 def _fields(row: Dict[str, Any]) -> Dict[str, Any]:
+    codes = [str(c) for c in (row.get("codes") or []) if c]
+    expanded_codes: set[str] = set()
+    for code in codes:
+        expanded_codes.update(_expand_code_aliases(code))
     return {
         "id": row.get("id", ""),
         "title": row.get("title", ""),
         "text": row.get("text", ""),
         "source": row.get("source", ""),
         "version": row.get("version", ""),
+        "section": str(row.get("section") or ""),
+        "strength": str(row.get("strength") or ""),
+        "population": str(row.get("population") or ""),
         "url": row.get("url", ""),
         "license": row.get("license", ""),
-        "codes": [str(c) for c in (row.get("codes") or []) if c],
+        "codes": codes,
+        "_code_variants": expanded_codes,
     }
+
+
+def _result_payload(row: Dict[str, Any], score: float) -> Dict[str, Any]:
+    out: Dict[str, Any] = {
+        "id": row["id"],
+        "title": row["title"],
+        "text": row["text"],
+        "source": row["source"],
+        "version": row["version"],
+        "url": row["url"],
+        "license": row["license"],
+        "score": float(score),
+    }
+    for extra in ("section", "strength", "population"):
+        if row.get(extra):
+            out[extra] = row[extra]
+    return out
 
 
 class _Index:
@@ -99,6 +158,7 @@ class _Index:
             except OSError:
                 self.mtime_ns = None
         self.rows = [_fields(r) for r in _load_corpus(path)]
+        self._by_id = {r["id"]: r for r in self.rows if r.get("id")}
         self.conn: Optional[sqlite3.Connection] = None
         try:
             conn = sqlite3.connect(":memory:", check_same_thread=False)
@@ -135,8 +195,11 @@ class _Index:
         ordered_codes = list(
             dict.fromkeys(str(c).strip() for c in (codes or []) if str(c).strip())
         )
-        code_priority = {c: idx for idx, c in enumerate(ordered_codes)}
-        code_set = set(ordered_codes)
+        code_priority: Dict[str, int] = {}
+        for idx, c in enumerate(ordered_codes):
+            for variant in _expand_code_aliases(c):
+                code_priority.setdefault(variant, idx)
+        code_set = set(code_priority)
         if not terms and not code_set:
             return []
 
@@ -146,12 +209,14 @@ class _Index:
             match = " OR ".join(terms)
             try:
                 cur = self.conn.execute(
-                    "SELECT id,title,text,source,version,url,license, bm25(kb) AS score "
+                    "SELECT id, bm25(kb) AS score "
                     "FROM kb WHERE kb MATCH ? ORDER BY score LIMIT ?",
                     (match, fts_limit),
                 )
-                cols = ["id", "title", "text", "source", "version", "url", "license", "score"]
-                fts_results = [dict(zip(cols, row)) for row in cur.fetchall()]
+                for row_id, score in cur.fetchall():
+                    base = self._by_id.get(row_id)
+                    if base is not None:
+                        fts_results.append(_result_payload(base, float(score)))
             except sqlite3.OperationalError as e:
                 logger.warning("KB FTS5 search failed for %r: %s", query, e)
                 fts_results = []
@@ -164,19 +229,7 @@ class _Index:
                 if hits:
                     scored.append((hits, r))
             scored.sort(key=lambda x: x[0], reverse=True)
-            fts_results = [
-                {
-                    "id": r["id"],
-                    "title": r["title"],
-                    "text": r["text"],
-                    "source": r["source"],
-                    "version": r["version"],
-                    "url": r["url"],
-                    "license": r["license"],
-                    "score": float(h),
-                }
-                for h, r in scored[:fts_limit]
-            ]
+            fts_results = [_result_payload(r, float(h)) for h, r in scored[:fts_limit]]
 
         if not code_set:
             return fts_results[:k]
@@ -187,10 +240,10 @@ class _Index:
         candidates: List[tuple[int, int, int, int, Dict[str, Any]]] = []
         for idx, r in enumerate(self.rows):
             rid = r["id"]
-            row_codes = set(r.get("codes") or [])
-            matched_codes = [c for c in ordered_codes if c in row_codes]
-            code_hits = len(matched_codes)
-            best_code_prio = min((code_priority[c] for c in matched_codes), default=999999)
+            row_variants = set(r.get("_code_variants") or ())
+            matched_variants = row_variants & code_set
+            code_hits = len(matched_variants)
+            best_code_prio = min((code_priority[v] for v in matched_variants), default=999999)
             in_fts = 1 if rid in fts_rank_by_id else 0
             if code_hits == 0 and not in_fts:
                 continue
@@ -199,30 +252,21 @@ class _Index:
                 tier = 1
                 primary_rank = fts_pos
                 secondary_rank = best_code_prio
-            elif in_fts:
+            elif code_hits > 0:
                 tier = 2
-                primary_rank = fts_pos
-                secondary_rank = 999999
-            else:
-                tier = 3
                 primary_rank = best_code_prio
                 secondary_rank = -code_hits
+            else:
+                tier = 3
+                primary_rank = fts_pos
+                secondary_rank = 999999
             candidates.append(
                 (
                     tier,
                     primary_rank,
                     secondary_rank,
                     idx,
-                    {
-                        "id": r["id"],
-                        "title": r["title"],
-                        "text": r["text"],
-                        "source": r["source"],
-                        "version": r["version"],
-                        "url": r["url"],
-                        "license": r["license"],
-                        "score": fts_score_by_id.get(rid, -float(code_hits)),
-                    },
+                    _result_payload(r, fts_score_by_id.get(rid, -float(code_hits))),
                 )
             )
         candidates.sort(key=lambda x: (x[0], x[1], x[2], x[3]))
