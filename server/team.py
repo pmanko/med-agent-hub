@@ -26,7 +26,7 @@ from typing import (
 
 import httpx
 
-from . import drug_safety, model_provisioner, router_memory, temporal
+from . import ddi_client, drug_safety, model_provisioner, router_memory, temporal
 from .config import EXPERT_DRY_MULTIPLIER, llm_config, resolve_hub_build_revision
 from .context_sources import (
     CHART_MARKER,
@@ -92,7 +92,7 @@ def _prepare_drug_safety(
     enabled: bool,
     *,
     exposure_complete: bool = False,
-) -> Tuple[str, List[Dict[str, Any]], Optional["drug_safety.PatientClinicalContext"]]:
+) -> Tuple[str, List[Dict[str, Any]], Optional[Any]]:
     """Build patient drug context and inject deterministic drug-reference records.
     patient's clinical context from the RAW querystore records (reference_date resolved the same
     way temporal grounding resolves "now" — a demo dataset has no real wall-clock activity), then
@@ -105,6 +105,15 @@ def _prepare_drug_safety(
         chart_text,
         timezone_name=os.environ.get("HUB_TIMEZONE"),
     )
+    if ddi_client.ddi_service_enabled():
+        return ddi_client.prepare_ddi_context(
+            chart_text,
+            mappings,
+            records,
+            question,
+            reference_date,
+            exposure_complete=exposure_complete,
+        )
     dataset = drug_safety.load_dataset()
     patient_context = drug_safety.build_patient_context(
         records, reference_date, dataset, exposure_complete=exposure_complete
@@ -121,12 +130,23 @@ def _prepare_drug_safety(
 
 
 def _compute_safety_check(
-    patient_context: Optional["drug_safety.PatientClinicalContext"],
+    patient_context: Optional[Any],
     answer_text: str,
     question: str,
     enabled: bool,
 ) -> "drug_safety.SafetyCheckResult":
     """Post-answer deterministic safety result with package and coverage provenance."""
+    if isinstance(patient_context, ddi_client.DdiPatientContext) or (
+        enabled and ddi_client.ddi_service_enabled()
+    ):
+        ddi_ctx = (
+            patient_context
+            if isinstance(patient_context, ddi_client.DdiPatientContext)
+            else None
+        )
+        return ddi_client.compute_ddi_safety_check(
+            ddi_ctx, answer_text, question, enabled
+        )
     dataset = drug_safety.load_dataset()
     if not enabled:
         return drug_safety.SafetyCheckResult(
@@ -189,7 +209,13 @@ def _normalize_product_blocks(
             and all(isinstance(ref, int) for ref in value["refs"])
         )
 
-    def cell_matches_column(column: Any, cell: Dict[str, Any]) -> bool:
+    _EMPTY_CELL_PLACEHOLDERS = frozenset(
+        {"", "-", "—", "–", "n/a", "na", "none", "active", "ongoing", "current", "unknown"}
+    )
+
+    def cell_matches_column(
+        column: Any, cell: Dict[str, Any], *, allow_placeholder: bool = False
+    ) -> bool:
         # Only date/weight columns have a regex-verifiable text shape — most real columns
         # (Medication, Dose, Route, Frequency, ...) are free text with no such format. For those,
         # this check has no opinion and defers entirely to the citation-consistency check below
@@ -203,6 +229,8 @@ def _normalize_product_blocks(
             str(column.get(field) or "").casefold() for field in ("key", "label")
         )
         text = str(cell.get("text") or "").strip()
+        if allow_placeholder and text.casefold() in _EMPTY_CELL_PLACEHOLDERS:
+            return True
         if re.search(r"\bdate\b", descriptor):
             return re.fullmatch(r"\d{4}-\d{2}-\d{2}", text) is not None
         if re.search(r"\bweight\b", descriptor):
@@ -245,50 +273,93 @@ def _normalize_product_blocks(
         def canonical_row_cells(cells: Any) -> Optional[Dict[str, Any]]:
             if (
                 not isinstance(cells, dict)
-                or len(cells) != len(keys)
+                or not cells
+                or len(cells) > len(keys)
                 or not all(valid_cell(cell) for cell in cells.values())
             ):
                 return None
             if set(cells) == set(keys):
                 return cells
             remapped: Dict[str, Any] = {}
-            used_cell_keys: set[str] = set()
-            for column, col_key in zip(columns or [], keys):
-                col_label = str((column or {}).get("label") or "").strip()
-                exact_candidates = [
-                    ck
-                    for ck in cells
-                    if ck not in used_cell_keys and ck in {col_key, col_label} and ck
-                ]
-                if len(exact_candidates) == 1:
-                    chosen = exact_candidates[0]
-                else:
-                    folded_targets = {t.casefold() for t in (col_key, col_label) if t}
-                    ci_candidates = [
-                        ck
-                        for ck in cells
-                        if ck not in used_cell_keys
-                        and str(ck).strip()
-                        and str(ck).strip().casefold() in folded_targets
-                    ]
-                    if len(ci_candidates) != 1:
-                        return None
-                    chosen = ci_candidates[0]
-                if not cell_matches_column(column, cells[chosen]):
+            used_cols: set[str] = set()
+            for ck, cell in cells.items():
+                ck_str = str(ck or "").strip()
+                if not ck_str:
                     return None
-                used_cell_keys.add(chosen)
-                remapped[col_key] = cells[chosen]
-            return remapped if len(remapped) == len(keys) else None
+                exact_cols = [
+                    (col, col_key)
+                    for col, col_key in zip(columns or [], keys)
+                    if col_key not in used_cols
+                    and ck_str in {col_key, str((col or {}).get("label") or "").strip()}
+                ]
+                if len(exact_cols) == 1:
+                    chosen_col, chosen_key = exact_cols[0]
+                else:
+                    folded = ck_str.casefold()
+                    ci_cols = [
+                        (col, col_key)
+                        for col, col_key in zip(columns or [], keys)
+                        if col_key not in used_cols
+                        and folded
+                        in {
+                            t.casefold()
+                            for t in (col_key, str((col or {}).get("label") or "").strip())
+                            if t
+                        }
+                    ]
+                    if len(ci_cols) != 1:
+                        return None
+                    chosen_col, chosen_key = ci_cols[0]
+                if ck != chosen_key and not cell_matches_column(
+                    chosen_col, cell, allow_placeholder=True
+                ):
+                    return None
+                used_cols.add(chosen_key)
+                remapped[chosen_key] = cell
+            for col_key in keys:
+                if col_key not in remapped:
+                    remapped[col_key] = {"text": "", "refs": []}
+            return remapped
 
         canonical_cells = (
             [canonical_row_cells(cells) for cells in row_cells] if base_valid else []
         )
         if base_valid and all(c is not None for c in canonical_cells):
-            if all(c == cells for c, cells in zip(canonical_cells, row_cells)):
+            non_empty_cols = [
+                (col, col_key)
+                for col, col_key in zip(columns or [], keys)
+                if any(
+                    str((c or {}).get(col_key, {}).get("text") or "").strip()
+                    for c in canonical_cells
+                )
+            ]
+            if not non_empty_cols:
+                issues.append(
+                    {
+                        "id": "table_contract",
+                        "status": "fail",
+                        "severity": "block",
+                        "reason": (
+                            f"Structured table {position + 1} was withheld because every column was empty."
+                        ),
+                        "source_indices": _block_temporal_text_and_refs([block])[1],
+                    }
+                )
+                continue
+            kept_keys = [col_key for _col, col_key in non_empty_cols]
+            pruned_cells = [
+                {col_key: c[col_key] for col_key in kept_keys}
+                for c in canonical_cells
+                if c is not None
+            ]
+            if len(kept_keys) == len(keys) and all(
+                c == orig for c, orig in zip(pruned_cells, row_cells)
+            ):
                 normalized.append(block)
             else:
                 repaired = dict(block)
-                repaired["rows"] = [{"cells": c} for c in canonical_cells]
+                repaired["columns"] = [col for col, _col_key in non_empty_cols]
+                repaired["rows"] = [{"cells": c} for c in pruned_cells]
                 normalized.append(repaired)
             continue
 
@@ -416,6 +487,8 @@ def _resolve_references(
                 answer or "", blocks or [], c, citations, answer_usage_location
             ),
         }
+        if m.get("group"):
+            ref["group"] = m.get("group")
         if grounding_status:
             ref["groundingStatus"] = grounding_status
             if grounding_status == "checking":
@@ -3066,13 +3139,17 @@ class _PrefixContent(str):
     """String carrying deferred turn-specific records so msg[0] stays patient-invariant."""
 
     turn_chart: str = ""
+    turn_gathered: str = ""
 
 
-def _with_turn_chart_attr(content: str, turn_chart: str) -> str:
-    if not turn_chart:
+def _with_turn_chart_attr(
+    content: str, turn_chart: str, turn_gathered: str = ""
+) -> str:
+    if not turn_chart and not turn_gathered:
         return str(content)
     wrapped = _PrefixContent(content)
     wrapped.turn_chart = turn_chart
+    wrapped.turn_gathered = turn_gathered
     return wrapped
 
 
@@ -3082,6 +3159,15 @@ def _extract_turn_chart(messages: Sequence[Mapping[str, Any]]) -> str:
         turn_chart = getattr(content, "turn_chart", "")
         if turn_chart:
             return turn_chart
+    return ""
+
+
+def _extract_turn_gathered(messages: Sequence[Mapping[str, Any]]) -> str:
+    for message in messages:
+        content = message.get("content")
+        turn_gathered = getattr(content, "turn_gathered", "")
+        if turn_gathered:
+            return turn_gathered
     return ""
 
 
@@ -3207,6 +3293,9 @@ def with_gathered(
     """
     turn_chart = _extract_turn_chart(base_messages)
     out = with_turn_records(instruction, turn_chart)
+    turn_gathered = _extract_turn_gathered(base_messages)
+    if turn_gathered and turn_gathered not in out:
+        out = turn_gathered + "\n\n" + out
     if not gathered or any(
         isinstance(message.get("content"), str) and gathered in message["content"]
         for message in base_messages
