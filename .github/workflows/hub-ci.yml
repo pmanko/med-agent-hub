@@ -68,6 +68,7 @@ jobs:
             if curl -fsS http://localhost:8080/health >/dev/null 2>&1; then
               echo "healthy after ${i}s"
               docker rm -f hub-smoke >/dev/null
+              docker run --rm hub-ci-candidate python -c "from ddi_service import app; h = app.health(); assert h['status'] == 'ok' and h['drugs'] >= 2000 and h['interactions'] >= 290000, h"
               exit 0
             fi
             sleep 1
