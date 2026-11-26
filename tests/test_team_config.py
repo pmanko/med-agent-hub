@@ -11,7 +11,6 @@ def test_profile_ids_are_unique_and_include_supported_topologies():
     assert len(mode_ids) == len(set(mode_ids))
     assert {"quick", "standard", "verified", "team"} <= set(mode_ids)
     assert levels_loader.catalyst_query_profile_ids()
-    assert levels_loader.wahs_profile_ids()
 
 
 def test_configured_team_profile_resolves_explicit_roles_and_stages():

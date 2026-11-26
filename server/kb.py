@@ -5,8 +5,6 @@ by the `StaticKnowledgeSource` context adapter.
 
 Supported corpora (`server/kb_data/`):
 - `"default"` (`corpus.jsonl`): Stream 1 HIV / primary-care clinical guidance seed.
-- `"wahs"` (`wahs_corpus.jsonl`): WAHS+ multi-source reconciliation, CDC ACIP schedule,
-  RxNorm duplicate-therapy, KDIGO/ADA staging exclusivity, and SDOH privacy snippets.
 
 Each corpus is loaded into an in-memory index on demand and automatically reloads if
 a previously missing corpus file becomes available or changes on disk. Matching rows
@@ -24,12 +22,9 @@ import sqlite3
 import threading
 from typing import Any, Dict, List, Optional, Sequence
 
-from wahs_core import WAHS_CORPUS_PATH as _DEFAULT_WAHS_CORPUS_PATH
-
 logger = logging.getLogger(__name__)
 
 _CORPUS_PATH = os.path.join(os.path.dirname(__file__), "kb_data", "corpus.jsonl")
-_WAHS_CORPUS_PATH = _DEFAULT_WAHS_CORPUS_PATH
 _DEFAULT_K = 3
 _TERM = re.compile(r"[A-Za-z0-9]+")
 
@@ -52,8 +47,6 @@ def _corpus_path_for(corpus: str) -> str:
     norm = (corpus or "default").strip().lower()
     if norm == "default":
         return _CORPUS_PATH
-    if norm == "wahs":
-        return _WAHS_CORPUS_PATH
     raise ValueError(f"Unsupported KB corpus: {corpus!r}")
 
 
@@ -318,7 +311,7 @@ def search(
     corpus: str = "default",
     codes: Optional[Sequence[str]] = None,
 ) -> List[Dict[str, Any]]:
-    """Return up to `k` clinical snippets from `corpus` (`'default'` or `'wahs'`).
+    """Return up to `k` clinical snippets from `corpus` (`'default'`).
 
     Matches via FTS5 BM25 over `query` and/or deterministic `codes` overlap (preserving
     `codes` priority order for code-only and tie-broken matches). Returns an empty list
