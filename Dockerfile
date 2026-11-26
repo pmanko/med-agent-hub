@@ -30,7 +30,6 @@ LABEL org.opencontainers.image.revision=${HUB_BUILD_REVISION}
 COPY --from=builder /root/.local /usr/local
 COPY server/ ./server/
 COPY ddi_service/ ./ddi_service/
-COPY scripts/ ./scripts/
 
 # Logs go to stdout; reach the host-native llama.cpp router by default.
 ENV PYTHONUNBUFFERED=1 \

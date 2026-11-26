@@ -1,20 +1,10 @@
-# Clinical knowledge-base seeds & WAHS+ structured reference packs
+# Clinical knowledge-base seed
 
 `server/kb_data/` contains the Stream 1 provenance-bearing JSONL corpus searched via `server.kb`
-(`StaticKnowledgeSource`), while Stream 6 WAHS+ structured reference packs and `wahs_corpus.jsonl`
-live canonically in `wahs_core.kb_data` (`pmanko/wahs-engine`) to guarantee zero drift between
-production `wahs-engine` and `med-agent-hub` evaluation sweeps:
+(`StaticKnowledgeSource`):
 
-1. **`corpus.jsonl` (`corpus="default"`, local in `server/kb_data/`)** — Stream 1 OpenMRS / global-health HIV, TB, malaria,
+1. **`corpus.jsonl` (`corpus="default"`, local in `server/kb_data/`)** - Stream 1 OpenMRS / global-health HIV, TB, malaria,
    pediatric IMCI, CIEL/OCL, and OpenMRS data-model seed (24 snippets).
-2. **`wahs_core/kb_data/wahs_corpus.jsonl` (`corpus="wahs"`, imported from `wahs_core`)** — Stream 6 Washington Health Summary (WAHS+)
-   clinical reconciliation, ACIP immunization schedule rules, medication brand↔generic and
-   therapeutic-class duplication guidance, KDIGO/ADA stage progression, LOINC lab trajectory
-   interpretation, and SDOH privacy segmentation reference, indexed with
-   clinical `codes` (SNOMED CT, RxNorm, CVX, LOINC) for hybrid code-first + FTS5 BM25 retrieval.
-3. **`wahs_core/kb_data/{acip_rules,rxnorm_lookup,clinical_exclusivity_and_privacy}.json` (imported via `wahs_core.kb_lookup`)** —
-   CDC ACIP CVX rules, NLM RxNorm ingredient/class mappings, SNOMED CT condition stage exclusivity,
-   SDOH privacy segmentation, and LOINC lab/vital reference ranges.
 
 Matching JSONL rows enter the common evidence ledger as numbered `KnowledgeReference` records.
 

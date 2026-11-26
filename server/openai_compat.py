@@ -14,14 +14,13 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
-from fastapi import APIRouter, Header, HTTPException, Request, Response
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from .config import llm_config
 from .context_sources import ContextSourceError
 from .engine import ExecutionRequest, drain_profile, execute_profile
-from .fhir.clinical_graph import build_wahs_hub_enrichment_block
 from .levels_loader import (
     OPENROUTER_MODEL_MAP,
     ModelNotFoundError,
@@ -29,18 +28,11 @@ from .levels_loader import (
     compile_execution_spec,
     execution_modes_metadata,
     get_profile,
-    get_wahs_profile,
-    is_wahs_profile_id,
     known_model_aliases,
     parse_model_map,
     profile_ids,
     resolve_backend_model,
-    resolve_openrouter_model,
-    resolve_wahs_model_context_spec,
-    wahs_profile_ids,
-    wahs_profile_metadata,
 )
-from .prompt_loader import load_prompt
 
 router = APIRouter()
 
@@ -226,64 +218,16 @@ def _backend_discovery_metadata() -> Dict[str, str]:
 
 
 @router.get("/v1/models")
-def list_models(
-    workflow: Optional[str] = None,
-    x_openrouter_key: Optional[str] = Header(default=None, alias="X-OpenRouter-Key"),
-) -> Dict[str, Any]:
+def list_models() -> Dict[str, Any]:
     created = int(time.time())
-    is_wahs = isinstance(workflow, str) and workflow.strip().lower() == "wahs"
     is_openrouter = _cfg_is_openrouter(llm_config)
     provider_name = str(getattr(llm_config, "provider", "openai-compatible"))
     model_map_raw = str(getattr(llm_config, "model_map_raw", "") or "")
-    openrouter_api_key = str(getattr(llm_config, "openrouter_api_key", "") or "")
-    openrouter_base_url = str(
-        getattr(llm_config, "openrouter_base_url", "https://openrouter.ai/api/v1")
-    )
 
-    if not is_wahs and is_openrouter:
-        backend_models = None
-    else:
-        backend_models = _served_backend_model_metadata()
+    backend_models = None if is_openrouter else _served_backend_model_metadata()
     backend_reachable = backend_models is not None
     advertised = set(backend_models) if backend_models else set()
     backend = _backend_discovery_metadata()
-
-    if is_wahs:
-        header_key = (
-            x_openrouter_key.strip() if isinstance(x_openrouter_key, str) else ""
-        )
-        openrouter_configured = bool(header_key or openrouter_api_key.strip())
-        wahs_profiles = [get_wahs_profile(pid) for pid in wahs_profile_ids()]
-        wahs_data = []
-        for profile in wahs_profiles:
-            meta = wahs_profile_metadata(
-                profile,
-                backend_models=advertised if backend_reachable else None,
-                openrouter_configured=openrouter_configured,
-                effective_default=profile.default,
-            )
-            wahs_data.append(
-                {
-                    **meta,
-                    "object": "model",
-                    "created": created,
-                    "owned_by": "med-agent-hub",
-                    "backend": backend,
-                }
-            )
-        return {
-            "object": "list",
-            "workflow": "wahs",
-            "data": wahs_data,
-            "backend": {
-                "contract_version": "med-agent-hub.backend-model-inventory.v1",
-                **backend,
-                "catalog_reachable": backend_reachable,
-                "advertised_model_ids": sorted(advertised),
-                "openrouter_configured": openrouter_configured,
-                "openrouter_base_url": _public_url(openrouter_base_url),
-            },
-        }
 
     explicit_map = parse_model_map(model_map_raw)
     data = []
@@ -537,367 +481,6 @@ def _context_error(error: ContextSourceError) -> HTTPException:
     )
 
 
-async def _execute_wahs_chat_completion(
-    req: ChatCompletionRequest,
-    profile: Profile,
-    request: Request,
-    response: Optional[Response] = None,
-):
-    header_provider = (request.headers.get("x-llm-provider") or "").strip().lower()
-    header_or_key = (request.headers.get("x-openrouter-key") or "").strip()
-    provider = str(profile.policies.get("provider") or "local").lower()
-    if header_provider == "openrouter" or header_or_key:
-        provider = "openrouter"
-
-    if provider == "openrouter":
-        target_base_url = llm_config.openrouter_base_url.rstrip("/")
-        api_key = header_or_key or (llm_config.openrouter_api_key or "").strip()
-        if not api_key:
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "code": "openrouter_api_key_required",
-                    "model": profile.id,
-                    "message": (
-                        "OpenRouter API key is required for OpenRouter connection "
-                        "(set OPENROUTER_API_KEY or pass X-OpenRouter-Key header)."
-                    ),
-                },
-            )
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": "https://wahs-demo.openclinai.org",
-            "X-Title": "OpenClinAI WAHS+ Explorer",
-        }
-    else:
-        target_base_url = llm_config.base_url.rstrip("/")
-        headers = {"Content-Type": "application/json"}
-        if llm_config.api_key:
-            headers["Authorization"] = f"Bearer {llm_config.api_key}"
-
-    sys_prompt = load_prompt(str(profile.prompts["answer"])).strip()
-    caller_sys_parts = [
-        str(m.get("content") or "").strip()
-        for m in req.messages
-        if str(m.get("role") or "").lower() == "system"
-        and str(m.get("content") or "").strip()
-    ]
-    combined_sys_prompt = (
-        f"{sys_prompt}\n\n{chr(10).join(caller_sys_parts)}"
-        if caller_sys_parts
-        else sys_prompt
-    )
-    user_messages = [
-        dict(m) for m in req.messages if str(m.get("role") or "").lower() != "system"
-    ]
-    enrichment_meta: Optional[Dict[str, Any]] = None
-    hub_enrich_hdr = (
-        (request.headers.get("x-wahs-hub-enrichment") or "").strip().lower()
-    )
-    enable_hub_enrichment = bool(
-        profile.policies.get(
-            "include_hub_enrichment", profile.policies.get("include_kb_findings", True)
-        )
-    ) and hub_enrich_hdr not in {"0", "false", "off", "no"}
-    if enable_hub_enrichment and user_messages:
-        enrichment_res = build_wahs_hub_enrichment_block(req.messages)
-        enrichment_meta = enrichment_res.to_metadata_dict()
-        for idx in range(len(user_messages) - 1, -1, -1):
-            if str(user_messages[idx].get("role") or "").lower() == "user":
-                orig_content = str(user_messages[idx].get("content") or "")
-                if (
-                    "[MED-AGENT-HUB ORCHESTRATION:" not in orig_content
-                    and enrichment_res.enrichment_text
-                ):
-                    user_messages[idx][
-                        "content"
-                    ] = f"{orig_content.rstrip()}\n\n{enrichment_res.enrichment_text}"
-                break
-    upstream_messages = [
-        {"role": "system", "content": combined_sys_prompt},
-        *user_messages,
-    ]
-
-    answer_knobs = dict(profile.knobs.get("answer") or {})
-    temperature = (
-        req.temperature
-        if req.temperature is not None
-        else float(answer_knobs.get("temperature", 0.1))
-    )
-    max_tokens = (
-        req.max_tokens
-        if req.max_tokens is not None
-        else int(answer_knobs.get("maxTokens", 4096))
-    )
-    raw_writer_model = str(profile.models["answer"])
-    writer_model = (
-        resolve_openrouter_model(raw_writer_model)
-        if provider == "openrouter"
-        else raw_writer_model
-    )
-    upstream_url = (
-        f"{target_base_url}/chat/completions"
-        if target_base_url.endswith("/v1")
-        else f"{target_base_url}/v1/chat/completions"
-    )
-
-    upstream_payload: Dict[str, Any] = {
-        "model": writer_model,
-        "messages": upstream_messages,
-        "temperature": temperature,
-        "max_tokens": max_tokens,
-        "stream": bool(req.stream),
-    }
-    if provider == "local":
-        upstream_payload["reasoning_effort"] = "none"
-        upstream_payload["chat_template_kwargs"] = {"enable_thinking": False}
-        total_msg_chars = sum(
-            len(str(m.get("content") or ""))
-            for m in upstream_messages
-            if isinstance(m, dict)
-        )
-        est_total_tokens = int(total_msg_chars / 3.2) + max_tokens + 256
-        if est_total_tokens > 28672:
-            ctx_max, _ = resolve_wahs_model_context_spec(raw_writer_model)
-            if est_total_tokens <= 65536:
-                req_ctx = 65536
-            elif est_total_tokens <= 131072:
-                req_ctx = 131072
-            else:
-                req_ctx = 262144
-            upstream_payload["num_ctx"] = min(req_ctx, ctx_max)
-
-    async def _run_review_stage(draft_answer: str) -> str:
-        if "review" not in profile.stages or "review" not in profile.models:
-            return ""
-        rev_model = str(profile.models["review"])
-        rev_prompt = load_prompt(str(profile.prompts["review"])).strip()
-        rev_knobs = dict(profile.knobs.get("review") or {})
-        last_user = next(
-            (
-                str(m.get("content") or "")
-                for m in reversed(user_messages)
-                if str(m.get("role") or "") == "user"
-            ),
-            "",
-        )
-        review_context = (
-            f"{chr(10).join(caller_sys_parts)}\n\n{last_user}".strip()
-            if caller_sys_parts
-            else last_user
-        )
-        rev_payload = {
-            "model": rev_model,
-            "messages": [
-                {"role": "system", "content": rev_prompt},
-                {
-                    "role": "user",
-                    "content": (
-                        f"CHART & QUESTION CONTEXT:\n{review_context}\n\n"
-                        f"WRITER DRAFT ANSWER:\n{draft_answer}"
-                    ),
-                },
-            ],
-            "temperature": float(rev_knobs.get("temperature", 0.0)),
-            "max_tokens": int(rev_knobs.get("maxTokens", 350)),
-            "stream": False,
-        }
-        from . import team
-
-        try:
-            async with (
-                team.prepared_router_call(
-                    rev_model,
-                    base_url=target_base_url,
-                    api_key="" if provider == "openrouter" else llm_config.api_key,
-                    is_remote=(provider != "local"),
-                    record_slot_evidence=False,
-                    acquire_for_remote=False,
-                    provision_local=True,
-                ),
-                httpx.AsyncClient(timeout=llm_config.request_timeout_seconds) as client,
-            ):
-                r = await client.post(upstream_url, headers=headers, json=rev_payload)
-                r.raise_for_status()
-                r_data = r.json()
-                verdict = (
-                    ((r_data.get("choices") or [{}])[0].get("message") or {}).get(
-                        "content"
-                    )
-                    or ""
-                ).strip()
-                if verdict:
-                    return f"\n\n---\n🔍 **Cross-Family Verifier (`{rev_model}`):**\n{verdict}"
-        except Exception:
-            return ""
-        return ""
-
-    if req.stream:
-        completion_id = f"chatcmpl-{uuid.uuid4().hex}"
-        created = int(time.time())
-
-        async def _wahs_sse():
-            from . import team
-
-            accumulated: List[str] = []
-            first_chunk_emitted = False
-            async with (
-                team.prepared_router_call(
-                    writer_model,
-                    base_url=target_base_url,
-                    api_key="" if provider == "openrouter" else llm_config.api_key,
-                    is_remote=(provider != "local"),
-                    record_slot_evidence=False,
-                    acquire_for_remote=False,
-                    provision_local=True,
-                ),
-                httpx.AsyncClient(timeout=llm_config.request_timeout_seconds) as client,
-                client.stream(
-                    "POST", upstream_url, headers=headers, json=upstream_payload
-                ) as resp,
-            ):
-                resp.raise_for_status()
-                async for raw_line in resp.aiter_lines():
-                    line = raw_line.strip()
-                    if not line or not line.startswith("data:"):
-                        continue
-                    data_str = line[5:].strip()
-                    if data_str == "[DONE]":
-                        break
-                    try:
-                        chunk_obj = json.loads(data_str)
-                        delta = (chunk_obj.get("choices") or [{}])[0].get("delta") or {}
-                        piece = delta.get("content") or ""
-                        if piece:
-                            accumulated.append(piece)
-                        chunk_obj["model"] = profile.id
-                        if not first_chunk_emitted and enrichment_meta is not None:
-                            chunk_obj["hub_enrichment"] = enrichment_meta
-                            first_chunk_emitted = True
-                        yield f"data: {json.dumps(chunk_obj)}\n\n"
-                    except Exception:
-                        yield f"{line}\n\n"
-            review_appendix = await _run_review_stage("".join(accumulated))
-            if review_appendix:
-                rev_chunk = {
-                    "id": completion_id,
-                    "object": "chat.completion.chunk",
-                    "created": created,
-                    "model": profile.id,
-                    "choices": [
-                        {
-                            "index": 0,
-                            "delta": {"content": review_appendix},
-                            "finish_reason": None,
-                        }
-                    ],
-                }
-                yield f"data: {json.dumps(rev_chunk)}\n\n"
-            yield "data: [DONE]\n\n"
-
-        stream_headers = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
-        if enrichment_meta is not None:
-            stream_headers["X-WAHS-Hub-Enrichment"] = json.dumps(enrichment_meta)
-        return StreamingResponse(
-            _wahs_sse(),
-            media_type="text/event-stream",
-            headers=stream_headers,
-        )
-
-    import re
-
-    from . import team
-
-    t0 = time.perf_counter()
-    async with (
-        team.prepared_router_call(
-            writer_model,
-            base_url=target_base_url,
-            api_key="" if provider == "openrouter" else llm_config.api_key,
-            is_remote=(provider != "local"),
-            record_slot_evidence=False,
-            acquire_for_remote=False,
-            provision_local=True,
-        ),
-        httpx.AsyncClient(timeout=llm_config.request_timeout_seconds) as client,
-    ):
-        resp = await client.post(upstream_url, headers=headers, json=upstream_payload)
-        resp.raise_for_status()
-        body = resp.json()
-    latency_ms = round((time.perf_counter() - t0) * 1000.0, 2)
-    content = ((body.get("choices") or [{}])[0].get("message") or {}).get(
-        "content"
-    ) or ""
-    if "<think>" in content and "</think>" in content:
-        content = re.sub(r"<think>.*?</think>\s*", "", content, flags=re.DOTALL).strip()
-    if "<|channel>thought" in content and "<channel|>" in content:
-        content = re.sub(
-            r"<\|channel>thought.*?<channel\|>\s*", "", content, flags=re.DOTALL
-        ).strip()
-    if re.match(r"^\s*thought\b", content, flags=re.IGNORECASE):
-        m_sum = re.search(
-            r"(?:^|\n)\s*(?:\*\*|###\s*)?(?:SUMMARY|ABSTAIN)\s*:",
-            content,
-            flags=re.IGNORECASE,
-        )
-        if m_sum:
-            content = content[m_sum.start() :].lstrip()
-    if content.startswith("```"):
-        content = re.sub(r"^```[a-zA-Z]*\s*", "", content)
-        content = re.sub(r"\s*```\s*$", "", content).strip()
-    if content.startswith(("{", "[")):
-        try:
-            parsed_json = json.loads(content)
-            if (
-                isinstance(parsed_json, list)
-                and parsed_json
-                and isinstance(parsed_json[0], dict)
-            ):
-                parsed_json = parsed_json[0]
-            if isinstance(parsed_json, dict):
-                if isinstance(parsed_json.get("text"), str):
-                    content = parsed_json["text"].strip()
-                elif "summary" in parsed_json or "SUMMARY" in parsed_json:
-                    s_txt = str(
-                        parsed_json.get("summary") or parsed_json.get("SUMMARY") or ""
-                    ).strip()
-                    q_val = (
-                        parsed_json.get("questions_for_doctor")
-                        or parsed_json.get("QUESTIONS_FOR_DOCTOR")
-                        or []
-                    )
-                    if isinstance(q_val, list):
-                        q_txt = "\n".join(f"- {q}" for q in q_val if str(q).strip())
-                    else:
-                        q_txt = str(q_val).strip()
-                    content = f"SUMMARY:\n{s_txt}" + (
-                        f"\n\nQUESTIONS_FOR_DOCTOR:\n{q_txt}" if q_txt else ""
-                    )
-        except Exception:
-            pass
-    review_appendix = await _run_review_stage(content)
-    if review_appendix:
-        content = f"{content}{review_appendix}"
-    envelope = _completion_envelope(profile.id, content)
-    if isinstance(body.get("usage"), dict):
-        envelope["usage"] = dict(body["usage"])
-    envelope["hub_profile"] = {
-        "id": profile.id,
-        "label": profile.label,
-        "provider": provider,
-        "model_family": str(profile.policies.get("model_family") or ""),
-        "role_models": dict(profile.models),
-        "policies": dict(profile.policies),
-        "latency_ms": latency_ms,
-    }
-    if enrichment_meta is not None:
-        envelope["hub_enrichment"] = enrichment_meta
-        if response is not None:
-            response.headers["X-WAHS-Hub-Enrichment"] = json.dumps(enrichment_meta)
-    return envelope
-
-
 def _invalid_execution_error(
     req: ChatCompletionRequest, error: ValueError
 ) -> HTTPException:
@@ -962,14 +545,7 @@ def _resolve_chat_profile(req: ChatCompletionRequest) -> Profile:
 async def chat_completions(
     req: ChatCompletionRequest,
     request: Request,
-    response: Response,
 ):
-    if is_wahs_profile_id(req.model):
-        wahs_profile = get_wahs_profile(req.model)
-        return await _execute_wahs_chat_completion(
-            req, wahs_profile, request, response=response
-        )
-
     profile = _resolve_chat_profile(req)
 
     _require_product_profile(req, profile)

@@ -23,11 +23,7 @@ _PATH = Path(__file__).parent / "levels.yaml"
 _PROMPTS = Path(__file__).parent / "prompts"
 _TEMPORAL_GATE_MODES = {"off", "warn", "enforce"}
 _CLINICAL_TOPOLOGIES = {"single", "team", "leg"}
-_WORKFLOWS = {"clinical_answer", "catalyst_query", "wahs"}
-_WAHS_TOPOLOGIES = {"single", "xcheck"}
-_WAHS_ALLOWED_STAGES = {"context", "answer", "review", "gate"}
-_WAHS_ALLOWED_ROLES = {"answer", "review"}
-_WAHS_PROVIDERS = {"local", "openrouter"}
+_WORKFLOWS = {"clinical_answer", "catalyst_query"}
 _OUTPUT_MODES = {"bare", "combined", "product", "review", "indepth"}
 _ANSWER_CONTRACTS = {"caller", "chart_answer"}
 # What happens with a model reviewer's verdict. Only labelling is built; applying the reviewer's fix
@@ -254,36 +250,6 @@ def validate_catalyst_query_profiles() -> Tuple[Profile, ...]:
     )
 
 
-def wahs_profile_ids() -> List[str]:
-    raw = _load_raw()
-    ids = [
-        profile_id
-        for profile_id, spec in raw.items()
-        if str((spec or {}).get("workflow") or "clinical_answer") == "wahs"
-    ]
-    defaults = [
-        profile_id for profile_id in ids if bool((raw[profile_id] or {}).get("default"))
-    ]
-    if len(defaults) > 1:
-        raise ValueError(
-            f"levels.yaml may define at most one default wahs profile; found {defaults}"
-        )
-    return ids
-
-
-def is_wahs_profile_id(profile_id: str) -> bool:
-    if profile_id in wahs_profile_ids():
-        return True
-    if profile_id.endswith("-direct-kb"):
-        base_kb = profile_id[: -len("-direct-kb")] + "-kb"
-        if base_kb in wahs_profile_ids():
-            return True
-    if profile_id.startswith(("wahs-kb:", "wahs-raw:", "wahs-direct-kb:")):
-        _, _, model_id = profile_id.partition(":")
-        return bool(model_id.strip())
-    return False
-
-
 OPENROUTER_MODEL_MAP: Dict[str, str] = {
     "gemma-e2b": "google/gemma-3-4b-it",
     "gemma-e4b": "google/gemma-3-4b-it",
@@ -306,45 +272,6 @@ OPENROUTER_MODEL_MAP: Dict[str, str] = {
     "granite-3.3-8b": "ibm-granite/granite-3.3-8b-instruct",
     "lfm2-8b-a1b": "liquid/lfm-7b",
 }
-
-
-WAHS_RECOMMENDED_LIMIT_URL = "https://reports.openclinai.org/2026-11-03-wahs-huge-context-and-hub-graph-eval/index.html"
-
-WAHS_MODEL_CONTEXT_SPECS: Dict[str, Tuple[int, int]] = {
-    "gemma-26b": (262144, 32768),
-    "gemma-31b": (262144, 32768),
-    "qwen3.6-35b": (262144, 32768),
-    "gemma-4-12b": (262144, 24576),
-    "gemma-4-12b-q4": (262144, 24576),
-    "qwen3-14b": (262144, 24576),
-    "medgemma-27b": (131072, 24576),
-    "qwen2.5-14b": (131072, 24576),
-    "mistral-nemo-12b": (131072, 24576),
-    "gemma-e4b": (131072, 16384),
-    "gemma-e4b-q8": (131072, 16384),
-    "qwen3.5-9b": (131072, 16384),
-    "llama-3.2-3b": (131072, 12288),
-    "llama-3.1-8b": (131072, 16384),
-    "hermes3-8b": (131072, 16384),
-    "granite-3.3-8b": (131072, 16384),
-    "lfm2-8b-a1b": (65536, 16384),
-    "gemma-e2b": (131072, 12288),
-    "medgemma-1.5-4b-q8": (131072, 12288),
-    "qwen3-4b": (131072, 12288),
-    "google/gemini-2.5-flash": (1048576, 65536),
-    "google/gemma-3-27b-it": (131072, 32768),
-    "google/gemma-3-12b-it": (131072, 24576),
-    "qwen/qwen-2.5-72b-instruct": (131072, 32768),
-    "meta-llama/llama-3.3-70b-instruct": (131072, 32768),
-    "mistralai/mistral-nemo": (131072, 24576),
-}
-
-
-def resolve_wahs_model_context_spec(model_id: str, fallback_window: int = 0) -> Tuple[int, int]:
-    clean = str(model_id or "").strip()
-    if clean in WAHS_MODEL_CONTEXT_SPECS:
-        return WAHS_MODEL_CONTEXT_SPECS[clean]
-    return (131072, fallback_window or 24576)
 
 
 def parse_model_map(raw: str) -> Dict[str, str]:
@@ -393,180 +320,6 @@ def resolve_backend_model(
     if (provider or "").strip().lower() == "openrouter":
         return resolve_openrouter_model(clean)
     return clean
-
-
-def _infer_model_family(model_id: str) -> str:
-    low = model_id.lower()
-    if "medgemma" in low:
-        return "medgemma"
-    if "gemini" in low:
-        return "gemini"
-    if "gemma-3" in low or "gemma3" in low:
-        return "gemma-3"
-    if "gemma" in low:
-        return "gemma-4"
-    if "qwen" in low:
-        return "qwen"
-    if "llama" in low or "hermes" in low:
-        return "llama"
-    if "mistral" in low or "nemo" in low:
-        return "mistral"
-    if "granite" in low:
-        return "granite"
-    if "lfm" in low or "liquid" in low:
-        return "lfm2"
-    if "claude" in low:
-        return "claude"
-    return low.split("-", 1)[0].split("/", 1)[0]
-
-
-def get_wahs_profile(profile_id: str) -> Profile:
-    raw = _load_raw()
-    if profile_id in wahs_profile_ids():
-        return _from_spec(profile_id, raw[profile_id] or {})
-    if profile_id.endswith("-direct-kb"):
-        base_kb = profile_id[: -len("-direct-kb")] + "-kb"
-        if base_kb in wahs_profile_ids():
-            spec = json.loads(json.dumps(raw[base_kb] or {}))
-            spec["label"] = f"{spec.get('label', base_kb)} (Direct KB Only — No Hub Graph)"
-            pol = dict(spec.get("policies") or {})
-            pol["include_kb_findings"] = True
-            pol["include_hub_enrichment"] = False
-            pol["overflow_lookup_tools"] = False
-            spec["policies"] = pol
-            return _from_spec(profile_id, spec)
-    if profile_id.startswith(("wahs-kb:", "wahs-raw:", "wahs-direct-kb:")):
-        prefix, _, raw_model = profile_id.partition(":")
-        model_id = raw_model.strip()
-        if not model_id:
-            raise ModelNotFoundError(profile_id, wahs_profile_ids())
-        include_kb = prefix in {"wahs-kb", "wahs-direct-kb"}
-        include_hub_enrichment = prefix == "wahs-kb"
-        provider = "openrouter" if "/" in model_id else "local"
-        family = _infer_model_family(model_id)
-        if prefix == "wahs-kb":
-            mode_label = "+ 4-Layer Clinical KB + Med Agent Hub"
-        elif prefix == "wahs-direct-kb":
-            mode_label = "Direct Model + 4-Layer Clinical KB"
-        else:
-            mode_label = "Raw Condensed Chart Only"
-        return compile_profile(
-            Profile(
-                id=profile_id,
-                label=f"{model_id} — {mode_label} (Dynamic)",
-                topology="single",
-                stages=("context", "answer", "gate"),
-                models={"answer": model_id},
-                prompts={
-                    "answer": "wahs-kb-guided" if include_kb else "wahs-raw-unhinted"
-                },
-                policies={
-                    "provider": provider,
-                    "model_family": family,
-                    "include_kb_findings": include_kb,
-                    "include_hub_enrichment": include_hub_enrichment,
-                    "overflow_lookup_tools": include_hub_enrichment,
-                    "citation_grounding": "enforce",
-                },
-                workflow="wahs",
-                knobs={"answer": {"temperature": 0.1, "dry": 0.0, "maxTokens": 4096}},
-                visibility="evaluation",
-                context_window=32768 if provider == "openrouter" else 24576,
-                reserved_output_tokens=2048,
-                exact_tokenizer=(provider == "local"),
-            )
-        )
-    raise ModelNotFoundError(profile_id, wahs_profile_ids())
-
-
-def validate_wahs_profiles() -> Tuple[Profile, ...]:
-    """Validate every configured WAHS profile at Hub startup."""
-    return tuple(get_wahs_profile(profile_id) for profile_id in wahs_profile_ids())
-
-
-def wahs_profile_metadata(
-    profile: Profile,
-    *,
-    backend_models: set[str] | None,
-    openrouter_configured: bool = False,
-    effective_default: bool = False,
-) -> Dict[str, Any]:
-    from . import model_provisioner
-
-    provider = str(profile.policies.get("provider") or "local").lower()
-    model_provisioned = True
-    auto_downloadable = False
-    if provider == "openrouter":
-        available = bool(openrouter_configured)
-        unavailable_reasons = (
-            [] if available else ["openrouter_api_key_not_configured"]
-        )
-    else:
-        unavailable_reasons = (
-            ["model_backend_unreachable"]
-            if backend_models is None
-            else [
-                f"model_not_advertised:{model}"
-                for model in sorted(set(profile.models.values()) - backend_models)
-            ]
-        )
-        for model in sorted(set(profile.models.values())):
-            present = model_provisioner.is_model_file_present(model)
-            pinned = model_provisioner.is_model_pinned(model)
-            if present is False:
-                model_provisioned = False
-                if pinned:
-                    auto_downloadable = True
-                else:
-                    unavailable_reasons.append(f"model_weights_missing:{model}")
-        if openrouter_configured and unavailable_reasons:
-            provider = "openrouter"
-            unavailable_reasons = []
-        available = not unavailable_reasons
-
-    system_prompts: Dict[str, str] = {}
-    for role, p_name in sorted(profile.prompts.items()):
-        system_prompts[str(role)] = load_prompt(str(p_name)).strip()
-
-    ans_model = str(profile.models.get("answer") or "")
-    family = str(
-        profile.policies.get("model_family") or _infer_model_family(ans_model)
-    )
-    ctx_length, rec_limit = resolve_wahs_model_context_spec(
-        ans_model, fallback_window=profile.context_window
-    )
-    return {
-        "id": profile.id,
-        "label": profile.label,
-        "workflow": profile.workflow,
-        "topology": profile.topology,
-        "provider": provider,
-        "openrouter_model": resolve_openrouter_model(ans_model),
-        "model_family": family,
-        "parameter_size": str(profile.policies.get("parameter_size") or ""),
-        "quantization": str(profile.policies.get("quantization") or ""),
-        "available": available,
-        "model_provisioned": model_provisioned,
-        "auto_downloadable": auto_downloadable,
-        "default": bool(effective_default or profile.default),
-        "selection_priority": profile.selection_priority,
-        "visibility": profile.visibility,
-        "stages": list(profile.stages),
-        "required_models": sorted(set(profile.models.values())),
-        "role_models": _jsonable(profile.models),
-        "role_knobs": _jsonable(profile.knobs),
-        "policies": _jsonable(profile.policies),
-        "prompts": _jsonable(profile.prompts),
-        "system_prompts": system_prompts,
-        "profile_configuration_digest": _profile_configuration_digest(profile),
-        "role_prompt_digests": _role_prompt_digests(profile),
-        "context_window": profile.context_window or rec_limit,
-        "context_length": ctx_length,
-        "recommended_limit_tokens": rec_limit,
-        "recommended_limit_url": WAHS_RECOMMENDED_LIMIT_URL,
-        "exact_tokenizer": profile.exact_tokenizer,
-        "unavailable_reasons": unavailable_reasons,
-    }
 
 
 def catalyst_query_profile_evidence(profile: Profile) -> Dict[str, Any]:
@@ -802,58 +555,6 @@ def _review_policy(profile: Profile) -> Optional[str]:
     return grounding
 
 
-def _compile_wahs_profile(profile: Profile) -> Profile:
-    if profile.topology not in _WAHS_TOPOLOGIES:
-        raise ValueError(
-            f"WAHS profile {profile.id!r} topology must be one of {_WAHS_TOPOLOGIES}"
-        )
-    if not profile.stages or profile.stages[0] != "context":
-        raise ValueError(f"WAHS profile {profile.id!r} must start with context")
-    unknown = [stage for stage in profile.stages if stage not in _WAHS_ALLOWED_STAGES]
-    if unknown:
-        raise ValueError(f"WAHS profile {profile.id!r} has unknown stages {unknown}")
-    if "answer" not in profile.models or set(profile.models) - _WAHS_ALLOWED_ROLES:
-        raise ValueError(
-            f"WAHS profile {profile.id!r} must define answer and optional review roles"
-        )
-    has_review = "review" in profile.models
-    if has_review != ("review" in profile.stages):
-        raise ValueError(
-            f"WAHS profile {profile.id!r} review role and stage must agree"
-        )
-    provider = str(profile.policies.get("provider") or "local").lower()
-    if provider not in _WAHS_PROVIDERS:
-        raise ValueError(
-            f"WAHS profile {profile.id!r} has invalid provider {provider!r}"
-        )
-    for role, model in profile.models.items():
-        if not isinstance(model, str) or not model.strip():
-            raise ValueError(f"WAHS profile {profile.id!r} has invalid {role} model")
-        prompt = profile.prompts.get(role)
-        if not isinstance(prompt, str) or not prompt.strip():
-            raise ValueError(f"WAHS profile {profile.id!r} has no {role} prompt")
-        load_prompt(prompt)
-    return Profile(
-        id=profile.id,
-        label=profile.label,
-        topology=profile.topology,
-        stages=tuple(profile.stages),
-        models=_freeze_mapping(profile.models),
-        prompts=_freeze_mapping(profile.prompts),
-        policies=_freeze_mapping(profile.policies),
-        workflow=profile.workflow,
-        supplemental_sources=tuple(profile.supplemental_sources),
-        knobs=_freeze_mapping(profile.knobs),
-        visibility=profile.visibility,
-        default=profile.default,
-        selection_priority=profile.selection_priority,
-        context_window=profile.context_window,
-        reserved_output_tokens=profile.reserved_output_tokens,
-        exact_tokenizer=profile.exact_tokenizer,
-        output_contracts=tuple(profile.output_contracts),
-    )
-
-
 def compile_profile(profile: Profile) -> Profile:
     if not profile.id or not profile.label:
         raise ValueError("profile id and label are required")
@@ -863,8 +564,6 @@ def compile_profile(profile: Profile) -> Profile:
         )
     if profile.workflow == "catalyst_query":
         return _compile_catalyst_query_profile(profile)
-    if profile.workflow == "wahs":
-        return _compile_wahs_profile(profile)
     if profile.topology not in _CLINICAL_TOPOLOGIES:
         raise ValueError(
             f"profile {profile.id!r} has invalid topology {profile.topology!r}"
@@ -1104,7 +803,7 @@ def known_model_aliases(model_map_raw: str = "") -> List[str]:
     explicit = parse_model_map(model_map_raw)
     return sorted(
         set(OPENROUTER_MODEL_MAP)
-        | set(WAHS_MODEL_CONTEXT_SPECS)
+        | set(OPENROUTER_MODEL_MAP.values())
         | set(explicit)
     )
 
@@ -1728,7 +1427,7 @@ def _profile_configuration_digest(profile: Profile) -> str:
 
 
 def _prompt_assets(profile: Profile, role: str, configured: str) -> Tuple[str, ...]:
-    if role != "review" or profile.workflow == "wahs":
+    if role != "review":
         return (configured,)
     review_policy = profile.policies.get("review") or {}
     folded = review_policy.get("grounding") == "folded"

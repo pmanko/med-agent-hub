@@ -5,8 +5,7 @@ example via Docker Compose mounting ``llama-router.models.tsv`` read-only and
 ``~/.cache/llama-router-models`` at ``/app/models``), ``med-agent-hub``
 verifies whether a profile's required local GGUF file is already present on
 disk before dispatching to ``llama-router``. If a pinned model is named in a
-profile (or requested via a dynamic ``wahs-kb:<model>`` / ``wahs-raw:<model>``
-leg) and its ``<alias>.gguf`` file is not yet downloaded, ``med-agent-hub``
+profile or low-level leg and its ``<alias>.gguf`` file is not yet downloaded, ``med-agent-hub``
 automatically streams it from the pinned Hugging Face revision URL, verifies
 its SHA-256 digest, and atomically installs ``<alias>.gguf`` into
 ``LLAMA_MODEL_DIR`` so ``llama-router`` can load it on demand without failing.
